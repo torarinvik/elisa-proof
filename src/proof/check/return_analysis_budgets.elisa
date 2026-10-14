@@ -26,6 +26,17 @@ extend ElisaProof:
         const PROOF_CALL_SUMMARY_BODY_MAX: usize = 24
         const PROOF_CALL_SUMMARY_TARGET_MAX: usize = 4
 
+        # Extra fact-state headroom is useful only when a call can contribute an
+        # instantiated ensure summary. Match the producer's verified-pure gate,
+        # and exclude callees with no ensure facts.
+        def proof_return_analysis_target_has_ensure_summary(functions: ProofFunctionTable&, target: usize) -> bool:
+            return false if target >= functions.summaries.pure.count or target >= functions.summaries.verified.count
+            return false if target >= functions.contracts.obligations.ensure_counts.count or target >= functions.contracts.obligations.ensure_starts.count
+            start: usize = functions.contracts.obligations.ensure_starts[target]
+            count: usize = functions.contracts.obligations.ensure_counts[target]
+            return false if start > functions.contracts.obligations.all_ensures.count or count > functions.contracts.obligations.all_ensures.count - start
+            functions.summaries.pure[target] and functions.summaries.verified[target] and count > 0
+
         # Count resolved function identities, not call sites. Unknown or malformed
         # edges cannot qualify for the small-target dispatcher policy.
         def proof_return_analysis_call_target_count(functions: ProofFunctionTable&, function_index: usize) -> usize:
@@ -40,8 +51,51 @@ extend ElisaProof:
             for offset in 0..<count |functions, start, targets, denied|:
                 target: usize = functions.call_graph.all_call_targets[start + offset]
                 return denied if target >= functions.lookup.names.count
+                continue if not proof_return_analysis_target_has_ensure_summary(functions, target)
                 present: mutable bool = false
                 for known in targets |target, present|:
+                    present <- true if known == target
+                if not present:
+                    return denied if targets.count >= PROOF_CALL_SUMMARY_TARGET_MAX
+                    targets.push(target)
+            targets.count
+
+        # Lemmas have no executable call-graph row, but still analyze executable summaries in
+        # their body. Reconstruct the same bounded edge census from source while the exact lemma
+        # owner module is active. Any opaque or unresolved edge denies the budget bonus.
+        def proof_return_analysis_lemma_call_target_count(functions: mutable ProofFunctionTable&, body: darray[Ast::Stmt]&, parameters: darray[Ast::ParamDecl]&, signature_requires: darray[Ast::Expr]&, signature_ensures: darray[Ast::Expr]&) -> usize:
+            denied: usize = PROOF_CALL_SUMMARY_TARGET_MAX + 1
+            return denied if not functions.call_graph.current_caller_is_lemma or functions.call_graph.current_caller != functions.lookup.names.count
+            source_work: mutable usize = functions.lookup.module_resolution_work_used
+            if not proof_function_call_edge_sources_charge(body, parameters, signature_requires, signature_ensures, &source_work):
+                functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                functions.lookup.module_resolution_work_exhausted <- true
+                return denied
+            names: mutable darray[sview] = []
+            qualifiers: mutable darray[sview] = []
+            sources: mutable darray[Ast::Expr] = []
+            proof_collect_body_call_edges(body, &names, &qualifiers, &sources)
+            for parameter in parameters |names, qualifiers, sources|:
+                proof_collect_call_edges(parameter.default_value, &names, &qualifiers, &sources) if parameter.has_default
+            for requirement in signature_requires |names, qualifiers, sources|:
+                proof_collect_call_edges(requirement, &names, &qualifiers, &sources)
+            for ensure in signature_ensures |names, qualifiers, sources|:
+                proof_collect_call_edges(ensure, &names, &qualifiers, &sources)
+            return denied if names.count != qualifiers.count or names.count != sources.count or names.count > PROOF_RETURN_ANALYSIS_STEP_BUDGET_MAX
+            functions.lookup.module_resolution_work_used <- source_work
+            targets: mutable darray[usize] = []
+            for edge in 0..<sources.count |edge, names, qualifiers, sources, functions, targets, denied|:
+                if not proof_function_graph_charge(1 + sview_len(names[edge]) + sview_len(qualifiers[edge]), functions.lookup.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                    functions.lookup.module_resolution_work_exhausted <- true
+                    return denied
+                target: usize = proof_function_index_for_callee(functions, sources[edge])
+                return denied if functions.lookup.module_resolution_work_exhausted or target >= functions.lookup.names.count
+                continue if not proof_return_analysis_target_has_ensure_summary(functions, target)
+                present: mutable bool = false
+                for known in targets |target, present, functions|:
+                    if not proof_function_graph_charge(1, functions.lookup.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                        functions.lookup.module_resolution_work_exhausted <- true
+                        return denied
                     present <- true if known == target
                 if not present:
                     return denied if targets.count >= PROOF_CALL_SUMMARY_TARGET_MAX

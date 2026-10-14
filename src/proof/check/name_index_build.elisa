@@ -100,7 +100,8 @@ extend ElisaProof:
             return (false, missing, false) if:
                 capacity == 0
                 source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                not proof_report_source_work_charge(1 + sview_len(name), source_work)
+                not proof_report_source_work_charge(1, source_work)
+                not proof_report_source_work_charge(sview_len(name), source_work)
             wanted_hash: u32 = proof_name_hash(name)
             slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
@@ -112,7 +113,9 @@ extend ElisaProof:
                 if functions.lookup.index_hashes[slot] == wanted_hash:
                     return (false, missing, false) if not proof_report_source_work_charge(sview_len(functions.lookup.names[current]), source_work)
                     if functions.lookup.names[current] == name:
-                        return (true, missing, true) if functions.lookup.index_ambiguous[slot]
+                        # Keep the first row available to the duplicate-chain walker; the
+                        # repeated bit separately prevents callers from treating it as unique.
+                        return (true, current, true) if functions.lookup.index_ambiguous[slot]
                         return (true, current, false)
                 slot <- (slot + 1) % capacity
                 probes <- probes + 1
@@ -156,7 +159,7 @@ extend ElisaProof:
                 lookup: (complete: bool, row: usize, repeated: bool) = proof_function_name_lookup_with_work(functions, name, source_work)
                 return (false, "function-line-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not lookup.complete
                 continue if not lookup.repeated
-                return (false, "function-line-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1 + sview_len(name), source_work)
+                return (false, "function-line-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(name), source_work)
                 hash: u32 = proof_expr_shape_mix(proof_name_hash(name), functions.lookup.lines[row].i64())
                 slot: mutable usize = (hash.i64() % capacity.i64()).usize()
                 probes: mutable usize = 0
@@ -172,7 +175,7 @@ extend ElisaProof:
                     return (false, "function-line-index-shape", current, functions.lookup.names.count) if current >= functions.lookup.names.count or current >= functions.lookup.lines.count
                     if functions.lookup.declaration_line_index_hashes[slot] == hash:
                         current_name: sview = functions.lookup.names[current]
-                        return (false, "function-line-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1 + sview_len(current_name), source_work)
+                        return (false, "function-line-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(current_name), source_work)
                         if functions.lookup.lines[current] == functions.lookup.lines[row] and current_name == name:
                             functions.lookup.declaration_line_index_ambiguous[slot] <- true
                             placed <- true
@@ -190,6 +193,8 @@ extend ElisaProof:
             functions.lookup.index_hashes.clear()
             functions.lookup.index_values.clear()
             functions.lookup.index_ambiguous.clear()
+            functions.lookup.index_duplicate_next.clear()
+            functions.lookup.index_duplicate_tails.clear()
             functions.lookup.declaration_line_index_hashes.clear()
             functions.lookup.declaration_line_index_values.clear()
             functions.lookup.declaration_line_index_ambiguous.clear()
@@ -204,12 +209,19 @@ extend ElisaProof:
             return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if:
                 not proof_report_source_work_charge(capacity, source_work)
                 not proof_report_source_work_charge(functions.lookup.names.count, source_work)
+                not proof_report_source_work_charge(capacity, source_work)
+                not proof_report_source_work_charge(functions.lookup.names.count, source_work)
             functions.lookup.index_hashes.resize(capacity)
             functions.lookup.index_values.resize(capacity)
             functions.lookup.index_ambiguous.resize(capacity)
+            functions.lookup.index_duplicate_tails.resize(capacity)
+            functions.lookup.index_duplicate_next.resize(functions.lookup.names.count)
             for slot in 0..<capacity |slot, functions|:
                 functions.lookup.index_values[slot] <- functions.lookup.names.count
                 functions.lookup.index_ambiguous[slot] <- false
+                functions.lookup.index_duplicate_tails[slot] <- functions.lookup.names.count
+            for row in 0..<functions.lookup.names.count |row, functions|:
+                functions.lookup.index_duplicate_next[row] <- functions.lookup.names.count
             for name_index in 0..<functions.lookup.names.count |name_index, functions, capacity|:
                 return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(functions.lookup.names[name_index]), source_work)
                 hash: u32 = functions.lookup.name_hashes[name_index]
@@ -222,12 +234,17 @@ extend ElisaProof:
                     if current == functions.lookup.names.count:
                         functions.lookup.index_hashes[slot] <- hash
                         functions.lookup.index_values[slot] <- name_index
+                        functions.lookup.index_duplicate_tails[slot] <- name_index
                         placed <- true
                         break
                     if current < functions.lookup.names.count and functions.lookup.index_hashes[slot] == hash:
                         return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(functions.lookup.names[current]), source_work)
                         if functions.lookup.names[current] == functions.lookup.names[name_index]:
                             functions.lookup.index_ambiguous[slot] <- true
+                            tail: usize = functions.lookup.index_duplicate_tails[slot]
+                            return (false, "name-index-duplicate-chain", tail, functions.lookup.names.count) if tail >= functions.lookup.names.count
+                            functions.lookup.index_duplicate_next[tail] <- name_index
+                            functions.lookup.index_duplicate_tails[slot] <- name_index
                             placed <- true
                             break
                     slot <- (slot + 1) % capacity
@@ -247,8 +264,11 @@ extend ElisaProof:
             missing: usize = functions.lookup.names.count
             name_lookup: (complete: bool, row: usize, repeated: bool) = proof_function_name_lookup_with_work(functions, name, source_work)
             return (false, missing) if not name_lookup.complete
-            return (true, name_lookup.row) if name_lookup.row < missing
-            return (true, missing) if not name_lookup.repeated
+            if not name_lookup.repeated:
+                return (true, missing) if name_lookup.row == missing
+                return (false, missing) if name_lookup.row >= functions.lookup.lines.count
+                return (true, name_lookup.row) if functions.lookup.lines[name_lookup.row] == line
+                return (true, missing)
             return (false, missing) if not functions.lookup.declaration_line_index_valid
             capacity: usize = functions.lookup.declaration_line_index_values.count
             return (false, missing) if capacity != functions.lookup.declaration_line_index_hashes.count or capacity != functions.lookup.declaration_line_index_ambiguous.count
@@ -259,7 +279,8 @@ extend ElisaProof:
             return (false, missing) if:
                 expected_capacity == 0 or capacity != expected_capacity
                 source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                not proof_report_source_work_charge(1 + sview_len(name), source_work)
+                not proof_report_source_work_charge(1, source_work)
+                not proof_report_source_work_charge(sview_len(name), source_work)
             wanted_hash: u32 = proof_expr_shape_mix(proof_name_hash(name), line.i64())
             slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0

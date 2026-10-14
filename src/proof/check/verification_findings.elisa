@@ -1,0 +1,574 @@
+# Incremental finding indexes for bounded declaration scheduling.
+extend ElisaProof:
+    private:
+        struct ProofFunctionFindingSummary:
+            clean: mutable darray[bool] = []
+            widened: mutable darray[bool] = []
+            contract_type: mutable darray[bool] = []
+            function_unverified: mutable darray[bool] = []
+            lemma_unverified: mutable darray[bool] = []
+            duplicate_row_next: mutable darray[usize] = []
+            duplicate_slot_tails: mutable darray[usize] = []
+            duplicate_slots_by_row: mutable darray[usize] = []
+            duplicate_slot_clean: mutable darray[bool] = []
+            duplicate_slot_widened: mutable darray[bool] = []
+            duplicate_slot_contract_type: mutable darray[bool] = []
+            duplicate_slot_function_unverified: mutable darray[bool] = []
+            duplicate_slot_lemma_unverified: mutable darray[bool] = []
+            source_identity_hashes: mutable darray[u32] = []
+            source_identity_rows: mutable darray[usize] = []
+            source_identity_tails: mutable darray[usize] = []
+            source_identity_next: mutable darray[usize] = []
+            findings_seen: mutable usize = 0
+
+        struct ProofLemmaFindingSummary:
+            clean: mutable darray[bool] = []
+            contract_type: mutable darray[bool] = []
+            lemma_unverified: mutable darray[bool] = []
+            duplicate_row_next: mutable darray[usize] = []
+            duplicate_slot_tails: mutable darray[usize] = []
+            source_identity_hashes: mutable darray[u32] = []
+            source_identity_rows: mutable darray[usize] = []
+            source_identity_tails: mutable darray[usize] = []
+            source_identity_next: mutable darray[usize] = []
+            findings_seen: mutable usize = 0
+
+        def proof_lemma_index_with_work(lemmas: ProofLemmaTable&, name: sview, work: mutable usize&) -> (complete: bool, index: usize, declared: bool, ambiguous: bool):
+            missing: usize = lemmas.identity.names.count
+            return (true, missing, false, false) if name == "" or lemmas.identity.names.count == 0
+            if lemmas.identity.index_values.count == 0 or lemmas.identity.index_values.count != lemmas.identity.index_hashes.count or lemmas.identity.index_values.count != lemmas.identity.index_ambiguous.count:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, missing, false, false)
+            if not proof_report_source_work_charge(sview_len(name), work):
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, missing, false, false)
+            wanted_hash: u32 = proof_name_hash(name)
+            capacity: usize = lemmas.identity.index_values.count
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes < PROOF_NAME_INDEX_MAX_CLUSTER + 1 |probes, slot, wanted_hash, name, lemmas, capacity, work|:
+                if not proof_report_source_work_charge(1, work):
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return (false, missing, false, false)
+                current: usize = lemmas.identity.index_values[slot]
+                return (true, missing, false, false) if current == missing
+                if current >= lemmas.identity.names.count:
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return (false, missing, false, false)
+                if lemmas.identity.index_hashes[slot] == wanted_hash:
+                    if not proof_report_source_work_charge(sview_len(lemmas.identity.names[current]), work):
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return (false, missing, false, false)
+                    if lemmas.identity.names[current] == name:
+                        return (true, missing, false, true) if lemmas.identity.index_ambiguous[slot]
+                        return (true, current, true, false)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+            return (false, missing, false, false)
+
+        # Classify a source declaration by its source identity, not by its leaf name. A
+        # function in another module may share a lemma's name, and duplicate lemma names
+        # remain distinguishable as declarations even though calls to them are ambiguous.
+        def proof_lemma_source_row_with_work(lemmas: ProofLemmaTable&, name: sview, line: u32, offset: u32, work: mutable usize&) -> (complete: bool, index: usize, declared: bool):
+            missing: usize = lemmas.identity.names.count
+            lookup: (complete: bool, index: usize, declared: bool, ambiguous: bool) = proof_lemma_index_with_work(lemmas, name, work)
+            return (false, missing, false) if not lookup.complete
+            if lookup.declared:
+                return (false, missing, false) if lookup.index >= lemmas.identity.lines.count or lookup.index >= lemmas.identity.offsets.count
+                exact: bool = lemmas.identity.lines[lookup.index] == line and lemmas.identity.offsets[lookup.index] == offset
+                return (true, lookup.index, true) if exact
+                return (true, missing, false)
+            return (true, missing, false) if not lookup.ambiguous
+            return (false, missing, false) if lemmas.identity.lines.count != missing or lemmas.identity.offsets.count != missing
+            for index in 0..<missing |index, lemmas, name, line, offset, work, missing|:
+                return (false, missing, false) if not proof_report_source_work_charge(1, work)
+                if lemmas.identity.names[index] == name and lemmas.identity.lines[index] == line and lemmas.identity.offsets[index] == offset:
+                    return (true, index, true)
+            return (true, missing, false)
+
+        # Findings with a source span can bypass a duplicate-name chain, even when owner
+        # metadata is absent. Rows sharing (name, line, offset) stay linked so the caller can
+        # apply the optional owner constraint without losing declarations from other modules.
+        def proof_finding_source_identity_hash(name: sview, line: u32, offset: u32) -> u32:
+            hash: mutable u32 = proof_name_hash(name)
+            hash <- ((hash.i64() ^ line.i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            hash <- ((hash.i64() ^ offset.i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            hash
+
+        def proof_finding_source_identity_slot(name: sview, line: u32, offset: u32, hashes: darray[u32]&, rows: darray[usize]&, names: darray[sview]&, lines: darray[u32]&, offsets: darray[u32]&, work: mutable usize&) -> (complete: bool, slot: usize):
+            capacity: usize = rows.count
+            missing_slot: usize = capacity
+            return (false, missing_slot) if capacity == 0 or hashes.count != capacity
+            return (false, missing_slot) if not proof_report_source_work_charge(sview_len(name), work)
+            wanted_hash: u32 = proof_finding_source_identity_hash(name, line, offset)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, line, offset, hashes, rows, names, lines, offsets, capacity, work|:
+                return (false, missing_slot) if not proof_report_source_work_charge(1, work)
+                row: usize = rows[slot]
+                return (true, missing_slot) if row == names.count
+                return (false, missing_slot) if row > names.count or row >= lines.count or row >= offsets.count
+                if hashes[slot] == wanted_hash:
+                    return (false, missing_slot) if not proof_report_source_work_charge(sview_len(names[row]), work)
+                    return (true, slot) if names[row] == name and lines[row] == line and offsets[row] == offset
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            (false, missing_slot)
+
+        def proof_finding_source_identity_index_build(names: darray[sview]&, lines: darray[u32]&, offsets: darray[u32]&, hashes: mutable darray[u32]&, rows: mutable darray[usize]&, tails: mutable darray[usize]&, next_rows: mutable darray[usize]&, capacity: usize, work: mutable usize&) -> bool:
+            count: usize = names.count
+            return false if lines.count != count or offsets.count != count or capacity < count
+            # Reserve all zero-initializing resizes before allocating the index arrays.
+            return false if not proof_report_source_work_charge(capacity, work)
+            return false if not proof_report_source_work_charge(capacity, work)
+            return false if not proof_report_source_work_charge(capacity, work)
+            return false if not proof_report_source_work_charge(count, work)
+            hashes.resize(capacity)
+            rows.resize(capacity)
+            tails.resize(capacity)
+            next_rows.resize(count)
+            for slot in 0..<capacity |slot, rows, tails, count, work|:
+                return false if not proof_report_source_work_charge(1, work)
+                return false if not proof_report_source_work_charge(1, work)
+                rows[slot] <- count
+                tails[slot] <- count
+            for row in 0..<count |row, next_rows, count, work|:
+                return false if not proof_report_source_work_charge(1, work)
+                next_rows[row] <- count
+            for row in 0..<count |row, names, lines, offsets, hashes, rows, tails, next_rows, capacity, count, work|:
+                return false if not proof_report_source_work_charge(1, work)
+                return false if not proof_report_source_work_charge(sview_len(names[row]), work)
+                hash: u32 = proof_finding_source_identity_hash(names[row], lines[row], offsets[row])
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, row, names, lines, offsets, hashes, rows, tails, next_rows, capacity, count, work|:
+                    return false if not proof_report_source_work_charge(1, work)
+                    first: usize = rows[slot]
+                    if first == count:
+                        return false if not proof_report_source_work_charge(1, work)
+                        return false if not proof_report_source_work_charge(1, work)
+                        return false if not proof_report_source_work_charge(1, work)
+                        rows[slot] <- row
+                        tails[slot] <- row
+                        hashes[slot] <- hash
+                        break
+                    if hashes[slot] == hash:
+                        return false if not proof_report_source_work_charge(sview_len(names[first]), work)
+                        if names[first] == names[row] and lines[first] == lines[row] and offsets[first] == offsets[row]:
+                            tail: usize = tails[slot]
+                            return false if tail >= count
+                            return false if not proof_report_source_work_charge(1, work)
+                            return false if not proof_report_source_work_charge(1, work)
+                            next_rows[tail] <- row
+                            tails[slot] <- row
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if probes >= capacity or probes > PROOF_NAME_INDEX_MAX_CLUSTER
+            true
+
+        def proof_lemma_finding_duplicate_index_build(lemmas: ProofLemmaTable&, summary: mutable ProofLemmaFindingSummary&, work: mutable usize&) -> bool:
+            count: usize = lemmas.identity.names.count
+            capacity: usize = lemmas.identity.index_values.count
+            return false if count > 0 and (capacity == 0 or capacity != lemmas.identity.index_hashes.count or capacity != lemmas.identity.index_ambiguous.count)
+            return false if lemmas.identity.name_hashes.count != count
+            for _ in 0..<count |summary, work, count|:
+                return false if not proof_report_source_work_charge(1, work)
+                summary.duplicate_row_next.push(count)
+            for _ in 0..<capacity |summary, work|:
+                return false if not proof_report_source_work_charge(1, work)
+                summary.duplicate_slot_tails.push(count)
+            for row in 0..<count |row, lemmas, summary, work, count, capacity|:
+                return false if not proof_report_source_work_charge(1, work) or not proof_report_source_work_charge(sview_len(lemmas.identity.names[row]), work)
+                hash: u32 = lemmas.identity.name_hashes[row]
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes < PROOF_NAME_INDEX_MAX_CLUSTER + 1 |probes, slot, hash, row, lemmas, summary, work, count, capacity, placed|:
+                    return false if not proof_report_source_work_charge(1, work)
+                    first: usize = lemmas.identity.index_values[slot]
+                    return false if first >= count
+                    if lemmas.identity.index_hashes[slot] == hash:
+                        return false if not proof_report_source_work_charge(sview_len(lemmas.identity.names[first]), work)
+                        if lemmas.identity.names[first] == lemmas.identity.names[row]:
+                            tail: usize = summary.duplicate_slot_tails[slot]
+                            if tail == count:
+                                summary.duplicate_slot_tails[slot] <- row
+                            else:
+                                return false if tail >= count
+                                summary.duplicate_row_next[tail] <- row
+                                summary.duplicate_slot_tails[slot] <- row
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            for slot in 0..<capacity |slot, lemmas, summary, work, count|:
+                return false if not proof_report_source_work_charge(1, work)
+                first: usize = lemmas.identity.index_values[slot]
+                if first == count:
+                    return false if lemmas.identity.index_ambiguous[slot]
+                    continue
+                return false if first > count
+                chain_has_duplicate: bool = summary.duplicate_row_next[first] != count
+                return false if chain_has_duplicate != lemmas.identity.index_ambiguous[slot]
+                last: mutable usize = first
+                next_row: mutable usize = summary.duplicate_row_next[first]
+                visits: mutable usize = 0
+                while next_row < count and visits < count |next_row, last, visits, summary, work, count|:
+                    return false if not proof_report_source_work_charge(1, work)
+                    last <- next_row
+                    next_row <- summary.duplicate_row_next[next_row]
+                    visits <- visits + 1
+                return false if next_row != count or summary.duplicate_slot_tails[slot] != last
+            return false if not proof_finding_source_identity_index_build(lemmas.identity.names, lemmas.identity.lines, lemmas.identity.offsets, &summary.source_identity_hashes, &summary.source_identity_rows, &summary.source_identity_tails, &summary.source_identity_next, capacity, work)
+            true
+
+        def proof_lemma_finding_duplicate_slot_with_work(lemmas: ProofLemmaTable&, name: sview, work: mutable usize&) -> (complete: bool, slot: usize):
+            capacity: usize = lemmas.identity.index_values.count
+            missing: usize = lemmas.identity.names.count
+            return (false, capacity) if capacity == 0 or capacity != lemmas.identity.index_hashes.count
+            return (false, capacity) if not proof_report_source_work_charge(sview_len(name), work)
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes < PROOF_NAME_INDEX_MAX_CLUSTER + 1 |probes, slot, wanted_hash, name, lemmas, capacity, work, missing|:
+                return (false, capacity) if not proof_report_source_work_charge(1, work)
+                row: usize = lemmas.identity.index_values[slot]
+                return (false, capacity) if row == missing or row >= missing
+                if lemmas.identity.index_hashes[slot] == wanted_hash:
+                    return (false, capacity) if not proof_report_source_work_charge(sview_len(lemmas.identity.names[row]), work)
+                    return (true, slot) if lemmas.identity.names[row] == name and lemmas.identity.index_ambiguous[slot]
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            (false, capacity)
+
+        def proof_function_identity_with_work(functions: ProofFunctionTable&, name: sview, work: mutable usize&) -> (complete: bool, index: usize, repeated: bool):
+            missing: usize = functions.lookup.names.count
+            return (false, missing, true) if not proof_report_source_work_charge(sview_len(name), work)
+            wanted_hash: u32 = proof_name_hash(name)
+            if functions.lookup.index_values.count > 0:
+                capacity: usize = functions.lookup.index_values.count
+                return (false, missing, true) if capacity != functions.lookup.index_hashes.count or capacity != functions.lookup.index_ambiguous.count
+                slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, functions, capacity, work, missing|:
+                    return (false, missing, true) if not proof_report_source_work_charge(1, work)
+                    current: usize = functions.lookup.index_values[slot]
+                    return (true, missing, false) if current == missing
+                    return (false, missing, true) if current >= functions.lookup.names.count
+                    if functions.lookup.index_hashes[slot] == wanted_hash:
+                        return (false, missing, true) if not proof_report_source_work_charge(sview_len(functions.lookup.names[current]), work)
+                        if functions.lookup.names[current] == name:
+                            return (true, missing, true) if functions.lookup.index_ambiguous[slot]
+                            return (true, current, false)
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (false, missing, true)
+            found: mutable usize = missing
+            for index in 0..<functions.lookup.names.count |index, functions, wanted_hash, name, found, work, missing|:
+                return (false, missing, true) if not proof_report_source_work_charge(1, work)
+                if index >= functions.lookup.name_hashes.count or functions.lookup.name_hashes[index] == wanted_hash:
+                    return (false, missing, true) if not proof_report_source_work_charge(sview_len(functions.lookup.names[index]), work)
+                    if functions.lookup.names[index] == name:
+                        return (true, missing, true) if found < missing
+                        found <- index
+            (true, found, false)
+
+        def proof_function_finding_duplicate_index_build(functions: ProofFunctionTable&, summary: mutable ProofFunctionFindingSummary&, work: mutable usize&) -> bool:
+            count: usize = functions.lookup.names.count
+            capacity: usize = functions.lookup.index_values.count
+            return false if count > 0 and (capacity == 0 or capacity != functions.lookup.index_hashes.count or capacity != functions.lookup.index_ambiguous.count)
+            return false if functions.lookup.name_hashes.count != count
+            for _ in 0..<count |summary, work, count|:
+                return false if not proof_report_source_work_charge(1, work)
+                summary.duplicate_row_next.push(count)
+            for _ in 0..<capacity |summary, work|:
+                return false if not proof_report_source_work_charge(6, work)
+                summary.duplicate_slot_tails.push(functions.lookup.names.count)
+                summary.duplicate_slot_clean.push(true)
+                summary.duplicate_slot_widened.push(false)
+                summary.duplicate_slot_contract_type.push(false)
+                summary.duplicate_slot_function_unverified.push(false)
+                summary.duplicate_slot_lemma_unverified.push(false)
+            for row in 0..<count |row, functions, summary, work, count, capacity|:
+                return false if not proof_report_source_work_charge(1, work) or not proof_report_source_work_charge(sview_len(functions.lookup.names[row]), work)
+                hash: u32 = functions.lookup.name_hashes[row]
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, row, functions, summary, work, count, capacity, placed|:
+                    return false if not proof_report_source_work_charge(1, work)
+                    first: usize = functions.lookup.index_values[slot]
+                    return false if first >= count
+                    if functions.lookup.index_hashes[slot] == hash:
+                        return false if not proof_report_source_work_charge(sview_len(functions.lookup.names[first]), work)
+                        if functions.lookup.names[first] == functions.lookup.names[row]:
+                            tail: usize = summary.duplicate_slot_tails[slot]
+                            if tail == count:
+                                summary.duplicate_slot_tails[slot] <- row
+                            else:
+                                return false if tail >= count
+                                summary.duplicate_row_next[tail] <- row
+                                summary.duplicate_slot_tails[slot] <- row
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+                return false if not proof_report_source_work_charge(1, work)
+                summary.duplicate_slots_by_row.push(slot)
+            for slot in 0..<capacity |slot, functions, summary, work, count|:
+                return false if not proof_report_source_work_charge(1, work)
+                first: usize = functions.lookup.index_values[slot]
+                if first == count:
+                    return false if functions.lookup.index_ambiguous[slot]
+                    continue
+                return false if first > count
+                chain_has_duplicate: bool = summary.duplicate_row_next[first] != count
+                return false if chain_has_duplicate != functions.lookup.index_ambiguous[slot]
+                last: mutable usize = first
+                next_row: mutable usize = summary.duplicate_row_next[first]
+                visits: mutable usize = 0
+                while next_row < count and visits < count |next_row, last, visits, summary, work, count|:
+                    return false if not proof_report_source_work_charge(1, work)
+                    last <- next_row
+                    next_row <- summary.duplicate_row_next[next_row]
+                    visits <- visits + 1
+                return false if next_row != count or summary.duplicate_slot_tails[slot] != last
+            return false if not proof_finding_source_identity_index_build(functions.lookup.names, functions.lookup.lines, functions.lookup.offsets, &summary.source_identity_hashes, &summary.source_identity_rows, &summary.source_identity_tails, &summary.source_identity_next, capacity, work)
+            true
+
+        def proof_function_finding_duplicate_slot_with_work(functions: ProofFunctionTable&, name: sview, work: mutable usize&) -> (complete: bool, slot: usize):
+            capacity: usize = functions.lookup.index_values.count
+            missing: usize = functions.lookup.names.count
+            return (false, capacity) if capacity == 0 or capacity != functions.lookup.index_hashes.count
+            return (false, capacity) if not proof_report_source_work_charge(sview_len(name), work)
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, functions, capacity, work, missing|:
+                return (false, capacity) if not proof_report_source_work_charge(1, work)
+                row: usize = functions.lookup.index_values[slot]
+                return (false, capacity) if row == missing
+                return (false, capacity) if row >= missing
+                if functions.lookup.index_hashes[slot] == wanted_hash:
+                    return (false, capacity) if not proof_report_source_work_charge(sview_len(functions.lookup.names[row]), work)
+                    return (true, slot) if functions.lookup.names[row] == name and functions.lookup.index_ambiguous[slot]
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            (false, capacity)
+
+        def proof_finding_only_widens_state(kind: sview) -> bool:
+            return true if kind == "captured-block-unsupported"
+            return kind == "loop-invariant-missing"
+
+        def proof_finding_is_about(finding: ProofFinding, function_name: sview, owner: sview, owner_line: u32, owner_offset: u32) -> bool:
+            return finding.name == function_name and (finding.owner == "" or finding.owner == owner) and (finding.owner_line == 0 or (finding.owner_line == owner_line and finding.owner_offset == owner_offset))
+
+        def proof_function_finding_mark_row(finding: ProofFinding, functions: ProofFunctionTable&, summary: mutable ProofFunctionFindingSummary&, row: usize, work: mutable usize&) -> bool:
+            count: usize = functions.lookup.names.count
+            return false if row >= count or row >= functions.lookup.owner_modules.count or row >= functions.lookup.lines.count or row >= functions.lookup.offsets.count
+            return false if row >= summary.clean.count or row >= summary.widened.count or row >= summary.contract_type.count or row >= summary.function_unverified.count or row >= summary.lemma_unverified.count
+            return false if:
+                not proof_report_source_work_charge(sview_len(finding.name), work)
+                not proof_report_source_work_charge(sview_len(functions.lookup.names[row]), work)
+                not proof_report_source_work_charge(sview_len(finding.owner), work)
+                not proof_report_source_work_charge(sview_len(functions.lookup.owner_modules[row]), work)
+            return true if not proof_finding_is_about(finding, functions.lookup.names[row], functions.lookup.owner_modules[row], functions.lookup.lines[row], functions.lookup.offsets[row])
+            return false if not proof_report_source_work_charge(sview_len(finding.kind), work)
+            summary.clean[row] <- false if not proof_finding_only_widens_state(finding.kind)
+            summary.widened[row] <- true if proof_finding_only_widens_state(finding.kind)
+            summary.contract_type[row] <- true if finding.kind == "contract-proposition-type"
+            summary.function_unverified[row] <- true if finding.kind == "function-summary-unverified"
+            summary.lemma_unverified[row] <- true if finding.kind == "lemma-summary-unverified"
+            true
+
+        # Ownerless findings apply to every declaration sharing an ambiguous leaf name. Store
+        # those effects at the name-index slot so many findings do not repeatedly walk its chain.
+        def proof_function_finding_mark_ambiguous_slot(finding: ProofFinding, summary: mutable ProofFunctionFindingSummary&, slot: usize, work: mutable usize&) -> bool:
+            return false if slot >= summary.duplicate_slot_clean.count or slot >= summary.duplicate_slot_widened.count or slot >= summary.duplicate_slot_contract_type.count or slot >= summary.duplicate_slot_function_unverified.count or slot >= summary.duplicate_slot_lemma_unverified.count
+            return false if not proof_report_source_work_charge(sview_len(finding.kind), work)
+            summary.duplicate_slot_clean[slot] <- false if not proof_finding_only_widens_state(finding.kind)
+            summary.duplicate_slot_widened[slot] <- true if proof_finding_only_widens_state(finding.kind)
+            summary.duplicate_slot_contract_type[slot] <- true if finding.kind == "contract-proposition-type"
+            summary.duplicate_slot_function_unverified[slot] <- true if finding.kind == "function-summary-unverified"
+            summary.duplicate_slot_lemma_unverified[slot] <- true if finding.kind == "lemma-summary-unverified"
+            true
+
+        def proof_function_finding_row_clean(summary: ProofFunctionFindingSummary, row: usize, work: mutable usize&) -> bool:
+            return false if row >= summary.clean.count or row >= summary.duplicate_slots_by_row.count
+            return false if not proof_report_source_work_charge(2, work)
+            slot: usize = summary.duplicate_slots_by_row[row]
+            return false if slot >= summary.duplicate_slot_clean.count
+            summary.clean[row] and summary.duplicate_slot_clean[slot]
+
+        def proof_function_finding_row_widened(summary: ProofFunctionFindingSummary, row: usize, work: mutable usize&) -> bool:
+            return false if row >= summary.widened.count or row >= summary.duplicate_slots_by_row.count
+            return false if not proof_report_source_work_charge(2, work)
+            slot: usize = summary.duplicate_slots_by_row[row]
+            return false if slot >= summary.duplicate_slot_widened.count
+            summary.widened[row] or summary.duplicate_slot_widened[slot]
+
+        def proof_function_finding_row_contract_type(summary: ProofFunctionFindingSummary, row: usize, work: mutable usize&) -> bool:
+            return false if row >= summary.contract_type.count or row >= summary.duplicate_slots_by_row.count
+            return false if not proof_report_source_work_charge(2, work)
+            slot: usize = summary.duplicate_slots_by_row[row]
+            return false if slot >= summary.duplicate_slot_contract_type.count
+            summary.contract_type[row] or summary.duplicate_slot_contract_type[slot]
+
+        def proof_function_finding_row_unverified(summary: ProofFunctionFindingSummary, row: usize, work: mutable usize&) -> bool:
+            return false if row >= summary.function_unverified.count or row >= summary.duplicate_slots_by_row.count
+            return false if not proof_report_source_work_charge(2, work)
+            slot: usize = summary.duplicate_slots_by_row[row]
+            return false if slot >= summary.duplicate_slot_function_unverified.count
+            summary.function_unverified[row] or summary.duplicate_slot_function_unverified[slot]
+
+        def proof_function_finding_row_lemma_unverified(summary: ProofFunctionFindingSummary, row: usize, work: mutable usize&) -> bool:
+            return false if row >= summary.lemma_unverified.count or row >= summary.duplicate_slots_by_row.count
+            return false if not proof_report_source_work_charge(2, work)
+            slot: usize = summary.duplicate_slots_by_row[row]
+            return false if slot >= summary.duplicate_slot_lemma_unverified.count
+            summary.lemma_unverified[row] or summary.duplicate_slot_lemma_unverified[slot]
+
+        def proof_function_finding_summary_build(report: ProofReport&, functions: ProofFunctionTable&, work: mutable usize&) -> (complete: bool, summary: ProofFunctionFindingSummary):
+            summary: mutable ProofFunctionFindingSummary = ProofFunctionFindingSummary{}
+            for _ in 0..<functions.lookup.names.count |summary, work|:
+                return (false, summary) if not proof_report_source_work_charge(1, work)
+                summary.clean.push(true)
+                summary.widened.push(false)
+                summary.contract_type.push(false)
+                summary.function_unverified.push(false)
+                summary.lemma_unverified.push(false)
+            return (false, summary) if not proof_function_finding_duplicate_index_build(functions, &summary, work)
+            return (false, summary) if not proof_function_finding_summary_extend(report, functions, &summary, work)
+            (true, summary)
+
+        def proof_function_finding_summary_extend(report: ProofReport&, functions: ProofFunctionTable&, summary: mutable ProofFunctionFindingSummary&, work: mutable usize&) -> bool:
+            count: usize = functions.lookup.names.count
+            return false if:
+                summary.clean.count != count or summary.widened.count != count or summary.contract_type.count != count
+                summary.function_unverified.count != count or summary.lemma_unverified.count != count
+                summary.duplicate_row_next.count != count or summary.duplicate_slot_tails.count != functions.lookup.index_values.count
+                summary.duplicate_slots_by_row.count != count or summary.duplicate_slot_clean.count != functions.lookup.index_values.count
+                summary.duplicate_slot_widened.count != functions.lookup.index_values.count or summary.duplicate_slot_contract_type.count != functions.lookup.index_values.count
+                summary.duplicate_slot_function_unverified.count != functions.lookup.index_values.count or summary.duplicate_slot_lemma_unverified.count != functions.lookup.index_values.count
+                summary.source_identity_hashes.count != functions.lookup.index_values.count or summary.source_identity_rows.count != functions.lookup.index_values.count or summary.source_identity_tails.count != functions.lookup.index_values.count
+                summary.source_identity_next.count != count
+                summary.findings_seen > report.results.findings.count
+            for index in summary.findings_seen..<report.results.findings.count |index, report, functions, summary, work, count|:
+                return false if not proof_report_source_work_charge(1, work)
+                finding: ProofFinding = report.results.findings[index]
+                identity: (complete: bool, row: usize, repeated: bool) = proof_function_identity_with_work(functions, finding.name, work)
+                return false if not identity.complete
+                if identity.row < count:
+                    return false if not proof_function_finding_mark_row(finding, functions, summary, identity.row, work)
+                elif identity.repeated:
+                    if finding.owner_line != 0:
+                        source: (complete: bool, slot: usize) = proof_finding_source_identity_slot(finding.name, finding.owner_line, finding.owner_offset, summary.source_identity_hashes, summary.source_identity_rows, functions.lookup.names, functions.lookup.lines, functions.lookup.offsets, work)
+                        return false if not source.complete
+                        if source.slot < summary.source_identity_rows.count:
+                            row: mutable usize = summary.source_identity_rows[source.slot]
+                            visits: mutable usize = 0
+                            last_row: mutable usize = count
+                            while row < count and visits < count |row, visits, source, finding, functions, summary, work, count|:
+                                return false if not proof_report_source_work_charge(1, work)
+                                return false if not proof_function_finding_mark_row(finding, functions, summary, row, work)
+                                last_row <- row
+                                row <- summary.source_identity_next[row]
+                                visits <- visits + 1
+                            return false if row != count or last_row != summary.source_identity_tails[source.slot]
+                    else:
+                        duplicate: (complete: bool, slot: usize) = proof_function_finding_duplicate_slot_with_work(functions, finding.name, work)
+                        return false if not duplicate.complete or duplicate.slot >= summary.duplicate_slot_tails.count
+                        if finding.owner == "":
+                            return false if not proof_function_finding_mark_ambiguous_slot(finding, summary, duplicate.slot, work)
+                            continue
+                        row: mutable usize = functions.lookup.index_values[duplicate.slot]
+                        return false if row >= count or summary.duplicate_row_next[row] == count
+                        visits: mutable usize = 0
+                        last_row: mutable usize = count
+                        while row < count and visits < count |row, visits, duplicate, finding, functions, summary, work, count|:
+                            return false if not proof_report_source_work_charge(1, work)
+                            return false if not proof_function_finding_mark_row(finding, functions, summary, row, work)
+                            last_row <- row
+                            row <- summary.duplicate_row_next[row]
+                            visits <- visits + 1
+                        return false if row != count or last_row != summary.duplicate_slot_tails[duplicate.slot]
+            summary.findings_seen <- report.results.findings.count
+            true
+
+        def proof_lemma_finding_mark_row(finding: ProofFinding, lemmas: ProofLemmaTable&, summary: mutable ProofLemmaFindingSummary&, row: usize, work: mutable usize&) -> bool:
+            return false if row >= lemmas.identity.names.count or row >= lemmas.identity.owner_modules.count or row >= lemmas.identity.lines.count or row >= lemmas.identity.offsets.count
+            return false if row >= summary.clean.count or row >= summary.contract_type.count or row >= summary.lemma_unverified.count
+            return false if:
+                not proof_report_source_work_charge(sview_len(finding.name), work)
+                not proof_report_source_work_charge(sview_len(lemmas.identity.names[row]), work)
+                not proof_report_source_work_charge(sview_len(finding.owner), work)
+                not proof_report_source_work_charge(sview_len(lemmas.identity.owner_modules[row]), work)
+            return true if finding.name != lemmas.identity.names[row]
+            return true if not proof_finding_is_about(finding, lemmas.identity.names[row], lemmas.identity.owner_modules[row], lemmas.identity.lines[row], lemmas.identity.offsets[row])
+            return false if not proof_report_source_work_charge(sview_len(finding.kind), work)
+            summary.clean[row] <- false
+            summary.contract_type[row] <- true if finding.kind == "contract-proposition-type"
+            summary.lemma_unverified[row] <- true if finding.kind == "lemma-summary-unverified"
+            true
+
+        def proof_lemma_finding_summary_build(report: ProofReport&, lemmas: ProofLemmaTable&, work: mutable usize&) -> (complete: bool, summary: ProofLemmaFindingSummary):
+            summary: mutable ProofLemmaFindingSummary = ProofLemmaFindingSummary{}
+            for _ in 0..<lemmas.identity.names.count |summary, work|:
+                return (false, summary) if not proof_report_source_work_charge(1, work)
+                summary.clean.push(true)
+                summary.contract_type.push(false)
+                summary.lemma_unverified.push(false)
+            return (false, summary) if not proof_lemma_finding_duplicate_index_build(lemmas, &summary, work)
+            return (false, summary) if not proof_lemma_finding_summary_extend(report, lemmas, &summary, work)
+            (true, summary)
+
+        def proof_lemma_finding_summary_extend(report: ProofReport&, lemmas: ProofLemmaTable&, summary: mutable ProofLemmaFindingSummary&, work: mutable usize&) -> bool:
+            count: usize = lemmas.identity.names.count
+            return false if:
+                summary.clean.count != count or summary.contract_type.count != count or summary.lemma_unverified.count != count
+                summary.duplicate_row_next.count != count or summary.duplicate_slot_tails.count != lemmas.identity.index_values.count
+                summary.source_identity_hashes.count != lemmas.identity.index_values.count or summary.source_identity_rows.count != lemmas.identity.index_values.count or summary.source_identity_tails.count != lemmas.identity.index_values.count
+                summary.source_identity_next.count != count
+                summary.findings_seen > report.results.findings.count
+            for index in summary.findings_seen..<report.results.findings.count |index, report, lemmas, summary, work, count|:
+                return false if not proof_report_source_work_charge(1, work)
+                finding: ProofFinding = report.results.findings[index]
+                identity: (complete: bool, row: usize, declared: bool, ambiguous: bool) = proof_lemma_index_with_work(lemmas, finding.name, work)
+                return false if not identity.complete
+                if identity.declared:
+                    return false if not proof_lemma_finding_mark_row(finding, lemmas, summary, identity.index, work)
+                elif identity.ambiguous:
+                    if finding.owner_line != 0:
+                        source: (complete: bool, slot: usize) = proof_finding_source_identity_slot(finding.name, finding.owner_line, finding.owner_offset, summary.source_identity_hashes, summary.source_identity_rows, lemmas.identity.names, lemmas.identity.lines, lemmas.identity.offsets, work)
+                        return false if not source.complete
+                        if source.slot < summary.source_identity_rows.count:
+                            row: mutable usize = summary.source_identity_rows[source.slot]
+                            visits: mutable usize = 0
+                            last_row: mutable usize = count
+                            while row < count and visits < count |row, visits, source, finding, lemmas, summary, work, count|:
+                                return false if not proof_report_source_work_charge(1, work)
+                                return false if not proof_lemma_finding_mark_row(finding, lemmas, summary, row, work)
+                                last_row <- row
+                                row <- summary.source_identity_next[row]
+                                visits <- visits + 1
+                            return false if row != count or last_row != summary.source_identity_tails[source.slot]
+                    else:
+                        duplicate: (complete: bool, slot: usize) = proof_lemma_finding_duplicate_slot_with_work(lemmas, finding.name, work)
+                        return false if not duplicate.complete or duplicate.slot >= summary.duplicate_slot_tails.count
+                        row: mutable usize = lemmas.identity.index_values[duplicate.slot]
+                        return false if row >= count or summary.duplicate_row_next[row] == count
+                        visits: mutable usize = 0
+                        last_row: mutable usize = count
+                        while row < count and visits < count |row, visits, duplicate, finding, lemmas, summary, work, count|:
+                            return false if not proof_report_source_work_charge(1, work)
+                            return false if not proof_lemma_finding_mark_row(finding, lemmas, summary, row, work)
+                            last_row <- row
+                            row <- summary.duplicate_row_next[row]
+                            visits <- visits + 1
+                        return false if row != count or last_row != summary.duplicate_slot_tails[duplicate.slot]
+            summary.findings_seen <- report.results.findings.count
+            true

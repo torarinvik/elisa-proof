@@ -1,80 +1,173 @@
 extend ElisaProof:
     private:
+        def proof_function_schedule_work_abort(functions: mutable ProofFunctionTable&, report: mutable ProofReport&, schedule_work: usize) -> void:
+            # Consumers require row-aligned trust vectors. Clearing them is O(1) and fails
+            # closed, while an exhausted meter must not authorize a cleanup sweep.
+            functions.summaries.verified.clear()
+            functions.summaries.verification_reasons.clear()
+            report.analysis_2.fact_call_shapes.returns.return_verified.clear()
+            report.analysis_2.fact_call_shapes.returns.return_verification_reasons.clear()
+            proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function dependency scheduling exceeded its validated work bound", "function-schedule-work", schedule_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+
+        def proof_function_schedule_invalid(functions: mutable ProofFunctionTable&, report: mutable ProofReport&, message: sview) -> void:
+            functions.summaries.verified.clear()
+            functions.summaries.verification_reasons.clear()
+            report.analysis_2.fact_call_shapes.returns.return_verified.clear()
+            report.analysis_2.fact_call_shapes.returns.return_verification_reasons.clear()
+            proof_add_finding(report, "function-summary-unverified", 0, "", message)
+
         def proof_compute_verified_functions(file: Ast::File&, declarations: darray[Ast::Decl]&, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, focus_name: sview) -> void can[Global.Read, Global.Write]:
             functions.summaries.verified.clear()
             functions.summaries.verification_reasons.clear()
-            required: darray[bool] = proof_focus_function_dependencies(functions, focus_name, report)
-            proof_filter_unrequested_function_proposition_findings(report, functions, required) if focus_name != ""
+            report.analysis_2.fact_call_shapes.returns.return_verified.clear()
+            report.analysis_2.fact_call_shapes.returns.return_verification_reasons.clear()
+            schedule_work: mutable usize = 0
+            required: darray[bool] = proof_focus_function_dependencies(file, functions, focus_name, report, &schedule_work)
+            proof_filter_unrequested_function_proposition_findings(report, functions, required, &schedule_work) if focus_name != "" and schedule_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             scheduled: mutable darray[bool] = []
             scheduled_count: mutable usize = 0
-            schedule_work: mutable usize = 0
-            candidate_start: mutable usize = 0
-            for _ in 0..<functions.lookup.names.count |functions|:
+            for _ in 0..<functions.lookup.names.count |functions, schedule_work|:
+                if not proof_report_source_work_charge(1, &schedule_work):
+                    schedule_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    break
                 functions.summaries.verified.push(false)
-            for function_index in 0..<functions.lookup.names.count |function_index, functions, required, scheduled, scheduled_count|:
+            for function_index in 0..<functions.lookup.names.count |function_index, functions, required, scheduled, scheduled_count, schedule_work|:
+                if not proof_report_source_work_charge(1, &schedule_work):
+                    schedule_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    break
                 selected: bool = function_index < required.count and required[function_index]
                 functions.summaries.verification_reasons.push("pending" if selected else "not-requested")
                 scheduled.push(not selected)
                 scheduled_count <- scheduled_count + 1 if not selected
-            while scheduled_count < functions.lookup.names.count |scheduled_count, scheduled, functions, file, declarations, lemmas, report, schedule_work|:
-                candidate: mutable usize = functions.lookup.names.count
-                for search_offset in 0..<functions.lookup.names.count |search_offset, functions, scheduled, candidate, candidate_start, schedule_work|:
-                    function_index: usize = (candidate_start + search_offset) % functions.lookup.names.count
+            if schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_function_schedule_work_abort(functions, report, schedule_work)
+                return
+            return if scheduled_count == functions.lookup.names.count
+            finding_build: (complete: bool, summary: ProofFunctionFindingSummary) = proof_function_finding_summary_build(report, functions, &schedule_work)
+            if not finding_build.complete:
+                proof_function_schedule_work_abort(functions, report, schedule_work)
+                return
+            function_findings: mutable ProofFunctionFindingSummary = finding_build.summary
+            component_schedule: ProofComponentSchedule = proof_build_component_schedule(functions.summaries.recursive_component_ids, functions.call_graph.call_starts, functions.call_graph.call_counts, functions.call_graph.all_call_targets, functions.lookup.names.count, &schedule_work)
+            if not component_schedule.valid:
+                if schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    proof_function_schedule_work_abort(functions, report, schedule_work)
+                else:
+                    proof_function_schedule_invalid(functions, report, "function SCC schedule rejected malformed component or call-graph metadata")
+                return
+            component: mutable darray[usize] = []
+            component_order_index: mutable usize = 0
+            while component_order_index < component_schedule.order.count and scheduled_count < functions.lookup.names.count |component_order_index, component_schedule, scheduled_count, scheduled, functions, report, schedule_work|:
+                if not proof_report_source_work_charge(1, &schedule_work):
+                    schedule_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    proof_function_schedule_work_abort(functions, report, schedule_work)
+                    return
+                component_id: usize = component_schedule.order[component_order_index]
+                component_order_index <- component_order_index + 1
+                component.clear()
+                if component_id >= component_schedule.starts.count or component_id >= component_schedule.counts.count:
+                    proof_function_schedule_invalid(functions, report, "function SCC schedule component row is invalid")
+                    return
+                component_start: usize = component_schedule.starts[component_id]
+                component_count: usize = component_schedule.counts[component_id]
+                if component_start > component_schedule.members.count or component_count > component_schedule.members.count - component_start:
+                    proof_function_schedule_invalid(functions, report, "function SCC schedule member range is invalid")
+                    return
+                for member_offset in 0..<component_count |member_offset, component_start, component_schedule, component, scheduled, functions, schedule_work|:
                     if not proof_report_source_work_charge(1, &schedule_work):
                         schedule_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
                         break
-                    if not scheduled[function_index] and proof_function_component_ready(functions, scheduled, function_index, &schedule_work):
-                        candidate <- function_index
-                        candidate_start <- (function_index + 1) % functions.lookup.names.count
-                        break
-                if schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
-                    for function_index in 0..<functions.lookup.names.count |function_index, functions, scheduled, scheduled_count|:
-                        if not scheduled[function_index]:
-                            functions.summaries.verification_reasons[function_index] <- "verification-schedule-work-limit"
-                            scheduled[function_index] <- true
-                            scheduled_count <- scheduled_count + 1
-                    proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function dependency scheduling exceeded its validated work bound", "function-schedule-work", schedule_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
-                    break
-                if candidate >= functions.lookup.names.count:
-                    # A well-formed collected call graph should always expose a ready SCC. If
-                    # metadata becomes malformed, reject every remaining summary explicitly.
-                    for function_index in 0..<functions.lookup.names.count |function_index, functions, scheduled, report|:
-                        if not scheduled[function_index]:
-                            functions.summaries.verification_reasons[function_index] <- "verification-schedule-stuck"
-                            proof_add_finding(report, "function-summary-unverified", 0, functions.lookup.names[function_index], "function dependency graph could not produce a verified scheduling component")
-                            scheduled[function_index] <- true
-                            scheduled_count <- scheduled_count + 1
-                    break
-                component: mutable darray[usize] = []
-                for function_index in 0..<functions.lookup.names.count |function_index, functions, scheduled, candidate, component|:
-                    if not scheduled[function_index] and proof_functions_same_recursive_component(functions, candidate, function_index):
+                    function_index: usize = component_schedule.members[component_start + member_offset]
+                    if function_index >= scheduled.count or function_index >= functions.summaries.verified.count or function_index >= functions.summaries.verification_reasons.count:
+                        proof_function_schedule_invalid(functions, report, "function SCC schedule member index is invalid")
+                        return
+                    if not scheduled[function_index]:
                         component.push(function_index)
                         functions.summaries.verified[function_index] <- true
                         functions.summaries.verification_reasons[function_index] <- "pending"
-                for member in component |member, component, file, declarations, lemmas, functions, report|:
-                    found: bool = (proof_check_scheduled_function(file, declarations, member, lemmas, functions, report) can Global{Read,Write})
+                if schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    proof_function_schedule_work_abort(functions, report, schedule_work)
+                    return
+                if component.count == 0:
+                    continue
+                if component.count != component_count:
+                    proof_function_schedule_invalid(functions, report, "focused verification selected only part of a recursive component")
+                    return
+                component_bodies_checked: mutable bool = true
+                for member in component |member, component, file, declarations, lemmas, functions, report, function_findings, schedule_work, component_bodies_checked|:
+                    if not proof_report_source_work_charge(1, &schedule_work):
+                        schedule_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        component_bodies_checked <- false
+                        break
+                    found: bool = (proof_check_scheduled_function(file, declarations, member, lemmas, functions, report, function_findings, &schedule_work) can Global{Read,Write})
                     functions.summaries.verification_reasons[member] <- "body-missing" if not found
-                component_ok: mutable bool = true
-                for member in component |member, component, functions, report, component_ok|:
-                    component_ok <- false if not proof_report_row_is_clean(report, functions, member)
+                    component_bodies_checked <- false if not found
+                if schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    proof_function_schedule_work_abort(functions, report, schedule_work)
+                    return
+                if not proof_function_finding_summary_extend(report, functions, &function_findings, &schedule_work):
+                    proof_function_schedule_work_abort(functions, report, schedule_work)
+                    return
+                component_ok: mutable bool = component_bodies_checked
+                for member in component |member, component, functions, function_findings, report, component_ok, schedule_work|:
+                    if not proof_report_source_work_charge(1, &schedule_work):
+                        schedule_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        component_ok <- false
+                        break
+                    member_clean: bool = proof_function_finding_row_clean(function_findings, member, &schedule_work)
+                    component_ok <- false if not member_clean or schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                if schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    proof_function_schedule_work_abort(functions, report, schedule_work)
+                    return
                 # A caller whose proof rests on a widened-state summary is in the same position as
                 # the callee, so the marking travels the call graph. Components are scheduled in
                 # dependency order, so every callee outside this component already carries its
                 # final reason by the time it is read here.
                 component_widened: mutable bool = false
-                for member in component |member, component, functions, report, component_widened|:
-                    component_widened <- true if proof_report_row_has_widened_finding(report, functions, member)
+                for member in component |member, component, functions, function_findings, report, component_widened, schedule_work, component_ok|:
+                    if not proof_report_source_work_charge(1, &schedule_work):
+                        schedule_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        component_ok <- false
+                        break
+                    continue if schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    member_widened: bool = proof_function_finding_row_widened(function_findings, member, &schedule_work)
+                    component_widened <- true if member_widened
+                    component_ok <- false if schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    break if schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    if member >= functions.call_graph.call_starts.count or member >= functions.call_graph.call_counts.count:
+                        component_ok <- false
+                        proof_add_finding(report, "function-summary-unverified", 0, functions.lookup.names[member], "function dependency graph metadata is incomplete during summary propagation")
+                        continue
                     call_start: usize = functions.call_graph.call_starts[member]
                     call_count: usize = functions.call_graph.call_counts[member]
-                    continue if call_start > functions.call_graph.all_calls.count or call_count > functions.call_graph.all_calls.count - call_start
-                    for offset in 0..<call_count |offset, call_start, functions, member, component_widened|:
-                        called: sview = functions.call_graph.all_calls[call_start + offset]
-                        continue if called == "__opaque_call__"
-                        called_index: usize = proof_function_call_target(functions, call_start + offset)
+                    if call_start > functions.call_graph.all_calls.count or call_count > functions.call_graph.all_calls.count - call_start:
+                        component_ok <- false
+                        proof_add_finding(report, "function-summary-unverified", 0, functions.lookup.names[member], "function dependency graph range is invalid during summary propagation")
+                        continue
+                    for offset in 0..<call_count |offset, call_start, functions, member, component_widened, schedule_work, component_ok|:
+                        if not proof_report_source_work_charge(1, &schedule_work):
+                            schedule_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                            component_ok <- false
+                            break
+                        target: (complete: bool, row: usize) = proof_scheduled_call_target(functions, call_start + offset)
+                        if not target.complete:
+                            component_ok <- false
+                            proof_add_finding(report, "function-summary-unverified", 0, functions.lookup.names[member], "function dependency target row is invalid during summary propagation")
+                            break
+                        called_index: usize = target.row
                         continue if called_index >= functions.summaries.verification_reasons.count
                         continue if proof_functions_same_recursive_component(functions, member, called_index)
                         component_widened <- true if functions.summaries.verification_reasons[called_index] == "contract-verified-widened-state"
-                for member in component |member, component, functions, component_ok, component_widened|:
+                if schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    proof_function_schedule_work_abort(functions, report, schedule_work)
+                    return
+                if not proof_function_finding_summary_extend(report, functions, &function_findings, &schedule_work):
+                    proof_function_schedule_work_abort(functions, report, schedule_work)
+                    return
+                for member in component |member, component, functions, function_findings, component_ok, component_widened, report, schedule_work|:
+                    if not proof_report_source_work_charge(1, &schedule_work):
+                        schedule_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        break
                     functions.summaries.verified[member] <- component_ok
                     # `verified` is what gates summary availability, so it stays true here -- that
                     # is the whole change. What separates a fully checked contract from one derived
@@ -84,7 +177,12 @@ extend ElisaProof:
                     functions.summaries.verification_reasons[member] <- "contract-verified-widened-state" if component_ok and component_widened
                     functions.summaries.verification_reasons[member] <- "recursive-component-unverified" if not component_ok and functions.summaries.verification_reasons[member] == "pending"
                     functions.summaries.verification_reasons[member] <- "body-unverified" if not component_ok and not functions.summaries.recursive[member]
-                    functions.summaries.verification_reasons[member] <- "dependency-unverified" if not component_ok and (proof_report_row_has_finding(report, functions, member, "function-summary-unverified") or proof_report_row_has_finding(report, functions, member, "lemma-summary-unverified"))
+                    has_unverified_dependency: bool = proof_function_finding_row_unverified(function_findings, member, &schedule_work) if not component_ok else false
+                    has_unverified_lemma_dependency: bool = proof_function_finding_row_lemma_unverified(function_findings, member, &schedule_work) if not component_ok else false
+                    functions.summaries.verification_reasons[member] <- "dependency-unverified" if not component_ok and (has_unverified_dependency or has_unverified_lemma_dependency)
                     proof_fact_call_shape_update_verification(report, functions, member)
                     scheduled[member] <- true
                     scheduled_count <- scheduled_count + 1
+                if schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    proof_function_schedule_work_abort(functions, report, schedule_work)
+                    return

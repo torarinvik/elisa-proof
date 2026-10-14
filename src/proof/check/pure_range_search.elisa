@@ -1,16 +1,23 @@
 # A finite range search owns its fresh scalar result and writes no caller state.
 extend ElisaProof:
     private:
-        def proof_pure_search_read(expression: Ast::Expr, globals: darray[sview]&, report: ProofReport&) -> bool:
-            return false if:
-                not proof_pure_expression_shape(expression) or proof_expr_has_call(expression) or proof_expr_has_move(expression)
-                proof_source_expression_has_overloaded_operator(expression, report.source.source_primitive_operator_mask, 0)
-            return not proof_expr_mentions_any_global(expression, globals)
+        def proof_pure_parameter_name_present(parameters: darray[Ast::ParamDecl]&, name: sview, globals: mutable ProofPureMutableGlobalIndex&) -> bool:
+            for parameter in parameters |name, globals|:
+                return true if not proof_report_source_work_charge(1, &globals.source_work)
+                return true if parameter.name == name
+            return false
 
-        def proof_pure_search_steps(body: darray[Ast::Stmt]&, accumulator: sview, binder: sview, globals: darray[sview]&, report: ProofReport&, depth: usize, work: mutable usize&) -> bool:
+        def proof_pure_search_read(expression: Ast::Expr, globals: mutable ProofPureMutableGlobalIndex&, report: ProofReport&) -> bool:
+            return false if:
+                not proof_purity_expression_supported_shape(expression, globals) or proof_expr_has_call(expression) or proof_expr_has_move(expression)
+                proof_source_expression_has_overloaded_operator(expression, report.source.source_primitive_operator_mask, 0)
+            shadowed: mutable darray[sview] = []
+            not proof_pure_global_expression_reads(expression, globals, &shadowed, 0)
+
+        def proof_pure_search_steps(body: darray[Ast::Stmt]&, accumulator: sview, binder: sview, globals: mutable ProofPureMutableGlobalIndex&, report: ProofReport&, depth: usize, work: mutable usize&) -> bool:
             return false if depth >= 64 or body.count > 4096
             for statement in body |accumulator, binder, globals, report, depth, work|:
-                return false if work >= 4096
+                return false if work >= 4096 or not proof_report_source_work_charge(1, &globals.source_work)
                 work <- work + 1
                 match statement:
                     Ast::Stmt.Contract("invariant", expression, _):
@@ -30,7 +37,7 @@ extend ElisaProof:
                         return false
             return true
 
-        def proof_pure_search_value(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, globals: darray[sview]&, report: ProofReport&, depth: usize) -> bool:
+        def proof_pure_search_value(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, globals: mutable ProofPureMutableGlobalIndex&, report: ProofReport&, depth: usize) -> bool:
             return false if depth >= 64
             match expression:
                 Ast::Expr.Block(statements, yielded, captures, _):
@@ -42,8 +49,8 @@ extend ElisaProof:
                         Ast::Stmt.VarDecl(local, type_expression, initializer, _):
                             return false if:
                                 local == "" or proof_unsigned_type_width_with_work(type_expression, report.source.source_declarations, 0, &report.source_types.source_effect_index.work.implicit_effect_work) <= 0
-                                any parameter in parameters where parameter.name == local
-                                any global_name in globals where global_name == local
+                                proof_pure_parameter_name_present(parameters, local, globals)
+                                proof_pure_mutable_global_index_contains(globals, local)
                                 not proof_pure_search_read(initializer, globals, report)
                             accumulator <- local
                         _:
@@ -53,12 +60,13 @@ extend ElisaProof:
                         Ast::Stmt.For(bind, variables, iterable, body, _):
                             return false if:
                                 bind != "" or variables.count != 1 or variables[0] == accumulator
-                                any parameter in parameters where parameter.name == variables[0]
-                                any global_name in globals where global_name == variables[0]
+                                proof_pure_parameter_name_present(parameters, variables[0], globals)
+                                proof_pure_mutable_global_index_contains(globals, variables[0])
                             match iterable:
                                 Ast::Expr.Binary(low, TokenKind.RangeLt, high, _):
                                     return false if:
                                         not proof_pure_search_read(low, globals, report) or not proof_pure_search_read(high, globals, report)
+                                        not proof_purity_expression_walks_bounded(iterable, globals)
                                         proof_source_expression_has_overloaded_operator(iterable, report.source.source_primitive_operator_mask, 0)
                                 _:
                                     return false
@@ -69,10 +77,11 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_pure_range_search_body(body: darray[Ast::Stmt]&, parameters: darray[Ast::ParamDecl]&, globals: darray[sview]&, report: ProofReport&) -> bool:
+        def proof_pure_range_search_body(body: darray[Ast::Stmt]&, parameters: darray[Ast::ParamDecl]&, globals: mutable ProofPureMutableGlobalIndex&, report: ProofReport&) -> bool:
             return false if body.count > 64
             searches: mutable usize = 0
             for statement in body |parameters, globals, report, searches|:
+                return false if not proof_report_source_work_charge(1, &globals.source_work)
                 match statement:
                     Ast::Stmt.Contract(kind, expression, _):
                         return false if not proof_is_ensure_kind(kind) or not proof_pure_search_read(expression, globals, report)

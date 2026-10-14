@@ -1,23 +1,26 @@
 extend ElisaProof:
     private:
+        # The parser stores canonical `x: mutable T` in the type expression; the separate
+        # ParamDecl bit is only populated for the legacy leading `mutable x: T` spelling.
+        # Mirror the compiler's recursive type mutability rule so both spellings affect purity.
         def proof_parameter_type_is_mutable(expression: Ast::Expr) -> bool:
+            local_work: mutable usize = 0
+            proof_parameter_type_is_mutable_with_work(expression, &local_work, 0)
+
+        def proof_parameter_type_is_mutable_with_work(expression: Ast::Expr, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or not proof_report_source_work_charge(1, work)
             match expression:
                 Ast::Expr.Unary(operator, operand, _):
                     return true if operator == TokenKind.Mutable or operator == TokenKind.Lmut
-                    return proof_parameter_type_is_mutable(operand)
+                    return proof_parameter_type_is_mutable_with_work(operand, work, depth + 1)
                 Ast::Expr.Binary(left, _, _, _):
-                    return proof_parameter_type_is_mutable(left)
+                    return proof_parameter_type_is_mutable_with_work(left, work, depth + 1)
                 Ast::Expr.Paren(inner, _):
-                    return proof_parameter_type_is_mutable(inner)
+                    return proof_parameter_type_is_mutable_with_work(inner, work, depth + 1)
                 Ast::Expr.Refinement(base, _, _):
-                    return proof_parameter_type_is_mutable(base)
+                    return proof_parameter_type_is_mutable_with_work(base, work, depth + 1)
                 _:
                     return false
-
-        def proof_expr_mentions_any_global(expression: Ast::Expr, mutable_globals: darray[sview]&) -> bool:
-            for global_name in mutable_globals:
-                return true if proof_expr_mentions_name(expression, global_name)
-            return false
 
         # Purity may ignore pattern forms that test values, and a variant test whose payloads are
         # only named or skipped. Such a binder can move a payload out of the callee's own
@@ -25,10 +28,18 @@ extend ElisaProof:
         # a verified callee, whose body the resource checker has already certified, and a logical
         # contract call never executes. Struct, tuple, `as` and pinned patterns stay outside this
         # tier.
-        def proof_pure_match_pattern(pattern: Ast::Pattern) -> bool:
+        def proof_pure_match_pattern(pattern: Ast::Pattern, globals: mutable ProofPureMutableGlobalIndex&) -> bool:
+            work: mutable usize = 0
+            proof_pure_match_pattern_depth(pattern, globals, 0, &work)
+
+        def proof_pure_match_pattern_depth(pattern: Ast::Pattern, globals: mutable ProofPureMutableGlobalIndex&, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or work >= PROOF_PATTERN_WALK_WORK_LIMIT or not proof_report_source_work_charge(1, &globals.source_work)
+            work <- work + 1
             match pattern:
                 Ast::Pattern.Variant(_, fields):
                     for field in fields:
+                        return false if work >= PROOF_PATTERN_WALK_WORK_LIMIT or not proof_report_source_work_charge(1, &globals.source_work)
+                        work <- work + 1
                         match field:
                             Ast::Pattern.Wildcard:
                                 pass
@@ -40,7 +51,7 @@ extend ElisaProof:
                                     Ast::Pattern.Binding(binding):
                                         return false if binding == ""
                                     _:
-                                        return false if not proof_pure_match_pattern(inner[0])
+                                        return false if not proof_pure_match_pattern_depth(inner[0], globals, depth + 1, work)
                             _:
                                 return false
                     return true
@@ -53,7 +64,7 @@ extend ElisaProof:
                 Ast::Pattern.Or(options):
                     return false if options.count == 0
                     for option in options:
-                        return false if not proof_pure_match_pattern(option)
+                        return false if not proof_pure_match_pattern_depth(option, globals, depth + 1, work)
                     return true
                 _:
                     return false
@@ -62,155 +73,142 @@ extend ElisaProof:
         # `global mutable` declarations in its annotation side table; reject those names in every
         # expression of the candidate body/defaults. Name collisions with a local are rejected
         # conservatively because this kernel does not carry binding identities through the AST.
-        def proof_pure_body_reads_mutable_global(body: darray[Ast::Stmt]&, mutable_globals: darray[sview]&) -> bool:
-            for statement in body:
+        def proof_pure_body_reads_mutable_global(body: darray[Ast::Stmt]&, mutable_globals: mutable ProofPureMutableGlobalIndex&, depth: usize) -> bool:
+            return true if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT
+            for statement in body |mutable_globals|:
+                return true if not proof_report_source_work_charge(6, &mutable_globals.source_work)
                 match statement:
                     Ast::Stmt.Return(value, _):
                         if value is returned:
-                            return true if proof_expr_mentions_any_global(returned, mutable_globals)
+                            return true if proof_pure_expression_has_mutable_global(returned, mutable_globals)
                     Ast::Stmt.Expr(expression, _):
                         if expression is Ast::Expr.Block(statements, value, captures, _):
-                            return true if value is not Ast::Expr.Invalid and proof_expr_mentions_any_global(value, mutable_globals)
+                            return true if value is not Ast::Expr.Invalid and proof_pure_expression_has_mutable_global(value, mutable_globals)
                             for captured_name in captures |mutable_globals|:
-                                return true if any global_name in mutable_globals where global_name == captured_name
-                            return true if proof_pure_body_reads_mutable_global(statements, mutable_globals)
-                        return true if proof_expr_mentions_any_global(expression, mutable_globals)
+                                return true if proof_pure_mutable_global_index_contains(mutable_globals, captured_name)
+                            return true if proof_pure_body_reads_mutable_global(statements, mutable_globals, depth + 1)
+                        return true if proof_pure_expression_has_mutable_global(expression, mutable_globals)
                     Ast::Stmt.VarDecl(_, _, initializer, _):
-                        return true if proof_expr_mentions_any_global(initializer, mutable_globals)
+                        return true if proof_pure_expression_has_mutable_global(initializer, mutable_globals)
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_expr_mentions_any_global(condition, mutable_globals) or proof_pure_body_reads_mutable_global(then_body, mutable_globals) or proof_pure_body_reads_mutable_global(else_body, mutable_globals)
+                        return true if proof_pure_expression_has_mutable_global(condition, mutable_globals) or proof_pure_body_reads_mutable_global(then_body, mutable_globals, depth + 1) or proof_pure_body_reads_mutable_global(else_body, mutable_globals, depth + 1)
                     Ast::Stmt.For(_, _, iterable, loop_body, _):
-                        return true if proof_expr_mentions_any_global(iterable, mutable_globals) or proof_pure_body_reads_mutable_global(loop_body, mutable_globals)
+                        return true if proof_pure_expression_has_mutable_global(iterable, mutable_globals) or proof_pure_body_reads_mutable_global(loop_body, mutable_globals, depth + 1)
                     Ast::Stmt.Match(scrutinee, arms, _):
-                        return true if proof_expr_mentions_any_global(scrutinee, mutable_globals)
+                        return true if proof_pure_expression_has_mutable_global(scrutinee, mutable_globals)
                         for arm in arms |mutable_globals|:
-                            return true if not proof_pure_match_pattern(arm.pattern)
+                            return true if not proof_report_source_work_charge(6, &mutable_globals.source_work)
+                            return true if not proof_pure_match_pattern(arm.pattern, mutable_globals)
                             match arm.guard:
                                 Ast::Expr.Absent:
                                     pass
                                 _:
-                                    return true if proof_expr_mentions_any_global(arm.guard, mutable_globals)
-                            return true if proof_pure_body_reads_mutable_global(arm.body, mutable_globals)
+                                    return true if proof_pure_expression_has_mutable_global(arm.guard, mutable_globals)
+                            return true if proof_pure_body_reads_mutable_global(arm.body, mutable_globals, depth + 1)
                     Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_expr_mentions_any_global(expression, mutable_globals)
+                        return true if proof_pure_expression_has_mutable_global(expression, mutable_globals)
                     _:
                         return true
             return false
 
-        def proof_pure_parameter_is_darray(type_expression: Ast::Expr) -> bool:
+        def proof_pure_parameter_is_darray(type_expression: Ast::Expr, globals: mutable ProofPureMutableGlobalIndex&, depth: usize) -> bool:
+            return false if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or not proof_report_source_work_charge(1, &globals.source_work)
             match type_expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_pure_parameter_is_darray(inner)
+                    return proof_pure_parameter_is_darray(inner, globals, depth + 1)
                 Ast::Expr.Refinement(base, _, _):
-                    return proof_pure_parameter_is_darray(base)
+                    return proof_pure_parameter_is_darray(base, globals, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
-                    return proof_pure_parameter_is_darray(inner) if operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Mutable
+                    return proof_pure_parameter_is_darray(inner, globals, depth + 1) if operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Mutable
                     return false
                 Ast::Expr.Index(head, _, _):
                     return proof_ident_name(head) == "darray"
                 _:
                     return false
 
-        def proof_pure_body_shadows_name(body: darray[Ast::Stmt]&, target: sview) -> bool:
-            for statement in body:
-                match statement:
-                    Ast::Stmt.VarDecl(name, _, _, _):
-                        return true if name == target
-                    Ast::Stmt.For(_, variables, _, loop_body, _):
-                        return true if:
-                            any variable in variables where variable == target
-                            proof_pure_body_shadows_name(loop_body, target)
-                    Ast::Stmt.If(_, then_body, else_body, _):
-                        return true if proof_pure_body_shadows_name(then_body, target) or proof_pure_body_shadows_name(else_body, target)
-                    Ast::Stmt.Expr(Ast::Expr.Block(statements, _, _, _), _):
-                        return proof_pure_body_shadows_name(statements, target)
-                    Ast::Stmt.Match(_, _, _):
-                        # Pattern binders are a separate source namespace; without a typed
-                        # binding identity, decline a name-based iterable check around a match.
-                        return true
-                    Ast::Stmt.While(_, _, _):
-                        return true
-                    Ast::Stmt.Block(_, _, _, _, _):
-                        return true
-                    _:
-                        pass
-            return false
-
-        def proof_pure_loop_iterable_supported(iterable: Ast::Expr, parameters: darray[Ast::ParamDecl]&, root_body: darray[Ast::Stmt]&) -> bool:
+        def proof_pure_loop_iterable_supported(iterable: Ast::Expr, parameters: darray[Ast::ParamDecl]&, root_body: darray[Ast::Stmt]&, shadow_index: mutable ProofPureBodyShadowIndex&, globals: mutable ProofPureMutableGlobalIndex&) -> bool:
             match iterable:
                 Ast::Expr.Binary(low, operator, high, _):
-                    return (operator == TokenKind.RangeLt or operator == TokenKind.RangeLe) and proof_expr_supported(low) and proof_pure_expression_shape(low) and proof_expr_supported(high) and proof_pure_expression_shape(high)
+                    return (operator == TokenKind.RangeLt or operator == TokenKind.RangeLe) and proof_purity_expression_supported_shape(low, globals) and proof_purity_expression_supported_shape(high, globals)
                 Ast::Expr.Ident(name, _):
-                    for parameter in parameters:
+                    for parameter in parameters |globals|:
+                        return false if not proof_report_source_work_charge(1, &globals.source_work)
                         if parameter.name == name:
-                            return proof_pure_parameter_is_darray(parameter.type_expression) and not proof_pure_body_shadows_name(root_body, name)
+                            if not shadow_index.valid:
+                                return false if not proof_pure_body_shadow_index_build(root_body, &shadow_index, globals)
+                            return proof_pure_parameter_is_darray(parameter.type_expression, globals, 0) and not proof_pure_body_shadow_index_contains(shadow_index, name, globals)
                     return false
                 _:
                     return false
 
-        def proof_pure_loop_captures_are_parameters(captures: darray[sview]&, parameters: darray[Ast::ParamDecl]&) -> bool:
+        def proof_pure_loop_captures_are_parameters(captures: darray[sview]&, parameters: darray[Ast::ParamDecl]&, globals: mutable ProofPureMutableGlobalIndex&) -> bool:
             return false if captures.count == 0
-            for capture_index in 0..<captures.count |capture_index, captures, parameters|:
+            for capture_index in 0..<captures.count |capture_index, captures, parameters, globals|:
+                return false if not proof_report_source_work_charge(1, &globals.source_work)
                 capture_name: sview = captures[capture_index]
                 return false if capture_name == ""
-                for prior in 0..<capture_index:
+                for prior in 0..<capture_index |globals|:
+                    return false if not proof_report_source_work_charge(1, &globals.source_work)
                     return false if captures[prior] == capture_name
                 parameter_matches: mutable usize = 0
-                for parameter in parameters |capture_name, parameter_matches|:
+                for parameter in parameters |capture_name, parameter_matches, globals|:
+                    return false if not proof_report_source_work_charge(1, &globals.source_work)
                     if parameter.name == capture_name:
                         parameter_matches <- parameter_matches + 1
-                        return false if parameter.is_mutable or proof_parameter_type_is_mutable(parameter.type_expression) or not proof_pure_parameter_is_darray(parameter.type_expression)
+                        return false if parameter.is_mutable or proof_parameter_type_is_mutable_with_work(parameter.type_expression, &globals.source_work, 0) or not proof_pure_parameter_is_darray(parameter.type_expression, globals, 0)
                 return false if parameter_matches != 1
             return true
 
-        def proof_pure_body_direct(body: darray[Ast::Stmt]&, root_body: darray[Ast::Stmt]&, parameters: darray[Ast::ParamDecl]&, report: ProofReport&) -> bool:
-            for statement in body:
+        def proof_pure_body_direct(body: darray[Ast::Stmt]&, root_body: darray[Ast::Stmt]&, parameters: darray[Ast::ParamDecl]&, shadow_index: mutable ProofPureBodyShadowIndex&, globals: mutable ProofPureMutableGlobalIndex&, report: ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT
+            for statement in body |globals|:
+                return false if not proof_report_source_work_charge(1, &globals.source_work)
                 match statement:
                     Ast::Stmt.Return(value, _):
                         if value is returned:
                             return false if:
-                                not proof_expr_supported(returned)
-                                not proof_pure_expression_shape(returned)
+                                not proof_purity_expression_supported_shape(returned, globals)
                     Ast::Stmt.Expr(expression, position):
                         continue if proof_inert_statement_kind(statement, report) == PROOF_INERT_PASS
                         if expression is Ast::Expr.Block(statements, value, captures, _):
                             # A for-loop header with captures lowers to a block expression. Admit
                             # only its no-yield, single-loop form with immutable darray formals;
                             # arbitrary block scopes and hidden write-back remain refused.
-                            return false if value is not Ast::Expr.Invalid or statements.count != 1 or not proof_pure_loop_captures_are_parameters(captures, parameters)
-                            return proof_pure_body_direct(statements, root_body, parameters, report)
-                        if not proof_expr_supported(expression) or not proof_pure_expression_shape(expression):
+                            return false if value is not Ast::Expr.Invalid or statements.count != 1 or not proof_pure_loop_captures_are_parameters(captures, parameters, globals)
+                            return proof_pure_body_direct(statements, root_body, parameters, shadow_index, globals, report, depth + 1)
+                        if not proof_purity_expression_supported_shape(expression, globals):
                             return false
                     Ast::Stmt.VarDecl(_, _, initializer, position):
-                        if not proof_expr_supported(initializer) or not proof_pure_expression_shape(initializer):
+                        if not proof_purity_expression_supported_shape(initializer, globals):
                             return false
                     Ast::Stmt.Assign(_, _, _, position):
                         return false
                     Ast::Stmt.If(condition, then_body, else_body, position):
-                        if not proof_expr_supported(condition) or not proof_pure_expression_shape(condition):
+                        if not proof_purity_expression_supported_shape(condition, globals):
                             return false
-                        if not proof_pure_body_direct(then_body, root_body, parameters, report) or not proof_pure_body_direct(else_body, root_body, parameters, report):
+                        if not proof_pure_body_direct(then_body, root_body, parameters, shadow_index, globals, report, depth + 1) or not proof_pure_body_direct(else_body, root_body, parameters, shadow_index, globals, report, depth + 1):
                             return false
                     Ast::Stmt.Match(scrutinee, arms, _):
                         return false if:
-                            not proof_expr_supported(scrutinee)
-                            not proof_pure_expression_shape(scrutinee)
+                            not proof_purity_expression_supported_shape(scrutinee, globals)
                         for arm in arms:
-                            return false if not proof_pure_match_pattern(arm.pattern)
+                            return false if not proof_pure_match_pattern(arm.pattern, globals)
                             match arm.guard:
                                 Ast::Expr.Absent:
                                     pass
                                 _:
-                                    return false if proof_expr_has_old(arm.guard) or not proof_expr_supported(arm.guard) or not proof_pure_expression_shape(arm.guard)
-                            return false if not proof_pure_body_direct(arm.body, root_body, parameters, report)
+                                    return false if not proof_purity_expression_supported_shape(arm.guard, globals) or proof_expr_has_old(arm.guard)
+                            return false if not proof_pure_body_direct(arm.body, root_body, parameters, shadow_index, globals, report, depth + 1)
                     Ast::Stmt.While(_, _, position):
                         return false
                     Ast::Stmt.For(_, variables, iterable, loop_body, position):
-                        if not proof_pure_loop_iterable_supported(iterable, parameters, root_body):
+                        if not proof_pure_loop_iterable_supported(iterable, parameters, root_body, shadow_index, globals):
                             return false
                         if iterable is Ast::Expr.Ident(iterable_name, _):
-                            return false if any variable in variables where variable == iterable_name
-                        if not proof_pure_body_direct(loop_body, root_body, parameters, report):
+                            for variable in variables |iterable_name, globals|:
+                                return false if not proof_report_source_work_charge(1, &globals.source_work)
+                                return false if variable == iterable_name
+                        if not proof_pure_body_direct(loop_body, root_body, parameters, shadow_index, globals, report, depth + 1):
                             return false
                     Ast::Stmt.Block(_, _, _, _, _):
                         return false
@@ -223,9 +221,9 @@ extend ElisaProof:
                         # contract-call checker separately requires each one to be verified,
                         # total, and pure before its summary can be used.
                         return false if:
+                            not proof_purity_expression_walks_bounded(expression, globals)
                             not proof_is_ensure_kind(kind) and proof_expr_has_old(expression)
                             proof_expr_has_executable_call(expression) and not proof_is_ensure_kind(kind)
-                            not proof_expr_supported(expression)
                     Ast::Stmt.Break(_, _):
                         return false
                     Ast::Stmt.Continue(_, _):
@@ -239,41 +237,49 @@ extend ElisaProof:
         # `allow_requires` asks only whether the body is deterministic: a precondition makes the
         # function partial, so it may not be a total contract term, but every call that runs
         # has proved its precondition and still reads nothing but its by-value arguments.
-        def proof_function_is_directly_pure(functions: mutable ProofFunctionTable&, function_index: usize, parameters: darray[Ast::ParamDecl]&, effects: darray[sview]&, body: darray[Ast::Stmt]&, declarations: darray[Ast::Decl]&, mutable_globals: darray[sview]&, report: mutable ProofReport&, allow_requires: bool) -> bool:
+        def proof_function_is_directly_pure(functions: mutable ProofFunctionTable&, function_index: usize, parameters: darray[Ast::ParamDecl]&, effects: darray[sview]&, body: darray[Ast::Stmt]&, declarations: darray[Ast::Decl]&, mutable_globals: mutable ProofPureMutableGlobalIndex&, report: mutable ProofReport&, allow_requires: bool) -> bool:
             return false if:
                 function_index >= functions.parameters.metadata.param_starts.count or function_index >= functions.parameters.metadata.param_counts.count
                 function_index >= functions.contracts.obligations.requires_counts.count or function_index >= functions.contracts.frames.changes_counts.count or function_index >= functions.contracts.frames.preserves_counts.count
                 (functions.contracts.obligations.requires_counts[function_index] > 0 and not allow_requires) or functions.contracts.frames.changes_counts[function_index] > 0 or functions.contracts.frames.preserves_counts[function_index] > 0
                 not functions.externs.extern_contract_analysis_complete or function_index >= functions.externs.reachable_extern_contract_unsafe.count
                 functions.externs.reachable_extern_contract_unsafe[function_index]
-                function_index >= functions.lookup.names.count or function_index >= functions.lookup.lines.count or proof_source_function_has_drop_risk(functions.lookup.names[function_index], functions.lookup.lines[function_index], parameters, body, report)
+                function_index >= functions.lookup.names.count or function_index >= functions.lookup.lines.count
             declaration_line: u32 = functions.lookup.lines[function_index]
             return false if effects.count > 0
             param_start: usize = functions.parameters.metadata.param_starts[function_index]
             return false if function_index >= functions.parameters.metadata.param_counts.count or functions.parameters.metadata.param_counts[function_index] != parameters.count
-            for parameter_index in 0..<parameters.count |parameter_index, functions, param_start|:
+            for parameter_index in 0..<parameters.count |parameter_index, functions, param_start, mutable_globals|:
+                return false if not proof_report_source_work_charge(1, &mutable_globals.source_work)
                 slot: usize = param_start + parameter_index
-                return false if slot >= functions.parameters.metadata.all_parameter_mutable.count or functions.parameters.metadata.all_parameter_mutable[slot] or parameter_index >= parameters.count or parameters[parameter_index].is_mutable or proof_parameter_type_is_mutable(parameters[parameter_index].type_expression)
+                return false if slot >= functions.parameters.metadata.all_parameter_mutable.count or functions.parameters.metadata.all_parameter_mutable[slot] or parameter_index >= parameters.count or parameters[parameter_index].is_mutable or proof_parameter_type_is_mutable_with_work(parameters[parameter_index].type_expression, &mutable_globals.source_work, 0)
                 if parameters[parameter_index].has_default:
                     # Defaults execute when the argument is omitted. Their call edges are added
                     # to the same fixed-point graph as body calls, so only verified pure calls
                     # can participate in a pure function's default computation.
                     return false if:
-                        not proof_expr_supported(parameters[parameter_index].default_value)
-                        not proof_pure_expression_shape(parameters[parameter_index].default_value)
+                        not proof_purity_expression_supported_shape(parameters[parameter_index].default_value, mutable_globals)
                         proof_expr_has_old(parameters[parameter_index].default_value)
-                        proof_expr_mentions_any_global(parameters[parameter_index].default_value, mutable_globals)
-                        proof_structural_typed_operator_expression_has_overload(parameters[parameter_index].default_value, parameters, declaration_line, report, 0)
-                        proof_source_expression_has_unsafe_runtime_index(parameters[parameter_index].default_value, parameters, report, 0, [])
+                        proof_pure_expression_has_mutable_global(parameters[parameter_index].default_value, mutable_globals)
+                        proof_structural_typed_operator_expression_has_overload(parameters[parameter_index].default_value, parameters, declaration_line, report, 0, functions.lookup.owner_modules[function_index] if functions.lookup.owner_modules.count == functions.lookup.names.count else "", functions.lookup.owner_modules.count == functions.lookup.names.count)
+                        proof_source_expression_has_unsafe_runtime_index(parameters[parameter_index].default_value, parameters, report, 0, [], declaration_line, functions.lookup.owner_modules[function_index] if functions.lookup.owner_modules.count == functions.lookup.names.count else "", functions.lookup.owner_modules.count == functions.lookup.names.count)
+            # Bound and classify every body expression before the legacy recursive safety
+            # visitors below inspect it. Unsupported statement forms fail closed here.
+            # This is charged six units per visited AST node: this scan plus the independent
+            # drop-risk, typed-operator, runtime-index, and pure-range/direct-body passes.
+            # Expression-heavy visitors additionally reserve their bounded structural cost in
+            # proof_purity_expression_walks_bounded.
+            return false if proof_pure_body_reads_mutable_global(body, mutable_globals, 0)
+            return false if proof_source_function_has_drop_risk(functions.lookup.names[function_index], functions.lookup.lines[function_index], parameters, body, report, functions.lookup.owner_modules[function_index] if functions.lookup.owner_modules.count == functions.lookup.names.count else "", functions.lookup.owner_modules.count == functions.lookup.names.count)
             # Operator implementations and non-builtin indexers are implicit calls absent from
             # the explicit-call SCC. Exclude them before either the range-search special case
             # or the ordinary pure-body checker can publish a function summary.
             return false if:
-                proof_structural_typed_operator_statements_have_overload(body, parameters, declaration_line, report, 0)
-                proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, [])
+                proof_structural_typed_operator_statements_have_overload(body, parameters, declaration_line, report, 0, functions.lookup.owner_modules[function_index] if functions.lookup.owner_modules.count == functions.lookup.names.count else "", functions.lookup.owner_modules.count == functions.lookup.names.count)
+                proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, [], declaration_line, functions.lookup.owner_modules[function_index] if functions.lookup.owner_modules.count == functions.lookup.names.count else "", functions.lookup.owner_modules.count == functions.lookup.names.count)
             return true if proof_pure_range_search_body(body, parameters, mutable_globals, report)
-            return false if proof_pure_body_reads_mutable_global(body, mutable_globals)
-            return proof_pure_body_direct(body, body, parameters, report)
+            shadow_index: mutable ProofPureBodyShadowIndex = ProofPureBodyShadowIndex{}
+            proof_pure_body_direct(body, body, parameters, &shadow_index, mutable_globals, report, 0)
 
         def proof_recursive_purity_eligible(functions: ProofFunctionTable&, function_index: usize) -> bool:
             return false if:
@@ -282,59 +288,118 @@ extend ElisaProof:
                 functions.contracts.termination.decreases_counts[function_index] == 0 or functions.contracts.termination.decreases_unbounded[function_index]
             return proof_decreases_range_valid(functions.contracts.termination.decreases_starts[function_index], functions.contracts.termination.decreases_counts[function_index], functions.contracts.termination.all_decreases.count)
 
-        # Recursive purity is a component certificate, not a per-edge shortcut. In particular,
-        # one locally pure member must not become pure by pointing at another member whose body
-        # reaches an unknown or effectful function. Inspect every member and every outgoing edge
-        # together before allowing any recursive summary edge in the fixed point.
-        def proof_recursive_component_is_pure_candidate(functions: ProofFunctionTable&, source: usize) -> bool:
-            return false if source >= functions.lookup.names.count
-            member_index: mutable usize = 0
-            while member_index < functions.lookup.names.count |member_index, functions, source|:
-                if proof_functions_same_recursive_component(functions, source, member_index):
-                    return false if:
-                        member_index >= functions.summaries.direct_pure.count or not functions.summaries.direct_pure[member_index]
-                        not proof_recursive_purity_eligible(functions, member_index)
-                        member_index >= functions.call_graph.call_starts.count or member_index >= functions.call_graph.call_counts.count
-                    member_start: usize = functions.call_graph.call_starts[member_index]
-                    member_count: usize = functions.call_graph.call_counts[member_index]
-                    return false if member_start > functions.call_graph.all_calls.count or member_count > functions.call_graph.all_calls.count - member_start
-                    for call_offset in 0..<member_count |call_offset, member_start, functions, source|:
-                        called: sview = functions.call_graph.all_calls[member_start + call_offset]
-                        return false if called == "__opaque_call__"
-                        continue if called == ""
-                        called_index: usize = proof_function_call_target(functions, member_start + call_offset)
-                        return false if called_index >= functions.lookup.names.count
-                        if not proof_functions_same_recursive_component(functions, source, called_index):
-                            return false if called_index >= functions.summaries.pure.count or not functions.summaries.pure[called_index]
-                member_index <- member_index + 1
-            return true
-
-        # A recursive pure function may use calls within its own SCC as total values only when
-        # every recursive member has an explicit bounded decreases tuple and a declaration-local
-        # purity certificate. The ordinary call checker still proves each edge's nonnegativity
-        # and strict descent while checking the bodies; this helper only opens the summary fixed
-        # point for that already-certified recursive component.
-        def proof_function_calls_are_pure(functions: ProofFunctionTable&, function_index: usize, allow_recursive_component: bool) -> bool:
-            return false if function_index >= functions.call_graph.call_starts.count or function_index >= functions.call_graph.call_counts.count
-            start: usize = functions.call_graph.call_starts[function_index]
-            count: usize = functions.call_graph.call_counts[function_index]
-            return false if start > functions.call_graph.all_calls.count or count > functions.call_graph.all_calls.count - start
-            for offset in 0..<count |offset, start, functions, function_index, allow_recursive_component|:
-                called: sview = functions.call_graph.all_calls[start + offset]
-                continue if called == ""
-                called_index: usize = proof_function_call_target(functions, start + offset)
-                return false if called == "__opaque_call__"
-                continue if called_index < functions.summaries.pure.count and functions.summaries.pure[called_index]
-                recursive_member: bool = allow_recursive_component and called_index < functions.summaries.recursive.count and functions.summaries.recursive[called_index] and proof_functions_same_recursive_component(functions, function_index, called_index)
-                continue if recursive_member and proof_recursive_component_is_pure_candidate(functions, function_index)
+        # Keep purity readers row-aligned for malformed metadata, but never spend another
+        # declaration-sized pass after the shared source-work limit has already been reached.
+        def proof_purity_summary_reset_unverified(functions: mutable ProofFunctionTable&, source_work: mutable usize&) -> bool:
+            functions.summaries.pure.clear()
+            if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                functions.lookup.module_resolution_work_used <- source_work
                 return false
-            return true
+            for _ in 0..<functions.lookup.names.count |functions, source_work|:
+                if not proof_report_source_work_charge(1, &source_work):
+                    functions.summaries.pure.clear()
+                    functions.lookup.module_resolution_work_used <- source_work
+                    return false
+                functions.summaries.pure.push(false)
+            functions.lookup.module_resolution_work_used <- source_work
+            true
+
+        # Compute purity once per SCC in dependency-first order. A recursive SCC is admitted
+        # atomically only when every member has a direct purity certificate and bounded
+        # decreases tuple; outgoing dependencies have already been classified by the schedule.
+        def proof_mark_pure_components(functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> void:
+            node_count: usize = functions.lookup.names.count
+            source_work: mutable usize = functions.lookup.module_resolution_work_used
+            schedule: ProofComponentSchedule = proof_build_component_schedule(functions.summaries.recursive_component_ids, functions.call_graph.call_starts, functions.call_graph.call_counts, functions.call_graph.all_call_targets, node_count, &source_work)
+            functions.lookup.module_resolution_work_used <- source_work
+            if not schedule.valid:
+                return if not proof_purity_summary_reset_unverified(functions, &source_work)
+                if source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    proof_add_finding(report, "function-dependency-graph-invalid", 0, "", "purity SCC schedule rejected malformed component or call-graph metadata")
+                return
+            component: mutable darray[usize] = []
+            for order_index in 0..<schedule.order.count |order_index, schedule, component, functions, source_work|:
+                if not proof_report_source_work_charge(1, &source_work):
+                    source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.summaries.pure.clear()
+                    functions.lookup.module_resolution_work_used <- source_work
+                    return
+                component_id: usize = schedule.order[order_index]
+                if component_id >= schedule.starts.count or component_id >= schedule.counts.count:
+                    return if not proof_purity_summary_reset_unverified(functions, &source_work)
+                    proof_add_finding(report, "function-dependency-graph-invalid", 0, "", "purity SCC schedule component row is invalid")
+                    return
+                component_start: usize = schedule.starts[component_id]
+                component_count: usize = schedule.counts[component_id]
+                if component_start > schedule.members.count or component_count > schedule.members.count - component_start:
+                    return if not proof_purity_summary_reset_unverified(functions, &source_work)
+                    proof_add_finding(report, "function-dependency-graph-invalid", 0, "", "purity SCC schedule member range is invalid")
+                    return
+                component.clear()
+                for member_offset in 0..<component_count |member_offset, component_start, schedule, component, source_work|:
+                    if not proof_report_source_work_charge(1, &source_work):
+                        source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        functions.summaries.pure.clear()
+                        functions.lookup.module_resolution_work_used <- source_work
+                        return
+                    component.push(schedule.members[component_start + member_offset])
+                recursive_component: bool = component_count > 1
+                for member in component |member, functions, recursive_component|:
+                    if not proof_report_source_work_charge(1, &source_work):
+                        source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        functions.summaries.pure.clear()
+                        functions.lookup.module_resolution_work_used <- source_work
+                        return
+                    recursive_component <- true if member < functions.summaries.recursive.count and functions.summaries.recursive[member]
+                candidate: mutable bool = true
+                for member in component |member, functions, candidate, recursive_component|:
+                    if not proof_report_source_work_charge(1, &source_work):
+                        source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        functions.summaries.pure.clear()
+                        functions.lookup.module_resolution_work_used <- source_work
+                        return
+                    candidate <- false if member >= functions.summaries.direct_pure.count or not functions.summaries.direct_pure[member]
+                    candidate <- false if recursive_component and not proof_recursive_purity_eligible(functions, member)
+                    if member >= functions.call_graph.call_starts.count or member >= functions.call_graph.call_counts.count:
+                        candidate <- false
+                        continue
+                    start: usize = functions.call_graph.call_starts[member]
+                    count: usize = functions.call_graph.call_counts[member]
+                    if start > functions.call_graph.all_calls.count or count > functions.call_graph.all_calls.count - start:
+                        candidate <- false
+                        continue
+                    for offset in 0..<count |offset, start, member, component, functions, candidate, recursive_component, source_work|:
+                        if not proof_report_source_work_charge(1, &source_work):
+                            source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                            functions.summaries.pure.clear()
+                            functions.lookup.module_resolution_work_used <- source_work
+                            return
+                        edge: usize = start + offset
+                        called: sview = functions.call_graph.all_calls[edge]
+                        continue if called == ""
+                        target: usize = functions.call_graph.all_call_targets[edge]
+                        if called == "__opaque_call__" or target >= node_count:
+                            candidate <- false
+                            continue
+                        same_component: bool = target < functions.summaries.recursive_component_ids.count and member < functions.summaries.recursive_component_ids.count and functions.summaries.recursive_component_ids[target] == functions.summaries.recursive_component_ids[member]
+                        continue if recursive_component and same_component
+                        candidate <- false if target >= functions.summaries.pure.count or not functions.summaries.pure[target]
+                if candidate:
+                    for member in component |member, functions, source_work|:
+                        if not proof_report_source_work_charge(1, &source_work):
+                            source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                            functions.summaries.pure.clear()
+                            functions.lookup.module_resolution_work_used <- source_work
+                            return
+                        functions.summaries.pure[member] <- true if member < functions.summaries.pure.count
+            functions.lookup.module_resolution_work_used <- source_work
 
         # Compute declaration-local purity before the call-graph fixed point. This pass must cover
         # the complete table first: otherwise a mutually recursive pair would be classified based
         # on declaration order rather than on the properties of the entire component.
-        def proof_mark_direct_pure_functions_pass(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, cursor: mutable usize&, mutable_globals: darray[sview]&, report: mutable ProofReport&) -> void:
+        def proof_mark_direct_pure_functions_pass(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, cursor: mutable usize&, mutable_globals: mutable ProofPureMutableGlobalIndex&, report: mutable ProofReport&) -> void:
             for declaration in declarations |file, functions, cursor, mutable_globals, report|:
+                return if not proof_report_source_work_charge(1, &mutable_globals.source_work)
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, body, effects, _, position):
                         # The executable table already excludes lemmas. Resolve the declaration
@@ -343,10 +408,16 @@ extend ElisaProof:
                         function_index: usize = proof_function_index_at_line(functions, name, position.line)
                         continue if function_index >= functions.lookup.names.count
                         cursor <- cursor + 1
-                        if function_index < functions.summaries.direct_pure.count:
-                            functions.summaries.direct_pure[function_index] <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, file.top_decls, mutable_globals, report, false)
+                        deterministic_candidate: bool = false
+                        return if mutable_globals.source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         if function_index < functions.summaries.deterministic.count:
-                            functions.summaries.deterministic[function_index] <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, file.top_decls, mutable_globals, report, true)
+                            deterministic_candidate <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, file.top_decls, mutable_globals, report, true)
+                        return if mutable_globals.source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        if function_index < functions.summaries.deterministic.count:
+                            functions.summaries.deterministic[function_index] <- deterministic_candidate
+                        if function_index < functions.summaries.direct_pure.count:
+                            has_requires: bool = function_index < functions.contracts.obligations.requires_counts.count and functions.contracts.obligations.requires_counts[function_index] > 0
+                            functions.summaries.direct_pure[function_index] <- deterministic_candidate and not has_requires
                     Ast::Decl.Module(_, module_body, _):
                         proof_mark_direct_pure_functions_pass(file, module_body, functions, cursor, mutable_globals, report)
                     Ast::Decl.Scoped(scoped_body, _):
@@ -354,56 +425,142 @@ extend ElisaProof:
                     _:
                         pass
 
-        # Populate purity after the complete function table exists. The fixed point admits an
-        # acyclic chain of pure calls, plus recursive SCCs whose ordinary body checker will prove
-        # bounded decreases on every edge.
-        def proof_mark_pure_functions_pass(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, cursor: mutable usize&, changed: mutable bool&) -> void:
-            for declaration in declarations |file, functions, cursor, changed|:
-                match declaration:
-                    Ast::Decl.Func(name, parameters, _, body, effects, _, position):
-                        # The executable table already excludes lemmas. Resolve the declaration
-                        # through that indexed table by name and line, so a bare name repeated
-                        # in another module neither skips this row nor shifts later rows.
-                        function_index: usize = proof_function_index_at_line(functions, name, position.line)
-                        continue if function_index >= functions.lookup.names.count
-                        cursor <- cursor + 1
-                        candidate: mutable bool = function_index < functions.summaries.direct_pure.count and functions.summaries.direct_pure[function_index]
-                        recursive_allowed: bool = proof_recursive_purity_eligible(functions, function_index)
-                        candidate <- false if function_index < functions.summaries.recursive.count and functions.summaries.recursive[function_index] and not recursive_allowed
-                        candidate <- false if not proof_function_calls_are_pure(functions, function_index, recursive_allowed)
-                        if candidate and function_index < functions.summaries.pure.count and not functions.summaries.pure[function_index]:
-                            functions.summaries.pure[function_index] <- true
-                            changed <- true
-                    Ast::Decl.Module(_, module_body, _):
-                        proof_mark_pure_functions_pass(file, module_body, functions, cursor, changed)
-                    Ast::Decl.Scoped(scoped_body, _):
-                        proof_mark_pure_functions_pass(file, scoped_body, functions, cursor, changed)
-                    _:
-                        pass
+        # Syntactic purity is intentionally a small total-function tier. It admits straight-line
+        # value computation, pure conditionals, and only the finite built-in loops admitted by
+        # purity_and_function_index. Assignments, hidden block scope, runtime assertions, and
+        # ownership/region effects remain outside this tier. Calls are allowed only after the
+        # declaration-independent fixed point below proves every reachable callee pure.
+        def proof_pure_expression_shape(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Absent:
+                    return true
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.FloatLit(_, _):
+                    return true
+                Ast::Expr.StringLit(_, _):
+                    return true
+                Ast::Expr.CharLit(_, _):
+                    return true
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Ident(_, _):
+                    return true
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_pure_expression_shape(callee)
+                    for argument in arguments:
+                        return false if not proof_pure_expression_shape(argument)
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_pure_expression_shape(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_pure_expression_shape(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_pure_expression_shape(left) and proof_pure_expression_shape(right)
+                Ast::Expr.Field(object, _, _):
+                    return proof_pure_expression_shape(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_pure_expression_shape(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_pure_expression_shape(object) and proof_pure_expression_shape(index)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_pure_expression_shape(object) and proof_pure_expression_shape(low) and proof_pure_expression_shape(high)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_pure_expression_shape(object)
+                    for argument in arguments:
+                        return false if not proof_pure_expression_shape(argument)
+                    return true
+                Ast::Expr.Move(_, _):
+                    return false
+                Ast::Expr.RegionNew(_, _, _):
+                    return false
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return false if not proof_pure_expression_shape(element)
+                    return true
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return false if not proof_pure_expression_shape(element)
+                    return true
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return false if not proof_pure_expression_shape(element)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return false if not proof_pure_expression_shape(entry.key) or not proof_pure_expression_shape(entry.value)
+                    return true
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return false if not proof_pure_expression_shape(type_expression)
+                    for field in fields:
+                        return false if not proof_pure_expression_shape(field.value)
+                    return true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_pure_expression_shape(base)
+                    for field in fields:
+                        return false if not proof_pure_expression_shape(field.value)
+                    return true
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_pure_expression_shape(condition) and proof_pure_expression_shape(then_expr) and proof_pure_expression_shape(else_expr)
+                Ast::Expr.Match(_, _, _):
+                    # The proof-safe value-match subset is lowered to a pure decision tree by
+                    # proof_expr_supported; using that same gate here keeps pure-summary
+                    # discovery aligned with the expression certificate boundary.
+                    return proof_expr_supported(expression)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_pure_expression_shape(iterable) and proof_pure_expression_shape(condition) and proof_pure_expression_shape(body)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_pure_expression_shape(base) and proof_pure_expression_shape(predicate)
+                Ast::Expr.Block(_, _, _, _):
+                    # Even a currently supported value block has a separate local scope and
+                    # can acquire hidden write-back semantics as the language evolves.
+                    return false
+                _:
+                    return false
+
 
         def proof_mark_pure_functions(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> void:
+            global_index: mutable ProofPureMutableGlobalIndex = ProofPureMutableGlobalIndex{source_work: functions.lookup.module_resolution_work_used}
             functions.summaries.direct_pure.clear()
             functions.summaries.deterministic.clear()
-            for _ in 0..<functions.lookup.names.count |functions|:
+            functions.summaries.pure.clear()
+            for _ in 0..<functions.lookup.names.count |functions, global_index|:
+                if not proof_report_source_work_charge(2, &global_index.source_work):
+                    functions.summaries.direct_pure.clear()
+                    functions.summaries.deterministic.clear()
+                    functions.lookup.module_resolution_work_used <- global_index.source_work
+                    proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "purity summary initialization exceeded its shared source-work bound", "purity-summary-init-work", global_index.source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return
                 functions.summaries.direct_pure.push(false)
                 functions.summaries.deterministic.push(false)
-            mutable_global_names: mutable darray[sview] = []
-            for annotation in file.enum_annotations |mutable_global_names|:
-                if annotation.name == "__global_mutable" and not (any existing in mutable_global_names where existing == annotation.owner):
-                    mutable_global_names.push(annotation.owner)
+            if not proof_pure_mutable_global_index_build(file.enum_annotations, &global_index):
+                functions.lookup.module_resolution_work_used <- global_index.source_work
+                functions.summaries.pure.clear()
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "mutable-global purity index exceeded its shared source-work bound", "purity-global-index-work", global_index.source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             direct_cursor: mutable usize = 0
-            proof_mark_direct_pure_functions_pass(file, declarations, functions, direct_cursor, mutable_global_names, report)
+            proof_mark_direct_pure_functions_pass(file, declarations, functions, direct_cursor, global_index, report)
+            functions.lookup.module_resolution_work_used <- global_index.source_work
+            if global_index.source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                functions.summaries.direct_pure.clear()
+                functions.summaries.deterministic.clear()
+                functions.summaries.pure.clear()
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "purity analysis exceeded its shared source-work bound while checking mutable-global reads", "purity-global-read-work", global_index.source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             functions.summaries.pure.clear()
-            for _ in 0..<functions.lookup.names.count |functions|:
+            for _ in 0..<functions.lookup.names.count |functions, global_index|:
+                if not proof_report_source_work_charge(1, &global_index.source_work):
+                    functions.lookup.module_resolution_work_used <- global_index.source_work
+                    functions.summaries.pure.clear()
+                    proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "purity summary initialization exceeded its shared source-work bound", "purity-summary-init-work", global_index.source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return
                 functions.summaries.pure.push(false)
-            changed: mutable bool = true
-            pass_index: mutable usize = 0
-            while changed and pass_index <= functions.lookup.names.count |functions, declarations, changed, pass_index|:
-                changed <- false
-                cursor: mutable usize = 0
-                proof_mark_pure_functions_pass(file, declarations, functions, cursor, changed)
-                pass_index <- pass_index + 1
-            proof_mark_deterministic_functions(functions)
+            functions.lookup.module_resolution_work_used <- global_index.source_work
+            proof_mark_pure_components(&functions, report)
+            deterministic_work: mutable usize = functions.lookup.module_resolution_work_used
+            proof_mark_deterministic_functions(functions, &deterministic_work)
 
         # Deterministic functions: pure ones, plus non-recursive functions that are directly pure
         # except for a precondition and call only deterministic functions. Start from the direct

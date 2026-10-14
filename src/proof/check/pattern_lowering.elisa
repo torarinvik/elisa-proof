@@ -175,44 +175,6 @@ extend ElisaProof:
         def proof_pattern_type_name(type_expression: Ast::Expr) -> sview:
             return proof_pattern_direct_type_name(type_expression, 0)
 
-        def proof_pattern_source_builtin_type_shadowed(declarations: darray[Ast::Decl]&, wanted: sview, work: mutable usize&, shadowed: mutable bool&, complete: mutable bool&, depth: usize) -> void:
-            if depth >= PROOF_PATTERN_SOURCE_TYPE_DEPTH_LIMIT or work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT:
-                complete <- false
-                return
-            for declaration in declarations |wanted, work, shadowed, complete, depth|:
-                if work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT:
-                    complete <- false
-                    return
-                work <- work + 1
-                match declaration:
-                    Ast::Decl.Alias(name, _, _) | Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _):
-                        if sview_len(name) > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT - work:
-                            work <- PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
-                            complete <- false
-                            return
-                        work <- work + sview_len(name)
-                        if name == wanted:
-                            shadowed <- true
-                            return
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        proof_pattern_source_builtin_type_shadowed(nested, wanted, work, shadowed, complete, depth + 1)
-                        complete_now: bool = proof_replay_summary_bool_ref_value(complete)
-                        return if proof_replay_summary_bool_ref_value(shadowed) or not complete_now
-                    Ast::Decl.Import(_, _):
-                        complete <- false
-                        return
-                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Law(_, _, _):
-                        pass
-                    Ast::Decl.Invalid:
-                        complete <- false
-                        return
-                    _:
-                        complete <- false
-                        return
-
-        # Find a direct parameter's source type only when both the function and parameter
-        # spelling are unique in the imported source tree. Ambiguous overloads, aliases not
-        # handled by the source type projector, and an exhausted declaration walk fail closed.
         def proof_pattern_source_type_text_equal_with_work(left: sview, right: sview, work: mutable usize&) -> (complete: bool, equal: bool):
             return (false, false) if work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
             work <- work + 1
@@ -224,39 +186,11 @@ extend ElisaProof:
             work <- work + right_length
             return (true, left == right)
 
-        # Type imports are represented in parser annotations rather than Ast::Decl nodes.
-        # Check exact aliases and imported members, and reject wildcard imports whose visible
-        # names cannot be established from the frozen source tree.
-        def proof_pattern_source_builtin_type_import_shadowed(annotations: darray[Ast::EnumAnnotation]&, wanted: sview, work: mutable usize&, shadowed: mutable bool&, complete: mutable bool&) -> void:
-            for annotation in annotations |wanted, work, shadowed, complete|:
-                if work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT:
-                    complete <- false
-                    return
-                work <- work + 1
-                shadowed_now: bool = proof_replay_summary_bool_ref_value(shadowed)
-                complete_now: bool = proof_replay_summary_bool_ref_value(complete)
-                return if shadowed_now or not complete_now
-                if annotation.name == "__binding_wildcard_import":
-                    complete <- false
-                    return
-                imported_name: mutable sview = ""
-                imported_name <- annotation.name if annotation.owner == "__from_member"
-                imported_name <- annotation.module if annotation.name == "__using_member"
-                imported_name <- annotation.owner if annotation.name == "__using_alias"
-                if imported_name != "":
-                    same_name: (complete: bool, equal: bool) = proof_pattern_source_type_text_equal_with_work(imported_name, wanted, work)
-                    if not same_name.complete:
-                        complete <- false
-                        return
-                    if same_name.equal:
-                        shadowed <- true
-                        return
-
-        def proof_pattern_source_formal_type_find(declarations: darray[Ast::Decl]&, function_name: sview, parameter: sview, found: mutable Ast::Expr&, function_line: mutable u32&, function_matches: mutable usize&, parameter_matches: mutable usize&, work: mutable usize&, complete: mutable bool&, depth: usize) -> void:
+        def proof_pattern_source_formal_type_find(declarations: darray[Ast::Decl]&, function_name: sview, parameter: sview, found: mutable Ast::Expr&, function_line: mutable u32&, function_offset: mutable usize&, function_module: mutable sview&, declaration_module: mutable sview&, module_path: mutable darray[sview]&, function_module_path: mutable darray[sview]&, function_matches: mutable usize&, parameter_matches: mutable usize&, work: mutable usize&, complete: mutable bool&, depth: usize) -> void:
             if depth >= PROOF_PATTERN_SOURCE_TYPE_DEPTH_LIMIT or work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT:
                 complete <- false
                 return
-            for declaration in declarations |function_name, parameter, found, function_matches, parameter_matches, work, complete, depth|:
+            for declaration in declarations |function_name, parameter, found, function_line, function_offset, function_module, declaration_module, module_path, function_module_path, function_matches, parameter_matches, work, complete, depth|:
                 if work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT:
                     complete <- false
                     return
@@ -270,6 +204,14 @@ extend ElisaProof:
                         if same_function.equal:
                             function_matches <- function_matches + 1
                             function_line <- position.line
+                            function_offset <- position.offset.usize()
+                            declaration_module <- function_module
+                            function_module_path.clear()
+                            for module_segment in module_path |module_segment, function_module_path, work, complete|:
+                                if not proof_pattern_charge_source_type_work(sview_len(module_segment), work):
+                                    complete <- false
+                                    return
+                                function_module_path.push(module_segment)
                             matching_parameters: mutable usize = 0
                             for candidate in parameters |parameter, found, parameter_matches, matching_parameters, work, complete|:
                                 same_parameter: (complete: bool, equal: bool) = proof_pattern_source_type_text_equal_with_work(candidate.name, parameter, work)
@@ -284,21 +226,129 @@ extend ElisaProof:
                             # formal for at least one possible match site. Treat any such body
                             # declaration, or an exhausted bounded scan, as unavailable type data.
                             complete <- false if matching_parameters != 0 and proof_pattern_source_body_declares_with_work(declarations, body, parameter, work)
-                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
-                        proof_pattern_source_formal_type_find(body, function_name, parameter, found, function_line, function_matches, parameter_matches, work, complete, depth + 1)
+                    Ast::Decl.Module(module_name, body, _):
+                        prior_module: sview = function_module
+                        function_module <- module_name
+                        module_bytes: usize = sview_len(module_name)
+                        if work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT or module_bytes > (PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT - work) / 3:
+                            complete <- false
+                            return
+                        if not proof_pattern_charge_source_type_work(module_bytes * 3 + module_path.count, work):
+                            complete <- false
+                            return
+                        nested_path: darray[sview] = proof_global_constant_scope_with_module(module_path, module_name)
+                        proof_pattern_source_formal_type_find(body, function_name, parameter, found, function_line, function_offset, function_module, declaration_module, nested_path, function_module_path, function_matches, parameter_matches, work, complete, depth + 1)
+                        function_module <- prior_module
+                    Ast::Decl.Scoped(body, _):
+                        proof_pattern_source_formal_type_find(body, function_name, parameter, found, function_line, function_offset, function_module, declaration_module, module_path, function_module_path, function_matches, parameter_matches, work, complete, depth + 1)
                     _:
                         pass
 
         # A generic type binder may legally reuse a builtin spelling. Do not use that
         # spelling as representation evidence for a typed string or character pattern fact.
-        def proof_pattern_source_generic_type_shadowed(report: ProofReport&, declaration_line: u32, wanted: sview, work: mutable usize&) -> (complete: bool, shadowed: bool):
+        def proof_pattern_source_generic_type_shadowed(report: mutable ProofReport&, declaration_line: u32, declaration_offset: usize, declaration_module: sview, wanted: sview, work: mutable usize&) -> (complete: bool, shadowed: bool):
             return (false, false) if:
                 work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
                 sview_len(wanted) >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT - work
             work <- work + 1 + sview_len(wanted)
-            generic: (complete: bool, count: usize) = proof_source_conversion_generic_name(wanted, declaration_line, report)
+            source_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
+            generic: (complete: bool, count: usize) = proof_operator_enum_generic_identity_count_with_work(wanted, declaration_line, declaration_offset, declaration_module, report, &source_work)
+            report.source_types.source_effect_index.work.implicit_effect_work <- source_work
             return (false, false) if not generic.complete or generic.count > 1
             return (true, generic.count == 1)
+
+        # Check root declarations and declarations along the exact module path. Sibling module
+        # names cannot shadow this formal's unqualified type spelling.
+        def proof_pattern_source_builtin_name_shadowed(declarations: darray[Ast::Decl]&, wanted: sview, owner_path: darray[sview]&, current_path: mutable darray[sview]&, work: mutable usize&, depth: usize) -> (complete: bool, shadowed: bool):
+            return (false, false) if depth >= PROOF_PATTERN_SOURCE_TYPE_DEPTH_LIMIT
+            for declaration in declarations |wanted, owner_path, current_path, work, depth|:
+                return (false, false) if not proof_pattern_charge_source_type_work(1, work)
+                match declaration:
+                    Ast::Decl.Alias(name, _, _) | Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _):
+                        return (false, false) if:
+                            not proof_pattern_charge_source_type_work(sview_len(name), work)
+                            not proof_pattern_charge_source_type_work(sview_len(wanted), work)
+                        return (true, true) if name == wanted
+                    Ast::Decl.Module(module_name, nested, _):
+                        module_bytes: usize = sview_len(module_name)
+                        if work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT or module_bytes > (PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT - work) / 3:
+                            return (false, false)
+                        if not proof_pattern_charge_source_type_work(module_bytes * 3 + current_path.count, work):
+                            return (false, false)
+                        nested_path: darray[sview] = proof_global_constant_scope_with_module(current_path, module_name)
+                        continue if nested_path.count > owner_path.count
+                        path_matches: mutable bool = true
+                        for index in 0..<nested_path.count |index, nested_path, owner_path, work, path_matches|:
+                            if not proof_pattern_charge_source_type_work(sview_len(nested_path[index]) + sview_len(owner_path[index]), work):
+                                return (false, false)
+                            path_matches <- false if nested_path[index] != owner_path[index]
+                        continue if not path_matches
+                        nested_status: (complete: bool, shadowed: bool) = proof_pattern_source_builtin_name_shadowed(nested, wanted, owner_path, nested_path, work, depth + 1)
+                        return nested_status if not nested_status.complete or nested_status.shadowed
+                    Ast::Decl.Scoped(nested, _):
+                        nested_status: (complete: bool, shadowed: bool) = proof_pattern_source_builtin_name_shadowed(nested, wanted, owner_path, current_path, work, depth + 1)
+                        return nested_status if not nested_status.complete or nested_status.shadowed
+                    Ast::Decl.Invalid:
+                        return (false, false)
+                    _:
+                        pass
+            return (true, false)
+
+        # Qualified import scopes can be matched exactly. A simple module spelling may be
+        # shared by siblings, so keep the conservative any-ancestor match for that case.
+        def proof_pattern_source_import_scope_visible(owner_path: darray[sview]&, import_module: sview, work: mutable usize&) -> (complete: bool, visible: bool):
+            if import_module == "":
+                return (true, true)
+            module_bytes: usize = sview_len(import_module)
+            if work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT or module_bytes > (PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT - work) / 3:
+                return (false, false)
+            return (false, false) if not proof_pattern_charge_source_type_work(module_bytes * 3, work)
+            import_scope: darray[sview] = proof_global_constant_scope_with_module([], import_module)
+            if import_scope.count > 1:
+                return (true, false) if owner_path.count < import_scope.count
+                for index in 0..<import_scope.count |index, owner_path, import_scope, work|:
+                    same_module: (complete: bool, equal: bool) = proof_pattern_source_type_text_equal_with_work(owner_path[index], import_scope[index], work)
+                    return (false, false) if not same_module.complete
+                    return (true, false) if not same_module.equal
+                return (true, true)
+            for segment in owner_path |segment, import_module, work|:
+                same_module: (complete: bool, equal: bool) = proof_pattern_source_type_text_equal_with_work(segment, import_module, work)
+                return (false, false) if not same_module.complete
+                return (true, true) if same_module.equal
+            (true, false)
+
+        def proof_pattern_source_builtin_import_shadowed(annotations: darray[Ast::EnumAnnotation]&, wanted: sview, owner_path: darray[sview]&, work: mutable usize&) -> (complete: bool, shadowed: bool):
+            for annotation in annotations |wanted, work|:
+                return (false, false) if not proof_pattern_charge_source_type_work(1, work)
+                return (false, false) if:
+                    not proof_pattern_charge_source_type_work(sview_len(annotation.name), work)
+                    not proof_pattern_charge_source_type_work(sview_len("__binding_wildcard_import"), work)
+                if annotation.name == "__binding_wildcard_import":
+                    wildcard_scope: (complete: bool, visible: bool) = proof_pattern_source_import_scope_visible(owner_path, annotation.module, work)
+                    return (false, false) if not wildcard_scope.complete
+                    return (false, false) if wildcard_scope.visible
+                    continue
+                return (false, false) if:
+                    not proof_pattern_charge_source_type_work(sview_len(annotation.owner), work)
+                    not proof_pattern_charge_source_type_work(sview_len("__from_member"), work)
+                imported_name: sview = annotation.name if annotation.owner == "__from_member"
+                return (false, false) if:
+                    not proof_pattern_charge_source_type_work(sview_len(annotation.name), work)
+                    not proof_pattern_charge_source_type_work(sview_len("__using_alias"), work)
+                imported_name <- annotation.owner if annotation.name == "__using_alias"
+                return (false, false) if:
+                    not proof_pattern_charge_source_type_work(sview_len(annotation.name), work)
+                    not proof_pattern_charge_source_type_work(sview_len("__using_member"), work)
+                # __using_member is paired with __from_member at the same source token;
+                # the latter carries the importer's module scope.
+                return (false, false) if:
+                    not proof_pattern_charge_source_type_work(sview_len(imported_name), work)
+                    not proof_pattern_charge_source_type_work(sview_len(wanted), work)
+                if imported_name != "" and imported_name == wanted:
+                    imported_scope: (complete: bool, visible: bool) = proof_pattern_source_import_scope_visible(owner_path, annotation.module, work)
+                    return (false, false) if not imported_scope.complete
+                    return (true, true) if imported_scope.visible
+            return (true, false)
 
         def proof_pattern_source_formal_type(report: ProofReport&, function_name: sview, scrutinee: Ast::Expr, work: mutable usize&) -> Ast::Expr:
             parameter: mutable sview = ""
@@ -310,19 +360,24 @@ extend ElisaProof:
             return Ast::Expr.Absent if parameter == "" or function_name == ""
             found: mutable Ast::Expr = Ast::Expr.Absent
             function_line: mutable u32 = 0
+            function_offset: mutable usize = 0
+            function_module: mutable sview = ""
+            declaration_module: mutable sview = ""
+            module_path: mutable darray[sview] = []
+            function_module_path: mutable darray[sview] = []
             function_matches: mutable usize = 0
             parameter_matches: mutable usize = 0
             complete: mutable bool = true
-            proof_pattern_source_formal_type_find(report.source.source_declarations, function_name, parameter, &found, &function_line, &function_matches, &parameter_matches, work, &complete, 0)
+            proof_pattern_source_formal_type_find(report.source.source_declarations, function_name, parameter, &found, &function_line, &function_offset, &function_module, &declaration_module, &module_path, &function_module_path, &function_matches, &parameter_matches, work, &complete, 0)
             return Ast::Expr.Absent if not complete or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT or function_matches != 1 or parameter_matches != 1
             if proof_pattern_is_string_type(found) or proof_pattern_is_char_type(found):
                 type_name: sview = proof_pattern_type_name(found)
-                generic_shadow: (complete: bool, shadowed: bool) = proof_pattern_source_generic_type_shadowed(report, function_line, type_name, work)
+                generic_shadow: (complete: bool, shadowed: bool) = proof_pattern_source_generic_type_shadowed(report, function_line, function_offset, declaration_module, type_name, work)
                 return Ast::Expr.Absent if not generic_shadow.complete or generic_shadow.shadowed or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
-                shadowed: mutable bool = false
-                proof_pattern_source_builtin_type_shadowed(report.source.source_declarations, type_name, work, &shadowed, &complete, 0)
-                proof_pattern_source_builtin_type_import_shadowed(report.source.source_annotations, type_name, work, &shadowed, &complete) if not shadowed and complete
-                return Ast::Expr.Absent if shadowed or not complete or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
+                declaration_shadow: (complete: bool, shadowed: bool) = proof_pattern_source_builtin_name_shadowed(report.source.source_declarations, type_name, function_module_path, &module_path, work, 0)
+                return Ast::Expr.Absent if not declaration_shadow.complete or declaration_shadow.shadowed
+                import_shadow: (complete: bool, shadowed: bool) = proof_pattern_source_builtin_import_shadowed(report.source.source_annotations, type_name, function_module_path, work)
+                return Ast::Expr.Absent if not import_shadow.complete or import_shadow.shadowed or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
             return found
 
         def proof_pattern_active_formal_type_with_work(report: ProofReport&, function_name: sview, source_scrutinee: Ast::Expr, symbolic_scrutinee: Ast::Expr, names: darray[sview]&, work: mutable usize&) -> Ast::Expr:
@@ -369,7 +424,7 @@ extend ElisaProof:
             if proof_pattern_is_string_type(type_expression) and proof_pattern_unambiguous_string_literal_with_work(text, source_work):
                 return Ast::Expr.StringLit(text, position)
             if proof_pattern_is_char_type(type_expression) and proof_pattern_unambiguous_char_literal(text):
-                return Ast::Expr.CharLit(string_view_slice(text, 1, sview_len(text) - 1).i64()), position)
+                return Ast::Expr.CharLit(string_view_slice(text, 1, sview_len(text) - 1), position)
             return null
 
         def proof_pattern_condition_typed(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr) -> Ast::Expr?:

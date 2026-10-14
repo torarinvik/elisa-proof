@@ -1,0 +1,264 @@
+extend ElisaProof:
+    private:
+        # Resolve diagnostic rows with the same declaration identity used when the finding was
+        # emitted. The innermost module name can repeat under different parents, so include source
+        # position and preserve diagnostics if the full key is still ambiguous.
+        def proof_focus_finding_function_identity(functions: ProofFunctionTable&, name: sview, owner: sview, owner_line: u32, owner_offset: u32, work: mutable usize&) -> (complete: bool, row: usize, ambiguous: bool):
+            count: usize = functions.lookup.names.count
+            return (false, count, false) if functions.lookup.owner_modules.count != count or functions.lookup.lines.count != count or functions.lookup.offsets.count != count
+            identity: (complete: bool, index: usize, repeated: bool) = proof_function_identity_with_work(functions, name, work)
+            return (false, count, false) if not identity.complete
+            if not identity.repeated:
+                return (true, count, false) if identity.index >= count
+                return (true, count, false) if owner != "" and functions.lookup.owner_modules[identity.index] != owner
+                return (true, count, false) if owner_line != 0 and (functions.lookup.lines[identity.index] != owner_line or functions.lookup.offsets[identity.index] != owner_offset)
+                return (true, identity.index, false)
+            return (true, count, true) if owner == "" and owner_line == 0
+            if owner_line != 0:
+                source_row: (complete: bool, row: usize) = proof_function_index_at_line_with_work(functions, name, owner_line, &work)
+                return (false, count, false) if not source_row.complete
+                return (true, count, false) if source_row.row >= count
+                return (false, count, false) if not proof_report_source_work_charge(sview_len(owner), work)
+                return (false, count, false) if not proof_report_source_work_charge(sview_len(functions.lookup.owner_modules[source_row.row]), work)
+                return (true, count, false) if owner != "" and functions.lookup.owner_modules[source_row.row] != owner
+                return (true, count, false) if functions.lookup.offsets[source_row.row] != owner_offset
+                return (true, source_row.row, false)
+            found: mutable usize = count
+            for row in 0..<count |row, functions, name, owner, owner_line, owner_offset, work, found, count|:
+                return (false, count, false) if not proof_report_source_work_charge(1, work)
+                return (false, count, false) if not proof_report_source_work_charge(sview_len(name), work)
+                return (false, count, false) if not proof_report_source_work_charge(sview_len(owner), work)
+                if functions.lookup.names[row] == name and (owner == "" or functions.lookup.owner_modules[row] == owner) and (owner_line == 0 or (functions.lookup.lines[row] == owner_line and functions.lookup.offsets[row] == owner_offset)):
+                    return (true, count, true) if found < count
+                    found <- row
+            return (true, found, false)
+
+        def proof_focus_selector_segment(selector: sview, start: usize, wanted: sview, require_end: bool, work: mutable usize&) -> (complete: bool, matches: bool, next: usize):
+            selector_length: usize = sview_len(selector)
+            end: mutable usize = start
+            while end < selector_length |end, selector, selector_length, work|:
+                return (false, false, start) if not proof_report_source_work_charge(1, work)
+                break if sview_at(selector, end) == 58
+                end <- end + 1
+            segment_length: usize = end - start
+            return (true, false, start) if segment_length == 0
+            has_separator: bool = end < selector_length
+            if has_separator:
+                return (true, false, start) if end + 1 >= selector_length or sview_at(selector, end + 1) != 58
+            return (true, false, start) if (require_end and has_separator) or ((not require_end) and (not has_separator))
+            return (true, false, start) if segment_length != sview_len(wanted)
+            for offset in 0..<segment_length |offset, selector, start, wanted, work|:
+                return (false, false, start) if not proof_report_source_work_charge(1, work)
+                return (true, false, start) if sview_at(selector, start + offset) != sview_at(wanted, offset)
+            (true, true, end + 2 if has_separator else end)
+
+        def proof_focus_function_path_matches(file: Ast::File&, functions: ProofFunctionTable&, row: usize, selector: sview, work: mutable usize&) -> (complete: bool, matches: bool):
+            count: usize = functions.lookup.names.count
+            return (false, false) if:
+                row >= count
+                functions.lookup.declaration_path_starts.count != count
+                functions.lookup.declaration_path_counts.count != count
+                functions.lookup.offsets.count != count
+            path_start: usize = functions.lookup.declaration_path_starts[row]
+            path_count: usize = functions.lookup.declaration_path_counts[row]
+            return (false, false) if path_count == 0 or path_start > functions.lookup.all_declaration_path.count or path_count > functions.lookup.all_declaration_path.count - path_start
+            declarations: mutable darray[Ast::Decl] = file.top_decls
+            selector_offset: mutable usize = 0
+            for depth in 0..<path_count |depth, path_start, path_count, functions, row, declarations, selector, selector_offset, work|:
+                return (false, false) if not proof_report_source_work_charge(1, work)
+                declaration_index: usize = functions.lookup.all_declaration_path[path_start + depth]
+                return (false, false) if declaration_index >= declarations.count
+                declaration: Ast::Decl = declarations[declaration_index]
+                match declaration:
+                    Ast::Decl.Module(module_name, nested, _):
+                        return (true, false) if depth + 1 >= path_count
+                        segment: (complete: bool, matches: bool, next: usize) = proof_focus_selector_segment(selector, selector_offset, module_name, false, work)
+                        return (false, false) if not segment.complete
+                        return (true, false) if not segment.matches
+                        selector_offset <- segment.next
+                        declarations <- nested
+                    Ast::Decl.Scoped(nested, _):
+                        return (true, false) if depth + 1 >= path_count
+                        declarations <- nested
+                    Ast::Decl.Func(name, _, _, _, _, _, _):
+                        return (true, false) if depth + 1 != path_count
+                        segment: (complete: bool, matches: bool, next: usize) = proof_focus_selector_segment(selector, selector_offset, name, true, work)
+                        return (false, false) if not segment.complete
+                        return (true, segment.matches and segment.next == sview_len(selector))
+                    _:
+                        return (true, false)
+            return (true, false)
+
+        def proof_focus_function_selector_identity(file: Ast::File&, functions: ProofFunctionTable&, selector: sview, work: mutable usize&) -> (complete: bool, row: usize, repeated: bool):
+            count: usize = functions.lookup.names.count
+            has_separator: mutable bool = false
+            leaf_start: mutable usize = 0
+            for offset in 0..<sview_len(selector) |offset, selector, has_separator, work|:
+                return (false, count, false) if not proof_report_source_work_charge(1, work)
+                if sview_at(selector, offset) == 58 and offset + 1 < sview_len(selector) and sview_at(selector, offset + 1) == 58:
+                    has_separator <- true
+                    leaf_start <- offset + 2
+            if not has_separator:
+                identity: (complete: bool, index: usize, repeated: bool) = proof_function_identity_with_work(functions, selector, work)
+                return (identity.complete, identity.index, identity.repeated)
+            return (false, count, false) if:
+                functions.lookup.declaration_path_starts.count != count
+                functions.lookup.declaration_path_counts.count != count
+                functions.lookup.name_hashes.count != count
+                functions.lookup.offsets.count != count
+                leaf_start >= sview_len(selector)
+            leaf_length: usize = sview_len(selector) - leaf_start
+            leaf_hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            return (false, count, false) if not proof_report_source_work_charge(leaf_length, work)
+            for offset in 0..<leaf_length |offset, selector, leaf_start, leaf_hash|:
+                leaf_hash <- ((leaf_hash ^ sview_at(selector, leaf_start + offset).i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            wanted_hash: u32 = leaf_hash.u32()
+            found: mutable usize = count
+            for row in 0..<count |row, functions, selector, leaf_start, leaf_length, wanted_hash, work, found, count, file|:
+                return (false, count, false) if not proof_report_source_work_charge(1, work)
+                continue if functions.lookup.name_hashes[row] != wanted_hash
+                name: sview = functions.lookup.names[row]
+                return (false, count, false) if not proof_report_source_work_charge(sview_len(name), work)
+                continue if sview_len(name) != leaf_length
+                exact_leaf: mutable bool = true
+                for offset in 0..<leaf_length |offset, selector, leaf_start, name, exact_leaf, work|:
+                    return (false, count, false) if not proof_report_source_work_charge(1, work)
+                    exact_leaf <- false if sview_at(selector, leaf_start + offset) != sview_at(name, offset)
+                continue if not exact_leaf
+                candidate: (complete: bool, matches: bool) = proof_focus_function_path_matches(file, functions, row, selector, work)
+                return (false, count, false) if not candidate.complete
+                if candidate.matches:
+                    return (true, count, true) if found < count
+                    found <- row
+            (true, found, false)
+
+        def proof_focus_function_dependencies(file: Ast::File&, functions: ProofFunctionTable&, focus_name: sview, report: mutable ProofReport&, work: mutable usize&) -> darray[bool]:
+            report.context.focused_function_identity_valid <- false
+            report.context.focused_function_offset <- 0
+            required: mutable darray[bool] = []
+            for _ in 0..<functions.lookup.names.count |required, work|:
+                if not proof_report_source_work_charge(1, work):
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    break
+                required.push(focus_name == "")
+            if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                return required
+            return required if focus_name == ""
+            if functions.call_graph.all_calls.count != functions.call_graph.all_call_targets.count:
+                proof_add_finding(report, "function-focus-dependency-graph-invalid", 0, focus_name, "focused function dependency targets are incomplete")
+                return required
+            focus_identity: (complete: bool, index: usize, repeated: bool) = proof_focus_function_selector_identity(file, functions, focus_name, &work)
+            if not focus_identity.complete:
+                proof_add_finding(report, "function-focus-dependency-graph-invalid", 0, focus_name, "focused function identity lookup exceeded or violated its validated bound")
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return required
+            focus_target: usize = focus_identity.index
+            if focus_identity.repeated or focus_target >= functions.lookup.names.count:
+                proof_add_finding(report, "function-focus-not-found", 0, focus_name, "focused function name is missing or ambiguous")
+                return required
+            return required if focus_target >= functions.lookup.offsets.count
+            report.context.focused_function_offset <- functions.lookup.offsets[focus_target]
+            report.context.focused_function_identity_valid <- true
+            required[focus_target] <- true
+            pending: mutable darray[usize] = []
+            pending.push(focus_target)
+            pending_index: mutable usize = 0
+            while pending_index < pending.count |pending_index, pending, required, functions, focus_name, report, work|:
+                if not proof_report_source_work_charge(1, work):
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return required
+                source: usize = pending[pending_index]
+                pending_index <- pending_index + 1
+                if source >= functions.call_graph.call_starts.count or source >= functions.call_graph.call_counts.count:
+                    proof_add_finding(report, "function-focus-dependency-graph-invalid", 0, focus_name, "focused function dependency metadata is incomplete")
+                    required.clear()
+                    return required
+                call_start: usize = functions.call_graph.call_starts[source]
+                call_count: usize = functions.call_graph.call_counts[source]
+                if call_start > functions.call_graph.all_calls.count or call_count > functions.call_graph.all_calls.count - call_start:
+                    proof_add_finding(report, "function-focus-dependency-graph-invalid", 0, focus_name, "focused function dependency range is invalid")
+                    required.clear()
+                    return required
+                for offset in 0..<call_count |offset, call_start, functions, required, pending, focus_name, report, work|:
+                    if not proof_report_source_work_charge(1, work):
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return required
+                    edge_target: (complete: bool, row: usize) = proof_scheduled_call_target(functions, call_start + offset)
+                    if not edge_target.complete:
+                        proof_add_finding(report, "function-focus-dependency-graph-invalid", 0, focus_name, "focused function dependency target row is invalid")
+                        required.clear()
+                        return required
+                    callee: usize = edge_target.row
+                    if callee < functions.lookup.names.count and not required[callee]:
+                        required[callee] <- true
+                        pending.push(callee)
+            return required
+
+        def proof_filter_unrequested_function_proposition_findings(report: mutable ProofReport&, functions: ProofFunctionTable&, required: darray[bool]&, work: mutable usize&) -> void:
+            if required.count != functions.lookup.names.count:
+                proof_add_finding(report, "function-focus-dependency-graph-invalid", 0, "", "focused function dependency rows are incomplete")
+                return
+            original_count: usize = report.results.findings.count
+            excluded: mutable darray[bool] = []
+            remaining_failed: mutable usize = report.results.failed
+            remaining_obligations: mutable usize = report.results.obligations
+            removed_count: mutable usize = 0
+            accounting_invalid: mutable darray[ProofFinding] = []
+            for index in 0..<original_count |index, report, functions, required, work, excluded, remaining_failed, remaining_obligations, removed_count, accounting_invalid|:
+                if not proof_report_source_work_charge(1, work):
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return
+                finding: ProofFinding = report.results.findings[index]
+                if finding.kind == "contract-proposition-type":
+                    function_identity: (complete: bool, row: usize, ambiguous: bool) = proof_focus_finding_function_identity(functions, finding.name, finding.owner, finding.owner_line, finding.owner_offset, &work)
+                    if not function_identity.complete:
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return
+                    finding_row_known: bool = not function_identity.ambiguous and function_identity.row < functions.lookup.names.count
+                    selected_function: bool = finding_row_known and function_identity.row < required.count and required[function_identity.row]
+                    if finding_row_known and not selected_function:
+                        if remaining_failed > 0 and remaining_obligations > 0:
+                            return if not proof_report_source_work_charge(1, work) or not proof_report_source_work_charge(sview_len(finding.name), work)
+                            excluded.push(true)
+                            removed_count <- removed_count + 1
+                            remaining_failed <- remaining_failed - 1
+                            remaining_obligations <- remaining_obligations - 1
+                        else:
+                            return if not proof_report_source_work_charge(1, work)
+                            accounting_invalid.push(finding)
+                            excluded.push(false)
+                    else:
+                        excluded.push(false)
+                else:
+                    excluded.push(false)
+                return if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+
+            # Reserve the stable compaction pass before changing report state. The work is linear
+            # in findings plus the names that actually move; repeated removals no longer rescan
+            # and shift the same suffix.
+            if removed_count > 0:
+                compact_index: mutable usize = 0
+                for index in 0..<original_count |index, report, excluded, work, compact_index|:
+                    return if not proof_report_source_work_charge(1, work)
+                    if not excluded[index]:
+                        if compact_index != index:
+                            finding_name_cost: usize = sview_len(report.results.findings[index].name)
+                            return if not proof_report_source_work_charge(1, work) or not proof_report_source_work_charge(finding_name_cost, work)
+                        compact_index <- compact_index + 1
+
+            # All identity checks and budget charges have completed. Compact once, preserving
+            # finding order, then commit the staged accounting changes.
+            if removed_count > 0:
+                write_index: mutable usize = 0
+                for index in 0..<original_count |index, report, excluded, write_index|:
+                    if excluded[index]:
+                        report.results.focused_unrequested_findings.push(report.results.findings[index])
+                    else:
+                        if write_index != index:
+                            report.results.findings[write_index] <- report.results.findings[index]
+                        write_index <- write_index + 1
+                report.results.findings <- report.results.findings.truncate(write_index)
+            report.results.failed <- remaining_failed
+            report.results.obligations <- remaining_obligations
+            for finding in accounting_invalid |finding, report|:
+                proof_add_finding(report, "function-focus-accounting-invalid", finding.line, finding.name, "could not safely scope an unrelated proposition-formation failure")

@@ -8,7 +8,11 @@ extend ElisaProof:
     private:
         const PROOF_FIXED_PLACE_DEPTH_LIMIT: usize = 3
         const PROOF_FIXED_PLACE_BUDGET: usize = 64
+        const PROOF_FIXED_PLACE_MATCH_DEPTH_LIMIT: usize = 64
         const PROOF_FIXED_EXTENT_SEARCH_DEPTH_LIMIT: usize = 64
+        # Each budgeted shape visit may emit up to one row per nested extent. Reserve the
+        # worst-case collection, scalar-reference rows, and global mutable-array imports.
+        const PROOF_FIXED_PLACE_ENTRY_LIMIT: usize = 4224
 
         # Primitive fixed-array element heads. Concrete records are checked separately
         # by declaration identity; a generic-looking head alone is insufficient.
@@ -142,16 +146,25 @@ extend ElisaProof:
                         head != "array" or arguments.count != 2
                     extent: (known: bool, value: i64) = proof_fixed_extent_constant_with_work(arguments[1], declarations, source_work, 0)
                     return false if not extent.known
+                    if extents.count >= PROOF_FIXED_PLACE_ENTRY_LIMIT:
+                        source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return false
                     extents.push(extent.value)
                     nested: mutable darray[i64] = []
                     nested_is_shape: bool = proof_fixed_array_shape_with_work(arguments[0], declarations, &nested, source_work, depth + 1)
                     return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    if nested_is_shape and nested.count > PROOF_FIXED_PLACE_ENTRY_LIMIT - extents.count:
+                        source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return false
                     extents.extend(nested) if nested_is_shape
                     return true
                 Ast::Expr.Index(object, extent_expression, _):
                     return false if not proof_fixed_array_source_head_with_work(object, declarations, source_work)
                     extent: (known: bool, value: i64) = proof_fixed_extent_constant_with_work(extent_expression, declarations, source_work, 0)
                     return false if not extent.known
+                    if extents.count >= PROOF_FIXED_PLACE_ENTRY_LIMIT:
+                        source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return false
                     extents.push(extent.value)
                     return true
                 _:
@@ -234,8 +247,11 @@ extend ElisaProof:
             capacity: usize = proof_name_index_capacity(member_count)
             return false if:
                 capacity == 0
-                not proof_fixed_array_source_work_charge(capacity * 3, source_work)
-                not proof_fixed_array_source_work_charge(member_count * 2, source_work)
+                not proof_fixed_array_source_work_charge(capacity, source_work)
+                not proof_fixed_array_source_work_charge(capacity, source_work)
+                not proof_fixed_array_source_work_charge(capacity, source_work)
+                not proof_fixed_array_source_work_charge(member_count, source_work)
+                not proof_fixed_array_source_work_charge(member_count, source_work)
             hashes: mutable darray[u32] = []
             values: mutable darray[usize] = []
             hashes.resize(capacity)
@@ -435,22 +451,33 @@ extend ElisaProof:
             return -1 if not proof_fixed_array_shape_with_work(type_expression, declarations, &shape, source_work, 0) or shape.count == 0
             shape[0]
 
-        # A place spelled by an index object matches a collected place when both are the same
-        # parameter name and the same chain of field projections. Parentheses are transparent.
-        def proof_fixed_place_matches(object: Ast::Expr, place: Ast::Expr) -> bool:
+        # Meter every row and recursive shape comparison used to match a tracked place. A
+        # failed charge poisons the shared source-work counter so callers cannot keep using a
+        # partial lookup as evidence.
+        def proof_fixed_place_matches_with_work(object: Ast::Expr, place: Ast::Expr, depth: usize, source_work: mutable usize&) -> (complete: bool, matches: bool):
+            return (false, false) if depth >= PROOF_FIXED_PLACE_MATCH_DEPTH_LIMIT or not proof_fixed_array_source_work_charge(1, source_work)
             match object:
                 Ast::Expr.Paren(inner, _):
-                    return proof_fixed_place_matches(inner, place)
+                    return proof_fixed_place_matches_with_work(inner, place, depth + 1, source_work)
                 Ast::Expr.Ident(object_name, _):
-                    return proof_ident_name(place) == object_name
+                    match place:
+                        Ast::Expr.Ident(place_name, _):
+                            return (false, false) if not proof_fixed_array_source_work_charge(sview_len(object_name), source_work)
+                            return (false, false) if not proof_fixed_array_source_work_charge(sview_len(place_name), source_work)
+                            return (true, object_name == place_name)
+                        _:
+                            return (true, false)
                 Ast::Expr.Field(object_base, object_field, _):
                     match place:
                         Ast::Expr.Field(place_base, place_field, _):
-                            return object_field == place_field and proof_fixed_place_matches(object_base, place_base)
+                            return (false, false) if not proof_fixed_array_source_work_charge(sview_len(object_field), source_work)
+                            return (false, false) if not proof_fixed_array_source_work_charge(sview_len(place_field), source_work)
+                            return (true, false) if object_field != place_field
+                            return proof_fixed_place_matches_with_work(object_base, place_base, depth + 1, source_work)
                         _:
-                            return false
+                            return (true, false)
                 _:
-                    return false
+                    return (true, false)
 
         # Collect fixed-array places under two independent limits: `budget` caps emitted places,
         # while `source_work` charges every source/declaration/member scan used to derive them.
@@ -460,10 +487,13 @@ extend ElisaProof:
             budget <- budget - 1
             shape: mutable darray[i64] = []
             if proof_fixed_array_shape_with_work(type_expression, declarations, &shape, source_work, 0):
+                if places.count > PROOF_FIXED_PLACE_ENTRY_LIMIT or shape.count > PROOF_FIXED_PLACE_ENTRY_LIMIT - places.count:
+                    source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return
                 new_names: mutable darray[sview] = []
                 return if not proof_collect_fixed_extent_names_with_work(type_expression, &new_names, source_work, 0)
                 return if shape.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
-                return if not proof_fixed_array_source_work_charge(shape.count * 2, source_work)
+                return if not proof_fixed_array_source_work_charge(shape.count, source_work) or not proof_fixed_array_source_work_charge(shape.count, source_work)
                 for new_name in new_names |new_name, constant_names, source_work|:
                     found: mutable bool = false
                     for existing in constant_names |existing, new_name, source_work, found|:

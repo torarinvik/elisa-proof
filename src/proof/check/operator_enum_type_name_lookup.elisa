@@ -1,0 +1,91 @@
+# Bounded path parsing and exact type-name lookup for operator-enum witnesses.
+extend ElisaProof:
+    private:
+        def proof_operator_enum_type_path_segments(expression: Ast::Expr, segments: mutable darray[sview]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return false if name == "" or not proof_type_audit_work_charge(sview_len(name), source_work)
+                    segments.push(name)
+                    return true
+                Ast::Expr.Scope(parent, name, _):
+                    return false if:
+                        name == "" or not proof_operator_enum_type_path_segments(parent, segments, source_work, depth + 1)
+                        not proof_type_audit_work_charge(sview_len(name), source_work)
+                    segments.push(name)
+                    return true
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_operator_enum_type_path_segments(inner, segments, source_work, depth + 1)
+                _:
+                    return false
+
+        def proof_operator_enum_root_name_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, name: sview):
+            return (false, "") if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return (false, "") if name == "" or not proof_type_audit_work_charge(sview_len(name), source_work)
+                    return (true, name)
+                Ast::Expr.Scope(parent, _, _) | Ast::Expr.Paren(parent, _) | Ast::Expr.Refinement(parent, _, _):
+                    return proof_operator_enum_root_name_with_work(parent, source_work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_operator_enum_root_name_with_work(inner, source_work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                _:
+                    pass
+            return (true, "")
+
+        def proof_operator_enum_named_enum_census_with_work(name: sview, owner_module: sview, index: ProofEnumIndex&, source_work: mutable usize&) -> (complete: bool, exact_count: usize, root_count: usize, all_count: usize, all_owner: sview):
+            exact_count: mutable usize = 0
+            root_count: mutable usize = 0
+            all_count: mutable usize = 0
+            all_owner: mutable sview = ""
+            count: usize = index.names.count
+            return (false, 0, 0, 0, "") if not index.complete or count != index.name_hashes.count or count != index.const_enums.count or count != index.root_level.count or count != index.owners.count or count != index.declarations.count or count != index.next_indices.count
+            return (false, 0, 0, 0, "") if index.bucket_heads.count != proof_index_capacity(count) or not proof_type_audit_work_charge(sview_len(name), source_work) or not proof_type_audit_work_charge(sview_len(owner_module), source_work)
+            return (true, 0, 0, 0, "") if count == 0
+            hash: u32 = proof_name_hash(name)
+            slot: usize = (hash.i64() % index.bucket_heads.count.i64()).usize()
+            row: mutable usize = index.bucket_heads[slot]
+            steps: mutable usize = 0
+            while row != count and steps < PROOF_INDEX_MAX_CHAIN |row, steps, hash, name, owner_module, index, exact_count, root_count, all_count, all_owner, source_work, count|:
+                return (false, 0, 0, 0, "") if row > count or not proof_type_audit_work_charge(1, source_work)
+                if index.name_hashes[row] == hash:
+                    return (false, 0, 0, 0, "") if not proof_type_audit_work_charge(sview_len(index.names[row]), source_work) or not proof_type_audit_work_charge(sview_len(index.owners[row]), source_work) or not proof_type_audit_work_charge(sview_len(name), source_work) or not proof_type_audit_work_charge(sview_len(owner_module), source_work)
+                    if index.names[row] == name:
+                        exact_count <- exact_count + 1 if index.owners[row] == owner_module
+                        root_count <- root_count + 1 if index.root_level[row]
+                        all_count <- all_count + 1
+                        all_owner <- index.owners[row] if all_count == 1
+                row <- index.next_indices[row]
+                steps <- steps + 1
+            return (false, 0, 0, 0, "") if row != count
+            (true, exact_count, root_count, all_count, all_owner)
+
+        def proof_operator_enum_named_type_lookup_with_work(name: sview, owner: darray[sview]&, position: Ast::Pos, report: mutable ProofReport&, source_work: mutable usize&) -> (complete: bool, aliases: usize, alias_row: usize, types: usize, type_row: usize):
+            index: ProofSourceEffectIndex& = report.source_types.source_effect_index
+            return (false, 2, 0, 2, 0) if:
+                index.aliases.alias_names.count != index.aliases.alias_targets.count or index.aliases.alias_names.count != index.aliases.alias_owners.count or index.aliases.alias_names.count != index.aliases.alias_lines.count or index.aliases.alias_names.count != index.aliases.alias_has_formals.count
+                index.types.declared_types.count != index.types.declared_type_owners.count
+            if owner.count == 0:
+                report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                alias: (complete: bool, count: usize, row: usize) = proof_source_conversion_scoped_owner_lookup(name, "", index.aliases.alias_names, index.aliases.alias_owners, index.aliases.alias_scope_index_hashes, index.aliases.alias_scope_index_values, index.aliases.alias_scope_index_counts, index.aliases.alias_scope_index_valid, report)
+                source_work <- report.source_types.source_effect_index.work.implicit_effect_work
+                return (false, 2, 0, 2, 0) if not alias.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                type: (complete: bool, count: usize, row: usize) = proof_source_conversion_scoped_owner_lookup(name, "", index.types.declared_types, index.types.declared_type_owners, index.types.declared_type_scope_index_hashes, index.types.declared_type_scope_index_values, index.types.declared_type_scope_index_counts, index.types.declared_type_scope_index_valid, report)
+                source_work <- report.source_types.source_effect_index.work.implicit_effect_work
+                return (false, 2, 0, 2, 0) if not type.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return (true, 0, 0, type.count, type.row) if type.count > 0
+                # Root concrete declarations win root aliases. Module-owned aliases
+                # are handled above and retain their lexical precedence.
+                return (true, alias.count, alias.row, 0, 0) if alias.count > 0
+            owner_expression: (complete: bool, expression: Ast::Expr) = proof_operator_enum_owner_expression_with_work(owner, position, source_work)
+            return (false, 2, 0, 2, 0) if not owner_expression.complete
+            report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+            aliases: (complete: bool, count: usize, row: usize) = proof_source_conversion_scoped_lookup(name, owner_expression.expression, index.aliases.alias_names, index.aliases.alias_owners, index.aliases.alias_scope_index_hashes, index.aliases.alias_scope_index_values, index.aliases.alias_scope_index_counts, index.aliases.alias_scope_index_valid, report)
+            source_work <- report.source_types.source_effect_index.work.implicit_effect_work
+            return (false, 2, 0, 2, 0) if not aliases.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+            types: (complete: bool, count: usize, row: usize) = proof_source_conversion_scoped_lookup(name, owner_expression.expression, index.types.declared_types, index.types.declared_type_owners, index.types.declared_type_scope_index_hashes, index.types.declared_type_scope_index_values, index.types.declared_type_scope_index_counts, index.types.declared_type_scope_index_valid, report)
+            source_work <- report.source_types.source_effect_index.work.implicit_effect_work
+            return (false, 2, 0, 2, 0) if not types.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return (true, aliases.count, aliases.row, 0, 0) if owner.count > 0 and aliases.count > 0
+            return (true, aliases.count, aliases.row, types.count, types.row)

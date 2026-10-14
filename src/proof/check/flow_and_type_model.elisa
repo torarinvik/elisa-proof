@@ -51,11 +51,6 @@ extend ElisaProof:
             report.analysis_1.structural.identity_next <- report.analysis_1.structural.identity_next + 1
             return PROOF_STRUCTURAL_FRESH_ID_BASE + report.analysis_1.structural.identity_next
 
-        def proof_structural_parameter_identity(parameters: darray[Ast::ParamDecl]&, wanted: sview) -> usize:
-            for index in 0..<parameters.count |index, parameters, wanted|:
-                return index + 1 if parameters[index].name == wanted and index + 1 < PROOF_STRUCTURAL_FRESH_ID_BASE
-            return 0
-
         def proof_add_structural_edge_attempt(report: mutable ProofReport&, caller: sview, callee: sview, witnesses: darray[ProofStructuralWitness]&, line: u32, call_offset: usize) -> void:
             if caller == "" or callee == "" or witnesses.count == 0:
                 report.proof_obligation(false)
@@ -203,40 +198,6 @@ extend ElisaProof:
                 name in {"bool", "char"}
             return false
 
-        # The per-import audit index is built once from the complete declaration tree. Preserve
-        # the linear walk's ambiguity and incompleteness behavior while following only the exact
-        # hash bucket; the hash selects candidates and never substitutes for name equality.
-        def proof_find_type_alias_index(index: ProofTypeAuditIndex, name: sview) -> (count: usize, target: Ast::Expr):
-            empty_target: Ast::Expr = Ast::Expr.Absent
-            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if not index.complete or index.entries.count != index.next_indices.count
-            return (0, empty_target) if index.entries.count == 0
-            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if index.bucket_heads.count == 0
-            hash: u32 = proof_name_hash(name)
-            slot: usize = (hash.i64() % index.bucket_heads.count.i64()).usize()
-            entry: mutable usize = index.bucket_heads[slot]
-            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if entry > index.entries.count
-            steps: mutable usize = 0
-            count: mutable usize = 0
-            target: mutable Ast::Expr = Ast::Expr.Absent
-            while entry < index.entries.count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, index, hash, name, count, target|:
-                return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if entry >= index.next_indices.count
-                row: ProofTypeAuditDeclaration = index.entries[entry]
-                if row.name_hash == hash:
-                    match row.declaration:
-                        Ast::Decl.Alias(alias_name, alias_target, _):
-                            if alias_name == name:
-                                count <- count + 1
-                                target <- alias_target
-                        _:
-                            pass
-                return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if count > 1
-                next_entry: usize = index.next_indices[entry]
-                return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if next_entry > index.entries.count
-                entry <- next_entry
-                steps <- steps + 1
-            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if entry < index.entries.count
-            return (count, target)
-
         # Report-backed indexed queries charge the input spelling and every bucket probe. The
         # prebuilt index keeps lookup proportional to the bounded collision chain without letting
         # repeated queries evade the caller's aggregate source-work budget.
@@ -266,7 +227,8 @@ extend ElisaProof:
                     row_name: sview = proof_type_audit_declaration_name(row.declaration)
                     return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT) if:
                         row_name == ""
-                        not proof_type_audit_work_charge(sview_len(row_name) + sview_len(name), source_work)
+                        not proof_type_audit_work_charge(sview_len(row_name), source_work)
+                        not proof_type_audit_work_charge(sview_len(name), source_work)
                     if row_name == name:
                         type_count <- type_count + 1
                         root_type_count <- root_type_count + 1 if row.root_level
@@ -288,7 +250,7 @@ extend ElisaProof:
         # The enum index is built once per source import. Keep scalar classification on its
         # collision-safe bucket instead of rescanning every declaration for each type query.
         def proof_count_enums_index_with_work(index: ProofEnumIndex, name: sview, source_work: mutable usize&) -> (count: usize, const_count: usize, root_count: usize, root_const_count: usize):
-            return (2, 2, 2, 2) if not index.complete or index.names.count != index.name_hashes.count or index.names.count != index.const_enums.count or index.names.count != index.declarations.count or index.names.count != index.root_level.count or index.names.count != index.next_indices.count
+            return (2, 2, 2, 2) if not index.complete or index.names.count != index.name_hashes.count or index.names.count != index.const_enums.count or index.names.count != index.declarations.count or index.names.count != index.root_level.count or index.names.count != index.owners.count or index.names.count != index.next_indices.count
             capacity: usize = proof_index_capacity(index.names.count)
             return (2, 2, 2, 2) if index.bucket_heads.count != capacity
             return (0, 0, 0, 0) if index.names.count == 0
@@ -307,7 +269,7 @@ extend ElisaProof:
                     not proof_type_audit_work_charge(1, source_work)
                     entry >= index.next_indices.count
                 if index.name_hashes[entry] == hash:
-                    return (2, 2, 2, 2) if not proof_type_audit_work_charge(sview_len(index.names[entry]) + sview_len(name), source_work)
+                    return (2, 2, 2, 2) if not proof_type_audit_work_charge(sview_len(index.names[entry]), source_work) or not proof_type_audit_work_charge(sview_len(name), source_work)
                     if index.names[entry] == name:
                         count <- count + 1
                         const_count <- const_count + 1 if index.const_enums[entry]
@@ -353,76 +315,6 @@ extend ElisaProof:
                     return -1
                 _:
                     return 0
-
-        # The declared type of one field of a named struct. The count reports how many struct
-        # declarations answer to the name; anything but exactly one is refused by the caller.
-        def proof_struct_field_type_walk(declarations: darray[Ast::Decl]&, struct_name: sview, field_name: sview, depth: usize) -> (count: usize, type_expression: Ast::Expr):
-            return (2, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            count: mutable usize = 0
-            found: mutable Ast::Expr = Ast::Expr.Invalid
-            for declaration in declarations |struct_name, field_name, depth, count, found|:
-                match declaration:
-                    Ast::Decl.Struct(name, members, _, _, _, _, _):
-                        if name == struct_name:
-                            count <- count + 1
-                            for member in members |field_name, found|:
-                                found <- member.type_expression if member.name == field_name
-                    Ast::Decl.Module(_, body, _):
-                        nested: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type_walk(body, struct_name, field_name, depth + 1)
-                        count <- count + nested.count
-                        found <- nested.type_expression if nested.count > 0
-                    Ast::Decl.Scoped(body, _):
-                        nested: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type_walk(body, struct_name, field_name, depth + 1)
-                        count <- count + nested.count
-                        found <- nested.type_expression if nested.count > 0
-                    _:
-                        pass
-            return (count, found)
-
-        def proof_struct_field_names(declarations: darray[Ast::Decl]&, struct_name: sview, depth: usize, names: mutable darray[sview]&) -> usize:
-            return 2 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            count: mutable usize = 0
-            for declaration in declarations |struct_name, depth, count, names|:
-                match declaration:
-                    Ast::Decl.Struct(name, members, _, _, _, _, _):
-                        if name == struct_name:
-                            count <- count + 1
-                            for member in members |names|:
-                                names.push(member.name)
-                    Ast::Decl.Module(_, body, _):
-                        count <- count + proof_struct_field_names(body, struct_name, depth + 1, names)
-                    Ast::Decl.Scoped(body, _):
-                        count <- count + proof_struct_field_names(body, struct_name, depth + 1, names)
-                    _:
-                        pass
-            return count
-
-        # The struct a declared type names, after stripping storage qualifiers, references,
-        # parentheses, refinements, and a unique alias. A reference is followed here because a
-        # field read through `p: Pair&` still has the field's declared type; what is refused for
-        # a scalar (`&T` compares by address) does not arise for a projection out of it.
-        def proof_type_head_name(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> sview:
-            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    return "" if proof_scalar_primitive_type_name(name)
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
-                    return "" if alias.count > 1
-                    return proof_type_head_name(alias.target, declarations, depth + 1) if alias.count == 1
-                    return name
-                Ast::Expr.Paren(inner, _):
-                    return proof_type_head_name(inner, declarations, depth + 1)
-                Ast::Expr.Refinement(base, _, _):
-                    return proof_type_head_name(base, declarations, depth + 1)
-                Ast::Expr.Unary(operator, inner, _):
-                    return proof_type_head_name(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                    return ""
-                Ast::Expr.Scope(_, _, _):
-                    # Without owner-qualified type lookup, a leaf name could select an unrelated
-                    # declaration. Do not expose a head for this type.
-                    return ""
-                _:
-                    return ""
 
         # The element type of a built-in container spelling: `darray[T]`, `view[T]`,
         # `array[T, N]`, or `T[N]`. Only built-in containers are recognized, because a subscript
@@ -588,6 +480,3 @@ extend ElisaProof:
                             return true
                 _:
                     return true
-        def proof_type_contains_borrowed_view(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
-            source_work: mutable usize = 0
-            return proof_type_contains_borrowed_view_with_work(expression, declarations, depth, &source_work)

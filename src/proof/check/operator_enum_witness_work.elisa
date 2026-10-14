@@ -1,4 +1,6 @@
 # Bounded const-enum facts used by primitive operator witness generation.
+include "./operator_enum_lexical_scope.elisa"
+include "./operator_enum_type_name_lookup.elisa"
 extend ElisaProof:
     private:
         def proof_operator_enum_fact_exists_with_work(facts: darray[Ast::Expr]&, wanted: Ast::Expr, source_work: mutable usize&) -> (complete: bool, found: bool):
@@ -59,7 +61,8 @@ extend ElisaProof:
             return false if target.count == 0 or current.count + 1 != target.count
             for index in 0..<current.count |index, current, target, source_work|:
                 return false if:
-                    not proof_type_audit_work_charge(sview_len(current[index]) + sview_len(target[index]), source_work)
+                    not proof_type_audit_work_charge(sview_len(current[index]), source_work)
+                    not proof_type_audit_work_charge(sview_len(target[index]), source_work)
                     current[index] != target[index]
             return true
 
@@ -67,12 +70,13 @@ extend ElisaProof:
             return false if left.count != right.count
             for index in 0..<left.count |index, left, right, source_work|:
                 return false if:
-                    not proof_type_audit_work_charge(sview_len(left[index]) + sview_len(right[index]), source_work)
+                    not proof_type_audit_work_charge(sview_len(left[index]), source_work)
+                    not proof_type_audit_work_charge(sview_len(right[index]), source_work)
                     left[index] != right[index]
             return true
 
         def proof_operator_enum_path_append_with_work(path: mutable darray[sview]&, owner: darray[sview]&, name: sview, source_work: mutable usize&) -> bool:
-            return false if not proof_type_audit_work_charge(owner.count + 1, source_work)
+            return false if not proof_type_audit_work_charge(owner.count, source_work) or not proof_type_audit_work_charge(1, source_work)
             for segment in owner |path, source_work|:
                 return false if not proof_type_audit_work_charge(sview_len(segment), source_work)
                 path.push(segment)
@@ -93,17 +97,25 @@ extend ElisaProof:
             return (false, false, empty_owner) if not lexical.complete
             backend: (complete: bool, matched: bool, valid: bool, row: usize) = proof_module_alias_lookup_global(aliases, segments[0], source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
             return (false, false, empty_owner) if not backend.complete
+            alias_scope: mutable sview = ""
+            alias_target: mutable sview = ""
             if not lexical.matched:
-                return (true, false, empty_owner) if backend.matched
-                unaliased_owner: mutable darray[sview] = []
-                for index in 0..<segments.count - 1 |index, segments, unaliased_owner, source_work|:
-                    return (false, false, empty_owner) if not proof_type_audit_work_charge(sview_len(segments[index]), source_work)
-                    unaliased_owner.push(segments[index])
-                return (true, true, unaliased_owner)
-            return (true, false, empty_owner) if not lexical.valid or not backend.matched or not backend.valid or backend.row >= aliases.targets.count
-            return (false, false, empty_owner) if not proof_type_audit_work_charge(sview_len(lexical.target) + sview_len(aliases.targets[backend.row]), source_work)
-            return (true, false, empty_owner) if lexical.target != aliases.targets[backend.row]
-            compatible: (complete: bool, compatible: bool, target: sview) = proof_module_alias_targets_compatible(aliases, lexical.scope, lexical.target, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                if not backend.matched:
+                    unaliased_owner: mutable darray[sview] = []
+                    for index in 0..<segments.count - 1 |index, segments, unaliased_owner, source_work|:
+                        return (false, false, empty_owner) if not proof_type_audit_work_charge(sview_len(segments[index]), source_work)
+                        unaliased_owner.push(segments[index])
+                    return (true, true, unaliased_owner)
+                return (true, false, empty_owner) if not backend.valid or backend.row >= aliases.targets.count or backend.row >= aliases.scopes.count
+                alias_scope <- aliases.scopes[backend.row]
+                alias_target <- aliases.targets[backend.row]
+            else:
+                return (true, false, empty_owner) if not lexical.valid or not backend.matched or not backend.valid or backend.row >= aliases.targets.count
+                return (false, false, empty_owner) if not proof_type_audit_work_charge(sview_len(lexical.target), source_work) or not proof_type_audit_work_charge(sview_len(aliases.targets[backend.row]), source_work)
+                return (true, false, empty_owner) if lexical.target != aliases.targets[backend.row]
+                alias_scope <- lexical.scope
+                alias_target <- lexical.target
+            compatible: (complete: bool, compatible: bool, target: sview) = proof_module_alias_targets_compatible(aliases, alias_scope, alias_target, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
             return (false, false, empty_owner) if not compatible.complete
             return (true, false, empty_owner) if not compatible.compatible
             return (false, false, empty_owner) if not proof_type_audit_work_charge(sview_len(compatible.target), source_work)
@@ -124,80 +136,60 @@ extend ElisaProof:
                 expression <- Ast::Expr.Scope(expression, owner[index], position)
             return (true, expression)
 
-        def proof_operator_enum_current_function_scope_with_work(functions: ProofFunctionTable&, report: ProofReport&, function_name: sview, source_work: mutable usize&) -> (complete: bool, known: bool, scope: darray[sview], declaration_line: u32, module_name: sview):
+        def proof_operator_enum_function_scope_at_row_with_work(functions: ProofFunctionTable&, report: ProofReport&, row: usize, source_work: mutable usize&) -> (complete: bool, known: bool, scope: darray[sview], declaration_line: u32, declaration_offset: usize, module_name: sview):
             empty_scope: darray[sview] = []
-            declaration_line: u32 = report.analysis_2.trace_owner_line
-            return (true, false, empty_scope, 0, "") if declaration_line == 0
             count: usize = functions.lookup.names.count
-            return (false, false, empty_scope, 0, "") if count != functions.lookup.lines.count or count != functions.lookup.owner_modules.count
-            row: usize = functions.call_graph.current_caller
-            return (true, false, empty_scope, 0, "") if row >= count
-            return (false, false, empty_scope, 0, "") if not proof_type_audit_work_charge(1 + sview_len(functions.lookup.names[row]) + sview_len(function_name), source_work)
-            return (true, false, empty_scope, 0, "") if functions.lookup.names[row] != function_name or functions.lookup.lines[row] != declaration_line
+            return (false, false, empty_scope, 0, 0, "") if:
+                row >= count or count != functions.lookup.lines.count or count != functions.lookup.offsets.count or count != functions.lookup.owner_modules.count
+                count != functions.lookup.declaration_path_starts.count or count != functions.lookup.declaration_path_counts.count
+            start: usize = functions.lookup.declaration_path_starts[row]
+            path_count: usize = functions.lookup.declaration_path_counts[row]
+            return (false, false, empty_scope, 0, 0, "") if path_count == 0 or start > functions.lookup.all_declaration_path.count or path_count > functions.lookup.all_declaration_path.count - start
+            declarations: mutable darray[Ast::Decl] = report.source.source_declarations
+            scope: mutable darray[sview] = []
+            for path_offset in 0..<path_count |path_offset, functions, report, row, start, path_count, declarations, scope, source_work|:
+                declaration_index: usize = functions.lookup.all_declaration_path[start + path_offset]
+                return (false, false, empty_scope, 0, 0, "") if declaration_index >= declarations.count or not proof_type_audit_work_charge(1, source_work)
+                declaration: Ast::Decl = declarations[declaration_index]
+                if path_offset + 1 == path_count:
+                    match declaration:
+                        Ast::Decl.Func(name, _, _, _, _, _, position):
+                            return (false, false, empty_scope, 0, 0, "") if not proof_type_audit_work_charge(sview_len(name), source_work) or not proof_type_audit_work_charge(sview_len(functions.lookup.names[row]), source_work)
+                            return (false, false, empty_scope, 0, 0, "") if name != functions.lookup.names[row] or position.line != functions.lookup.lines[row] or position.offset != functions.lookup.offsets[row]
+                        _:
+                            return (false, false, empty_scope, 0, 0, "")
+                else:
+                    match declaration:
+                        Ast::Decl.Module(module_name, body, _):
+                            return (false, false, empty_scope, 0, 0, "") if not proof_type_audit_work_charge(sview_len(module_name), source_work)
+                            scope.push(module_name)
+                            declarations <- body
+                        Ast::Decl.Scoped(body, _):
+                            declarations <- body
+                        _:
+                            return (false, false, empty_scope, 0, 0, "")
             module_name: sview = functions.lookup.owner_modules[row]
-            return (false, false, empty_scope, 0, "") if not proof_type_audit_work_charge(sview_len(module_name), source_work)
-            scope: darray[sview] = proof_global_constant_scope_with_module(empty_scope, module_name)
-            return (true, true, scope, declaration_line, module_name)
+            return (false, false, empty_scope, 0, 0, "") if scope.count == 0 and module_name != ""
+            return (false, false, empty_scope, 0, 0, "") if scope.count > 0 and scope[scope.count - 1] != module_name
+            return (true, true, scope, functions.lookup.lines[row], functions.lookup.offsets[row].usize(), module_name)
 
-        def proof_operator_enum_type_path_segments(expression: Ast::Expr, segments: mutable darray[sview]&, source_work: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    return false if name == "" or not proof_type_audit_work_charge(sview_len(name), source_work)
-                    segments.push(name)
-                    return true
-                Ast::Expr.Scope(parent, name, _):
-                    return false if:
-                        name == "" or not proof_operator_enum_type_path_segments(parent, segments, source_work, depth + 1)
-                        not proof_type_audit_work_charge(sview_len(name), source_work)
-                    segments.push(name)
-                    return true
-                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
-                    return proof_operator_enum_type_path_segments(inner, segments, source_work, depth + 1)
-                _:
-                    return false
-
-        def proof_operator_enum_root_name_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, name: sview):
-            return (false, "") if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    return (false, "") if name == "" or not proof_type_audit_work_charge(sview_len(name), source_work)
-                    return (true, name)
-                Ast::Expr.Scope(parent, _, _) | Ast::Expr.Paren(parent, _) | Ast::Expr.Refinement(parent, _, _):
-                    return proof_operator_enum_root_name_with_work(parent, source_work, depth + 1)
-                Ast::Expr.Unary(operator, inner, _):
-                    return proof_operator_enum_root_name_with_work(inner, source_work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                _:
-                    pass
-            return (true, "")
-
-        def proof_operator_enum_named_type_lookup_with_work(name: sview, owner: darray[sview]&, position: Ast::Pos, report: mutable ProofReport&, source_work: mutable usize&) -> (complete: bool, aliases: usize, alias_row: usize, types: usize, type_row: usize):
-            index: ProofSourceEffectIndex& = report.source_types.source_effect_index
-            return (false, 2, 0, 2, 0) if:
-                index.aliases.alias_names.count != index.aliases.alias_targets.count or index.aliases.alias_names.count != index.aliases.alias_owners.count or index.aliases.alias_names.count != index.aliases.alias_lines.count or index.aliases.alias_names.count != index.aliases.alias_has_formals.count
-                index.types.declared_types.count != index.types.declared_type_owners.count
-            if owner.count == 0:
-                report.source_types.source_effect_index.work.implicit_effect_work <- source_work
-                alias: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal: bool, blocks_parent: bool) = proof_source_conversion_alias_target_in_owner(name, "", report)
-                source_work <- report.source_types.source_effect_index.work.implicit_effect_work
-                return (false, 2, 0, 2, 0) if:
-                    not alias.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                    not proof_type_audit_work_charge(sview_len(name), source_work)
-                type: (complete: bool, count: usize, row: usize) = proof_source_conversion_name_lookup(name, index.types.declared_types, index.types.declared_type_index_hashes, index.types.declared_type_index_values, index.types.declared_type_index_counts, index.types.declared_type_index_valid, report)
-                source_work <- report.source_types.source_effect_index.work.implicit_effect_work
-                return (false, 2, 0, 2, 0) if not type.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                return (true, alias.count, alias.row, type.count, type.row)
-            owner_expression: (complete: bool, expression: Ast::Expr) = proof_operator_enum_owner_expression_with_work(owner, position, source_work)
-            return (false, 2, 0, 2, 0) if not owner_expression.complete
-            report.source_types.source_effect_index.work.implicit_effect_work <- source_work
-            aliases: (complete: bool, count: usize, row: usize) = proof_source_conversion_scoped_lookup(name, owner_expression.expression, index.aliases.alias_names, index.aliases.alias_owners, index.aliases.alias_scope_index_hashes, index.aliases.alias_scope_index_values, index.aliases.alias_scope_index_counts, index.aliases.alias_scope_index_valid, report)
-            source_work <- report.source_types.source_effect_index.work.implicit_effect_work
-            return (false, 2, 0, 2, 0) if not aliases.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            report.source_types.source_effect_index.work.implicit_effect_work <- source_work
-            types: (complete: bool, count: usize, row: usize) = proof_source_conversion_scoped_lookup(name, owner_expression.expression, index.types.declared_types, index.types.declared_type_owners, index.types.declared_type_scope_index_hashes, index.types.declared_type_scope_index_values, index.types.declared_type_scope_index_counts, index.types.declared_type_scope_index_valid, report)
-            source_work <- report.source_types.source_effect_index.work.implicit_effect_work
-            return (false, 2, 0, 2, 0) if not types.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return (true, aliases.count, aliases.row, types.count, types.row)
+        def proof_operator_enum_current_function_scope_with_work(functions: ProofFunctionTable&, report: ProofReport&, function_name: sview, source_work: mutable usize&) -> (complete: bool, known: bool, scope: darray[sview], declaration_line: u32, declaration_offset: usize, module_name: sview):
+            empty_scope: darray[sview] = []
+            if functions.call_graph.current_caller_is_lemma:
+                declaration_line: u32 = report.context.current_goal_owner_line
+                declaration_offset: usize = report.context.current_goal_owner_offset.usize()
+                module_name: sview = functions.call_graph.current_caller_module
+                return (false, false, empty_scope, 0, 0, "") if declaration_line == 0
+                context: (known: bool, declarations: darray[Ast::Decl], module_scope: darray[sview]) = proof_function_enum_context_for_source_declarations(report.source.source_declarations, functions, function_name, declaration_line, declaration_offset.u32(), module_name)
+                return (false, false, empty_scope, 0, 0, "") if not context.known
+                return (true, true, context.module_scope, declaration_line, declaration_offset, module_name)
+            declaration_line: u32 = report.analysis_2.trace_owner_line
+            return (true, false, empty_scope, 0, 0, "") if declaration_line == 0
+            row: usize = functions.call_graph.current_caller
+            return (true, false, empty_scope, 0, 0, "") if row >= functions.lookup.names.count
+            return (false, false, empty_scope, 0, 0, "") if not proof_type_audit_work_charge(1, source_work) or not proof_type_audit_work_charge(sview_len(functions.lookup.names[row]), source_work) or not proof_type_audit_work_charge(sview_len(function_name), source_work)
+            return (true, false, empty_scope, 0, 0, "") if functions.lookup.names[row] != function_name or functions.lookup.lines[row] != declaration_line
+            proof_operator_enum_function_scope_at_row_with_work(functions, report, row, source_work)
 
         def proof_operator_enum_type_path_in_with_work(expression: Ast::Expr, caller_scope: darray[sview]&, resolution_scope: darray[sview]&, declaration_line: u32, resolution_module: sview, module_aliases: ProofModuleAliasIndex&, report: mutable ProofReport&, active_alias_rows: mutable darray[usize]&, path: mutable darray[sview]&, source_work: mutable usize&, depth: usize, caller_expression: bool) -> (complete: bool, known: bool):
             return (false, false) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
@@ -210,7 +202,12 @@ extend ElisaProof:
                 Ast::Expr.Ident(name, position):
                     return (false, false) if name == "" or not proof_type_audit_work_charge(sview_len(name), source_work)
                     return (true, false) if proof_scalar_primitive_type_name(name)
-                    lookup: (complete: bool, aliases: usize, alias_row: usize, types: usize, type_row: usize) = proof_operator_enum_named_type_lookup_with_work(name, resolution_scope, position, report, source_work)
+                    lookup: mutable (complete: bool, aliases: usize, alias_row: usize, types: usize, type_row: usize, resolved_owner: sview) = (false, 2, 0, 2, 0, "")
+                    if resolution_module != "":
+                        lookup <- proof_operator_enum_named_type_lexical_lookup_with_work(name, resolution_module, position, report, source_work)
+                    else:
+                        exact: (complete: bool, aliases: usize, alias_row: usize, types: usize, type_row: usize) = proof_operator_enum_named_type_lookup_with_work(name, resolution_scope, position, report, source_work)
+                        lookup <- (exact.complete, exact.aliases, exact.alias_row, exact.types, exact.type_row, "")
                     return (false, false) if not lookup.complete or lookup.aliases > 1 or lookup.types > 1 or (lookup.aliases > 0 and lookup.types > 0)
                     if lookup.aliases == 1:
                         index: ProofSourceEffectIndex& = report.source_types.source_effect_index
@@ -228,16 +225,16 @@ extend ElisaProof:
                         active_alias_rows.resize(mark)
                         return resolved
                     if lookup.types == 1:
-                        type_owner: darray[sview] = resolution_scope
+                        type_owner: darray[sview] = proof_global_constant_scope_with_module([], lookup.resolved_owner) if resolution_module != "" else resolution_scope
                         index: ProofSourceEffectIndex& = report.source_types.source_effect_index
-                        if resolution_scope.count == 0:
+                        if resolution_module == "" and resolution_scope.count == 0:
                             return (false, false) if:
                                 lookup.type_row >= index.types.declared_type_owners.count
                                 not proof_type_audit_work_charge(sview_len(index.types.declared_type_owners[lookup.type_row]), source_work)
                             type_owner <- proof_global_constant_scope_with_module([], index.types.declared_type_owners[lookup.type_row])
                         return (false, false) if not proof_operator_enum_path_append_with_work(path, type_owner, name, source_work)
                         return (true, true)
-                    if caller_expression and resolution_scope.count > 0:
+                    if caller_expression and resolution_scope.count > 0 and resolution_module == "":
                         return (true, false) if not report.source_types.source_effect_index.aliases.bare_alias_root_fallback_valid
                         empty_scope: darray[sview] = []
                         root_alias: (complete: bool, aliases: usize, alias_row: usize, types: usize, type_row: usize) = proof_operator_enum_named_type_lookup_with_work(name, empty_scope, position, report, source_work)
@@ -255,7 +252,7 @@ extend ElisaProof:
                         active_alias_rows.resize(mark)
                         return resolved
                     return (true, false)
-                Ast::Expr.Scope(_, _, position):
+                Ast::Expr.Scope(head, _, position):
                     segments: mutable darray[sview] = []
                     return (false, false) if not proof_operator_enum_type_path_segments(expression, &segments, source_work, 0) or segments.count < 2
                     resolved_owner: (complete: bool, known: bool, owner: darray[sview]) = proof_operator_enum_alias_owner_with_work(module_aliases, resolution_module, segments, source_work)
@@ -263,7 +260,37 @@ extend ElisaProof:
                     return (true, false) if not resolved_owner.known
                     owner: darray[sview] = resolved_owner.owner
                     name: sview = segments[segments.count - 1]
-                    lookup: (complete: bool, aliases: usize, alias_row: usize, types: usize, type_row: usize) = proof_operator_enum_named_type_lookup_with_work(name, owner, position, report, source_work)
+                    lookup: mutable (complete: bool, aliases: usize, alias_row: usize, types: usize, type_row: usize) = proof_operator_enum_named_type_lookup_with_work(name, owner, position, report, source_work)
+                    resolved_type_owner: mutable darray[sview] = owner
+                    simple_module_head: bool = match head:
+                        Ast::Expr.Ident(_, _): true
+                        _: false
+                    if lookup.complete and lookup.aliases == 0 and simple_module_head:
+                        imported_aliases: (complete: bool, count: usize, row: usize) = proof_operator_enum_imported_alias_census_with_work(name, report, source_work)
+                        return (false, false) if not imported_aliases.complete or imported_aliases.count > 1
+                        return (false, false) if imported_aliases.count == 1 and imported_aliases.row >= report.source_types.source_effect_index.aliases.alias_has_formals.count
+                        return (true, false) if imported_aliases.count == 1 and report.source_types.source_effect_index.aliases.alias_has_formals[imported_aliases.row]
+                        if imported_aliases.count == 1:
+                            lookup <- (true, 1, imported_aliases.row, 0, 0)
+                            resolved_type_owner.clear()
+                    if lookup.complete and lookup.aliases == 0 and simple_module_head:
+                        fallback: (complete: bool, aliases: usize, alias_row: usize, types: usize, type_row: usize) = proof_operator_enum_named_type_root_fallback_with_work(name, position, report, source_work)
+                        return (false, false) if not fallback.complete
+                        if fallback.aliases > 0 or (lookup.types == 0 and fallback.types > 0):
+                            lookup <- (fallback.complete, fallback.aliases, fallback.alias_row, fallback.types, fallback.type_row)
+                            resolved_type_owner.clear()
+                    if lookup.complete and lookup.aliases == 0 and simple_module_head:
+                        index: ProofSourceEffectIndex& = report.source_types.source_effect_index
+                        return (false, false) if not index.aliases.alias_index_valid
+                        index.work.implicit_effect_work <- source_work
+                        global_alias: (complete: bool, count: usize, row: usize, target: Ast::Expr) = proof_source_conversion_alias_target(name, report)
+                        source_work <- index.work.implicit_effect_work
+                        return (false, false) if not global_alias.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or global_alias.count > 1
+                        return (false, false) if global_alias.count == 1 and (global_alias.row >= index.aliases.alias_owners.count or global_alias.row >= index.aliases.alias_has_formals.count)
+                        return (true, false) if global_alias.count == 1 and index.aliases.alias_has_formals[global_alias.row]
+                        if global_alias.count == 1:
+                            lookup <- (true, 1, global_alias.row, 0, 0)
+                            resolved_type_owner.clear()
                     return (false, false) if not lookup.complete or lookup.aliases > 1 or lookup.types > 1 or (lookup.aliases > 0 and lookup.types > 0)
                     if lookup.aliases == 1:
                         index: ProofSourceEffectIndex& = report.source_types.source_effect_index
@@ -281,27 +308,25 @@ extend ElisaProof:
                         active_alias_rows.resize(mark)
                         return resolved
                     if lookup.types == 1:
-                        return (false, false) if not proof_operator_enum_path_append_with_work(path, owner, name, source_work)
+                        return (false, false) if not proof_operator_enum_path_append_with_work(path, resolved_type_owner, name, source_work)
                         return (true, true)
                     return (true, false)
                 _:
                     return (true, false)
-
-        def proof_operator_enum_type_path_with_aliases_work(expression: Ast::Expr, caller_scope: darray[sview]&, declaration_line: u32, caller_module: sview, module_aliases: ProofModuleAliasIndex&, report: mutable ProofReport&, path: mutable darray[sview]&, source_work: mutable usize&) -> (complete: bool, known: bool):
+        def proof_operator_enum_type_path_with_aliases_work(expression: Ast::Expr, caller_scope: darray[sview]&, declaration_line: u32, declaration_offset: usize, caller_module: sview, module_aliases: ProofModuleAliasIndex&, report: mutable ProofReport&, path: mutable darray[sview]&, source_work: mutable usize&) -> (complete: bool, known: bool):
             root: (complete: bool, name: sview) = proof_operator_enum_root_name_with_work(expression, source_work, 0)
             return (false, false) if not root.complete
             if root.name != "" and declaration_line != 0:
-                report.source_types.source_effect_index.work.implicit_effect_work <- source_work
-                generic: (complete: bool, count: usize) = proof_source_conversion_generic_name(root.name, declaration_line, report)
-                source_work <- report.source_types.source_effect_index.work.implicit_effect_work
+                generic: mutable (complete: bool, count: usize) = (false, 0)
+                generic <- proof_operator_enum_generic_identity_count_with_work(root.name, declaration_line, declaration_offset, caller_module, report, source_work)
                 return (false, false) if not generic.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 return (true, false) if generic.count > 0
             active_alias_rows: mutable darray[usize] = []
             return proof_operator_enum_type_path_in_with_work(expression, caller_scope, caller_scope, declaration_line, caller_module, module_aliases, report, &active_alias_rows, path, source_work, 0, true)
 
-        def proof_operator_enum_type_path_with_work(expression: Ast::Expr, caller_scope: darray[sview]&, declaration_line: u32, report: mutable ProofReport&, path: mutable darray[sview]&, source_work: mutable usize&) -> (complete: bool, known: bool):
+        def proof_operator_enum_type_path_with_work(expression: Ast::Expr, caller_scope: darray[sview]&, declaration_line: u32, declaration_offset: usize, caller_module: sview, report: mutable ProofReport&, path: mutable darray[sview]&, source_work: mutable usize&) -> (complete: bool, known: bool):
             empty_aliases: ProofModuleAliasIndex = proof_operator_enum_empty_module_alias_index()
-            proof_operator_enum_type_path_with_aliases_work(expression, caller_scope, declaration_line, "", empty_aliases, report, path, source_work)
+            proof_operator_enum_type_path_with_aliases_work(expression, caller_scope, declaration_line, declaration_offset, caller_module, empty_aliases, report, path, source_work)
 
         def proof_exact_const_enum_member_in_scope_with_work(declarations: darray[Ast::Decl]&, target: darray[sview]&, current: darray[sview]&, member_name: sview, depth: usize, source_work: mutable usize&) -> (types: usize, members: usize, owner: sview, fieldless: bool):
             return (2, 2, "", false) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
@@ -315,7 +340,8 @@ extend ElisaProof:
                     Ast::Decl.Module(module_name, body, _):
                         return (2, 2, "", false) if:
                             not proof_type_audit_work_charge(sview_len(module_name), source_work)
-                            not proof_type_audit_work_charge(current.count + 1, source_work)
+                            not proof_type_audit_work_charge(current.count, source_work)
+                            not proof_type_audit_work_charge(1, source_work)
                         nested_scope: darray[sview] = proof_global_constant_scope_with_module(current, module_name)
                         nested: (types: usize, members: usize, owner: sview, fieldless: bool) = proof_exact_const_enum_member_in_scope_with_work(body, target, nested_scope, member_name, depth + 1, source_work)
                         return (2, 2, "", false) if nested.types > 1 or nested.members > 1
@@ -334,12 +360,13 @@ extend ElisaProof:
                         matches_scope: bool = proof_operator_enum_scope_matches_with_work(current, target, source_work)
                         return (2, 2, "", false) if:
                             source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                            not proof_type_audit_work_charge(sview_len(enum_name) + sview_len(target[target.count - 1]), source_work)
+                            not proof_type_audit_work_charge(sview_len(enum_name), source_work)
+                            not proof_type_audit_work_charge(sview_len(target[target.count - 1]), source_work)
                         if is_const and matches_scope and target[target.count - 1] == enum_name:
                             types <- types + 1
                             owner <- enum_name
                             for variant in variants |member_name, source_work, members, fieldless|:
-                                return (2, 2, "", false) if not proof_type_audit_work_charge(1 + sview_len(member_name) + sview_len(variant.name), source_work)
+                                return (2, 2, "", false) if not proof_type_audit_work_charge(1, source_work) or not proof_type_audit_work_charge(sview_len(member_name), source_work) or not proof_type_audit_work_charge(sview_len(variant.name), source_work)
                                 if variant.name == member_name:
                                     members <- members + 1
                                     fieldless <- variant.fields.count == 0
@@ -348,19 +375,20 @@ extend ElisaProof:
                 return (2, 2, "", false) if types > 1 or members > 1
             return (types, members, owner, fieldless)
 
-        def proof_exact_const_enum_member_owner_with_work(enum_type: Ast::Expr, member_name: sview, declarations: darray[Ast::Decl]&, caller_scope: darray[sview]&, caller_module: sview, module_aliases: ProofModuleAliasIndex&, declaration_line: u32, report: mutable ProofReport&, source_work: mutable usize&) -> (complete: bool, known: bool, owner: sview, fieldless: bool):
+        def proof_exact_const_enum_member_owner_with_work(enum_type: Ast::Expr, member_name: sview, declarations: darray[Ast::Decl]&, caller_scope: darray[sview]&, caller_module: sview, module_aliases: ProofModuleAliasIndex&, declaration_line: u32, declaration_offset: usize, report: mutable ProofReport&, source_work: mutable usize&) -> (complete: bool, path_resolved: bool, known: bool, owner: sview, fieldless: bool):
             path: mutable darray[sview] = []
-            resolved_path: (complete: bool, known: bool) = proof_operator_enum_type_path_with_aliases_work(enum_type, caller_scope, declaration_line, caller_module, module_aliases, report, &path, source_work)
-            return (false, false, "", false) if not resolved_path.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return (true, false, "", false) if not resolved_path.known or path.count < 2
-            return (false, false, "", false) if not proof_type_audit_work_charge(path.count + sview_len(member_name), source_work)
+            resolved_path: (complete: bool, known: bool) = proof_operator_enum_type_path_with_aliases_work(enum_type, caller_scope, declaration_line, declaration_offset, caller_module, module_aliases, report, &path, source_work)
+            return (false, false, false, "", false) if not resolved_path.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return (true, false, false, "", false) if not resolved_path.known
+            return (false, true, false, "", false) if path.count == 0
+            return (false, true, false, "", false) if not proof_type_audit_work_charge(path.count, source_work) or not proof_type_audit_work_charge(sview_len(member_name), source_work)
             for part in path |source_work|:
-                return (false, false, "", false) if not proof_type_audit_work_charge(sview_len(part), source_work)
+                return (false, true, false, "", false) if not proof_type_audit_work_charge(sview_len(part), source_work)
             root_scope: darray[sview] = []
             found: (types: usize, members: usize, owner: sview, fieldless: bool) = proof_exact_const_enum_member_in_scope_with_work(declarations, path, root_scope, member_name, 0, source_work)
-            return (false, false, "", false) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return (true, false, "", false) if found.types != 1 or found.members != 1 or found.owner == ""
-            return (true, true, found.owner, found.fieldless)
+            return (false, true, false, "", false) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return (true, true, false, "", false) if found.types != 1 or found.members != 1 or found.owner == ""
+            return (true, true, true, found.owner, found.fieldless)
 
         def proof_const_enum_alias_operator_override_in_with_work(enum_path: darray[sview]&, module_aliases: ProofModuleAliasIndex&, report: mutable ProofReport&, source_work: mutable usize&) -> (complete: bool, overridden: bool):
             index: ProofSourceEffectIndex& = report.source_types.source_effect_index
@@ -382,7 +410,7 @@ extend ElisaProof:
                 return (false, false) if not proof_type_audit_work_charge(sview_len(index.aliases.alias_owners[alias_row]), source_work)
                 alias_scope: darray[sview] = proof_global_constant_scope_with_module([], index.aliases.alias_owners[alias_row])
                 target_path: mutable darray[sview] = []
-                resolved: (complete: bool, known: bool) = proof_operator_enum_type_path_with_aliases_work(index.aliases.alias_targets[alias_row], alias_scope, index.aliases.alias_lines[alias_row], index.aliases.alias_owners[alias_row], module_aliases, report, &target_path, source_work)
+                resolved: (complete: bool, known: bool) = proof_operator_enum_type_path_with_aliases_work(index.aliases.alias_targets[alias_row], alias_scope, index.aliases.alias_lines[alias_row], 0, index.aliases.alias_owners[alias_row], module_aliases, report, &target_path, source_work)
                 return (false, false) if not resolved.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 # If an overloaded alias cannot be resolved, it may still target this enum.
                 # Suppress generation instead of treating a missing path as unrelated.
@@ -392,7 +420,7 @@ extend ElisaProof:
                 return (false, false) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return (true, false)
 
-        def proof_unique_builtin_const_enum_member_witness_with_context_work(expression: Ast::Expr, report: ProofReport&, caller_module: sview, module_aliases: ProofModuleAliasIndex&, declaration_line: u32, source_work: mutable usize&) -> bool:
+        def proof_unique_builtin_const_enum_member_witness_with_context_work(expression: Ast::Expr, report: ProofReport&, caller_module: sview, module_aliases: ProofModuleAliasIndex&, declaration_line: u32, declaration_offset: usize, source_work: mutable usize&) -> bool:
             marker: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
             return false if not marker.known
             caller_scope: darray[sview] = proof_global_constant_scope_with_module([], caller_module)
@@ -405,16 +433,21 @@ extend ElisaProof:
                     return false if not member.complete or not member.known
                     resolved_type <- Ast::Expr.Ident(member.owner, position)
                 Ast::Expr.Field(enum_type, member_name, _):
-                    exact: (complete: bool, known: bool, owner: sview, fieldless: bool) = proof_exact_const_enum_member_owner_with_work(enum_type, member_name, report.source.source_declarations, caller_scope, caller_module, module_aliases, declaration_line, report, source_work)
+                    exact: (complete: bool, path_resolved: bool, known: bool, owner: sview, fieldless: bool) = proof_exact_const_enum_member_owner_with_work(enum_type, member_name, report.source.source_declarations, caller_scope, caller_module, module_aliases, declaration_line, declaration_offset, report, source_work)
                     return false if not exact.complete
-                    member <- exact if exact.known else proof_unique_const_enum_member_owner_with_work(member_name, report, source_work)
+                    # A resolved type path with a missing or ambiguous exact member is a
+                    # negative result. Never replace it with a file-wide same-name variant.
+                    if exact.path_resolved:
+                        member <- (exact.complete, exact.known, exact.owner, exact.fieldless)
+                    else:
+                        member <- proof_unique_const_enum_member_owner_with_work(member_name, report, source_work)
                     return false if not member.complete
                     resolved_type <- enum_type
                 _:
                     return false
             return false if not member.complete or not member.known or not member.fieldless
             enum_path: mutable darray[sview] = []
-            resolved: (complete: bool, known: bool) = proof_operator_enum_type_path_with_aliases_work(resolved_type, caller_scope, declaration_line, caller_module, module_aliases, report, &enum_path, source_work)
+            resolved: (complete: bool, known: bool) = proof_operator_enum_type_path_with_aliases_work(resolved_type, caller_scope, declaration_line, declaration_offset, caller_module, module_aliases, report, &enum_path, source_work)
             return false if not resolved.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not resolved.known
             aliases: (complete: bool, overridden: bool) = proof_const_enum_alias_operator_override_in_with_work(enum_path, module_aliases, report, source_work)
             return false if not aliases.complete or aliases.overridden
@@ -428,7 +461,7 @@ extend ElisaProof:
         # witness production uses the caller-aware entrypoint above, matching replay's lookup.
         def proof_unique_builtin_const_enum_member_witness_with_work(expression: Ast::Expr, report: ProofReport&, source_work: mutable usize&) -> bool:
             empty_aliases: ProofModuleAliasIndex = proof_operator_enum_empty_module_alias_index()
-            proof_unique_builtin_const_enum_member_witness_with_context_work(expression, report, "", empty_aliases, 0, source_work)
+            proof_unique_builtin_const_enum_member_witness_with_context_work(expression, report, "", empty_aliases, 0, 0, source_work)
 
         def proof_add_const_enum_member_scalar_witnesses_in_with_work(declarations: darray[Ast::Decl]&, current_scope: darray[sview]&, target_path: darray[sview]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, type_expression: Ast::Expr, line: u32, owner: sview, position: Ast::Pos, depth: usize, source_work: mutable usize&) -> bool:
             return false if:
@@ -441,11 +474,12 @@ extend ElisaProof:
                         exact_owner: bool = proof_operator_enum_scope_matches_with_work(current_scope, target_path, source_work)
                         return false if:
                             source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                            not proof_type_audit_work_charge(sview_len(declared_name) + sview_len(target_path[target_path.count - 1]), source_work)
+                            not proof_type_audit_work_charge(sview_len(declared_name), source_work)
+                            not proof_type_audit_work_charge(sview_len(target_path[target_path.count - 1]), source_work)
                         if exact_owner and declared_name == target_path[target_path.count - 1] and is_const:
                             for variant in variants |facts, report, target_path, type_expression, line, owner, position, source_work|:
                                 return true if report.analysis_2.scalar_witness_facts >= PROOF_SCALAR_WITNESS_FUNCTION_BUDGET
-                                return false if not proof_type_audit_work_charge(1 + sview_len(variant.name), source_work)
+                                return false if not proof_type_audit_work_charge(1, source_work) or not proof_type_audit_work_charge(sview_len(variant.name), source_work)
                                 continue if variant.fields.count != 0
                                 member_expression: Ast::Expr = Ast::Expr.Field(type_expression, variant.name, position)
                                 return false if not proof_add_operator_enum_scalar_witness_with_work(facts, report, proof_scalar_term_marker(member_expression, position), line, owner, source_work)
@@ -455,7 +489,7 @@ extend ElisaProof:
                                     shorthand: Ast::Expr = Ast::Expr.ShorthandMember([variant.name], position)
                                     return false if not proof_add_operator_enum_scalar_witness_with_work(facts, report, proof_scalar_term_marker(shorthand, position), line, owner, source_work)
                     Ast::Decl.Module(module_name, body, _):
-                        return false if not proof_type_audit_work_charge(sview_len(module_name) + current_scope.count, source_work)
+                        return false if not proof_type_audit_work_charge(sview_len(module_name), source_work) or not proof_type_audit_work_charge(current_scope.count, source_work)
                         nested_scope: darray[sview] = proof_global_constant_scope_with_module(current_scope, module_name)
                         return false if not proof_add_const_enum_member_scalar_witnesses_in_with_work(body, nested_scope, target_path, facts, report, type_expression, line, owner, position, depth + 1, source_work)
                     Ast::Decl.Scoped(body, _):
@@ -466,10 +500,10 @@ extend ElisaProof:
                         pass
             return true
 
-        def proof_add_const_enum_member_scalar_witnesses_with_work(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, type_expression: Ast::Expr, caller_scope: darray[sview]&, caller_module: sview, module_aliases: ProofModuleAliasIndex&, declaration_line: u32, line: u32, owner: sview, position: Ast::Pos, source_work: mutable usize&) -> bool:
+        def proof_add_const_enum_member_scalar_witnesses_with_work(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, type_expression: Ast::Expr, caller_scope: darray[sview]&, caller_module: sview, module_aliases: ProofModuleAliasIndex&, declaration_line: u32, declaration_offset: usize, line: u32, owner: sview, position: Ast::Pos, source_work: mutable usize&) -> bool:
             return false if not report.analysis_1.operator_impls.valid
             enum_path: mutable darray[sview] = []
-            resolved_path: (complete: bool, known: bool) = proof_operator_enum_type_path_with_aliases_work(type_expression, caller_scope, declaration_line, caller_module, module_aliases, report, &enum_path, source_work)
+            resolved_path: (complete: bool, known: bool) = proof_operator_enum_type_path_with_aliases_work(type_expression, caller_scope, declaration_line, declaration_offset, caller_module, module_aliases, report, &enum_path, source_work)
             return false if not resolved_path.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return true if not resolved_path.known or enum_path.count == 0
             aliases: (complete: bool, overridden: bool) = proof_const_enum_alias_operator_override_in_with_work(enum_path, module_aliases, report, source_work)
@@ -485,7 +519,7 @@ extend ElisaProof:
             protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
             for protocol in protocols |report, type_names, source_work|:
                 for type_name in type_names |report, protocol, source_work|:
-                    return false if not proof_type_audit_work_charge(1 + sview_len(type_name) + sview_len(protocol), source_work)
+                    return false if not proof_type_audit_work_charge(1, source_work) or not proof_type_audit_work_charge(sview_len(type_name), source_work) or not proof_type_audit_work_charge(sview_len(protocol), source_work)
                     implementation: (complete: bool, exists: bool) = proof_report_builtin_operator_impl_exists_with_work(report, type_name, protocol, source_work)
                     return false if not implementation.complete
                     return true if implementation.exists
@@ -498,7 +532,7 @@ extend ElisaProof:
                 return false if not proof_type_audit_work_charge(1, source_work)
                 match declaration:
                     Ast::Decl.Enum(declared_name, variants, is_const, _, _):
-                        return false if not proof_type_audit_work_charge(sview_len(declared_name) + sview_len(enum_name), source_work)
+                        return false if not proof_type_audit_work_charge(sview_len(declared_name), source_work) or not proof_type_audit_work_charge(sview_len(enum_name), source_work)
                         if declared_name == enum_name and is_const:
                             found <- true
                             eligible_names: mutable darray[sview] = []
@@ -512,7 +546,7 @@ extend ElisaProof:
                                 member: (complete: bool, known: bool, owner: sview, fieldless: bool) = proof_report_const_enum_member_lookup_with_work(report, variant.name, source_work)
                                 return false if not member.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                                 continue if not member.known or not member.fieldless or member.owner != enum_name
-                                return false if not proof_type_audit_work_charge(1 + sview_len(variant.name), source_work)
+                                return false if not proof_type_audit_work_charge(1, source_work) or not proof_type_audit_work_charge(sview_len(variant.name), source_work)
                                 eligible_names.push(variant.name)
                                 eligible_values.push(variant_value.value)
                             for first_index in 0..<eligible_names.count |first_index, eligible_names, eligible_values, facts, report, root, type_expression, position, source_work|:
@@ -549,34 +583,3 @@ extend ElisaProof:
                     _:
                         pass
             return true
-
-        def proof_add_const_enum_value_exclusions_with_work(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos, source_work: mutable usize&) -> bool:
-            enum_name: sview = proof_type_head_name_with_work(type_expression, report.source.source_declarations, 0, source_work)
-            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return true if enum_name == ""
-            aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(report.source.source_declarations, enum_name, 0, source_work)
-            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return true if aggregates.enums != 0 or aggregates.const_enums != 1 or aggregates.structs != 0
-            type_alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(report.source.source_declarations, enum_name, 0, source_work)
-            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return true if type_alias.count != 0
-            hierarchy: bool = proof_enum_in_hierarchy_with_work(report.source.source_annotations, enum_name, source_work)
-            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return true if hierarchy
-            type_names: mutable darray[sview] = []
-            return false if not proof_type_operator_impl_names(type_expression, report, &type_names, 0, source_work)
-            for type_name in type_names |report, source_work|:
-                equality_impl: (complete: bool, exists: bool) = proof_report_builtin_operator_impl_exists_with_work(report, type_name, "Eq", source_work)
-                return false if not equality_impl.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                return true if equality_impl.exists
-            match root:
-                Ast::Expr.Field(root_type, root_member, _):
-                    root_name: sview = proof_type_head_name_with_work(root_type, report.source.source_declarations, 0, source_work)
-                    root_owner: (complete: bool, known: bool, owner: sview, fieldless: bool) = proof_unique_const_enum_member_owner_with_work(root_member, report, source_work)
-                    return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not root_owner.complete
-                    return true if root_owner.known and root_owner.fieldless and root_owner.owner == enum_name and root_name == enum_name
-                _:
-                    pass
-            found: mutable bool = false
-            return false if not proof_add_const_enum_value_exclusions_in_with_work(facts, report, root, type_expression, enum_name, position, report.source.source_declarations, 0, &found, source_work)
-            return found and source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT

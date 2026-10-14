@@ -1,14 +1,61 @@
 extend ElisaProof:
     private:
+        def proof_check_function_with_goal_owner(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, body: darray[Ast::Stmt]&, position: Ast::Pos, is_lemma: bool, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> void can[Global.Read, Global.Write]:
+            saved_line: u32 = report.context.current_goal_owner_line
+            saved_offset: u32 = report.context.current_goal_owner_offset
+            saved_caller: usize = functions.call_graph.current_caller
+            saved_caller_is_lemma: bool = functions.call_graph.current_caller_is_lemma
+            saved_caller_module: sview = functions.call_graph.current_caller_module
+            report.context.current_goal_owner_line <- position.line
+            report.context.current_goal_owner_offset <- position.offset
+            functions.call_graph.current_caller_is_lemma <- is_lemma
+            if is_lemma:
+                # A lemma has a distinct identity table. Keep executable caller based helpers
+                # from borrowing whichever function row the scheduler checked previously.
+                functions.call_graph.current_caller <- functions.lookup.names.count
+            proof_check_function(file, function_name, parameters, return_type, body, position, is_lemma, lemmas, functions, report)
+            functions.call_graph.current_caller <- saved_caller
+            functions.call_graph.current_caller_is_lemma <- saved_caller_is_lemma
+            functions.call_graph.current_caller_module <- saved_caller_module
+            report.context.current_goal_owner_line <- saved_line
+            report.context.current_goal_owner_offset <- saved_offset
+
         def proof_check_function(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, body: darray[Ast::Stmt]&, position: Ast::Pos, is_lemma: bool, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> void can[Global.Read, Global.Write]:
             # The logical kernel currently models ordinary equality and integer arithmetic,
             # not IEEE NaN or rounding. Erasing a floating parameter to an untyped identifier
             # would make even x == x an unsound theorem. Stop before publishing obligations
             # that a source-bound tactic could otherwise repair under the wrong semantics.
-            function_index: usize = proof_function_index_at_line(functions, function_name, position.line)
-            caller_scope: darray[sview] = proof_global_constant_scope_with_module([], functions.lookup.owner_modules[function_index]) if function_index < functions.lookup.owner_modules.count else []
-            caller_module: sview = functions.lookup.owner_modules[function_index] if function_index < functions.lookup.owner_modules.count else ""
-            caller_declaration_line: u32 = position.line if function_index < functions.lookup.owner_modules.count else 0
+            # Lemmas are not executable-function rows. Never borrow a same-named executable
+            # caller row for their parameter, recursion, or owner metadata. A lemma's exact module
+            # identity is installed below so callee resolution can still use verified executable
+            # contracts in that source scope.
+            function_index: mutable usize = functions.lookup.names.count if is_lemma else proof_function_index_at_line(functions, function_name, position.line)
+            # Scheduled executable checks know their exact declaration row. Prefer it over the
+            # name+line lookup when all three identity fields agree.
+            scheduled_caller: usize = functions.call_graph.current_caller
+            if not is_lemma and scheduled_caller < functions.lookup.names.count and scheduled_caller < functions.lookup.lines.count and scheduled_caller < functions.lookup.offsets.count:
+                if functions.lookup.names[scheduled_caller] == function_name and functions.lookup.lines[scheduled_caller] == position.line and functions.lookup.offsets[scheduled_caller] == position.offset:
+                    function_index <- scheduled_caller
+            caller_scope: mutable darray[sview] = proof_global_constant_scope_with_module([], functions.lookup.owner_modules[function_index]) if function_index < functions.lookup.owner_modules.count else []
+            caller_module: mutable sview = functions.lookup.owner_modules[function_index] if function_index < functions.lookup.owner_modules.count else ""
+            caller_declaration_line: mutable u32 = position.line if function_index < functions.lookup.owner_modules.count else 0
+            if is_lemma:
+                # Lemma checking may run while `current_caller` still names the last executable
+                # function. Resolve the lemma by its own source identity before selecting scope.
+                lemma_source: (complete: bool, index: usize, declared: bool) = proof_lemma_source_row_with_work(lemmas, function_name, position.line, position.offset, &functions.lookup.module_resolution_work_used)
+                if not lemma_source.complete or not lemma_source.declared or lemma_source.index >= lemmas.identity.owner_modules.count or lemmas.identity.owner_modules.count != lemmas.identity.names.count or lemmas.identity.lines.count != lemmas.identity.names.count or lemmas.identity.offsets.count != lemmas.identity.names.count:
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "lemma-owner-unavailable", position.line, function_name, "lemma declaration owner could not be resolved exactly")
+                    return
+                caller_module <- lemmas.identity.owner_modules[lemma_source.index]
+                functions.call_graph.current_caller_module <- caller_module
+                caller_scope <- proof_global_constant_scope_with_module([], caller_module)
+                caller_declaration_line <- position.line
+            enum_context: (known: bool, declarations: darray[Ast::Decl], module_scope: darray[sview]) = proof_function_enum_context_for_source(file, functions, function_index, function_name, position.line, position.offset, caller_module)
+            if not enum_context.known:
+                report.proof_obligation(false)
+                proof_add_finding(report, "function-enum-context-unavailable", position.line, function_name, "function enum qualification context could not be resolved to the exact source declaration")
+                return
             report.context.current_return_signed_width <- 0
             can Global.Write:
                 proof_float_mode <- false
@@ -17,11 +64,11 @@ extend ElisaProof:
             # proof model cannot represent before publishing any obligations; in particular,
             # semantic analysis permits Named compound targets as possible overloads even
             # though the backend has no compound-operator dispatch path.
-            unsupported_default_operator: mutable bool = proof_structural_typed_operator_defaults_have_overload(parameters, position.line, report)
+            unsupported_default_operator: mutable bool = proof_structural_typed_operator_defaults_have_overload(parameters, position.line, report, caller_module, caller_declaration_line != 0)
             unsupported_default_index: mutable bool = false
-            for parameter in parameters |report, unsupported_default_index|:
-                unsupported_default_index <- true if parameter.has_default and proof_source_expression_has_unsafe_runtime_index(parameter.default_value, parameters, report, 0, [])
-            if unsupported_default_operator or unsupported_default_index or proof_structural_typed_operator_statements_have_overload(body, parameters, position.line, report, 0) or proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, []):
+            for parameter in parameters |parameters, report, unsupported_default_index, position, caller_module, caller_declaration_line|:
+                unsupported_default_index <- true if parameter.has_default and proof_source_expression_has_unsafe_runtime_index(parameter.default_value, parameters, report, 0, [], position.line, caller_module, caller_declaration_line != 0)
+            if unsupported_default_operator or unsupported_default_index or proof_structural_typed_operator_statements_have_overload(body, parameters, position.line, report, 0, caller_module, caller_declaration_line != 0) or proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, [], position.line, caller_module, caller_declaration_line != 0):
                 report.proof_obligation(false)
                 proof_add_finding(report, "source-operator-unsupported", position.line, function_name, "function body contains operator or indexing dispatch that is not modeled by source proof admission")
                 return
@@ -65,22 +112,22 @@ extend ElisaProof:
             signature_ensures: darray[Ast::Expr] = signature_contracts.postconditions
             postconditions.extend(signature_ensures)
             for index in 0..<postconditions.count |index, postconditions, file, functions, function_index|:
-                postconditions[index] <- proof_qualify_function_enum_contract(file, functions, function_index, postconditions[index])
+                postconditions[index] <- proof_qualify_function_enum_contract_in_context(enum_context.declarations, enum_context.module_scope, functions, function_index, parameters, postconditions[index], file.enum_annotations)
                 if functions.lookup.module_resolution_work_exhausted:
                     proof_add_budget_finding(report, "resource-analysis-budget", position.line, function_name, "qualified source rewriting exceeded its shared source-work bound", "module-call-resolution-work", functions.lookup.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     return
             postconditions.extend(proof_unfolded_ensures(parameters, body, return_type, file.top_decls, &report.source_types.source_effect_index.work.implicit_effect_work)) if postconditions.count == 0
-            if proof_structural_typed_operator_contracts_have_overload(signature_requires, parameters, position.line, report) or proof_structural_typed_operator_contracts_have_overload(signature_ensures, parameters, position.line, report):
+            if proof_structural_typed_operator_contracts_have_overload(signature_requires, parameters, position.line, report, caller_module, caller_declaration_line != 0) or proof_structural_typed_operator_contracts_have_overload(signature_ensures, parameters, position.line, report, caller_module, caller_declaration_line != 0):
                 report.proof_obligation(false)
                 proof_add_finding(report, "source-operator-unsupported", position.line, function_name, "signature contract contains operator dispatch that is not modeled by source proof admission")
                 return
-            for contract in signature_requires |parameters, report|:
-                if proof_source_expression_has_unsafe_runtime_index(contract, parameters, report, 0, []):
+            for contract in signature_requires |parameters, report, position, caller_module, caller_declaration_line|:
+                if proof_source_expression_has_unsafe_runtime_index(contract, parameters, report, 0, [], position.line, caller_module, caller_declaration_line != 0):
                     report.proof_obligation(false)
                     proof_add_finding(report, "source-operator-unsupported", Ast::expr_pos(contract).line, function_name, "signature contract contains indexing dispatch that is not modeled by source proof admission")
                     return
-            for contract in signature_ensures |parameters, report|:
-                if proof_source_expression_has_unsafe_runtime_index(contract, parameters, report, 0, []):
+            for contract in signature_ensures |parameters, report, position, caller_module, caller_declaration_line|:
+                if proof_source_expression_has_unsafe_runtime_index(contract, parameters, report, 0, [], position.line, caller_module, caller_declaration_line != 0):
                     report.proof_obligation(false)
                     proof_add_finding(report, "source-operator-unsupported", Ast::expr_pos(contract).line, function_name, "signature contract contains indexing dispatch that is not modeled by source proof admission")
                     return
@@ -128,11 +175,18 @@ extend ElisaProof:
                 frame_parameters.push(parameter.name)
                 fixed_before: usize = fixed_names.count
                 proof_collect_fixed_array_places_with_work(Ast::Expr.Ident(parameter.name, position), parameter.type_expression, report.source.source_declarations, &fixed_names, &fixed_extents, &extent_constants, 0, &fixed_budget, &report.source_types.source_effect_index.work.implicit_effect_work)
+                if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    report.proof_obligation(false)
+                    proof_add_budget_finding(report, "resource-analysis-budget", position.line, function_name, "fixed-array place collection exceeded its shared source-work budget", "fixed-array-place-collection-work", report.source_types.source_effect_index.work.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return
                 # A reference to a single scalar is a one-element place, so `x[0]` reads and writes it.
                 scalar_reference: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type_with_work(parameter.type_expression, report.source.source_declarations, 0, &report.source_types.source_effect_index.work.implicit_effect_work)
-                if fixed_names.count == fixed_before and scalar_reference.known:
+                # Scalar-reference entries use the remaining collection visits and the global
+                # entry cap; they cannot grow a parameter-sized vector outside either bound.
+                if fixed_names.count == fixed_before and scalar_reference.known and fixed_budget > 0 and fixed_names.count < PROOF_FIXED_PLACE_ENTRY_LIMIT:
                     fixed_names.push(Ast::Expr.Ident(parameter.name, position))
                     fixed_extents.push(1)
+                    fixed_budget <- fixed_budget - 1
             old_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
             proof_initialize_old_parameter_values_with_work(parameters, &old_values, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, position.line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, position, &report.source_types.source_effect_index.work.implicit_effect_work)
             changes: mutable darray[ProofFramePlace] = proof_frame_body_places(body, "changes")
@@ -142,7 +196,7 @@ extend ElisaProof:
             proof_frame_collect_annotations(file, functions.type_indexes.frame_annotation_index, function_name, &header_changes, &header_preserves)
             changes.extend(header_changes)
             preserves.extend(header_preserves)
-            if not proof_emit_prepared_frame_events(report, function_name, position.line):
+            if not proof_emit_prepared_frame_events(report, function_name, position.line, position.offset):
                 proof_check_frame_specs(body, changes, preserves, frame_parameters, report, function_name)
                 proof_check_header_frame_specs(header_changes, header_preserves, frame_parameters, report, function_name)
             facts: mutable darray[Ast::Expr] = []
@@ -160,7 +214,7 @@ extend ElisaProof:
             report.threading.value_thread_site <- false
             report.analysis_2.scalar_witness_facts <- 0
             for postcondition in postconditions |facts, report, position, function_name|:
-                proof_add_qualified_enum_member_witnesses(postcondition, facts, report, position.line, function_name, caller_module, functions.lookup.module_aliases, 0)
+                proof_add_qualified_enum_member_witnesses(postcondition, facts, report, position.line, position.offset.usize(), function_name, caller_module, functions.lookup.module_aliases, 0)
             report.analysis_1.budgets.frame_call_steps <- 0
             report.analysis_1.budgets.frame_call_source_work <- 0
             report.analysis_1.budgets.frame_call_reported <- false
@@ -176,7 +230,7 @@ extend ElisaProof:
             report.analysis_1.budgets.assert_by_source_work <- 0
             report.analysis_1.budgets.assert_by_source_reported <- false
             # Share bounded headroom with medium functions that reuse a small set of call summaries.
-            call_target_count: usize = proof_return_analysis_call_target_count(functions, function_index)
+            call_target_count: usize = proof_return_analysis_call_target_count(functions, function_index) if function_index < functions.lookup.names.count else proof_return_analysis_lemma_call_target_count(functions, body, parameters, signature_requires, signature_ensures)
             report.analysis_1.budgets.return_fact_state_budget <- proof_return_analysis_fact_state_budget(
                 function_name, body.count, parameters.count, call_target_count, proof_return_analysis_call_summary_body_count(body)
             )
@@ -205,7 +259,7 @@ extend ElisaProof:
             # reaches external storage, which an unrelated callee may mutate through another
             # path. Such a root must not justify call-stable field/count facts.
             for parameter in parameters |report|:
-                parameter_markers: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(parameter.type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, position.line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
+                parameter_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(parameter.type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, position.line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
                 parameter_has_generic: bool = proof_resource_type_mentions_owner_generic_with_work(parameter.type_expression, position.line, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work, 0)
                 local_value: bool = not parameter_has_generic and not parameter_markers.reference and proof_type_is_reference_free_with_work(parameter.type_expression, report.source.source_declarations, report.source.source_annotations, 0, &report.source_types.source_effect_index.work.implicit_effect_work) and not proof_type_contains_borrowed_view_with_work(parameter.type_expression, report.source.source_declarations, 0, &report.source_types.source_effect_index.work.implicit_effect_work)
                 plain_value: bool = not parameter_has_generic and not parameter_markers.reference and proof_value_binding_type(parameter.type_expression, report, 0)
@@ -219,7 +273,7 @@ extend ElisaProof:
                 signed_width: i64 = 0 if parameter_has_generic else proof_signed_type_width_index_with_work(parameter.type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, 0, &report.source_types.source_effect_index.work.implicit_effect_work)
                 proof_add_type_bound_fact(facts, report, proof_signed_type_marker(Ast::Expr.Ident(parameter.name, position), signed_width, position), position.line, function_name) if signed_width > 0
                 proof_add_signed_upper_bound_fact(facts, report, parameter.name, signed_width, position.line, function_name, position)
-                proof_add_primitive_operator_witnesses_in_scope_with_aliases(facts, report, Ast::Expr.Ident(parameter.name, position), parameter.type_expression, position, caller_scope, caller_module, functions.lookup.module_aliases, caller_declaration_line)
+                proof_add_primitive_operator_witnesses_in_scope_with_aliases(facts, report, Ast::Expr.Ident(parameter.name, position), parameter.type_expression, position, caller_scope, caller_module, functions.lookup.module_aliases, caller_declaration_line, position.offset.usize())
                 # An unsigned width marker already witnesses a primitive scalar type, so only the
                 # remaining scalar parameters need the narrower marker. Congruence consumes it to
                 # establish that this name's operators cannot be a user protocol implementation.
@@ -235,17 +289,26 @@ extend ElisaProof:
                         shorthand_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
                         proof_add_const_enum_shorthand_witnesses(report.source.source_declarations, report.source.source_declarations, enum_owner, facts, report, position.line, function_name, position, &shorthand_budget, 0, &report.source_types.source_effect_index.work.implicit_effect_work)
                 witness_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
-                (proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(parameter.name, position), parameter.type_expression, position.line, function_name, position, caller_scope, caller_module, functions.lookup.module_aliases, caller_declaration_line, &witness_budget, 0) can Global.Read) if scalar_kind != 1
+                (proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(parameter.name, position), parameter.type_expression, position.line, function_name, position, caller_scope, caller_module, functions.lookup.module_aliases, caller_declaration_line, position.offset.usize(), &witness_budget, 0) can Global.Read) if scalar_kind != 1
             checked_body: mutable darray[Ast::Stmt] = []
             checked_body.extend(body)
-            checked_body <- proof_qualify_function_enum_body(file, functions, function_index, checked_body, 0)
+            checked_body <- proof_qualify_function_enum_body_in_source_context(enum_context.declarations, enum_context.module_scope, functions, function_index, parameters, checked_body, file.enum_annotations, 0)
             if functions.lookup.module_resolution_work_exhausted:
                 proof_add_budget_finding(report, "resource-analysis-budget", position.line, function_name, "qualified source rewriting exceeded its shared source-work bound", "module-call-resolution-work", functions.lookup.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
-            proof_add_qualified_enum_member_body_witnesses(checked_body, facts, report, position.line, function_name, caller_module, functions.lookup.module_aliases, 0)
+            proof_add_qualified_enum_member_body_witnesses(checked_body, facts, report, position.line, position.offset.usize(), function_name, caller_module, functions.lookup.module_aliases, 0)
+            if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", position.line, function_name, "function-entry witness preparation exceeded its shared source-work budget", "function-entry-source-work", report.source_types.source_effect_index.work.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             facts_before_constants: usize = facts.count
             proof_import_global_constant_facts(file, function_name, parameters, body, extent_constants, &names, &values, &facts, report, position, functions.type_indexes.type_audit_index)
+            if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", position.line, function_name, "global constant witness import exceeded its shared source-work budget", "global-constant-source-work", report.source_types.source_effect_index.work.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             proof_import_global_mutable_array_facts(file, function_name, parameters, body, &fixed_names, &fixed_extents, &facts, report, position)
+            if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", position.line, function_name, "global mutable-array witness import exceeded its shared source-work budget", "global-array-witness-work", report.source_types.source_effect_index.work.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             proof_import_qualified_constant_facts(file, function_name, parameters, &preconditions, &postconditions, &checked_body, &facts, report, position, functions, function_index)
             proof_resolve_global_constants_in_contracts(&preconditions, &postconditions, names, values, functions, function_index)
             # Counted before the preconditions, which are body facts and not constants.
@@ -274,15 +337,15 @@ extend ElisaProof:
                 headroom: usize = constant_facts * 4 + PROOF_RETURN_FACT_STATE_BUDGET
                 report.analysis_1.budgets.return_fact_state_budget <- headroom if headroom < PROOF_RETURN_FACT_STATE_ENTRY_CAP else PROOF_RETURN_FACT_STATE_ENTRY_CAP
             function_flow: mutable ProofFlow = proof_empty_flow()
-            report.context.current_source_postcondition_count <- body_postcondition_count
+            # Bind signature ensures as well as body ensures. Their source obligation indices
+            # follow the same body-then-signature order used by `postconditions` below.
+            report.context.current_source_postcondition_count <- body_postcondition_count + signature_ensures.count
             report.context.current_source_postcondition_line <- position.line
             report.context.current_source_postcondition_name <- function_name
+            report.context.current_source_postcondition_offset <- position.offset
             report.analysis_2.trace_owner_line <- position.line
             (proof_check_returns(checked_body, &names, &values, &facts, postconditions, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, function_name, lemma_steps, file.enum_annotations, 0, "", empty_loop_invariants, 0, &function_flow) can Global{Read,Write})
             report.analysis_2.trace_owner_line <- 0
-            report.context.current_source_postcondition_count <- 0
-            report.context.current_source_postcondition_line <- 0
-            report.context.current_source_postcondition_name <- ""
             # A cutoff leaves the function body unsupported. Do not spend time attempting
             # postconditions on the conservative placeholder flow, and never infer that they
             # held merely because an abandoned branch was represented as terminal.
@@ -290,10 +353,10 @@ extend ElisaProof:
                 function_flow.normal <- false
                 function_flow.valid <- false
             if not function_flow.normal:
-                for source_index in 0..<body_postcondition_count |source_index, report, position, function_name|:
+                for source_index in 0..<report.context.current_source_postcondition_count |source_index, report, position, function_name|:
                     found: mutable bool = false
                     for obligation in report.results.obligation_inventory |source_index, position, function_name, found|:
-                        found <- true if obligation.source_kind == "postcondition" and obligation.source_line == position.line and obligation.source_name == function_name and obligation.source_obligation_index == source_index
+                        found <- true if obligation.source_kind == "postcondition" and obligation.source_line == position.line and obligation.source_name == function_name and obligation.source_function_offset == position.offset and obligation.source_obligation_index == source_index
                     report.proof_obligation_for_source(false, position.line, function_name, "postcondition", source_index) if not found
             if function_flow.normal:
                 postcondition_index: mutable usize = 0
@@ -302,11 +365,15 @@ extend ElisaProof:
                     (proof_add_quantified_call_summaries(normal_goal, facts, functions, file.enum_annotations, report, function_name) can Global{Read,Write}) if proof_expr_has_call(normal_goal)
                     proof_add_pure_call_witnesses(normal_goal, facts, functions, report, position.line, function_name, 0) if proof_expr_has_call(normal_goal)
                     proven: bool = (proof_certify_goal_with_rule(facts, normal_goal, report, position.line, function_name, file.enum_annotations, proof_quantifier_rule(ensure, file.enum_annotations)) can Global{Read,Write})
-                    if postcondition_index < body_postcondition_count:
+                    if postcondition_index < report.context.current_source_postcondition_count:
                         report.proof_obligation_for_source(proven, position.line, function_name, "postcondition", postcondition_index)
                     else:
                         report.proof_obligation(proven)
                     postcondition_index <- postcondition_index + 1
                     proof_add_goal_failure(report, "ensure-unproven", position.line, function_name, "normal completion does not establish ensure", facts, normal_goal) if not proven
+            report.context.current_source_postcondition_count <- 0
+            report.context.current_source_postcondition_line <- 0
+            report.context.current_source_postcondition_name <- ""
+            report.context.current_source_postcondition_offset <- 0
 
             report.analysis_1.frame_producer.active_name <- ""

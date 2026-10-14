@@ -24,82 +24,200 @@ extend ElisaProof:
                     pass
             return -1
 
-        def proof_global_mutable_array_annotation_count(annotations: darray[Ast::EnumAnnotation]&, name: sview, position: Ast::Pos) -> usize:
+        def proof_global_mutable_array_annotation_count(annotations: darray[Ast::EnumAnnotation]&, name: sview, position: Ast::Pos, report: mutable ProofReport&) -> usize:
             count: mutable usize = 0
-            for annotation in annotations |name, position, count|:
+            for annotation in annotations |name, position, count, report|:
+                return 2 if:
+                    not proof_source_index_work_charge(report, 1)
+                    not proof_source_index_work_charge(report, sview_len(annotation.name))
+                    not proof_source_index_work_charge(report, sview_len(annotation.owner))
+                    not proof_source_index_work_charge(report, sview_len(annotation.module))
                 count <- count + 1 if annotation.name == "__global_mutable" and annotation.owner == name and annotation.module == "" and annotation.line == position.line and annotation.offset == position.offset and annotation.pos.line == position.line and annotation.pos.offset == position.offset
             return count
 
         # Count competing root value declarations conservatively. Scoped blocks preserve the
         # current namespace; nested modules are a different namespace and are not root bindings.
-        def proof_global_mutable_array_root_binding_count(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> usize:
+        def proof_global_mutable_array_root_binding_count(declarations: darray[Ast::Decl]&, name: sview, depth: usize, report: mutable ProofReport&) -> usize:
             return 2 if depth >= PROOF_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT
             count: mutable usize = 0
-            for declaration in declarations |name, depth, count|:
+            for declaration in declarations |name, depth, count, report|:
+                return 2 if not proof_source_index_work_charge(report, 1)
                 match declaration:
                     Ast::Decl.Const(candidate, _, _, _, _):
+                        return 2 if not proof_source_index_work_charge(report, sview_len(candidate))
                         count <- count + 1 if candidate == name
                     Ast::Decl.Func(candidate, _, _, _, _, _, _):
+                        return 2 if not proof_source_index_work_charge(report, sview_len(candidate))
                         count <- count + 1 if candidate == name
                     Ast::Decl.Extern(candidate, _, _, _, _, _, _, _):
+                        return 2 if not proof_source_index_work_charge(report, sview_len(candidate))
                         count <- count + 1 if candidate == name
                     Ast::Decl.Import(candidate, _):
+                        return 2 if not proof_source_index_work_charge(report, sview_len(candidate))
                         count <- count + 1 if candidate == name
                     Ast::Decl.Module(candidate, _, _):
+                        return 2 if not proof_source_index_work_charge(report, sview_len(candidate))
                         count <- count + 1 if candidate == name
                     Ast::Decl.Scoped(body, _):
-                        count <- count + proof_global_mutable_array_root_binding_count(body, name, depth + 1)
+                        nested_count: usize = proof_global_mutable_array_root_binding_count(body, name, depth + 1, report)
+                        return 2 if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        count <- count + nested_count
                     _:
                         pass
             return count
 
         def proof_add_global_mutable_array_type_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, owner: sview) -> void:
             for trace in report.analysis_1.traces.records |facts, report, expression, line, owner|:
+                return if:
+                    not proof_source_index_work_charge(report, 1)
+                    not proof_source_index_work_charge(report, sview_len(trace.kind))
+                    not proof_source_index_work_charge(report, sview_len(trace.name))
+                    not proof_source_index_work_charge(report, sview_len(owner))
                 continue if trace.kind != "global-mutable-array-type" or trace.name != owner
+                return if not proof_global_mutable_array_expr_compare_charge(expression, trace.expression, report)
                 return if proof_expr_equal(trace.expression, expression)
+            fact_present: mutable bool = false
+            for existing in facts |existing, expression, report|:
+                return if not proof_source_index_work_charge(report, 1) or not proof_global_mutable_array_expr_compare_charge(existing, expression, report)
+                fact_present <- true if proof_expr_equal(existing, expression)
+            seen_present: mutable bool = false
+            for existing in report.analysis_1.type_bounds.seen |existing, expression, report|:
+                return if not proof_source_index_work_charge(report, 1) or not proof_global_mutable_array_expr_compare_charge(existing, expression, report)
+                seen_present <- true if proof_expr_equal(existing, expression)
+            return if not seen_present and not proof_global_mutable_array_expr_hash_charge(expression, report)
             return if not proof_kernel_report_append_allowed(report, facts.count, 1, owner)
             return if not proof_trace_fact(report, expression, "global-mutable-array-type", line, owner)
-            facts.push(expression) if not (any existing in facts where proof_expr_equal(existing, expression))
-            if not (any existing in report.analysis_1.type_bounds.seen where proof_expr_equal(existing, expression)):
+            facts.push(expression) if not fact_present
+            if not seen_present:
                 report.analysis_1.type_bounds.seen.push(expression)
                 report.analysis_1.type_bounds.seen_hashes.push(proof_expr_shape_hash(expression, 0))
 
         # A fixed extent and the function's exact `requires index < N` fact together imply
         # `index < global.count`. Preserve that derivation as a distinct boundary fact so replay
         # can bind it to both source declarations instead of accepting a generic type-bound axiom.
-        def proof_global_mutable_array_has_precondition_bound(facts: darray[Ast::Expr]&, report: ProofReport&, bound: Ast::Expr, owner: sview) -> bool:
-            return false if not (any fact in facts where proof_expr_equal(fact, bound))
-            for trace in report.analysis_1.traces.records |bound, owner|:
-                continue if trace.kind != "precondition" or trace.name != owner
-                return true if proof_expr_equal(trace.expression, bound)
-            return false
+        def proof_global_mutable_array_expr_compare_charge(left: Ast::Expr, right: Ast::Expr, report: mutable ProofReport&) -> bool:
+            work: usize = report.source_types.source_effect_index.work.implicit_effect_work
+            left_cost: mutable usize = 0
+            right_cost: mutable usize = 0
+            if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not proof_replay_summary_expr_cost(left, &left_cost, work, 0) or left_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 2:
+                report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            work <- work + left_cost * 2
+            if not proof_replay_summary_expr_cost(right, &right_cost, work, 0) or right_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 2:
+                report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return false if not proof_source_index_work_charge(report, left_cost) or not proof_source_index_work_charge(report, left_cost)
+            return false if not proof_source_index_work_charge(report, right_cost) or not proof_source_index_work_charge(report, right_cost)
+            return true
 
-        def proof_add_global_mutable_array_index_bound_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, owner: sview) -> void:
+        def proof_global_mutable_array_expr_hash_charge(expression: Ast::Expr, report: mutable ProofReport&) -> bool:
+            work: usize = report.source_types.source_effect_index.work.implicit_effect_work
+            cost: mutable usize = 0
+            if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not proof_replay_summary_expr_cost(expression, &cost, work, 0) or cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 2:
+                report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return false if not proof_source_index_work_charge(report, cost) or not proof_source_index_work_charge(report, cost)
+            return true
+
+        def proof_global_mutable_array_has_precondition_bound(facts: darray[Ast::Expr]&, report: mutable ProofReport&, bound: Ast::Expr, owner: sview) -> (complete: bool, found: bool):
+            found: mutable bool = false
+            for fact in facts |bound, report, found|:
+                return (false, false) if not proof_source_index_work_charge(report, 1) or not proof_global_mutable_array_expr_compare_charge(fact, bound, report)
+                found <- true if proof_expr_equal(fact, bound)
+            return (true, false) if not found
+            for trace in report.analysis_1.traces.records |bound, owner|:
+                return (false, false) if:
+                    not proof_source_index_work_charge(report, 1)
+                    not proof_source_index_work_charge(report, sview_len(trace.kind))
+                    not proof_source_index_work_charge(report, sview_len(trace.name))
+                    not proof_source_index_work_charge(report, sview_len(owner))
+                continue if trace.kind != "precondition" or trace.name != owner
+                return (false, false) if not proof_global_mutable_array_expr_compare_charge(trace.expression, bound, report)
+                return (true, true) if proof_expr_equal(trace.expression, bound)
+            return (true, false)
+
+        def proof_add_global_mutable_array_index_bound_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, owner: sview) -> bool:
             for trace in report.analysis_1.traces.records |expression, owner|:
+                return false if:
+                    not proof_source_index_work_charge(report, 1)
+                    not proof_source_index_work_charge(report, sview_len(trace.kind))
+                    not proof_source_index_work_charge(report, sview_len(trace.name))
+                    not proof_source_index_work_charge(report, sview_len(owner))
                 continue if trace.kind != "global-mutable-array-index-bound" or trace.name != owner
-                return if proof_expr_equal(trace.expression, expression)
-            return if not proof_kernel_report_append_allowed(report, facts.count, 1, owner)
-            return if not proof_trace_fact(report, expression, "global-mutable-array-index-bound", line, owner)
-            facts.push(expression) if not (any existing in facts where proof_expr_equal(existing, expression))
-            if not (any existing in report.analysis_1.type_bounds.seen where proof_expr_equal(existing, expression)):
+                return false if not proof_global_mutable_array_expr_compare_charge(trace.expression, expression, report)
+                return true if proof_expr_equal(trace.expression, expression)
+            fact_present: mutable bool = false
+            for existing in facts |existing, expression, report|:
+                return false if not proof_source_index_work_charge(report, 1) or not proof_global_mutable_array_expr_compare_charge(existing, expression, report)
+                fact_present <- true if proof_expr_equal(existing, expression)
+            seen_present: mutable bool = false
+            for existing in report.analysis_1.type_bounds.seen |existing, expression, report|:
+                return false if not proof_source_index_work_charge(report, 1) or not proof_global_mutable_array_expr_compare_charge(existing, expression, report)
+                seen_present <- true if proof_expr_equal(existing, expression)
+            return false if not seen_present and not proof_global_mutable_array_expr_hash_charge(expression, report)
+            return false if not proof_kernel_report_append_allowed(report, facts.count, 1, owner)
+            return false if not proof_trace_fact(report, expression, "global-mutable-array-index-bound", line, owner)
+            facts.push(expression) if not fact_present
+            if not seen_present:
                 report.analysis_1.type_bounds.seen.push(expression)
                 report.analysis_1.type_bounds.seen_hashes.push(proof_expr_shape_hash(expression, 0))
+            return true
 
         def proof_global_mutable_array_import_root(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, function_name: sview, function_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, fixed_names: mutable darray[Ast::Expr]&, fixed_extents: mutable darray[i64]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, budget: mutable usize&, depth: usize) -> void:
             return if depth >= PROOF_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT or budget == 0
             for declaration in declarations |annotations, function_name, function_line, parameters, body, fixed_names, fixed_extents, facts, report, budget, depth|:
+                return if not proof_source_index_work_charge(report, 1)
                 match declaration:
                     Ast::Decl.Const(global_name, global_type, _, is_global, global_position):
                         continue if not is_global or budget == 0
+                        return if not proof_source_index_work_charge(report, sview_len(global_name))
                         extent: i64 = proof_global_mutable_array_literal_extent(global_type, 0)
                         continue if extent < 0
-                        continue if proof_global_mutable_array_root_binding_count(report.source.source_declarations, global_name, 0) != 1
-                        continue if proof_global_mutable_array_annotation_count(annotations, global_name, global_position) != 1
-                        continue if any parameter in parameters where parameter.name == global_name
-                        continue if proof_replay_source_body_declares(report.source.source_declarations, body, global_name)
+                        root_bindings: usize = proof_global_mutable_array_root_binding_count(report.source.source_declarations, global_name, 0, report)
+                        return if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        continue if root_bindings != 1
+                        annotation_count: usize = proof_global_mutable_array_annotation_count(annotations, global_name, global_position, report)
+                        return if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        continue if annotation_count != 1
+                        parameter_shadowed: mutable bool = false
+                        for parameter in parameters |parameter_shadowed, global_name, report|:
+                            return if:
+                                not proof_source_index_work_charge(report, 1)
+                                not proof_source_index_work_charge(report, sview_len(parameter.name))
+                                not proof_source_index_work_charge(report, sview_len(global_name))
+                            parameter_shadowed <- true if parameter.name == global_name
+                        continue if parameter_shadowed
+                        body_declaration_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
+                        body_declares: bool = proof_replay_source_body_declares_with_work(report.source.source_declarations, body, global_name, &body_declaration_work)
+                        report.source_types.source_effect_index.work.implicit_effect_work <- body_declaration_work
+                        return if body_declaration_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        continue if body_declares
+                        body_cost: mutable usize = 0
+                        body_work: usize = report.source_types.source_effect_index.work.implicit_effect_work
+                        if not proof_replay_summary_expr_cost_body(body, &body_cost, body_work, 0) or body_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or body_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - body_work) / 2:
+                            report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                            return
+                        report.source_types.source_effect_index.work.implicit_effect_work <- body_work + body_cost * 2
                         continue if not proof_global_constant_body_mentions_name(body, global_name)
                         root: Ast::Expr = Ast::Expr.Ident(global_name, global_position)
-                        continue if proof_fixed_array_extent_for_object(root, fixed_names, fixed_extents) >= 0
+                        fixed_name_work: mutable usize = fixed_names.count
+                        return if fixed_name_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or sview_len(global_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - fixed_name_work
+                        fixed_name_work <- fixed_name_work + sview_len(global_name)
+                        for fixed_name in fixed_names |fixed_name, fixed_name_work, report|:
+                            fixed_name_cost: mutable usize = 0
+                            candidate_compare_cost: usize = sview_len(global_name)
+                            if candidate_compare_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - fixed_name_work:
+                                report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                                return
+                            fixed_name_work <- fixed_name_work + candidate_compare_cost
+                            if not proof_replay_summary_expr_cost(fixed_name, &fixed_name_cost, 0, 0) or fixed_name_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - fixed_name_work) / 2:
+                                report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                                return
+                            fixed_name_work <- fixed_name_work + fixed_name_cost * 2
+                        return if not proof_source_index_work_charge(report, fixed_name_work)
+                        fixed_lookup: (complete: bool, extent: i64) = proof_fixed_array_extent_for_object(root, fixed_names, fixed_extents, &report.source_types.source_effect_index.work.implicit_effect_work)
+                        return if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        continue if fixed_lookup.complete and fixed_lookup.extent >= 0
                         budget <- budget - 1
                         fixed_names.push(root)
                         fixed_extents.push(extent)
@@ -123,6 +241,8 @@ extend ElisaProof:
             # replay can bind their full namespace identities.
             return if function_matches != 1 or function_scope.count != 0
             report.analysis_2.trace_owner_line <- position.line
-            budget: mutable usize = PROOF_GLOBAL_MUTABLE_ARRAY_IMPORT_BUDGET
+            available_places: mutable usize = 0
+            available_places <- PROOF_FIXED_PLACE_ENTRY_LIMIT - fixed_names.count if fixed_names.count < PROOF_FIXED_PLACE_ENTRY_LIMIT
+            budget: mutable usize = PROOF_GLOBAL_MUTABLE_ARRAY_IMPORT_BUDGET if available_places >= PROOF_GLOBAL_MUTABLE_ARRAY_IMPORT_BUDGET else available_places
             proof_global_mutable_array_import_root(file.top_decls, file.enum_annotations, function_name, position.line, parameters, body, fixed_names, fixed_extents, facts, report, &budget, 0)
             report.analysis_2.trace_owner_line <- 0

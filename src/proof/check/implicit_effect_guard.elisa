@@ -9,7 +9,7 @@ extend ElisaProof:
                 return 2
             count: mutable usize = 0
             for name in names |wanted, count, source_work|:
-                if not proof_report_source_work_charge(1 + sview_len(name), source_work):
+                if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(name), source_work):
                     source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
                     return 2
                 count <- count + 1 if name == wanted
@@ -31,7 +31,7 @@ extend ElisaProof:
             index.callables.callable_index_counts.clear()
             index.callables.callable_index_valid <- false
             count: usize = index.callables.callable_names.count
-            return false if count != index.callables.callable_return_types.count or count != index.callables.callable_lines.count
+            return false if count != index.callables.callable_return_types.count or count != index.callables.callable_lines.count or count != index.callables.callable_owners.count
             if count == 0:
                 index.callables.callable_index_valid <- true
                 return true
@@ -82,7 +82,7 @@ extend ElisaProof:
             visibility: (complete: bool, safe: bool) = proof_source_conversion_root_alias_visibility_scan(report.source.source_declarations, report.source.source_annotations, source_work, 0)
             return false if not visibility.complete
             report.source_types.source_effect_index.aliases.bare_alias_root_fallback_valid <- visibility.safe
-            index: (complete: bool, declared_types: darray[sview], drop_hook_types: darray[sview], alias_names: darray[sview], alias_targets: darray[Ast::Expr], callable_names: darray[sview], callable_return_types: darray[Ast::Expr], callable_lines: darray[u32], field_conversion_names: darray[sview], field_conversion_custom_cast_present: bool, declaration_count: usize) = proof_source_drop_type_index_with_work(report.source.source_declarations, report.source.source_annotations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, report.source_types.source_effect_index, report.source_types.source_effect_index.aliases.bare_alias_root_fallback_valid, &report.source_types.source_effect_index.aliases.alias_index_hashes, &report.source_types.source_effect_index.aliases.alias_index_values, &report.source_types.source_effect_index.aliases.alias_index_counts, source_work)
+            index: (complete: bool, declared_types: darray[sview], drop_hook_types: darray[sview], alias_names: darray[sview], alias_targets: darray[Ast::Expr], callable_names: darray[sview], callable_return_types: darray[Ast::Expr], callable_lines: darray[u32], callable_owners: darray[sview], field_conversion_names: darray[sview], field_conversion_custom_cast_present: bool, declaration_count: usize) = proof_source_drop_type_index_with_work(report.source.source_declarations, report.source.source_annotations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, report.source_types.source_effect_index, report.source_types.source_effect_index.aliases.bare_alias_root_fallback_valid, &report.source_types.source_effect_index.aliases.alias_index_hashes, &report.source_types.source_effect_index.aliases.alias_index_values, &report.source_types.source_effect_index.aliases.alias_index_counts, source_work)
             return false if not index.complete
             report.source_types.source_effect_index.types.declared_types <- index.declared_types
             report.source_types.source_effect_index.destructors.drop_hook_types <- index.drop_hook_types
@@ -94,6 +94,7 @@ extend ElisaProof:
             report.source_types.source_effect_index.callables.callable_names <- index.callable_names
             report.source_types.source_effect_index.callables.callable_return_types <- index.callable_return_types
             report.source_types.source_effect_index.callables.callable_lines <- index.callable_lines
+            report.source_types.source_effect_index.callables.callable_owners <- index.callable_owners
             report.source_types.source_effect_index.conversions.field_conversion_names <- index.field_conversion_names
             report.source_types.source_effect_index.conversions.field_conversion_custom_cast_present <- index.field_conversion_custom_cast_present
             report.source_types.source_effect_index.work.declaration_count <- index.declaration_count
@@ -104,7 +105,38 @@ extend ElisaProof:
             report.source_types.source_effect_index.destructors.drop_hook_index_valid <- true
             return true
 
-        def proof_source_effect_type_may_drop(type_expression: Ast::Expr, declaration_line: u32, report: mutable ProofReport&, depth: usize) -> bool:
+        def proof_source_effect_type_name_may_drop_in_owner(name: sview, declaration_line: u32, owner: sview, report: mutable ProofReport&, depth: usize) -> bool:
+            return true if depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
+            owner_target: (complete: bool, count: usize, row: usize, type_expression: Ast::Expr, nominal: bool, blocks_parent: bool) = proof_source_conversion_alias_target_in_owner(name, owner, report)
+            return true if not owner_target.complete
+            return false if owner_target.nominal
+            if owner_target.count == 1:
+                index: ProofSourceEffectIndex& = report.source_types.source_effect_index
+                return true if owner_target.row >= index.aliases.alias_lines.count or index.aliases.alias_lines.count != index.aliases.alias_names.count
+                return proof_source_effect_type_may_drop(owner_target.type_expression, index.aliases.alias_lines[owner_target.row], report, depth + 1, owner, true)
+            return true if owner_target.count != 0 or owner_target.blocks_parent
+            if owner != "":
+                # Stage1 checks exact root concrete types and aliases before its global
+                # unique-alias fallback. Keep those owner-ranked declarations available
+                # even when the final cross-module fallback is uncertain.
+                root_target: (complete: bool, count: usize, row: usize, type_expression: Ast::Expr, nominal: bool, blocks_parent: bool) = proof_source_conversion_alias_target_in_owner(name, "", report)
+                return true if not root_target.complete
+                return false if root_target.nominal
+                if root_target.count == 1:
+                    index: ProofSourceEffectIndex& = report.source_types.source_effect_index
+                    return true if root_target.row >= index.aliases.alias_lines.count or index.aliases.alias_lines.count != index.aliases.alias_names.count
+                    return proof_source_effect_type_may_drop(root_target.type_expression, index.aliases.alias_lines[root_target.row], report, depth + 1, "", true)
+                return true if root_target.count != 0 or root_target.blocks_parent
+            # Stage1's legacy alias fallback is globally unique and runs after concrete
+            # registries. Its indexed proof equivalent declines when a nominal can win.
+            return true if not report.source_types.source_effect_index.aliases.bare_alias_root_fallback_valid
+            global_alias: (complete: bool, count: usize, row: usize, target: Ast::Expr) = proof_source_conversion_alias_target(name, report)
+            return true if not global_alias.complete or global_alias.count != 1
+            index: ProofSourceEffectIndex& = report.source_types.source_effect_index
+            return true if global_alias.row >= index.aliases.alias_lines.count or global_alias.row >= index.aliases.alias_owners.count or index.aliases.alias_lines.count != index.aliases.alias_names.count
+            return proof_source_effect_type_may_drop(global_alias.target, index.aliases.alias_lines[global_alias.row], report, depth + 1, index.aliases.alias_owners[global_alias.row], true)
+
+        def proof_source_effect_type_may_drop(type_expression: Ast::Expr, declaration_line: u32, report: mutable ProofReport&, depth: usize, caller_owner: sview = "", caller_owner_known: bool = false) -> bool:
             return true if:
                 depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
                 not proof_source_implicit_effect_charge(report, 1)
@@ -117,51 +149,89 @@ extend ElisaProof:
                     return true if not index.destructors.drop_hook_index_valid
                     hook: (complete: bool, count: usize, row: usize) = proof_source_conversion_name_lookup_work(name, index.destructors.drop_hook_types, index.destructors.drop_hook_index_hashes, index.destructors.drop_hook_index_values, index.destructors.drop_hook_index_counts, &index.work.implicit_effect_work)
                     return true if not hook.complete or hook.count > 0
+                    return proof_source_effect_type_name_may_drop_in_owner(name, declaration_line, caller_owner, report, depth + 1) if caller_owner_known
                     declared: (complete: bool, count: usize, row: usize) = proof_source_conversion_name_lookup_work(name, index.types.declared_types, index.types.declared_type_index_hashes, index.types.declared_type_index_values, index.types.declared_type_index_counts, &index.work.implicit_effect_work)
                     return true if not declared.complete
-                    alias: (complete: bool, count: usize, row: usize) = proof_source_conversion_name_lookup_work(name, index.aliases.alias_names, index.aliases.alias_index_hashes, index.aliases.alias_index_values, index.aliases.alias_index_counts, &index.work.implicit_effect_work)
+                    alias: (complete: bool, count: usize, row: usize, target: Ast::Expr) = proof_source_conversion_alias_target(name, report)
                     return true if not alias.complete or alias.count > 1
                     if declared.count > 0:
-                        if declared.count == 1 and index.aliases.bare_alias_root_fallback_valid and declared.row < index.types.declared_type_owners.count and index.types.declared_type_owners[declared.row] == "" and alias.count == 0:
+                        if declared.count == 1 and declared.row < index.types.declared_type_owners.count and index.types.declared_type_owners[declared.row] == "" and alias.count == 0:
                             return false
                         return true
                     if alias.count == 1:
                         return true if:
-                            not index.aliases.bare_alias_root_fallback_valid or alias.row >= index.aliases.alias_targets.count or alias.row >= index.aliases.alias_owners.count or alias.row >= index.aliases.alias_has_formals.count
-                            index.aliases.alias_owners[alias.row] != "" or index.aliases.alias_has_formals[alias.row] or index.aliases.alias_targets[alias.row] is Ast::Expr.Invalid or index.aliases.alias_targets[alias.row] is Ast::Expr.Absent
-                        return false
+                            alias.row >= index.aliases.alias_lines.count or alias.row >= index.aliases.alias_owners.count
+                        return proof_source_effect_type_may_drop(alias.target, index.aliases.alias_lines[alias.row], report, depth + 1, "", true)
                     return true
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
-                    return proof_source_effect_type_may_drop(inner, declaration_line, report, depth + 1)
+                    return proof_source_effect_type_may_drop(inner, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.Unary(operator, inner, _):
                     return false if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
-                    return proof_source_effect_type_may_drop(inner, declaration_line, report, depth + 1)
+                    return proof_source_effect_type_may_drop(inner, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.Index(head, element, _):
                     head_name: sview = proof_ident_name(head)
                     return false if head_name == "view"
-                    return proof_source_effect_type_may_drop(element, declaration_line, report, depth + 1) if head_name == "darray"
+                    return proof_source_effect_type_may_drop(element, declaration_line, report, depth + 1, caller_owner, caller_owner_known) if head_name == "darray"
                     return true
                 Ast::Expr.IndexN(head, arguments, _):
                     head_name: sview = proof_ident_name(head)
                     return false if head_name == "view"
-                    return proof_source_effect_type_may_drop(arguments[0], declaration_line, report, depth + 1) if:
+                    return proof_source_effect_type_may_drop(arguments[0], declaration_line, report, depth + 1, caller_owner, caller_owner_known) if:
                         head_name == "array" and arguments.count == 2
                         head_name == "darray" and arguments.count == 1
                     return true
                 Ast::Expr.Tuple(elements, _) | Ast::Expr.Array(elements, _):
                     for element in elements |report, depth|:
-                        return true if proof_source_effect_type_may_drop(element, declaration_line, report, depth + 1)
+                        return true if proof_source_effect_type_may_drop(element, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     return false
                 _:
                     return true
 
-        def proof_source_callable_return_type(callable: sview, report: mutable ProofReport&, depth: usize) -> (known: bool, type_expression: Ast::Expr, declaration_line: u32):
-            return (false, Ast::Expr.Invalid, 0) if callable == "" or depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
-            lookup: (complete: bool, count: usize, row: usize) = proof_source_effect_callable_lookup(report, callable)
-            return (false, Ast::Expr.Invalid, 0) if not lookup.complete or lookup.count != 1 or lookup.row >= report.source_types.source_effect_index.callables.callable_return_types.count or lookup.row >= report.source_types.source_effect_index.callables.callable_lines.count
-            selected: Ast::Expr = report.source_types.source_effect_index.callables.callable_return_types[lookup.row]
-            return (false, Ast::Expr.Invalid, 0) if selected is Ast::Expr.Invalid or selected is Ast::Expr.Absent
-            return (true, selected, report.source_types.source_effect_index.callables.callable_lines[lookup.row])
+        def proof_source_effect_callable_return_row(row: usize, report: mutable ProofReport&) -> (known: bool, type_expression: Ast::Expr, declaration_line: u32, owner: sview):
+            index: ProofSourceEffectIndex& = report.source_types.source_effect_index
+            count: usize = index.callables.callable_names.count
+            return (false, Ast::Expr.Invalid, 0, "") if:
+                row >= count
+                count != index.callables.callable_return_types.count or count != index.callables.callable_lines.count or count != index.callables.callable_owners.count
+            selected: Ast::Expr = index.callables.callable_return_types[row]
+            return (false, Ast::Expr.Invalid, 0, "") if selected is Ast::Expr.Invalid or selected is Ast::Expr.Absent
+            return (true, selected, index.callables.callable_lines[row], index.callables.callable_owners[row])
+
+        # Prefer exact declaration owners for qualified and same-module calls. A top-level
+        # callable is also an exact row; the shared visibility gate applies only to the legacy
+        # globally unique fallback that runs after it.
+        def proof_source_callable_return_type(callee: Ast::Expr, caller_owner: sview, caller_owner_known: bool, report: mutable ProofReport&, depth: usize) -> (known: bool, type_expression: Ast::Expr, declaration_line: u32, owner: sview):
+            callable: sview = proof_callable_name(callee)
+            index: ProofSourceEffectIndex& = report.source_types.source_effect_index
+            return (false, Ast::Expr.Invalid, 0, "") if callable == "" or depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
+            return (false, Ast::Expr.Invalid, 0, "") if:
+                not index.callables.callable_scope_index_valid
+                index.callables.callable_names.count != index.callables.callable_owners.count
+                index.callables.callable_scope_index_hashes.count != index.callables.callable_scope_index_values.count or index.callables.callable_scope_index_hashes.count != index.callables.callable_scope_index_counts.count
+            match callee:
+                Ast::Expr.Scope(head, name, _):
+                    normalized: (complete: bool, head: Ast::Expr) = proof_source_conversion_module_alias_head(head, report)
+                    return (false, Ast::Expr.Invalid, 0, "") if not normalized.complete
+                    scoped: (complete: bool, count: usize, row: usize) = proof_source_conversion_scoped_lookup(name, normalized.head, index.callables.callable_names, index.callables.callable_owners, index.callables.callable_scope_index_hashes, index.callables.callable_scope_index_values, index.callables.callable_scope_index_counts, index.callables.callable_scope_index_valid, report)
+                    return (false, Ast::Expr.Invalid, 0, "") if not scoped.complete or scoped.count != 1
+                    return proof_source_effect_callable_return_row(scoped.row, report)
+                Ast::Expr.Ident(name, _):
+                    if caller_owner_known:
+                        local: (complete: bool, count: usize, row: usize) = proof_source_conversion_scoped_owner_lookup(name, caller_owner, index.callables.callable_names, index.callables.callable_owners, index.callables.callable_scope_index_hashes, index.callables.callable_scope_index_values, index.callables.callable_scope_index_counts, index.callables.callable_scope_index_valid, report)
+                        return (false, Ast::Expr.Invalid, 0, "") if not local.complete or local.count > 1
+                        return proof_source_effect_callable_return_row(local.row, report) if local.count == 1
+                    # Stage1's bare-call lookup checks a top-level function before its
+                    # final unique-owner fallback. The shared visibility gate applies only
+                    # to that final fallback, not an exact root callable row.
+                    root: (complete: bool, count: usize, row: usize) = proof_source_conversion_scoped_owner_lookup(name, "", index.callables.callable_names, index.callables.callable_owners, index.callables.callable_scope_index_hashes, index.callables.callable_scope_index_values, index.callables.callable_scope_index_counts, index.callables.callable_scope_index_valid, report)
+                    return (false, Ast::Expr.Invalid, 0, "") if not root.complete or root.count > 1
+                    return proof_source_effect_callable_return_row(root.row, report) if root.count == 1
+                _:
+                    pass
+            return (false, Ast::Expr.Invalid, 0, "") if not index.aliases.bare_alias_root_fallback_valid
+            global_lookup: (complete: bool, count: usize, row: usize) = proof_source_effect_callable_lookup(report, callable)
+            return (false, Ast::Expr.Invalid, 0, "") if not global_lookup.complete or global_lookup.count != 1
+            return proof_source_effect_callable_return_row(global_lookup.row, report)
 
         def proof_source_call_is_primitive_conversion(callee: Ast::Expr) -> bool:
             match callee:
@@ -170,17 +240,17 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_source_field_call_is_primitive_conversion(callee: Ast::Expr, arguments: darray[Ast::Expr], argument_names: darray[sview], parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&) -> bool:
+        def proof_source_field_call_is_primitive_conversion(callee: Ast::Expr, arguments: darray[Ast::Expr], argument_names: darray[sview], parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&, caller_owner: sview = "", caller_owner_known: bool = false) -> bool:
             return false if arguments.count != 0 or argument_names.count != 0
             match proof_strip_parens(callee):
                 Ast::Expr.Field(receiver, method, _):
                     return false if not proof_resource_pure_conversion(method)
-                    return proof_structural_field_conversion_type_supported(method, receiver, parameters, declaration_line, report) if method == "as_sview"
+                    return proof_structural_field_conversion_type_supported(method, receiver, parameters, declaration_line, report, caller_owner, caller_owner_known) if method == "as_sview"
                     method_lookup: (complete: bool, count: usize, row: usize) = proof_source_effect_field_conversion_lookup(report, method)
                     return false if:
                         not method_lookup.complete or method_lookup.count != 0
                         report.source_types.source_effect_index.conversions.field_conversion_custom_cast_present
-                    return proof_structural_field_conversion_type_supported(method, receiver, parameters, declaration_line, report)
+                    return proof_structural_field_conversion_type_supported(method, receiver, parameters, declaration_line, report, caller_owner, caller_owner_known)
                 _:
                     return false
 
@@ -211,19 +281,18 @@ extend ElisaProof:
                     pass
             return false
 
-        def proof_source_expression_type_may_drop(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&, depth: usize) -> bool:
+        def proof_source_expression_type_may_drop(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&, depth: usize, caller_owner: sview = "", caller_owner_known: bool = false) -> bool:
             return true if depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Construct(type_expression, _, _):
-                    return proof_source_effect_type_may_drop(type_expression, declaration_line, report, depth + 1)
+                    return proof_source_effect_type_may_drop(type_expression, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.Call(callee, arguments, argument_names, _):
                     return false if:
                         proof_source_call_is_primitive_conversion(callee)
-                        proof_source_field_call_is_primitive_conversion(callee, arguments, argument_names, parameters, declaration_line, report)
-                    callable: sview = proof_callable_name(callee)
-                    result: (known: bool, type_expression: Ast::Expr, declaration_line: u32) = proof_source_callable_return_type(callable, report, depth + 1)
+                        proof_source_field_call_is_primitive_conversion(callee, arguments, argument_names, parameters, declaration_line, report, caller_owner, caller_owner_known)
+                    result: (known: bool, type_expression: Ast::Expr, declaration_line: u32, owner: sview) = proof_source_callable_return_type(callee, caller_owner, caller_owner_known, report, depth + 1)
                     return true if not result.known
-                    return proof_source_effect_type_may_drop(result.type_expression, result.declaration_line, report, depth + 1)
+                    return proof_source_effect_type_may_drop(result.type_expression, result.declaration_line, report, depth + 1, result.owner, true)
                 Ast::Expr.Ident(name, _):
                     selected: mutable Ast::Expr = Ast::Expr.Invalid
                     matches: mutable usize = 0
@@ -234,127 +303,127 @@ extend ElisaProof:
                             matches <- matches + 1
                     return false if matches == 0
                     return true if matches != 1
-                    return proof_source_effect_type_may_drop(selected, declaration_line, report, depth + 1)
+                    return proof_source_effect_type_may_drop(selected, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.Field(_, _, _) | Ast::Expr.Index(_, _, _) | Ast::Expr.IndexN(_, _, _):
                     return true if not proof_source_implicit_effect_charge(report, report.source_types.source_effect_index.work.declaration_count + parameters.count)
-                    value_type: (known: bool, type_expression: Ast::Expr) = proof_structural_source_value_type(expression, parameters, report, depth + 1, [])
+                    value_type: (known: bool, type_expression: Ast::Expr) = proof_structural_source_value_type(expression, parameters, report, depth + 1, [], declaration_line, caller_owner, caller_owner_known)
                     return true if not value_type.known
-                    return proof_source_effect_type_may_drop(value_type.type_expression, declaration_line, report, depth + 1)
+                    return proof_source_effect_type_may_drop(value_type.type_expression, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.Array(_, _) | Ast::Expr.Tuple(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Binary(_, _, _, _) | Ast::Expr.Slice(_, _, _, _) | Ast::Expr.If(_, _, _, _):
                     return false
                 _:
                     return true
 
-        def proof_source_expression_has_drop_risk(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&, depth: usize) -> bool:
+        def proof_source_expression_has_drop_risk(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&, depth: usize, caller_owner: sview = "", caller_owner_known: bool = false) -> bool:
             return true if:
                 depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
                 not proof_source_implicit_effect_charge(report, 1)
             match expression:
                 Ast::Expr.Construct(type_expression, fields, _):
-                    return true if proof_source_effect_type_may_drop(type_expression, declaration_line, report, depth + 1)
-                    for field in fields |parameters, declaration_line, report, depth|:
-                        return true if proof_source_expression_has_drop_risk(field.value, parameters, declaration_line, report, depth + 1)
+                    return true if proof_source_effect_type_may_drop(type_expression, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
+                    for field in fields |parameters, declaration_line, report, depth, caller_owner, caller_owner_known|:
+                        return true if proof_source_expression_has_drop_risk(field.value, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     return false
                 Ast::Expr.Call(callee, arguments, argument_names, _):
                     match callee:
                         Ast::Expr.Field(receiver, _, _):
-                            return true if proof_source_expression_has_drop_risk(receiver, parameters, declaration_line, report, depth + 1)
+                            return true if proof_source_expression_has_drop_risk(receiver, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                         Ast::Expr.Scope(_, _, _):
                             pass
                         _:
-                            return true if proof_source_expression_has_drop_risk(callee, parameters, declaration_line, report, depth + 1)
+                            return true if proof_source_expression_has_drop_risk(callee, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     callable: sview = proof_callable_name(callee)
-                    if not proof_source_call_is_primitive_conversion(callee) and not proof_source_field_call_is_primitive_conversion(callee, arguments, argument_names, parameters, declaration_line, report):
+                    if not proof_source_call_is_primitive_conversion(callee) and not proof_source_field_call_is_primitive_conversion(callee, arguments, argument_names, parameters, declaration_line, report, caller_owner, caller_owner_known):
                         return true if callable == ""
-                        result: (known: bool, type_expression: Ast::Expr, declaration_line: u32) = proof_source_callable_return_type(callable, report, depth + 1)
-                        return true if not result.known or proof_source_effect_type_may_drop(result.type_expression, result.declaration_line, report, depth + 1)
-                    for argument in arguments |parameters, declaration_line, report, depth|:
-                        return true if proof_source_expression_has_drop_risk(argument, parameters, declaration_line, report, depth + 1)
+                        result: (known: bool, type_expression: Ast::Expr, declaration_line: u32, owner: sview) = proof_source_callable_return_type(callee, caller_owner, caller_owner_known, report, depth + 1)
+                        return true if not result.known or proof_source_effect_type_may_drop(result.type_expression, result.declaration_line, report, depth + 1, result.owner, true)
+                    for argument in arguments |parameters, declaration_line, report, depth, caller_owner, caller_owner_known|:
+                        return true if proof_source_expression_has_drop_risk(argument, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     return false
                 Ast::Expr.Index(object, index, _):
                     return false if proof_is_type_cast_index(object)
-                    return true if proof_source_expression_type_may_drop(expression, parameters, declaration_line, report, depth + 1)
-                    return proof_source_expression_has_drop_risk(object, parameters, declaration_line, report, depth + 1) or proof_source_expression_has_drop_risk(index, parameters, declaration_line, report, depth + 1)
+                    return true if proof_source_expression_type_may_drop(expression, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
+                    return proof_source_expression_has_drop_risk(object, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_expression_has_drop_risk(index, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.IndexN(object, arguments, _):
                     return false if proof_is_type_cast_index(object)
                     return true if:
-                        proof_source_expression_type_may_drop(expression, parameters, declaration_line, report, depth + 1)
-                        proof_source_expression_has_drop_risk(object, parameters, declaration_line, report, depth + 1)
-                    for argument in arguments |parameters, declaration_line, report, depth|:
-                        return true if proof_source_expression_has_drop_risk(argument, parameters, declaration_line, report, depth + 1)
+                        proof_source_expression_type_may_drop(expression, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
+                        proof_source_expression_has_drop_risk(object, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
+                    for argument in arguments |parameters, declaration_line, report, depth, caller_owner, caller_owner_known|:
+                        return true if proof_source_expression_has_drop_risk(argument, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     return false
                 Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
-                    return true if proof_source_expression_type_may_drop(expression, parameters, declaration_line, report, depth + 1)
-                    return proof_source_expression_has_drop_risk(object, parameters, declaration_line, report, depth + 1)
+                    return true if proof_source_expression_type_may_drop(expression, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
+                    return proof_source_expression_has_drop_risk(object, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.Refinement(inner, predicate, _):
-                    return true if proof_source_expression_has_drop_risk(inner, parameters, declaration_line, report, depth + 1)
+                    return true if proof_source_expression_has_drop_risk(inner, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     return false if proof_source_expression_is_bare_loop_pattern(predicate, report)
-                    return proof_source_expression_has_drop_risk(predicate, parameters, declaration_line, report, depth + 1)
+                    return proof_source_expression_has_drop_risk(predicate, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.Unary(_, inner, _):
-                    return proof_source_expression_has_drop_risk(inner, parameters, declaration_line, report, depth + 1)
+                    return proof_source_expression_has_drop_risk(inner, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.Binary(left, operator, right, _):
-                    return proof_source_expression_has_drop_risk(left, parameters, declaration_line, report, depth + 1) if operator == TokenKind.Is or operator == TokenKind.As
-                    return proof_source_expression_has_drop_risk(left, parameters, declaration_line, report, depth + 1) or proof_source_expression_has_drop_risk(right, parameters, declaration_line, report, depth + 1)
+                    return proof_source_expression_has_drop_risk(left, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) if operator == TokenKind.Is or operator == TokenKind.As
+                    return proof_source_expression_has_drop_risk(left, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_expression_has_drop_risk(right, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.If(condition, then_value, else_value, _):
-                    return proof_source_expression_has_drop_risk(condition, parameters, declaration_line, report, depth + 1) or proof_source_expression_has_drop_risk(then_value, parameters, declaration_line, report, depth + 1) or proof_source_expression_has_drop_risk(else_value, parameters, declaration_line, report, depth + 1)
+                    return proof_source_expression_has_drop_risk(condition, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_expression_has_drop_risk(then_value, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_expression_has_drop_risk(else_value, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.Slice(object, low, high, _):
-                    return proof_source_expression_has_drop_risk(object, parameters, declaration_line, report, depth + 1) or proof_source_expression_has_drop_risk(low, parameters, declaration_line, report, depth + 1) or proof_source_expression_has_drop_risk(high, parameters, declaration_line, report, depth + 1)
+                    return proof_source_expression_has_drop_risk(object, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_expression_has_drop_risk(low, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_expression_has_drop_risk(high, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
-                    for element in elements |parameters, declaration_line, report, depth|:
-                        return true if proof_source_expression_has_drop_risk(element, parameters, declaration_line, report, depth + 1)
+                    for element in elements |parameters, declaration_line, report, depth, caller_owner, caller_owner_known|:
+                        return true if proof_source_expression_has_drop_risk(element, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     return false
                 Ast::Expr.DictLit(entries, _):
-                    for entry in entries |parameters, declaration_line, report, depth|:
-                        return true if proof_source_expression_has_drop_risk(entry.key, parameters, declaration_line, report, depth + 1) or proof_source_expression_has_drop_risk(entry.value, parameters, declaration_line, report, depth + 1)
+                    for entry in entries |parameters, declaration_line, report, depth, caller_owner, caller_owner_known|:
+                        return true if proof_source_expression_has_drop_risk(entry.key, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_expression_has_drop_risk(entry.value, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     return false
                 Ast::Expr.RecordUpdate(base, fields, _):
-                    return true if proof_source_expression_has_drop_risk(base, parameters, declaration_line, report, depth + 1)
-                    for field in fields |parameters, declaration_line, report, depth|:
-                        return true if proof_source_expression_has_drop_risk(field.value, parameters, declaration_line, report, depth + 1)
+                    return true if proof_source_expression_has_drop_risk(base, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
+                    for field in fields |parameters, declaration_line, report, depth, caller_owner, caller_owner_known|:
+                        return true if proof_source_expression_has_drop_risk(field.value, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     return false
                 Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    return true if proof_source_expression_type_may_drop(expression, parameters, declaration_line, report, depth + 1)
-                    return proof_source_expression_has_drop_risk(iterable, parameters, declaration_line, report, depth + 1) or proof_source_expression_has_drop_risk(condition, parameters, declaration_line, report, depth + 1) or proof_source_expression_has_drop_risk(body, parameters, declaration_line, report, depth + 1)
+                    return true if proof_source_expression_type_may_drop(expression, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
+                    return proof_source_expression_has_drop_risk(iterable, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_expression_has_drop_risk(condition, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_expression_has_drop_risk(body, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.GetElse(guarded, recovery, _):
-                    return proof_source_expression_has_drop_risk(guarded, parameters, declaration_line, report, depth + 1) or proof_source_statements_have_drop_risk(recovery, parameters, declaration_line, report, depth + 1)
+                    return proof_source_expression_has_drop_risk(guarded, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_statements_have_drop_risk(recovery, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
-                    return true if proof_source_expression_type_may_drop(scrutinee, parameters, declaration_line, report, depth + 1)
-                    for arm in arms |parameters, declaration_line, report, depth|:
-                        return true if proof_source_expression_has_drop_risk(arm.guard, parameters, declaration_line, report, depth + 1) or proof_source_statements_have_drop_risk(arm.body, parameters, declaration_line, report, depth + 1)
+                    return true if proof_source_expression_type_may_drop(scrutinee, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
+                    for arm in arms |parameters, declaration_line, report, depth, caller_owner, caller_owner_known|:
+                        return true if proof_source_expression_has_drop_risk(arm.guard, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_statements_have_drop_risk(arm.body, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     return false
                 Ast::Expr.Lambda(_, _, _) | Ast::Expr.RegionNew(_, _, _):
                     return true
                 Ast::Expr.Block(statements, value, _, _):
-                    return proof_source_statements_have_drop_risk(statements, parameters, declaration_line, report, depth + 1) or proof_source_expression_has_drop_risk(value, parameters, declaration_line, report, depth + 1)
+                    return proof_source_statements_have_drop_risk(statements, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_expression_has_drop_risk(value, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                 Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _):
                     return false
                 _:
                     return true
 
-        def proof_source_statements_have_drop_risk(statements: darray[Ast::Stmt], parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&, depth: usize) -> bool:
+        def proof_source_statements_have_drop_risk(statements: darray[Ast::Stmt], parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&, depth: usize, caller_owner: sview = "", caller_owner_known: bool = false) -> bool:
             return true if depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
-            for statement in statements |parameters, declaration_line, report, depth|:
+            for statement in statements |parameters, declaration_line, report, depth, caller_owner, caller_owner_known|:
                 return true if not proof_source_implicit_effect_charge(report, 1)
                 match statement:
                     Ast::Stmt.Invalid:
                         return true
                     Ast::Stmt.Expr(expression, _):
-                        return true if proof_source_expression_has_drop_risk(expression, parameters, declaration_line, report, depth + 1)
+                        return true if proof_source_expression_has_drop_risk(expression, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     Ast::Stmt.Return(value, _):
                         if value is returned:
-                            return true if proof_source_expression_has_drop_risk(returned, parameters, declaration_line, report, depth + 1)
+                            return true if proof_source_expression_has_drop_risk(returned, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     Ast::Stmt.Block(_, _, _, body, _):
-                        return true if proof_source_statements_have_drop_risk(body, parameters, declaration_line, report, depth + 1)
+                        return true if proof_source_statements_have_drop_risk(body, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     Ast::Stmt.VarDecl(_, type_expression, initializer, _):
                         if type_expression is not Ast::Expr.Absent and type_expression is not Ast::Expr.Invalid:
-                            return true if proof_source_effect_type_may_drop(type_expression, declaration_line, report, depth + 1)
-                        return true if proof_source_expression_has_drop_risk(initializer, parameters, declaration_line, report, depth + 1)
+                            return true if proof_source_effect_type_may_drop(type_expression, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
+                        return true if proof_source_expression_has_drop_risk(initializer, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     Ast::Stmt.Assign(target, _, initializer, _):
-                        return true if proof_source_expression_has_drop_risk(target, parameters, declaration_line, report, depth + 1) or proof_source_expression_has_drop_risk(initializer, parameters, declaration_line, report, depth + 1)
+                        return true if proof_source_expression_has_drop_risk(target, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_expression_has_drop_risk(initializer, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_source_expression_has_drop_risk(condition, parameters, declaration_line, report, depth + 1) or proof_source_statements_have_drop_risk(then_body, parameters, declaration_line, report, depth + 1) or proof_source_statements_have_drop_risk(else_body, parameters, declaration_line, report, depth + 1)
+                        return true if proof_source_expression_has_drop_risk(condition, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_statements_have_drop_risk(then_body, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_statements_have_drop_risk(else_body, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     Ast::Stmt.While(condition, body, _):
-                        return true if proof_source_expression_has_drop_risk(condition, parameters, declaration_line, report, depth + 1) or proof_source_statements_have_drop_risk(body, parameters, declaration_line, report, depth + 1)
+                        return true if proof_source_expression_has_drop_risk(condition, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_statements_have_drop_risk(body, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     Ast::Stmt.For(_, _, iterable, body, _):
                         predicates: mutable darray[Ast::Expr] = []
                         base_iterable: mutable Ast::Expr = iterable
@@ -370,31 +439,31 @@ extend ElisaProof:
                                     break
                         return true if:
                             refinement_depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
-                            not proof_structural_builtin_iteration_source(base_iterable, parameters, report, 0, [])
-                            proof_source_expression_type_may_drop(base_iterable, parameters, declaration_line, report, depth + 1)
-                            proof_source_expression_has_drop_risk(base_iterable, parameters, declaration_line, report, depth + 1)
+                            not proof_structural_builtin_iteration_source(base_iterable, parameters, report, 0, [], declaration_line, caller_owner, caller_owner_known)
+                            proof_source_expression_type_may_drop(base_iterable, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
+                            proof_source_expression_has_drop_risk(base_iterable, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                         predicate_index: mutable usize = predicates.count
-                        while predicate_index > 0 |predicate_index, predicates, parameters, declaration_line, report, depth|:
+                        while predicate_index > 0 |predicate_index, predicates, parameters, declaration_line, report, depth, caller_owner, caller_owner_known|:
                             predicate_index <- predicate_index - 1
                             predicate: Ast::Expr = predicates[predicate_index]
-                            return true if not proof_source_expression_is_bare_loop_pattern(predicate, report) and proof_source_expression_has_drop_risk(predicate, parameters, declaration_line, report, depth + 1)
-                        return proof_source_statements_have_drop_risk(body, parameters, declaration_line, report, depth + 1)
+                            return true if not proof_source_expression_is_bare_loop_pattern(predicate, report) and proof_source_expression_has_drop_risk(predicate, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
+                        return proof_source_statements_have_drop_risk(body, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     Ast::Stmt.Match(scrutinee, arms, _):
-                        return true if proof_source_expression_type_may_drop(scrutinee, parameters, declaration_line, report, depth + 1)
-                        for arm in arms |parameters, declaration_line, report, depth|:
-                            return true if proof_source_expression_has_drop_risk(arm.guard, parameters, declaration_line, report, depth + 1) or proof_source_statements_have_drop_risk(arm.body, parameters, declaration_line, report, depth + 1)
+                        return true if proof_source_expression_type_may_drop(scrutinee, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
+                        for arm in arms |parameters, declaration_line, report, depth, caller_owner, caller_owner_known|:
+                            return true if proof_source_expression_has_drop_risk(arm.guard, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known) or proof_source_statements_have_drop_risk(arm.body, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_source_expression_has_drop_risk(expression, parameters, declaration_line, report, depth + 1)
+                        return true if proof_source_expression_has_drop_risk(expression, parameters, declaration_line, report, depth + 1, caller_owner, caller_owner_known)
                     Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
                         return true
             return false
 
-        def proof_source_function_has_drop_risk(function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], report: mutable ProofReport&) -> bool:
-            for parameter in parameters |report|:
+        def proof_source_function_has_drop_risk(function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], report: mutable ProofReport&, caller_owner: sview = "", caller_owner_known: bool = false) -> bool:
+            for parameter in parameters |report, caller_owner, caller_owner_known|:
                 # `__drop__` skips generated receiver cleanup; defaults and body still run.
                 return true if:
-                    function_name != "__drop__" and proof_source_effect_type_may_drop(parameter.type_expression, declaration_line, report, 0)
-                    parameter.has_default and proof_source_expression_has_drop_risk(parameter.default_value, parameters, declaration_line, report, 0)
-            return proof_source_statements_have_drop_risk(body, parameters, declaration_line, report, 0)
+                    function_name != "__drop__" and proof_source_effect_type_may_drop(parameter.type_expression, declaration_line, report, 0, caller_owner, caller_owner_known)
+                    parameter.has_default and proof_source_expression_has_drop_risk(parameter.default_value, parameters, declaration_line, report, 0, caller_owner, caller_owner_known)
+            return proof_source_statements_have_drop_risk(body, parameters, declaration_line, report, 0, caller_owner, caller_owner_known)

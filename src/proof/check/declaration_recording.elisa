@@ -1,5 +1,103 @@
 extend ElisaProof:
     private:
+        struct ProofDeclarationAttemptIndex:
+            names: mutable darray[sview] = []
+            hashes: mutable darray[u32] = []
+            owner_lines: mutable darray[u32] = []
+            owner_offsets: mutable darray[u32] = []
+            slots: mutable darray[usize] = []
+            heads: mutable darray[usize] = []
+            tails: mutable darray[usize] = []
+            next: mutable darray[usize] = []
+            valid: bool = false
+
+        def proof_declaration_attempt_key_hash(name: sview, owner_line: u32, owner_offset: u32, source_work: mutable usize&) -> (complete: bool, hash: u32):
+            return (false, 0) if not proof_report_source_work_charge(sview_len(name), source_work)
+            return (false, 0) if not proof_report_source_work_charge(2, source_work)
+            hash: u32 = proof_expr_shape_mix(proof_name_hash(name), owner_line.i64())
+            hash <- proof_expr_shape_mix(hash, owner_offset.i64())
+            return (true, hash)
+
+        def proof_declaration_attempt_index_build(report: ProofReport&, source_work: mutable usize&) -> ProofDeclarationAttemptIndex can[Memory.Allocate]:
+            attempt_count: usize = report.results.goal_attempts.count
+            index: mutable ProofDeclarationAttemptIndex = ProofDeclarationAttemptIndex{valid: true}
+            return index if attempt_count == 0
+            if attempt_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return ProofDeclarationAttemptIndex{}
+            target_capacity: usize = attempt_count * 2
+            capacity: mutable usize = 1
+            while capacity < target_capacity |capacity, target_capacity|:
+                if capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4:
+                    source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return ProofDeclarationAttemptIndex{}
+                capacity <- capacity * 2
+            return ProofDeclarationAttemptIndex{} if not proof_report_source_work_charge(capacity, source_work) or not proof_report_source_work_charge(attempt_count, source_work)
+            index.slots.resize(capacity)
+            index.next.resize(attempt_count)
+            for slot in 0..<capacity |slot, index, capacity|:
+                index.slots[slot] <- capacity
+            for attempt_id in 0..<attempt_count |attempt_id, index, attempt_count|:
+                index.next[attempt_id] <- attempt_count
+            for attempt_id in 0..<attempt_count |attempt_id, report, index, capacity, attempt_count, source_work|:
+                attempt: ProofGoalAttempt = report.results.goal_attempts[attempt_id]
+                return ProofDeclarationAttemptIndex{} if not proof_report_source_work_charge(1, source_work)
+                key: (complete: bool, hash: u32) = proof_declaration_attempt_key_hash(attempt.name, attempt.owner_function_line, attempt.owner_function_offset, source_work)
+                return ProofDeclarationAttemptIndex{} if not key.complete
+                hash: u32 = key.hash
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, attempt, attempt_id, index, capacity, attempt_count, source_work|:
+                    return ProofDeclarationAttemptIndex{} if not proof_report_source_work_charge(1, source_work)
+                    row: usize = index.slots[slot]
+                    if row == capacity:
+                        row <- index.names.count
+                        index.names.push(attempt.name)
+                        index.hashes.push(hash)
+                        index.owner_lines.push(attempt.owner_function_line)
+                        index.owner_offsets.push(attempt.owner_function_offset)
+                        index.heads.push(attempt_id)
+                        index.tails.push(attempt_id)
+                        index.slots[slot] <- row
+                        break
+                    return ProofDeclarationAttemptIndex{} if row >= index.names.count or row >= index.heads.count or row >= index.tails.count or row >= index.hashes.count or row >= index.owner_lines.count or row >= index.owner_offsets.count
+                    if index.hashes[row] == hash:
+                        return ProofDeclarationAttemptIndex{} if not proof_report_source_work_charge(sview_len(index.names[row]), source_work) or not proof_report_source_work_charge(2, source_work)
+                        if index.owner_lines[row] == attempt.owner_function_line and index.owner_offsets[row] == attempt.owner_function_offset and index.names[row] == attempt.name:
+                            return ProofDeclarationAttemptIndex{} if index.tails[row] >= index.next.count
+                            index.next[index.tails[row]] <- attempt_id
+                            index.tails[row] <- attempt_id
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return ProofDeclarationAttemptIndex{} if probes >= capacity or probes > PROOF_NAME_INDEX_MAX_CLUSTER
+            index
+
+        def proof_declaration_attempt_index_find(index: ProofDeclarationAttemptIndex, name: sview, owner_line: u32, owner_offset: u32, source_work: mutable usize&) -> (complete: bool, row: usize):
+            missing: usize = index.names.count
+            capacity: usize = index.slots.count
+            return (false, missing) if not index.valid
+            return (true, missing) if capacity == 0 or name == ""
+            return (false, missing) if:
+                index.hashes.count != missing or index.owner_lines.count != missing or index.owner_offsets.count != missing
+                index.heads.count != missing or index.tails.count != missing or index.slots.count != capacity
+            key: (complete: bool, hash: u32) = proof_declaration_attempt_key_hash(name, owner_line, owner_offset, source_work)
+            return (false, missing) if not key.complete
+            hash: u32 = key.hash
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, name, index, capacity, source_work, missing|:
+                return (false, missing) if not proof_report_source_work_charge(1, source_work)
+                row: usize = index.slots[slot]
+                return (true, missing) if row == capacity
+                return (false, missing) if row >= index.names.count or row >= index.hashes.count or row >= index.heads.count or row >= index.tails.count
+                if index.hashes[row] == hash:
+                    return (false, missing) if not proof_report_source_work_charge(sview_len(index.names[row]), source_work) or not proof_report_source_work_charge(2, source_work)
+                    return (true, row) if index.owner_lines[row] == owner_line and index.owner_offsets[row] == owner_offset and index.names[row] == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, missing)
+
         def proof_declaration_summary(kind: sview, name: sview, line: u32) -> ProofDeclarationSummary:
             return ProofDeclarationSummary{kind: kind, name: name, line: line, parameters_start: 0, parameters_count: 0, requires_count: 0, ensures_count: 0, changes_count: 0, preserves_count: 0, decreases_count: 0, lemma: false, recursive: false, pure: false, verified: false, verification_reason: "not-checked", structural: false, effects_start: 0, effects_count: 0, effects_declared: false}
 
@@ -30,13 +128,15 @@ extend ElisaProof:
         # that remains the compiler effect checker's obligation. An unresolved callee or an
         # abstract row is reported and no certificate is emitted.
 
-        def proof_record_declaration(declaration: Ast::Decl, file: Ast::File&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&, source_work: mutable usize&) -> void:
+        def proof_record_declaration(declaration: Ast::Decl, file: Ast::File&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, attempt_index: ProofDeclarationAttemptIndex, report: mutable ProofReport&, source_work: mutable usize&) -> void:
             summary: mutable ProofDeclarationSummary = proof_declaration_summary("declaration", "", 0)
             match declaration:
                 Ast::Decl.Func(name, parameters, _, _, declared_effects, _, position):
                     summary <- proof_declaration_summary("function", name, position.line)
-                    lemma_lookup: (complete: bool, index: usize, declared: bool) = proof_lemma_index_with_work(lemmas, name, source_work)
-                    summary.lemma <- lemma_lookup.declared or not lemma_lookup.complete
+                    summary.source_offset <- position.offset
+                    lemma_lookup: (complete: bool, index: usize, declared: bool, ambiguous: bool) = proof_lemma_index_with_work(lemmas, name, source_work)
+                    lemma_source: (complete: bool, index: usize, declared: bool) = proof_lemma_source_row_with_work(lemmas, name, position.line, position.offset, source_work)
+                    summary.lemma <- lemma_source.declared or not lemma_source.complete
                     summary.kind <- "lemma" if summary.lemma
                     summary.parameters_start <- report.analysis_1.declaration_parameters.count
                     summary.parameters_count <- parameters.count
@@ -58,11 +158,42 @@ extend ElisaProof:
                             summary.verification_reason <- lemmas.verification.verification_reasons[lemma_index] if lemma_index < lemmas.verification.verification_reasons.count else "not-checked"
                             proof_goals_start: usize = report.analysis_1.theorems.proof_goal_ids.count
                             proof_goals_count: mutable usize = 0
-                            for goal_id in 0..<report.results.goal_attempts.count |goal_id, report, name, proof_goals_count|:
-                                if report.results.goal_attempts[goal_id].name == name:
-                                    report.analysis_1.theorems.proof_goal_ids.push(goal_id)
+                            attempt_row: (complete: bool, row: usize) = proof_declaration_attempt_index_find(attempt_index, name, position.line, position.offset, source_work)
+                            goal_owner_complete: bool = attempt_row.complete
+                            if goal_owner_complete and attempt_row.row < attempt_index.names.count and attempt_row.row < attempt_index.heads.count and attempt_row.row < attempt_index.tails.count:
+                                attempt_id: mutable usize = attempt_index.heads[attempt_row.row]
+                                expected_tail: usize = attempt_index.tails[attempt_row.row]
+                                visits: mutable usize = 0
+                                last_attempt: mutable usize = report.results.goal_attempts.count
+                                while attempt_id < report.results.goal_attempts.count and visits < report.results.goal_attempts.count |attempt_id, visits, last_attempt, attempt_index, report, proof_goals_count, source_work, goal_owner_complete|:
+                                    if not proof_report_source_work_charge(1, source_work):
+                                        goal_owner_complete <- false
+                                        break
+                                    if attempt_id >= attempt_index.next.count:
+                                        goal_owner_complete <- false
+                                        break
+                                    linked_attempt: ProofGoalAttempt = report.results.goal_attempts[attempt_id]
+                                    linked_name_work_complete: bool = proof_report_source_work_charge(sview_len(name), source_work)
+                                    if not linked_name_work_complete:
+                                        goal_owner_complete <- false
+                                        break
+                                    if linked_attempt.owner_function_line != position.line or linked_attempt.owner_function_offset != position.offset or linked_attempt.name != name:
+                                        goal_owner_complete <- false
+                                        break
+                                    report.analysis_1.theorems.proof_goal_ids.push(attempt_id)
                                     proof_goals_count <- proof_goals_count + 1
-                            theorem: ProofTheoremSummary = ProofTheoremSummary{name: name, line: position.line, parameters_start: report.analysis_1.theorems.parameters.count, parameters_count: lemmas.parameters.param_counts[lemma_index], requires_start: report.analysis_1.theorems.requires.count, requires_count: lemmas.contracts.requires_counts[lemma_index], ensures_start: report.analysis_1.theorems.ensures.count, ensures_count: lemmas.contracts.ensure_counts[lemma_index], decreases_start: report.analysis_1.theorems.decreases.count, decreases_count: lemmas.termination.decreases_counts[lemma_index], proof_goals_start: proof_goals_start, proof_goals_count: proof_goals_count, recursive: summary.recursive, verified: summary.verified, verification_reason: summary.verification_reason}
+                                    last_attempt <- attempt_id
+                                    attempt_id <- attempt_index.next[attempt_id]
+                                    visits <- visits + 1
+                                goal_owner_complete <- false if visits == 0 or attempt_id != report.results.goal_attempts.count or last_attempt != expected_tail
+                                goal_owner_complete <- false if visits >= report.results.goal_attempts.count and attempt_id < report.results.goal_attempts.count
+                            elif goal_owner_complete and attempt_row.row < attempt_index.names.count:
+                                goal_owner_complete <- false
+                            if not goal_owner_complete:
+                                summary.verified <- false
+                                summary.verification_reason <- "goal-owner-unavailable"
+                                report.proof_obligation(false)
+                            theorem: ProofTheoremSummary = ProofTheoremSummary{name: name, line: position.line, parameters_start: report.analysis_1.theorems.parameters.count, parameters_count: lemmas.parameters.param_counts[lemma_index], requires_start: report.analysis_1.theorems.requires.count, requires_count: lemmas.contracts.requires_counts[lemma_index], ensures_start: report.analysis_1.theorems.ensures.count, ensures_count: lemmas.contracts.ensure_counts[lemma_index], decreases_start: report.analysis_1.theorems.decreases.count, decreases_count: lemmas.termination.decreases_counts[lemma_index], proof_goals_start: proof_goals_start, proof_goals_count: proof_goals_count, recursive: summary.recursive, verified: summary.verified, verification_reason: summary.verification_reason, source_offset: position.offset}
                             parameter_start: usize = lemmas.parameters.param_starts[lemma_index]
                             for index in 0..<theorem.parameters_count |index, parameter_start, lemmas, report|:
                                 report.analysis_1.theorems.parameters.push(lemmas.parameters.all_params[parameter_start + index])
@@ -114,36 +245,49 @@ extend ElisaProof:
                             report.analysis_1.executables.summaries.push(executable)
                 Ast::Decl.Struct(name, _, _, _, _, _, position):
                     summary <- proof_declaration_summary("struct", name, position.line)
+                    summary.source_offset <- position.offset
                 Ast::Decl.Enum(name, _, _, _, position):
                     summary <- proof_declaration_summary("enum", name, position.line)
+                    summary.source_offset <- position.offset
                 Ast::Decl.Alias(name, _, position):
                     summary <- proof_declaration_summary("alias", name, position.line)
+                    summary.source_offset <- position.offset
                 Ast::Decl.Law(name, _, position):
                     summary <- proof_declaration_summary("law", name, position.line)
+                    summary.source_offset <- position.offset
                 Ast::Decl.Import(module, position):
                     summary <- proof_declaration_summary("import", module, position.line)
+                    summary.source_offset <- position.offset
                 Ast::Decl.Scoped(_, position):
                     summary <- proof_declaration_summary("scope", "", position.line)
+                    summary.source_offset <- position.offset
                 Ast::Decl.Extern(name, _, _, _, _, _, _, position):
                     summary <- proof_declaration_summary("extern", name, position.line)
+                    summary.source_offset <- position.offset
                 Ast::Decl.Const(name, _, _, _, position):
                     summary <- proof_declaration_summary("const", name, position.line)
+                    summary.source_offset <- position.offset
                 Ast::Decl.Module(name, _, position):
                     summary <- proof_declaration_summary("module", name, position.line)
+                    summary.source_offset <- position.offset
                 Ast::Decl.Invalid:
                     summary <- proof_declaration_summary("invalid", "", 0)
             report.analysis_1.declaration_details.push(summary)
 
         def proof_record_declarations(file: Ast::File&, declarations: darray[Ast::Decl]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&, source_work: mutable usize&) -> void:
+            attempt_index: ProofDeclarationAttemptIndex = proof_declaration_attempt_index_build(report, source_work)
+            proof_record_declarations_indexed(file, declarations, lemmas, functions, attempt_index, report, source_work)
+
+        def proof_record_declarations_indexed(file: Ast::File&, declarations: darray[Ast::Decl]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, attempt_index: ProofDeclarationAttemptIndex, report: mutable ProofReport&, source_work: mutable usize&) -> void:
             for declaration in declarations |file, lemmas, functions, report, source_work|:
                 report.results.declarations <- report.results.declarations + 1
-                proof_record_declaration(declaration, file, lemmas, functions, report, source_work)
+                proof_record_declaration(declaration, file, lemmas, functions, attempt_index, report, source_work)
                 proof_refuse_struct_invariants(declaration, report)
                 match declaration:
                     Ast::Decl.Module(_, module_body, _):
-                        proof_record_declarations(file, module_body, lemmas, functions, report, source_work)
+                        proof_record_declarations_indexed(file, module_body, lemmas, functions, attempt_index, report, source_work)
                     Ast::Decl.Scoped(scoped_body, _):
-                        proof_record_declarations(file, scoped_body, lemmas, functions, report, source_work)
+                        proof_record_declarations_indexed(file, scoped_body, lemmas, functions, attempt_index, report, source_work)
                     Ast::Decl.Invalid:
                         report.proof_obligation(false)
                         proof_add_finding(report, "declaration-unsupported", 0, "", "invalid declaration cannot enter a verified proof state")

@@ -305,12 +305,43 @@ extend ElisaProof:
         # Build the flat lemma summary used by the compiler's assert-by checker.
         # A call can contribute only a postcondition from a lemma whose preconditions are
         # established at the call site; opaque ordinary functions never contribute facts.
-        def proof_collect_lemmas(file: Ast::File&, declarations: darray[Ast::Decl], lemma_markers: ProofLemmaAnnotationIndex, lemmas: mutable ProofLemmaTable&, source_work: mutable usize&) -> void:
-            for declaration in declarations |file, lemmas, source_work|:
+        def proof_collect_lemmas(file: Ast::File&, declarations: darray[Ast::Decl], lemma_markers: ProofLemmaAnnotationIndex, owner_module: sview, lemmas: mutable ProofLemmaTable&, source_work: mutable usize&) -> void:
+            for declaration in declarations |file, owner_module, lemmas, source_work|:
+                if not proof_report_source_work_charge(1, source_work):
+                    source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return
                 match declaration:
                     Ast::Decl.Func(name, parameters, return_type, body, _, _, position):
-                        if proof_function_is_lemma(lemma_markers, name):
+                        lemma_marker: (complete: bool, is_lemma: bool) = proof_function_is_lemma_with_work(lemma_markers, name, source_work)
+                        if not lemma_marker.complete:
+                            source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                            return
+                        if lemma_marker.is_lemma:
+                            # Charge the lemma table's fixed parallel-row writes and all
+                            # parameter metadata before mutating the table. Body traversal
+                            # work is reserved separately from the AST cost preflight below.
+                            if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3 or not proof_report_source_work_charge(16, source_work) or not proof_report_source_work_charge(parameters.count * 3, source_work) or not proof_report_source_work_charge(sview_len(name), source_work):
+                                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                                return
+                            body_cost: mutable usize = 0
+                            if not proof_replay_summary_expr_cost_body(body, &body_cost, source_work, 0):
+                                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                                return
+                            remaining_work: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                            # The preflight itself walks the body once; call collection,
+                            # call-row appending, decreases flattening, and contract census
+                            # each make another body-sized pass.
+                            if body_cost > remaining_work / 5:
+                                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                                return
+                            source_work <- source_work + body_cost * 5
+                            signature_contracts: (complete: bool, preconditions: darray[Ast::Expr], postconditions: darray[Ast::Expr]) = proof_signature_contracts_for_line_with_work(file, position.line, source_work)
+                            source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1 if not signature_contracts.complete
+                            return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                             lemmas.identity.names <- lemmas.identity.names.push(name)
+                            lemmas.identity.owner_modules <- lemmas.identity.owner_modules.push(owner_module)
+                            lemmas.identity.lines <- lemmas.identity.lines.push(position.line)
+                            lemmas.identity.offsets <- lemmas.identity.offsets.push(position.offset)
                             lemmas.identity.name_hashes <- lemmas.identity.name_hashes.push(proof_name_hash(name))
                             lemmas.parameters.param_starts <- lemmas.parameters.param_starts.push(lemmas.parameters.all_params.count)
                             lemmas.parameters.param_counts <- lemmas.parameters.param_counts.push(parameters.count)
@@ -320,8 +351,24 @@ extend ElisaProof:
                                 lemmas.parameters.all_defaults <- lemmas.parameters.all_defaults.push(parameter.default_value)
                             lemmas.termination.call_starts <- lemmas.termination.call_starts.push(lemmas.termination.all_calls.count)
                             lemma_call_names: mutable darray[sview] = []
-                            lemma_call_qualifiers: mutable darray[sview] = []
-                            proof_collect_lemma_body_call_names(body, &lemma_call_names, &lemma_call_qualifiers)
+                            proof_collect_lemma_body_call_names(body, &lemma_call_names)
+                            body_call_count: usize = lemma_call_names.count
+                            for requirement in signature_contracts.preconditions |lemma_call_names, source_work|:
+                                if not proof_replay_summary_expr_repeat_charge_with_work(requirement, 1, source_work):
+                                    source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                                    return
+                                proof_collect_lemma_call_names(requirement, &lemma_call_names)
+                            for ensure in signature_contracts.postconditions |lemma_call_names, source_work|:
+                                if not proof_replay_summary_expr_repeat_charge_with_work(ensure, 1, source_work):
+                                    source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                                    return
+                                proof_collect_lemma_call_names(ensure, &lemma_call_names)
+                            if lemma_call_names.count < body_call_count:
+                                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                                return
+                            if not proof_report_source_work_charge(lemma_call_names.count - body_call_count, source_work):
+                                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                                return
                             for called in lemma_call_names |lemmas|:
                                 lemmas.termination.all_calls <- lemmas.termination.all_calls.push(called)
                             lemmas.termination.call_counts <- lemmas.termination.call_counts.push(lemma_call_names.count)
@@ -353,18 +400,19 @@ extend ElisaProof:
                                             ensures_count <- ensures_count + 1
                                     _:
                                         pass
-                            signature_contracts: (complete: bool, preconditions: darray[Ast::Expr], postconditions: darray[Ast::Expr]) = proof_signature_contracts_for_line_with_work(file, position.line, source_work)
-                            source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1 if not signature_contracts.complete
+                            if not proof_report_source_work_charge(signature_contracts.preconditions.count, source_work) or not proof_report_source_work_charge(signature_contracts.postconditions.count, source_work):
+                                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                                return
                             lemmas.contracts.all_requires.extend(signature_contracts.preconditions)
                             lemmas.contracts.all_ensures.extend(signature_contracts.postconditions)
                             requires_count <- requires_count + signature_contracts.preconditions.count
                             ensures_count <- ensures_count + signature_contracts.postconditions.count
                             lemmas.contracts.requires_counts <- lemmas.contracts.requires_counts.push(requires_count)
                             lemmas.contracts.ensure_counts <- lemmas.contracts.ensure_counts.push(ensures_count)
-                    Ast::Decl.Module(_, module_body, _):
-                        proof_collect_lemmas(file, module_body, lemma_markers, lemmas, source_work)
+                    Ast::Decl.Module(module_name, module_body, _):
+                        proof_collect_lemmas(file, module_body, lemma_markers, module_name, lemmas, source_work)
                     Ast::Decl.Scoped(scoped_body, _):
-                        proof_collect_lemmas(file, scoped_body, lemma_markers, lemmas, source_work)
+                        proof_collect_lemmas(file, scoped_body, lemma_markers, owner_module, lemmas, source_work)
                     _:
                         pass
 
@@ -383,43 +431,6 @@ extend ElisaProof:
                 slot <- (slot + 1) % capacity
                 probes <- probes + 1
             return lemmas.identity.names.count
-
-        # Lemma calls in erased proof steps still participate in induction. The executable call
-        # graph deliberately ignores those steps, so recursive lemma summaries need this separate
-        # collector that descends through every assert-by body instead of only its runtime guard.
-        def proof_collect_lemma_body_call_names(body: darray[Ast::Stmt]&, names: mutable darray[sview]&, qualifiers: mutable darray[sview]&) -> void:
-            for statement in body |names, qualifiers|:
-                match statement:
-                    Ast::Stmt.Return(value, _):
-                        proof_collect_call_names(returned, names, qualifiers) if value is returned
-                    Ast::Stmt.Expr(expression, _):
-                        proof_collect_call_names(expression, names, qualifiers)
-                    Ast::Stmt.VarDecl(_, _, initializer, _):
-                        proof_collect_call_names(initializer, names, qualifiers)
-                    Ast::Stmt.Assign(target, _, initializer, _):
-                        proof_collect_call_names(target, names, qualifiers)
-                        proof_collect_call_names(initializer, names, qualifiers)
-                    Ast::Stmt.If(condition, then_body, else_body, _):
-                        proof_collect_call_names(condition, names, qualifiers)
-                        proof_collect_lemma_body_call_names(then_body, names, qualifiers)
-                        proof_collect_lemma_body_call_names(else_body, names, qualifiers)
-                    Ast::Stmt.While(condition, while_body, _):
-                        proof_collect_call_names(condition, names, qualifiers)
-                        proof_collect_lemma_body_call_names(while_body, names, qualifiers)
-                    Ast::Stmt.For(_, _, iterable, for_body, _):
-                        proof_collect_call_names(iterable, names, qualifiers)
-                        proof_collect_lemma_body_call_names(for_body, names, qualifiers)
-                    Ast::Stmt.Match(scrutinee, arms, _):
-                        proof_collect_call_names(scrutinee, names, qualifiers)
-                        for arm in arms |names, qualifiers|:
-                            proof_collect_call_names(arm.guard, names, qualifiers)
-                            proof_collect_lemma_body_call_names(arm.body, names, qualifiers)
-                    Ast::Stmt.Block(_, _, _, block_body, _):
-                        proof_collect_lemma_body_call_names(block_body, names, qualifiers)
-                    Ast::Stmt.Contract(kind, expression, _):
-                        proof_collect_call_names(expression, names, qualifiers) if kind == "assert"
-                    _:
-                        proof_push_call_name(names, qualifiers, "__opaque_call__", "")
 
         # Lemmas are theorem declarations, not executable summaries. A recursive lemma cannot
         # use its own postcondition as an induction hypothesis unless the kernel also checks a
@@ -450,100 +461,3 @@ extend ElisaProof:
                             reachable.push(next) if not already_seen
                 cursor <- cursor + 1
             return false
-
-        # Compute lemma SCCs with iterative Kosaraju traversal. The older per-node reachability
-        # test was easy to read but quadratic over large imported compiler modules and could make
-        # self-hosted-scale checking impractical. The explicit stacks keep traversal bounded by
-        # the collected graph and avoid recursive host-stack assumptions.
-        def proof_build_lemma_components(lemmas: mutable ProofLemmaTable&) -> void:
-            count: usize = lemmas.identity.names.count
-            lemmas.termination.recursive.clear()
-            lemmas.termination.recursive_component_ids.clear()
-            return if count == 0
-            reverse_counts: mutable darray[usize] = []
-            reverse_counts.resize(count)
-            self_edges: mutable darray[bool] = []
-            self_edges.resize(count)
-            for source in 0..<count |source, lemmas, reverse_counts, self_edges|:
-                start: usize = lemmas.termination.call_starts[source] if source < lemmas.termination.call_starts.count else lemmas.termination.all_calls.count
-                edge_count: usize = lemmas.termination.call_counts[source] if source < lemmas.termination.call_counts.count else 0
-                valid_range: bool = start <= lemmas.termination.all_calls.count and edge_count <= lemmas.termination.all_calls.count - start
-                continue if not valid_range
-                for offset in 0..<edge_count |offset, source, start, lemmas, reverse_counts, self_edges|:
-                    called: sview = lemmas.termination.all_calls[start + offset]
-                    next: usize = proof_lemma_index(lemmas, called)
-                    continue if next >= count
-                    reverse_counts[next] <- reverse_counts[next] + 1
-                    self_edges[source] <- true if next == source
-            reverse_starts: mutable darray[usize] = []
-            reverse_cursor: mutable usize = 0
-            for incoming in reverse_counts |reverse_starts, reverse_cursor|:
-                reverse_starts.push(reverse_cursor)
-                reverse_cursor <- reverse_cursor + incoming
-            reverse_edges: mutable darray[usize] = []
-            reverse_edges.resize(reverse_cursor)
-            reverse_write: mutable darray[usize] = []
-            reverse_write.extend(reverse_starts)
-            for source in 0..<count |source, lemmas, reverse_starts, reverse_write, reverse_edges|:
-                start: usize = lemmas.termination.call_starts[source] if source < lemmas.termination.call_starts.count else lemmas.termination.all_calls.count
-                edge_count: usize = lemmas.termination.call_counts[source] if source < lemmas.termination.call_counts.count else 0
-                valid_range: bool = start <= lemmas.termination.all_calls.count and edge_count <= lemmas.termination.all_calls.count - start
-                continue if not valid_range
-                for offset in 0..<edge_count |offset, source, start, lemmas, reverse_write, reverse_edges|:
-                    next: usize = proof_lemma_index(lemmas, lemmas.termination.all_calls[start + offset])
-                    continue if next >= count
-                    slot: usize = reverse_write[next]
-                    reverse_edges[slot] <- source
-                    reverse_write[next] <- slot + 1
-            visited: mutable darray[bool] = []
-            visited.resize(count)
-            order: mutable darray[usize] = []
-            for source in 0..<count |source, visited, order, lemmas|:
-                continue if visited[source]
-                stack_nodes: mutable darray[usize] = [source]
-                stack_offsets: mutable darray[usize] = [0]
-                visited[source] <- true
-                while stack_nodes.count > 0 |stack_nodes, stack_offsets, visited, order, lemmas|:
-                    top: usize = stack_nodes.count - 1
-                    current: usize = stack_nodes[top]
-                    start: usize = lemmas.termination.call_starts[current] if current < lemmas.termination.call_starts.count else lemmas.termination.all_calls.count
-                    edge_count: usize = lemmas.termination.call_counts[current] if current < lemmas.termination.call_counts.count else 0
-                    valid_range: bool = start <= lemmas.termination.all_calls.count and edge_count <= lemmas.termination.all_calls.count - start
-                    if valid_range and stack_offsets[top] < edge_count:
-                        offset: usize = stack_offsets[top]
-                        stack_offsets[top] <- offset + 1
-                        next: usize = proof_lemma_index(lemmas, lemmas.termination.all_calls[start + offset])
-                        if next < count and not visited[next]:
-                            visited[next] <- true
-                            stack_nodes.push(next)
-                            stack_offsets.push(0)
-                    else:
-                        order.push(current)
-                        stack_nodes <- stack_nodes.truncate(top)
-                        stack_offsets <- stack_offsets.truncate(top)
-            component_ids: mutable darray[usize] = []
-            component_ids.resize(count)
-            for index in 0..<count |index, component_ids|:
-                component_ids[index] <- count
-            for order_index in 0..<order.count |order_index, order, component_ids, reverse_starts, reverse_counts, reverse_edges, count|:
-                seed: usize = order[order.count - 1 - order_index]
-                continue if component_ids[seed] < count
-                component_ids[seed] <- seed
-                component_work: mutable darray[usize] = [seed]
-                while component_work.count > 0 |component_work, component_ids, reverse_starts, reverse_counts, reverse_edges, count|:
-                    current: usize = component_work[component_work.count - 1]
-                    component_work <- component_work.truncate(component_work.count - 1)
-                    start: usize = reverse_starts[current]
-                    edge_count: usize = reverse_counts[current]
-                    for offset in 0..<edge_count |offset, start, reverse_edges, component_ids, component_work, current|:
-                        predecessor: usize = reverse_edges[start + offset]
-                        if component_ids[predecessor] == count:
-                            component_ids[predecessor] <- seed
-                            component_work.push(predecessor)
-            component_sizes: mutable darray[usize] = []
-            component_sizes.resize(count)
-            for index in 0..<count |index, component_ids, component_sizes, count|:
-                component_sizes[component_ids[index]] <- component_sizes[component_ids[index]] + 1
-            for index in 0..<count |index, component_ids, component_sizes, self_edges, lemmas|:
-                lemmas.termination.recursive_component_ids.push(component_ids[index])
-                lemmas.termination.recursive.push(component_sizes[component_ids[index]] > 1 or self_edges[index])

@@ -1,0 +1,115 @@
+# Bounded hash-index builders shared by source-derived alias analysis.
+extend ElisaProof:
+    private:
+        const PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT: usize = 64
+
+        struct ProofSourceOpaqueExternSeen:
+            names: mutable darray[sview] = []
+            hashes: mutable darray[u32] = []
+            values: mutable darray[usize] = []
+            root_names: mutable darray[sview] = []
+            root_hashes: mutable darray[u32] = []
+            root_values: mutable darray[usize] = []
+            capacity: usize = 0
+            valid: mutable bool = false
+
+        def proof_source_conversion_name_index_build(names: darray[sview]&, hashes: mutable darray[u32]&, values: mutable darray[usize]&, counts: mutable darray[usize]&, source_work: mutable usize&) -> bool:
+            hashes.clear()
+            values.clear()
+            counts.clear()
+            name_count: usize = names.count
+            return true if name_count == 0
+            capacity: usize = proof_name_index_capacity(name_count)
+            return false if:
+                capacity == 0
+                not proof_report_source_work_charge(capacity, source_work) or not proof_report_source_work_charge(name_count, source_work)
+            hashes.resize(capacity)
+            values.resize(capacity)
+            counts.resize(capacity)
+            for slot in 0..<capacity |slot, values, counts, name_count|:
+                values[slot] <- name_count
+                counts[slot] <- 0
+            for row in 0..<name_count |row, names, hashes, values, counts, name_count, capacity, source_work|:
+                name: sview = names[row]
+                return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                hash: u32 = proof_name_hash(name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, row, names, hashes, values, counts, name_count, capacity, source_work, placed|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    current: usize = values[slot]
+                    if current == name_count:
+                        hashes[slot] <- hash
+                        values[slot] <- row
+                        counts[slot] <- 1
+                        placed <- true
+                        break
+                    if current < name_count and hashes[slot] == hash:
+                        current_name: sview = names[current]
+                        return false if not proof_report_source_work_charge(sview_len(current_name), source_work)
+                        if current_name == name:
+                            counts[slot] <- counts[slot] + 1
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(values, name_count, source_work)
+            return cluster_status.complete and cluster_status.bounded
+
+        def proof_source_conversion_source_alias_names_collect(declarations: darray[Ast::Decl]&, names: mutable darray[sview]&, root_names: mutable darray[sview]&, opaque_extern_count: mutable usize&, owner: sview, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT
+            for declaration in declarations |names, root_names, owner, source_work, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Alias(name, _, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        names.push(name)
+                        root_names.push(name) if owner == ""
+                    Ast::Decl.Module(module_name, body, _):
+                        return false if not proof_source_conversion_source_alias_names_collect(body, names, root_names, opaque_extern_count, module_name, source_work, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        return false if not proof_source_conversion_source_alias_names_collect(body, names, root_names, opaque_extern_count, owner, source_work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    Ast::Decl.Extern(_, _, _, _, _, _, _, _):
+                        return false if opaque_extern_count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        opaque_extern_count <- opaque_extern_count + 1
+                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Law(_, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Const(_, _, _, _, _):
+                        pass
+                    _:
+                        return false
+            return true
+
+        def proof_source_conversion_export_marker_owners_collect(annotations: darray[Ast::EnumAnnotation]&, owners: mutable darray[sview]&, source_work: mutable usize&) -> bool:
+            for annotation in annotations |owners, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(annotation.name), source_work) or not proof_report_source_work_charge(sview_len(annotation.owner), source_work)
+                if annotation.name == "__export_type" or annotation.name == "__export_pymodule":
+                    owners.push(annotation.owner)
+            return true
+
+        def proof_source_conversion_source_alias_index_build(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, index: mutable ProofSourceEffectIndexAliases&, source_work: mutable usize&) -> bool:
+            index.source_alias_names.clear()
+            index.source_root_alias_names.clear()
+            index.source_alias_index_hashes.clear()
+            index.source_alias_index_values.clear()
+            index.source_alias_index_counts.clear()
+            index.source_alias_index_valid <- false
+            index.source_root_alias_index_valid <- false
+            index.opaque_extern_export_owners.clear()
+            index.opaque_extern_export_owner_index_hashes.clear()
+            index.opaque_extern_export_owner_index_values.clear()
+            index.opaque_extern_export_owner_index_counts.clear()
+            index.opaque_extern_export_owner_index_valid <- false
+            index.source_opaque_extern_count <- 0
+            return false if:
+                not proof_source_conversion_source_alias_names_collect(declarations, &index.source_alias_names, &index.source_root_alias_names, &index.source_opaque_extern_count, "", source_work, 0)
+                not proof_source_conversion_name_index_build(index.source_alias_names, &index.source_alias_index_hashes, &index.source_alias_index_values, &index.source_alias_index_counts, source_work)
+                not proof_source_conversion_name_index_build(index.source_root_alias_names, &index.source_root_alias_index_hashes, &index.source_root_alias_index_values, &index.source_root_alias_index_counts, source_work)
+                not proof_source_conversion_export_marker_owners_collect(annotations, &index.opaque_extern_export_owners, source_work)
+                not proof_source_conversion_name_index_build(index.opaque_extern_export_owners, &index.opaque_extern_export_owner_index_hashes, &index.opaque_extern_export_owner_index_values, &index.opaque_extern_export_owner_index_counts, source_work)
+            index.source_alias_index_valid <- true
+            index.source_root_alias_index_valid <- true
+            index.opaque_extern_export_owner_index_valid <- true
+            return true

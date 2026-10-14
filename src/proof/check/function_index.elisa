@@ -14,34 +14,129 @@ extend ElisaProof:
                 return false if parameter.has_default and not proof_replay_summary_expr_charge_with_work(parameter.default_value, source_work)
             return true
 
-        def proof_mark_deterministic_functions(functions: mutable ProofFunctionTable&) -> void:
-            for index in 0..<functions.summaries.deterministic.count |functions|:
-                recursive: bool = index < functions.summaries.recursive.count and functions.summaries.recursive[index]
-                functions.summaries.deterministic[index] <- false if recursive
-                functions.summaries.deterministic[index] <- true if index < functions.summaries.pure.count and functions.summaries.pure[index]
-            changed: mutable bool = true
-            rounds: mutable usize = 0
-            while changed and rounds <= functions.lookup.names.count |functions, changed, rounds|:
-                changed <- false
-                for index in 0..<functions.summaries.deterministic.count |functions, changed|:
-                    continue if not functions.summaries.deterministic[index] or (index < functions.summaries.pure.count and functions.summaries.pure[index])
-                    if not proof_function_calls_are_deterministic(functions, index):
-                        functions.summaries.deterministic[index] <- false
-                        changed <- true
-                rounds <- rounds + 1
+        def proof_deterministic_summary_work_abort(functions: mutable ProofFunctionTable&, source_work: mutable usize&) -> void:
+            functions.summaries.deterministic.clear()
+            source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+            functions.lookup.module_resolution_work_used <- source_work
 
-        def proof_function_calls_are_deterministic(functions: ProofFunctionTable&, function_index: usize) -> bool:
-            return false if function_index >= functions.call_graph.call_starts.count or function_index >= functions.call_graph.call_counts.count
-            start: usize = functions.call_graph.call_starts[function_index]
-            count: usize = functions.call_graph.call_counts[function_index]
-            return false if start > functions.call_graph.all_calls.count or count > functions.call_graph.all_calls.count - start
-            for offset in 0..<count |offset, start, functions|:
-                called: sview = functions.call_graph.all_calls[start + offset]
-                return false if called == "__opaque_call__"
-                continue if called == ""
-                called_index: usize = proof_function_call_target(functions, start + offset)
-                return false if called_index >= functions.summaries.deterministic.count or not functions.summaries.deterministic[called_index]
-            return true
+        def proof_mark_deterministic_functions(functions: mutable ProofFunctionTable&, source_work: mutable usize&) -> void:
+            node_count: usize = functions.lookup.names.count
+            if functions.summaries.deterministic.count != node_count or functions.summaries.pure.count != node_count or functions.summaries.recursive.count != node_count:
+                functions.summaries.deterministic.clear()
+                return
+            for index in 0..<node_count |functions, source_work|:
+                if not proof_report_source_work_charge(1, &source_work):
+                    proof_deterministic_summary_work_abort(functions, source_work)
+                    return
+                pure: bool = functions.summaries.pure[index]
+                functions.summaries.deterministic[index] <- false if functions.summaries.recursive[index] and not pure
+                functions.summaries.deterministic[index] <- true if pure
+            if functions.call_graph.call_starts.count != node_count or functions.call_graph.call_counts.count != node_count or functions.call_graph.all_calls.count != functions.call_graph.all_call_targets.count:
+                for index in 0..<node_count |functions, source_work|:
+                    if not proof_report_source_work_charge(1, &source_work):
+                        proof_deterministic_summary_work_abort(functions, source_work)
+                        return
+                    functions.summaries.deterministic[index] <- false if not functions.summaries.pure[index]
+                functions.lookup.module_resolution_work_used <- source_work
+                return
+
+            # Build the reverse call graph once. Starting from directly nondeterministic
+            # callees, invalidate each deterministic caller at most once instead of
+            # rescanning every function on every fixed-point round.
+            reverse_counts: mutable darray[usize] = []
+            reverse_starts: mutable darray[usize] = []
+            reverse_edges: mutable darray[usize] = []
+            reverse_write: mutable darray[usize] = []
+            if not proof_report_source_work_charge(node_count, &source_work):
+                proof_deterministic_summary_work_abort(functions, source_work)
+                return
+            reverse_counts.resize(node_count)
+            invalid: mutable darray[usize] = []
+            for caller in 0..<node_count |caller, functions, reverse_counts, invalid, source_work|:
+                if not proof_report_source_work_charge(1, &source_work):
+                    proof_deterministic_summary_work_abort(functions, source_work)
+                    return
+                start: usize = functions.call_graph.call_starts[caller]
+                count: usize = functions.call_graph.call_counts[caller]
+                if start > functions.call_graph.all_calls.count or count > functions.call_graph.all_calls.count - start:
+                    if functions.summaries.deterministic[caller] and not functions.summaries.pure[caller]:
+                        functions.summaries.deterministic[caller] <- false
+                        invalid.push(caller)
+                    continue
+                for offset in 0..<count |offset, start, caller, functions, reverse_counts, invalid, source_work|:
+                    if not proof_report_source_work_charge(1, &source_work):
+                        proof_deterministic_summary_work_abort(functions, source_work)
+                        return
+                    edge: usize = start + offset
+                    called: sview = functions.call_graph.all_calls[edge]
+                    if not proof_report_source_work_charge(sview_len(called), &source_work):
+                        proof_deterministic_summary_work_abort(functions, source_work)
+                        return
+                    continue if called == ""
+                    target: usize = functions.call_graph.all_call_targets[edge]
+                    if called == "__opaque_call__" or target >= node_count:
+                        if functions.summaries.deterministic[caller] and not functions.summaries.pure[caller]:
+                            functions.summaries.deterministic[caller] <- false
+                            invalid.push(caller)
+                        continue
+                    reverse_counts[target] <- reverse_counts[target] + 1
+                    if not functions.summaries.deterministic[target] and functions.summaries.deterministic[caller] and not functions.summaries.pure[caller]:
+                        functions.summaries.deterministic[caller] <- false
+                        invalid.push(caller)
+
+            reverse_cursor: mutable usize = 0
+            for count in reverse_counts |reverse_starts, reverse_cursor, source_work|:
+                if not proof_report_source_work_charge(1, &source_work):
+                    proof_deterministic_summary_work_abort(functions, source_work)
+                    return
+                reverse_starts.push(reverse_cursor)
+                reverse_cursor <- reverse_cursor + count
+            if not proof_report_source_work_charge(reverse_cursor, &source_work) or not proof_report_source_work_charge(node_count, &source_work):
+                proof_deterministic_summary_work_abort(functions, source_work)
+                return
+            reverse_edges.resize(reverse_cursor)
+            reverse_write.extend(reverse_starts)
+            for caller in 0..<node_count |caller, functions, reverse_write, reverse_edges, source_work|:
+                if not proof_report_source_work_charge(1, &source_work):
+                    proof_deterministic_summary_work_abort(functions, source_work)
+                    return
+                start: usize = functions.call_graph.call_starts[caller]
+                count: usize = functions.call_graph.call_counts[caller]
+                continue if start > functions.call_graph.all_calls.count or count > functions.call_graph.all_calls.count - start
+                for offset in 0..<count |offset, start, caller, functions, reverse_write, reverse_edges, source_work|:
+                    if not proof_report_source_work_charge(1, &source_work):
+                        proof_deterministic_summary_work_abort(functions, source_work)
+                        return
+                    edge: usize = start + offset
+                    called: sview = functions.call_graph.all_calls[edge]
+                    if not proof_report_source_work_charge(sview_len(called), &source_work):
+                        proof_deterministic_summary_work_abort(functions, source_work)
+                        return
+                    continue if called == ""
+                    target: usize = functions.call_graph.all_call_targets[edge]
+                    continue if target >= node_count
+                    slot: usize = reverse_write[target]
+                    reverse_edges[slot] <- caller
+                    reverse_write[target] <- slot + 1
+
+            pending_index: mutable usize = 0
+            while pending_index < invalid.count |pending_index, invalid, reverse_starts, reverse_counts, reverse_edges, functions, source_work|:
+                if not proof_report_source_work_charge(1, &source_work):
+                    proof_deterministic_summary_work_abort(functions, source_work)
+                    return
+                failed: usize = invalid[pending_index]
+                pending_index <- pending_index + 1
+                start: usize = reverse_starts[failed]
+                count: usize = reverse_counts[failed]
+                for offset in 0..<count |offset, start, reverse_edges, invalid, functions, source_work|:
+                    if not proof_report_source_work_charge(1, &source_work):
+                        proof_deterministic_summary_work_abort(functions, source_work)
+                        return
+                    caller: usize = reverse_edges[start + offset]
+                    if functions.summaries.deterministic[caller] and not functions.summaries.pure[caller]:
+                        functions.summaries.deterministic[caller] <- false
+                        invalid.push(caller)
+            functions.lookup.module_resolution_work_used <- source_work
 
         # Runtime calls may materialize a default that invokes a verified pure function. This is
         # separate from the lemma mapper because erased lemma defaults remain intentionally
@@ -121,12 +216,13 @@ extend ElisaProof:
                         # Lemmas are erased proof declarations, never executable summaries.
                         # Keeping them out of this table prevents a runtime assignment or
                         # return from manufacturing facts through a proof-only call.
-                        lemma_lookup: (complete: bool, index: usize, declared: bool) = proof_lemma_index_with_work(lemmas, name, source_work)
-                        if not lemma_lookup.complete or lemma_lookup.declared:
+                        lemma_source: (complete: bool, index: usize, declared: bool) = proof_lemma_source_row_with_work(lemmas, name, position.line, position.offset, source_work)
+                        if not lemma_source.complete or lemma_source.declared:
                             declaration_path <- declaration_path.truncate(declaration_path.count - 1)
                             continue
                         functions.lookup.names <- functions.lookup.names.push(name)
                         functions.lookup.lines <- functions.lookup.lines.push(position.line)
+                        functions.lookup.offsets <- functions.lookup.offsets.push(position.offset)
                         functions.lookup.owner_modules <- functions.lookup.owner_modules.push(owner_module)
                         functions.lookup.module_prefixes <- functions.lookup.module_prefixes.push(module_prefix)
                         functions.lookup.declaration_path_starts <- functions.lookup.declaration_path_starts.push(functions.lookup.all_declaration_path.count)
@@ -146,7 +242,7 @@ extend ElisaProof:
                         functions.parameters.regions.all_param_region_starts <- functions.parameters.regions.all_param_region_starts.push(functions.parameters.regions.all_param_regions.count)
                         for parameter in parameters |functions, generic_index, source_work|:
                             functions.parameters.metadata.all_params <- functions.parameters.metadata.all_params.push(parameter.name)
-                            parameter_markers: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(parameter.type_expression, file.top_decls, file.generic_param_lines, file.generic_param_names, position.line, generic_index, generic_metadata_valid, source_work)
+                            parameter_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(parameter.type_expression, file.top_decls, file.generic_param_lines, file.generic_param_names, position.line, generic_index, generic_metadata_valid, source_work)
                             functions.parameters.metadata.all_parameter_references <- functions.parameters.metadata.all_parameter_references.push(parameter_markers.reference)
                             functions.parameters.metadata.all_parameter_mutable_references <- functions.parameters.metadata.all_parameter_mutable_references.push(parameter_markers.mutable_reference)
                             functions.parameters.metadata.all_parameter_type_marker_complete <- functions.parameters.metadata.all_parameter_type_marker_complete.push(parameter_markers.complete)
@@ -168,7 +264,7 @@ extend ElisaProof:
                         if return_type is declared_return_type:
                             return_generic: bool = proof_resource_type_mentions_owner_generic_with_work(declared_return_type, position.line, file.generic_param_lines, file.generic_param_names, generic_index, generic_metadata_valid, source_work, 0)
                             functions.returns.return_scalar <- functions.returns.return_scalar.push(not return_generic and proof_scalar_type_kind_index(declared_return_type, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, 0, source_work) == 1)
-                            return_markers: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(declared_return_type, file.top_decls, file.generic_param_lines, file.generic_param_names, position.line, generic_index, generic_metadata_valid, source_work)
+                            return_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(declared_return_type, file.top_decls, file.generic_param_lines, file.generic_param_names, position.line, generic_index, generic_metadata_valid, source_work)
                             functions.returns.return_references <- functions.returns.return_references.push(return_markers.reference)
                             return_reference_free: bool = proof_type_is_reference_free_with_work(declared_return_type, file.top_decls, file.enum_annotations, 0, source_work)
                             functions.returns.return_reference_free <- functions.returns.return_reference_free.push(not return_generic and return_reference_free)

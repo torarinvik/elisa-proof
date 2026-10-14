@@ -20,44 +20,93 @@ extend ElisaProof:
         # compiler's own ensure check cannot see those assumptions.
         def proof_add_refinement_signature_contracts(file: mutable Ast::File&, report: mutable ProofReport&, refined: mutable darray[sview]&) -> void:
             declarations: darray[Ast::Decl] = file.top_decls
-            proof_refinement_contracts_in(file, report, declarations, refined, 0)
+            source_work: mutable usize = 0
+            work_exhausted: mutable bool = false
+            proof_refinement_contracts_in(file, report, declarations, refined, source_work, work_exhausted, 0)
 
     private:
-        def proof_refinement_contracts_in(file: mutable Ast::File&, report: mutable ProofReport&, declarations: darray[Ast::Decl]&, refined: mutable darray[sview]&, depth: usize) -> void:
-            return if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in declarations |file, report, refined, depth|:
+        def proof_refinement_record_work_limit(report: mutable ProofReport&, name: sview, line: u32, source_work: usize, work_exhausted: mutable bool&) -> bool:
+            return false if source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if not work_exhausted:
+                work_exhausted <- true
+                report.proof_obligation(false)
+                proof_add_finding(report, "source-admission-work-limit", line, name, "refinement signature analysis exceeded its source work limit")
+            true
+
+        def proof_refinement_contracts_in(file: mutable Ast::File&, report: mutable ProofReport&, declarations: darray[Ast::Decl]&, refined: mutable darray[sview]&, source_work: mutable usize&, work_exhausted: mutable bool&, depth: usize) -> void:
+            return if work_exhausted
+            if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT:
+                work_exhausted <- true
+                report.proof_obligation(false)
+                proof_add_finding(report, "source-analysis-depth-limit", 0, "", "refinement signature analysis exceeded its nesting limit")
+                return
+            for declaration in declarations |file, report, refined, source_work, work_exhausted, depth|:
+                if not proof_type_audit_work_charge(1, source_work):
+                    proof_refinement_record_work_limit(report, "", 0, source_work, work_exhausted)
+                    return
                 match declaration:
                     Ast::Decl.Func(name, parameters, return_type, _, _, _, position):
-                        proof_refinement_function_contracts(file, report, name, parameters, return_type, position.line)
-                        refined.push(name) if any parameter in parameters where not proof_refinement_plain(parameter.type_expression, file.top_decls)
+                        proof_refinement_function_contracts(file, report, name, parameters, return_type, position.line, source_work, work_exhausted)
+                        return if work_exhausted
+                        if not proof_type_audit_work_charge(sview_len(name), source_work):
+                            proof_refinement_record_work_limit(report, name, position.line, source_work, work_exhausted)
+                            return
+                        has_refinement: mutable bool = false
+                        for parameter in parameters |file, report, name, parameters, source_work, work_exhausted, has_refinement|:
+                            if not proof_type_audit_work_charge(1, source_work) or not proof_type_audit_work_charge(sview_len(parameter.name), source_work):
+                                proof_refinement_record_work_limit(report, name, position.line, source_work, work_exhausted)
+                                return
+                            has_refinement <- true if not proof_refinement_plain(parameter.type_expression, file.top_decls, source_work)
+                            if proof_refinement_record_work_limit(report, name, position.line, source_work, work_exhausted):
+                                return
+                        refined.push(name) if has_refinement
                     Ast::Decl.Module(_, body, _):
-                        proof_refinement_contracts_in(file, report, body, refined, depth + 1)
+                        proof_refinement_contracts_in(file, report, body, refined, source_work, work_exhausted, depth + 1)
+                        return if work_exhausted
                     Ast::Decl.Scoped(body, _):
-                        proof_refinement_contracts_in(file, report, body, refined, depth + 1)
+                        proof_refinement_contracts_in(file, report, body, refined, source_work, work_exhausted, depth + 1)
+                        return if work_exhausted
                     _:
                         pass
 
-        def proof_refinement_function_contracts(file: mutable Ast::File&, report: mutable ProofReport&, name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, line: u32) -> void:
-            for parameter in parameters |file, report, name, parameters, line|:
+        def proof_refinement_function_contracts(file: mutable Ast::File&, report: mutable ProofReport&, name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, line: u32, source_work: mutable usize&, work_exhausted: mutable bool&) -> void:
+            for parameter in parameters |file, report, name, parameters, line, source_work, work_exhausted|:
+                if not proof_type_audit_work_charge(1, source_work) or not proof_type_audit_work_charge(sview_len(parameter.name), source_work):
+                    proof_refinement_record_work_limit(report, name, line, source_work, work_exhausted)
+                    return
                 predicates: mutable darray[Ast::Expr] = []
-                resolved: bool = proof_refinement_predicates(parameter.type_expression, file.top_decls, &predicates, 0)
+                resolved: bool = proof_refinement_predicates(parameter.type_expression, file.top_decls, &predicates, source_work, 0)
+                if proof_refinement_record_work_limit(report, name, line, source_work, work_exhausted):
+                    return
                 if not resolved:
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-expression-unsupported", line, name, "parameter refinement type alias cannot be resolved uniquely")
                 else:
-                    for predicate in predicates |file, report, name, parameters, line, parameter|:
-                        proof_refinement_push_contract(file, report, name, parameters, line, "requires", predicate, parameter.name)
+                    for predicate in predicates |file, report, name, parameters, line, parameter, source_work, work_exhausted|:
+                        proof_refinement_push_contract(file, report, name, parameters, line, "requires", predicate, parameter.name, source_work, work_exhausted)
+                        return if work_exhausted
             if return_type is declared_return_type:
                 predicates: mutable darray[Ast::Expr] = []
-                resolved: bool = proof_refinement_predicates(declared_return_type, file.top_decls, &predicates, 0)
+                resolved: bool = proof_refinement_predicates(declared_return_type, file.top_decls, &predicates, source_work, 0)
+                if proof_refinement_record_work_limit(report, name, line, source_work, work_exhausted):
+                    return
                 if not resolved:
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-expression-unsupported", line, name, "return refinement type alias cannot be resolved uniquely")
                 else:
-                    for predicate in predicates |file, report, name, parameters, line|:
-                        proof_refinement_push_contract(file, report, name, parameters, line, "ensure", predicate, "result")
+                    for predicate in predicates |file, report, name, parameters, line, source_work, work_exhausted|:
+                        proof_refinement_push_contract(file, report, name, parameters, line, "ensure", predicate, "result", source_work, work_exhausted)
+                        return if work_exhausted
 
-        def proof_refinement_push_contract(file: mutable Ast::File&, report: mutable ProofReport&, name: sview, parameters: darray[Ast::ParamDecl]&, line: u32, kind: sview, predicate: Ast::Expr, subject: sview) -> void:
+        def proof_refinement_push_contract(file: mutable Ast::File&, report: mutable ProofReport&, name: sview, parameters: darray[Ast::ParamDecl]&, line: u32, kind: sview, predicate: Ast::Expr, subject: sview, source_work: mutable usize&, work_exhausted: mutable bool&) -> void:
+            if not proof_replay_summary_expr_repeat_charge_with_work(predicate, parameters.count + 2, source_work):
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                proof_refinement_record_work_limit(report, name, line, source_work, work_exhausted)
+                return
+            for parameter in parameters |report, name, line, source_work, work_exhausted|:
+                if not proof_type_audit_work_charge(sview_len(parameter.name), source_work):
+                    proof_refinement_record_work_limit(report, name, line, source_work, work_exhausted)
+                    return
             if proof_refinement_predicate_captures(predicate, parameters):
                 report.proof_obligation(false)
                 proof_add_finding(report, "contract-expression-unsupported", line, name, "refinement predicate mentions a name the signature binds")
@@ -69,9 +118,9 @@ extend ElisaProof:
             file.signature_contract_kinds <- file.signature_contract_kinds.push(kind)
             file.signature_contract_exprs <- file.signature_contract_exprs.push(proof_substitute(predicate, names, values))
 
-        def proof_refinement_plain(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&) -> bool:
+        def proof_refinement_plain(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> bool:
             predicates: mutable darray[Ast::Expr] = []
-            return proof_refinement_predicates(type_expression, declarations, &predicates, 0) and predicates.count == 0
+            return proof_refinement_predicates(type_expression, declarations, &predicates, source_work, 0) and predicates.count == 0
 
         # A predicate names its subject only through `self`. Any other mention of a parameter or
         # of `result` would be captured by the signature scope and change the predicate's meaning.
@@ -83,22 +132,22 @@ extend ElisaProof:
 
         # Collect every predicate on a type's refinement chain, outermost first. Returns false
         # when the chain cannot be resolved uniquely; the collected predicates are then unused.
-        def proof_refinement_predicates(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, predicates: mutable darray[Ast::Expr]&, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+        def proof_refinement_predicates(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, predicates: mutable darray[Ast::Expr]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
             match type_expression:
                 Ast::Expr.Refinement(base, predicate, _):
                     predicates.push(predicate)
-                    return proof_refinement_predicates(base, declarations, predicates, depth + 1)
+                    return proof_refinement_predicates(base, declarations, predicates, source_work, depth + 1)
                 Ast::Expr.Paren(inner, _):
-                    return proof_refinement_predicates(inner, declarations, predicates, depth + 1)
+                    return proof_refinement_predicates(inner, declarations, predicates, source_work, depth + 1)
                 Ast::Expr.Ident(name, _):
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
                     return false if alias.count > 1
-                    return proof_refinement_predicates(alias.target, declarations, predicates, depth + 1) if alias.count == 1
+                    return proof_refinement_predicates(alias.target, declarations, predicates, source_work, depth + 1) if alias.count == 1
                     return true
                 Ast::Expr.Scope(_, name, _):
                     # A bare-name search cannot establish a qualified alias's owner.
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
                     return alias.count == 0
                 _:
                     return true

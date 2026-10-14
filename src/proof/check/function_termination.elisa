@@ -1,81 +1,129 @@
 extend ElisaProof:
     private:
-        def proof_structural_check_body(body: darray[Ast::Stmt]&, own_name: sview, subject_position: usize, parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&, smaller: darray[ProofStructuralSmaller]&, report: mutable ProofReport&, name: sview) -> void:
+        def proof_structural_check_body(body: darray[Ast::Stmt]&, own_name: sview, subject_position: usize, parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&, smaller: darray[ProofStructuralSmaller]&, report: mutable ProofReport&, name: sview, source_work: mutable usize&) -> void:
+            if not proof_structural_environment_work_charge(parameters, destructurable, smaller, source_work, true):
+                proof_structural_termination_finding(report, 0, name, "structural environment work exceeded its validated bound")
+                return
             current_destructurable: mutable darray[sview] = proof_copy_names(destructurable)
             current_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(smaller)
-            for statement in body |own_name, subject_position, parameters, current_destructurable, current_smaller, report, name|:
+            for statement in body |own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, source_work|:
+                if not proof_report_source_work_charge(1, source_work) or not proof_structural_environment_work_charge(parameters, current_destructurable, current_smaller, source_work, true):
+                    proof_structural_termination_finding(report, 0, name, "structural environment work exceeded its validated bound")
+                    return
                 match statement:
                     Ast::Stmt.Return(value, _):
-                        proof_structural_check_expression(returned, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name) if value is returned
+                        proof_structural_check_expression(returned, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, source_work) if value is returned
                     Ast::Stmt.Expr(expression, _):
-                        proof_structural_check_expression(expression, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        proof_structural_check_expression(expression, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, source_work)
                     Ast::Stmt.VarDecl(local_name, _, initializer, position):
                         proof_structural_termination_finding(report, position.line, name, "a local binding shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, local_name)
-                        proof_structural_check_expression(initializer, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        proof_structural_check_expression(initializer, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, source_work)
                         blocked: darray[sview] = [local_name]
-                        current_destructurable <- proof_structural_without(current_destructurable, blocked)
-                        current_smaller <- proof_structural_smaller_without(current_smaller, blocked)
+                        current_destructurable <- proof_structural_without(current_destructurable, blocked, source_work)
+                        current_smaller <- proof_structural_smaller_without(current_smaller, blocked, source_work)
+                        if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                            proof_structural_termination_finding(report, position.line, name, "structural shadow-filter work exceeded its validated bound")
+                            return
                     Ast::Stmt.Assign(target, _, initializer, position):
                         target_name: sview = proof_ident_name(target)
                         proof_structural_termination_finding(report, position.line, name, "an assignment binding shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, target_name)
-                        proof_structural_check_expression(target, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
-                        proof_structural_check_expression(initializer, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        proof_structural_check_expression(target, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, source_work)
+                        proof_structural_check_expression(initializer, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, source_work)
                         blocked: darray[sview] = [proof_ident_name(target)]
-                        current_destructurable <- proof_structural_without(current_destructurable, blocked)
-                        current_smaller <- proof_structural_smaller_without(current_smaller, blocked)
+                        current_destructurable <- proof_structural_without(current_destructurable, blocked, source_work)
+                        current_smaller <- proof_structural_smaller_without(current_smaller, blocked, source_work)
+                        if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                            proof_structural_termination_finding(report, position.line, name, "structural shadow-filter work exceeded its validated bound")
+                            return
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        proof_structural_check_expression(condition, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        proof_structural_check_expression(condition, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, source_work)
                         then_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
                         then_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
-                        proof_structural_check_body(then_body, own_name, subject_position, parameters, &then_destructurable, &then_smaller, report, name)
+                        proof_structural_check_body(then_body, own_name, subject_position, parameters, &then_destructurable, &then_smaller, report, name, source_work)
                         else_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
                         else_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
-                        proof_structural_check_body(else_body, own_name, subject_position, parameters, &else_destructurable, &else_smaller, report, name)
+                        proof_structural_check_body(else_body, own_name, subject_position, parameters, &else_destructurable, &else_smaller, report, name, source_work)
+                        if not proof_structural_environment_join_work_charge(then_destructurable, then_smaller, else_destructurable, else_smaller, source_work):
+                            proof_structural_termination_finding(report, 0, name, "structural branch join work exceeded its validated bound")
+                            return
                         current_destructurable <- proof_structural_intersect(then_destructurable, else_destructurable)
                         current_smaller <- proof_structural_smaller_intersect(then_smaller, else_smaller)
                     Ast::Stmt.While(condition, while_body, _):
-                        proof_structural_check_expression(condition, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        proof_structural_check_expression(condition, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, source_work)
                         loop_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
                         loop_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
-                        proof_structural_check_body(while_body, own_name, subject_position, parameters, &loop_destructurable, &loop_smaller, report, name)
+                        proof_structural_check_body(while_body, own_name, subject_position, parameters, &loop_destructurable, &loop_smaller, report, name, source_work)
+                        if not proof_structural_environment_join_work_charge(current_destructurable, current_smaller, loop_destructurable, loop_smaller, source_work):
+                            proof_structural_termination_finding(report, 0, name, "structural loop join work exceeded its validated bound")
+                            return
                         current_destructurable <- proof_structural_intersect(current_destructurable, loop_destructurable)
                         current_smaller <- proof_structural_smaller_intersect(current_smaller, loop_smaller)
                     Ast::Stmt.For(_, loop_variables, iterable, for_body, position):
-                        proof_structural_check_expression(iterable, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        proof_structural_check_expression(iterable, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, source_work)
                         for loop_variable in loop_variables |loop_variable, report, own_name, name, statement|:
                             proof_structural_termination_finding(report, position.line, name, "a loop binding shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, loop_variable)
-                        loop_destructurable: mutable darray[sview] = proof_structural_without(current_destructurable, loop_variables)
-                        loop_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(current_smaller, loop_variables)
+                        loop_destructurable: mutable darray[sview] = proof_structural_without(current_destructurable, loop_variables, source_work)
+                        loop_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(current_smaller, loop_variables, source_work)
+                        if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                            proof_structural_termination_finding(report, position.line, name, "structural loop shadow-filter work exceeded its validated bound")
+                            return
                         # Each element of a matched AST side-table is a strict subterm of the
                         # enclosing AST node. Promote loop variables only for an iterable already
                         # known to be such a subterm; ordinary user collections never enter this
                         # structural environment.
-                        if proof_structural_argument_is_smaller(iterable, current_smaller):
-                            iterable_subject: sview = proof_structural_argument_subject(iterable, current_smaller)
-                            iterable_subject_identity: usize = proof_structural_argument_subject_identity(iterable, current_smaller)
-                            for loop_variable in loop_variables |loop_variable, loop_smaller|:
-                                loop_smaller.push(ProofStructuralSmaller{name: loop_variable, subject: iterable_subject, identity: proof_structural_fresh_identity(report), subject_identity: iterable_subject_identity}) if not any candidate in loop_smaller where candidate.name == loop_variable
-                        proof_structural_check_body(for_body, own_name, subject_position, parameters, &loop_destructurable, &loop_smaller, report, name)
+                        iterable_metadata: (complete: bool, root: sview, found: bool, subject: sview, identity: usize, subject_identity: usize) = proof_structural_argument_metadata(iterable, current_smaller, "", source_work)
+                        if not iterable_metadata.complete:
+                            proof_structural_termination_finding(report, position.line, name, "structural iterable subterm lookup exceeded its validated bound")
+                            return
+                        if iterable_metadata.found:
+                            iterable_subject: sview = iterable_metadata.subject
+                            iterable_subject_identity: usize = iterable_metadata.subject_identity
+                            for loop_variable in loop_variables |loop_variable, loop_smaller, source_work, report, position, name, iterable_subject, iterable_subject_identity|:
+                                existing_loop_binding: (complete: bool, found: bool) = proof_structural_smaller_has_name_with_work(loop_smaller, loop_variable, source_work)
+                                if not existing_loop_binding.complete:
+                                    proof_structural_termination_finding(report, position.line, name, "structural loop subterm lookup exceeded its validated bound")
+                                    return
+                                loop_smaller.push(ProofStructuralSmaller{name: loop_variable, subject: iterable_subject, identity: proof_structural_fresh_identity(report), subject_identity: iterable_subject_identity}) if not existing_loop_binding.found
+                        proof_structural_check_body(for_body, own_name, subject_position, parameters, &loop_destructurable, &loop_smaller, report, name, source_work)
+                        if not proof_structural_environment_join_work_charge(current_destructurable, current_smaller, loop_destructurable, loop_smaller, source_work):
+                            proof_structural_termination_finding(report, position.line, name, "structural loop join work exceeded its validated bound")
+                            return
                         current_destructurable <- proof_structural_intersect(current_destructurable, loop_destructurable)
                         current_smaller <- proof_structural_smaller_intersect(current_smaller, loop_smaller)
                     Ast::Stmt.Match(scrutinee, arms, position):
-                        proof_structural_check_expression(scrutinee, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        proof_structural_check_expression(scrutinee, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, source_work)
                         merged_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
                         merged_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
                         first_arm: mutable bool = true
-                        for arm in arms |own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, merged_destructurable, merged_smaller, first_arm|:
+                        for arm in arms |own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, merged_destructurable, merged_smaller, first_arm, source_work|:
                             arm_bindings: mutable darray[sview] = []
-                            proof_structural_pattern_bindings(arm.pattern, &arm_bindings)
+                            arm_pattern_complete: bool = proof_structural_pattern_bindings_with_source_work(arm.pattern, &arm_bindings, source_work)
+                            if not arm_pattern_complete:
+                                proof_structural_termination_finding(report, position.line, name, "pattern binding analysis exceeded its validated bound")
+                                return
                             for arm_binding in arm_bindings |arm_binding, report, name, position|:
                                 proof_structural_termination_finding(report, position.line, name, "a pattern binding shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, arm_binding)
-                            arm_destructurable: mutable darray[sview] = proof_structural_without(current_destructurable, arm_bindings)
-                            arm_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(current_smaller, arm_bindings)
+                            arm_destructurable: mutable darray[sview] = proof_structural_without(current_destructurable, arm_bindings, source_work)
+                            arm_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(current_smaller, arm_bindings, source_work)
+                            if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                proof_structural_termination_finding(report, position.line, name, "structural pattern shadow-filter work exceeded its validated bound")
+                                return
                             scrutinee_name: sview = proof_ident_name(scrutinee)
                             if proof_structural_name_in(current_destructurable, scrutinee_name):
-                                proof_structural_pattern_bindings(arm.pattern, &arm_destructurable)
-                                proof_structural_pattern_subterms(arm.pattern, scrutinee_name, proof_structural_binding_identity(scrutinee, current_smaller, parameters), &arm_smaller, report)
-                            proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
-                            proof_structural_check_body(arm.body, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
+                                arm_destructurable_complete: bool = proof_structural_pattern_bindings_with_source_work(arm.pattern, &arm_destructurable, source_work)
+                                binding_identity: (complete: bool, identity: usize) = proof_structural_binding_identity_with_work(scrutinee, current_smaller, parameters, source_work)
+                                if not binding_identity.complete:
+                                    proof_structural_termination_finding(report, position.line, name, "pattern subject identity lookup exceeded its validated bound")
+                                    return
+                                arm_subterms_complete: bool = proof_structural_pattern_subterms_with_source_work(arm.pattern, scrutinee_name, binding_identity.identity, &arm_smaller, report, source_work)
+                                if not arm_destructurable_complete or not arm_subterms_complete:
+                                    proof_structural_termination_finding(report, position.line, name, "pattern subterm analysis exceeded its validated bound")
+                                    return
+                            proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name, source_work)
+                            proof_structural_check_body(arm.body, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name, source_work)
+                            if not proof_structural_environment_join_work_charge(current_destructurable, current_smaller, arm_destructurable, arm_smaller, source_work):
+                                proof_structural_termination_finding(report, position.line, name, "structural match join work exceeded its validated bound")
+                                return
                             arm_outer_destructurable: darray[sview] = proof_structural_intersect(current_destructurable, arm_destructurable)
                             arm_outer_smaller: darray[ProofStructuralSmaller] = proof_structural_smaller_intersect(current_smaller, arm_smaller)
                             if first_arm:
@@ -83,6 +131,9 @@ extend ElisaProof:
                                 merged_smaller <- arm_outer_smaller
                                 first_arm <- false
                             else:
+                                if not proof_structural_environment_join_work_charge(merged_destructurable, merged_smaller, arm_outer_destructurable, arm_outer_smaller, source_work):
+                                    proof_structural_termination_finding(report, position.line, name, "structural match merge work exceeded its validated bound")
+                                    return
                                 merged_destructurable <- proof_structural_intersect(merged_destructurable, arm_outer_destructurable)
                                 merged_smaller <- proof_structural_smaller_intersect(merged_smaller, arm_outer_smaller)
                         current_destructurable <- merged_destructurable if not first_arm
@@ -91,7 +142,7 @@ extend ElisaProof:
                         if block_kind == "assert_by" and block_body.count > 0:
                             match block_body[0]:
                                 Ast::Stmt.Contract(_, goal, _):
-                                    proof_structural_check_expression(goal, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                                    proof_structural_check_expression(goal, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, source_work)
                                 _:
                                     pass
                         if block_kind != "assert_by":
@@ -101,15 +152,21 @@ extend ElisaProof:
                                 Ast::Stmt.Block(_, _, binding, _, _):
                                     blocked: darray[sview] = [binding]
                                     proof_structural_termination_finding(report, position.line, name, "a block binding shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, binding)
-                                    block_destructurable <- proof_structural_without(block_destructurable, blocked) if binding != ""
-                                    block_smaller <- proof_structural_smaller_without(block_smaller, blocked) if binding != ""
+                                    block_destructurable <- proof_structural_without(block_destructurable, blocked, source_work) if binding != ""
+                                    block_smaller <- proof_structural_smaller_without(block_smaller, blocked, source_work) if binding != ""
                                 _:
                                     pass
-                            proof_structural_check_body(block_body, own_name, subject_position, parameters, &block_destructurable, &block_smaller, report, name)
+                            if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                proof_structural_termination_finding(report, position.line, name, "structural block shadow-filter work exceeded its validated bound")
+                                return
+                            proof_structural_check_body(block_body, own_name, subject_position, parameters, &block_destructurable, &block_smaller, report, name, source_work)
+                            if not proof_structural_environment_join_work_charge(current_destructurable, current_smaller, block_destructurable, block_smaller, source_work):
+                                proof_structural_termination_finding(report, position.line, name, "structural block join work exceeded its validated bound")
+                                return
                             current_destructurable <- proof_structural_intersect(current_destructurable, block_destructurable)
                             current_smaller <- proof_structural_smaller_intersect(current_smaller, block_smaller)
                     Ast::Stmt.Contract(kind, expression, _):
-                        proof_structural_check_expression(expression, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name) if kind == "assert"
+                        proof_structural_check_expression(expression, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, source_work) if kind == "assert"
                     _:
                         pass
 
@@ -150,38 +207,38 @@ extend ElisaProof:
                     high <- middle
             return (true, start, low - start)
 
-        def proof_structural_function_has_implicit_dispatch_risk_range(function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, contract_start: usize, contract_count: usize, source_work: mutable usize&, report: mutable ProofReport&) -> bool:
+        def proof_structural_function_has_implicit_dispatch_risk_range(function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, contract_start: usize, contract_count: usize, source_work: mutable usize&, report: mutable ProofReport&, caller_owner: sview = "", caller_owner_known: bool = false) -> bool:
             return true if:
-                proof_source_function_has_drop_risk(function_name, declaration_line, parameters, body, report)
-                proof_structural_typed_operator_defaults_have_overload(parameters, declaration_line, report)
-                proof_structural_typed_operator_statements_have_overload(body, parameters, declaration_line, report, 0)
-            for parameter in parameters |parameters, report|:
-                return true if parameter.has_default and proof_source_expression_has_unsafe_runtime_index(parameter.default_value, parameters, report, 0, [])
+                proof_source_function_has_drop_risk(function_name, declaration_line, parameters, body, report, caller_owner, caller_owner_known)
+                proof_structural_typed_operator_defaults_have_overload(parameters, declaration_line, report, caller_owner, caller_owner_known)
+                proof_structural_typed_operator_statements_have_overload(body, parameters, declaration_line, report, 0, caller_owner, caller_owner_known)
+            for parameter in parameters |parameters, report, declaration_line, caller_owner, caller_owner_known|:
+                return true if parameter.has_default and proof_source_expression_has_unsafe_runtime_index(parameter.default_value, parameters, report, 0, [], declaration_line, caller_owner, caller_owner_known)
             return true if:
-                proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, [])
+                proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, [], declaration_line, caller_owner, caller_owner_known)
                 signature_lines.count != signature_kinds.count or signature_kinds.count != signature_contracts.count
                 contract_start > signature_contracts.count or contract_count > signature_contracts.count - contract_start
-            for offset in 0..<contract_count |offset, contract_start, declaration_line, signature_lines, signature_kinds, signature_contracts, report, source_work|:
+            for offset in 0..<contract_count |offset, contract_start, declaration_line, signature_lines, signature_kinds, signature_contracts, report, source_work, caller_owner, caller_owner_known|:
                 return true if not proof_report_source_work_charge(1, source_work)
                 contract_index: usize = contract_start + offset
                 return true if signature_lines[contract_index] != declaration_line
                 kind: sview = signature_kinds[contract_index]
-                return true if not proof_source_index_work_charge(report, 1 + sview_len(kind))
+                return true if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(kind))
                 continue if kind != "requires" and kind != "ensure"
                 expression: Ast::Expr = signature_contracts[contract_index]
                 return true if:
-                    proof_source_expression_has_drop_risk(expression, parameters, declaration_line, report, 0)
-                    proof_structural_typed_operator_expression_has_overload(expression, parameters, declaration_line, report, 0)
-                    proof_source_expression_has_unsafe_runtime_index(expression, parameters, report, 0, [])
+                    proof_source_expression_has_drop_risk(expression, parameters, declaration_line, report, 0, caller_owner, caller_owner_known)
+                    proof_structural_typed_operator_expression_has_overload(expression, parameters, declaration_line, report, 0, caller_owner, caller_owner_known)
+                    proof_source_expression_has_unsafe_runtime_index(expression, parameters, report, 0, [], declaration_line, caller_owner, caller_owner_known)
             return false
 
         # Source call-graph edges do not include operations lowered to implicit trait calls,
         # indexing hooks, or generated drops. Record those hazards per function so they can be
         # propagated only to structural callers that can reach the function.
-        def proof_structural_function_has_implicit_dispatch_risk(function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, source_work: mutable usize&, report: mutable ProofReport&) -> bool:
+        def proof_structural_function_has_implicit_dispatch_risk(function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, source_work: mutable usize&, report: mutable ProofReport&, caller_owner: sview = "", caller_owner_known: bool = false) -> bool:
             contract_range: (complete: bool, start: usize, count: usize) = proof_structural_signature_contract_range_for_line(signature_lines, signature_kinds, signature_contracts, declaration_line, source_work)
             return true if not contract_range.complete
-            return proof_structural_function_has_implicit_dispatch_risk_range(function_name, declaration_line, parameters, body, signature_lines, signature_kinds, signature_contracts, contract_range.start, contract_range.count, source_work, report)
+            return proof_structural_function_has_implicit_dispatch_risk_range(function_name, declaration_line, parameters, body, signature_lines, signature_kinds, signature_contracts, contract_range.start, contract_range.count, source_work, report, caller_owner, caller_owner_known)
 
         def proof_structural_source_type_is_byte_darray(type_expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> bool:
             return false if depth >= 32 or not proof_source_index_work_charge(report, 1)
@@ -192,10 +249,10 @@ extend ElisaProof:
                     return proof_structural_source_type_is_byte_darray(inner, report, depth + 1) if operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                     return false
                 Ast::Expr.Index(head, element, _):
-                    return false if not proof_source_index_work_charge(report, sview_len(proof_ident_name(head)) + sview_len(proof_ident_name(element)))
+                    return false if not proof_source_index_work_charge(report, sview_len(proof_ident_name(head))) or not proof_source_index_work_charge(report, sview_len(proof_ident_name(element)))
                     return proof_ident_name(head) == "darray" and proof_ident_name(element) == "u8"
                 Ast::Expr.IndexN(head, elements, _):
-                    return false if elements.count != 1 or not proof_source_index_work_charge(report, sview_len(proof_ident_name(head)) + sview_len(proof_ident_name(elements[0])))
+                    return false if elements.count != 1 or not proof_source_index_work_charge(report, sview_len(proof_ident_name(head))) or not proof_source_index_work_charge(report, sview_len(proof_ident_name(elements[0])))
                     return proof_ident_name(head) == "darray" and proof_ident_name(elements[0]) == "u8"
                 _:
                     return false
@@ -211,21 +268,21 @@ extend ElisaProof:
                 _:
                     return proof_head_name(type_expression)
 
-        def proof_structural_field_conversion_type_supported(method: sview, receiver: Ast::Expr, parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&) -> bool:
-            receiver_type: (known: bool, type_expression: Ast::Expr) = proof_structural_source_value_type(receiver, parameters, report, 0, [])
+        def proof_structural_field_conversion_type_supported(method: sview, receiver: Ast::Expr, parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&, caller_owner: sview = "", caller_owner_known: bool = false) -> bool:
+            receiver_type: (known: bool, type_expression: Ast::Expr) = proof_structural_source_value_type(receiver, parameters, report, 0, [], declaration_line, caller_owner, caller_owner_known)
             return false if not receiver_type.known
             active_aliases: mutable darray[usize] = []
-            unwrapped_type: (complete: bool, type_expression: Ast::Expr) = proof_source_conversion_type_alias_unwrap(receiver_type.type_expression, declaration_line, true, "", report, &active_aliases, 0)
+            unwrapped_type: (complete: bool, type_expression: Ast::Expr) = proof_source_conversion_type_alias_unwrap(receiver_type.type_expression, declaration_line, true, caller_owner, caller_owner_known, report, &active_aliases, 0)
             return false if not unwrapped_type.complete
             if method == "as_sview":
                 return false if not proof_structural_source_type_is_byte_darray(unwrapped_type.type_expression, report, 0)
-                element: (known: bool, element: Ast::Expr) = proof_structural_builtin_container_element_type(unwrapped_type.type_expression, report)
+                element: (known: bool, element: Ast::Expr) = proof_structural_builtin_container_element_type(unwrapped_type.type_expression, report, declaration_line, caller_owner, caller_owner_known)
                 return element.known and proof_ident_name(element.element) == "u8"
             type_name: sview = proof_structural_source_type_head_name(unwrapped_type.type_expression, 0)
             return type_name in {"sview", "dstr", "cstr"} if method == "sview"
             return proof_builtin_scalar_type_name(type_name)
 
-        def proof_check_structural_function(enum_index: ProofEnumIndex, function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], extern_contract_summary_complete: bool, reachable_extern_contract_unsafe: bool, reachable_unresolved_call: bool, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, source_work: mutable usize&, report: mutable ProofReport&) -> void:
+        def proof_check_structural_function(enum_index: ProofEnumIndex, function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], extern_contract_summary_complete: bool, reachable_extern_contract_unsafe: bool, reachable_unresolved_call: bool, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, source_work: mutable usize&, report: mutable ProofReport&, caller_owner: sview = "", caller_owner_known: bool = false) -> void:
             if not report.analysis_1.structural.function_name_index_valid:
                 proof_structural_termination_finding(report, declaration_line, function_name, "source callable name index was unavailable for structural checking")
                 return
@@ -258,31 +315,66 @@ extend ElisaProof:
                 return
             own_index: usize = own_lookup.row
             finding_start: usize = report.results.findings.count
+            if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_structural_termination_finding(report, declaration_line, function_name, "structural source work exceeded its validated bound")
+                return
+            body_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_body(body, &body_cost, source_work, 0):
+                proof_structural_source_work_exhaust(source_work)
+                proof_structural_termination_finding(report, declaration_line, function_name, "structural body source work exceeded its validated bound")
+                return
+            # Reserve the cost walk plus the three whole-body hazard classifiers below:
+            # drop risk, overloaded operators, and unsafe runtime indexing. The structural
+            # termination traversal itself charges each node and environment operation as it runs.
+            if body_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / 4:
+                proof_structural_source_work_exhaust(source_work)
+                proof_structural_termination_finding(report, declaration_line, function_name, "structural body source work exceeded its validated bound")
+                return
+            if not proof_report_source_work_charge(body_cost * 4, source_work):
+                proof_structural_termination_finding(report, declaration_line, function_name, "structural body source work exceeded its validated bound")
+                return
             if not extern_contract_summary_complete:
                 proof_structural_termination_finding(report, declaration_line, function_name, "reachable callable extern contracts could not be classified within their validated bound")
                 return
             proof_structural_termination_finding(report, declaration_line, function_name, "a reachable callable extern contract may hide recursive edges") if reachable_extern_contract_unsafe
             proof_structural_termination_finding(report, declaration_line, function_name, "a reachable opaque call or implicit dispatch may hide a structural recursive edge") if reachable_unresolved_call
-            proof_structural_termination_finding(report, declaration_line, function_name, "an unmodeled destructor or opaque source call in this structural function may hide recursive calls") if proof_source_function_has_drop_risk(function_name, declaration_line, parameters, body, report)
+            proof_structural_termination_finding(report, declaration_line, function_name, "an unmodeled destructor or opaque source call in this structural function may hide recursive calls") if proof_source_function_has_drop_risk(function_name, declaration_line, parameters, body, report, caller_owner, caller_owner_known)
             # Operator implementations and user-defined indexers are implicit calls and are
             # absent from the current source call graph. Reject these paths unless a runtime
             # index receiver is statically known to be a built-in container.
-            for parameter in parameters |parameter, report, function_name|:
+            for parameter in parameters |parameter, report, function_name, declaration_line, caller_owner, caller_owner_known|:
                 if parameter.has_default:
-                    proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "overloaded operators in structural defaults may hide recursive calls") if proof_structural_typed_operator_expression_has_overload(parameter.default_value, parameters, declaration_line, report, 0)
-                    proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "user-defined indexing in structural defaults may hide recursive calls") if proof_source_expression_has_unsafe_runtime_index(parameter.default_value, parameters, report, 0, [])
-            if proof_structural_typed_operator_statements_have_overload(body, parameters, declaration_line, report, 0):
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                        proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "structural default source work exceeded its validated bound")
+                        return
+                    default_cost: mutable usize = 0
+                    if not proof_replay_summary_expr_cost(parameter.default_value, &default_cost, source_work, 0):
+                        proof_structural_source_work_exhaust(source_work)
+                        proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "structural default source work exceeded its validated bound")
+                        return
+                    # The default cost walk and its operator/index hazard checks are precharged;
+                    # the recursive termination expression walk charges its own visited nodes.
+                    if default_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / 3:
+                        proof_structural_source_work_exhaust(source_work)
+                        proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "structural default source work exceeded its validated bound")
+                        return
+                    if not proof_report_source_work_charge(default_cost * 3, source_work):
+                        proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "structural default source work exceeded its validated bound")
+                        return
+                    proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "overloaded operators in structural defaults may hide recursive calls") if proof_structural_typed_operator_expression_has_overload(parameter.default_value, parameters, declaration_line, report, 0, caller_owner, caller_owner_known)
+                    proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "user-defined indexing in structural defaults may hide recursive calls") if proof_source_expression_has_unsafe_runtime_index(parameter.default_value, parameters, report, 0, [], declaration_line, caller_owner, caller_owner_known)
+            if proof_structural_typed_operator_statements_have_overload(body, parameters, declaration_line, report, 0, caller_owner, caller_owner_known):
                 proof_structural_termination_finding(report, 0, function_name, "overloaded operators in structural bodies may hide recursive calls")
-            if proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, []):
+            if proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, [], declaration_line, caller_owner, caller_owner_known):
                 proof_structural_termination_finding(report, 0, function_name, "user-defined indexing in structural bodies may hide recursive calls")
             contract_range: (complete: bool, start: usize, count: usize) = proof_structural_signature_contract_range_for_line(signature_lines, signature_kinds, signature_contracts, declaration_line, source_work)
             if not contract_range.complete or contract_range.start > signature_contracts.count or contract_range.count > signature_contracts.count - contract_range.start:
                 proof_structural_termination_finding(report, declaration_line, function_name, "the signature contract source snapshot is malformed")
             else:
-                for offset in 0..<contract_range.count |offset, contract_range, report, function_name, signature_kinds, signature_contracts, source_work|:
+                for offset in 0..<contract_range.count |offset, contract_range, report, function_name, signature_kinds, signature_contracts, source_work, declaration_line, caller_owner, caller_owner_known, parameters|:
                     contract_index: usize = contract_range.start + offset
                     kind: sview = signature_kinds[contract_index]
-                    if not proof_report_source_work_charge(1 + sview_len(kind), &source_work):
+                    if not proof_report_source_work_charge(1, &source_work) or not proof_report_source_work_charge(sview_len(kind), &source_work):
                         proof_structural_termination_finding(report, declaration_line, function_name, "signature contract source work exceeded its validated bound")
                         return
                     continue if kind != "requires" and kind != "ensure"
@@ -290,22 +382,28 @@ extend ElisaProof:
                     if not proof_replay_summary_expr_charge_with_work(expression, &source_work) or not proof_replay_summary_expr_charge_with_work(expression, &source_work) or not proof_replay_summary_expr_charge_with_work(expression, &source_work):
                         proof_structural_termination_finding(report, Ast::expr_pos(expression).line, function_name, "signature contract source work exceeded its validated bound")
                         return
-                    if proof_structural_typed_operator_expression_has_overload(expression, parameters, declaration_line, report, 0) or proof_source_expression_has_unsafe_runtime_index(expression, parameters, report, 0, []):
+                    if proof_structural_typed_operator_expression_has_overload(expression, parameters, declaration_line, report, 0, caller_owner, caller_owner_known) or proof_source_expression_has_unsafe_runtime_index(expression, parameters, report, 0, [], declaration_line, caller_owner, caller_owner_known):
                         proof_structural_termination_finding(report, Ast::expr_pos(expression).line, function_name, "implicit operator or index dispatch in structural signature contracts may hide recursive calls")
-                    proof_structural_check_expression(expression, function_name, subject_position, parameters, destructurable, smaller, report, function_name)
+                    proof_structural_check_expression(expression, function_name, subject_position, parameters, destructurable, smaller, report, function_name, source_work)
             for parameter in parameters |parameter, report, function_name|:
                 proof_structural_termination_finding(report, 0, function_name, "a parameter shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, parameter.name)
             # Defaults are evaluated at a call site before entering the function body. They do
             # not inherit any branch-local pattern evidence, so any recursive or mutual call in
             # a structural default must fail closed instead of being certified from body binds.
-            for parameter in parameters |parameter, own_name, subject_position, parameters, destructurable, smaller, report, function_name|:
-                proof_structural_check_expression(parameter.default_value, function_name, subject_position, parameters, destructurable, smaller, report, function_name) if parameter.has_default
-            proof_structural_check_body(body, function_name, subject_position, parameters, destructurable, smaller, report, function_name)
+            for parameter in parameters |parameter, own_name, subject_position, parameters, destructurable, smaller, report, function_name, source_work|:
+                proof_structural_check_expression(parameter.default_value, function_name, subject_position, parameters, destructurable, smaller, report, function_name, source_work) if parameter.has_default
+            proof_structural_check_body(body, function_name, subject_position, parameters, destructurable, smaller, report, function_name, source_work)
             structural_failed: mutable bool = false
-            for finding_index in finding_start..<report.results.findings.count |finding_index, report, function_name, structural_failed|:
-                structural_failed <- true if report.results.findings[finding_index].kind == "structural-decreases-unproven" and report.results.findings[finding_index].name == function_name
+            for finding_index in finding_start..<report.results.findings.count |finding_index, report, function_name, source_work, structural_failed|:
+                finding: ProofFinding = report.results.findings[finding_index]
+                if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(finding.kind), source_work) or not proof_report_source_work_charge(sview_len(finding.name), source_work) or not proof_report_source_work_charge(sview_len(finding.message), source_work):
+                    proof_structural_termination_finding(report, declaration_line, function_name, "structural finding scan exceeded its validated bound")
+                    return
+                structural_failed <- true if finding.kind == "structural-decreases-unproven" and finding.name == function_name
             if not structural_failed:
-                report.analysis_1.structural.verified_names.push(function_name)
+                if not proof_structural_verified_member_publish(report, own_lookup.row, function_name, source_work):
+                    proof_structural_termination_finding(report, declaration_line, function_name, "verified structural member publication exceeded its validated bound")
+                    return
 
         def proof_check_structural_termination(file: Ast::File&, declarations: darray[Ast::Decl], functions: ProofFunctionTable&, report: mutable ProofReport&, initialize: bool) -> void:
             # This routine recurses into nested modules/scopes. Publish the immutable
@@ -322,12 +420,15 @@ extend ElisaProof:
                 report.analysis_1.structural.subject_types.clear()
                 report.analysis_1.structural.component_ids.clear()
                 report.analysis_1.structural.members.clear()
+                report.analysis_1.structural.verified_members.clear()
+                report.analysis_1.structural.verified_names.clear()
                 proof_structural_component_index_build(functions, report)
                 for index in 0..<functions.lookup.names.count |index, functions, report|:
                     report.analysis_1.structural.names.push(functions.lookup.names[index])
                     report.analysis_1.structural.subject_positions.push(functions.contracts.termination.structural_subject_positions[index] if index < functions.contracts.termination.structural_subject_positions.count else functions.parameters.metadata.param_counts[index])
                     report.analysis_1.structural.subject_types.push(functions.contracts.termination.structural_subject_types[index] if index < functions.contracts.termination.structural_subject_types.count else "")
                     report.analysis_1.structural.members.push(functions.contracts.termination.structural[index] if index < functions.contracts.termination.structural.count else false)
+                    report.analysis_1.structural.verified_members.push(false)
                 index_count: usize = functions.lookup.index_values.count
                 index_shape_valid: bool = index_count == functions.lookup.index_hashes.count and index_count == functions.lookup.index_ambiguous.count
                 if functions.lookup.names.count == 0:
@@ -354,7 +455,7 @@ extend ElisaProof:
                             unresolved_reachable: bool = function_index >= functions.call_graph.reachable_unresolved_calls.count or functions.call_graph.reachable_unresolved_calls[function_index]
                             saved_caller: usize = report.analysis_2.fact_call_shapes.status.active_caller
                             report.analysis_2.fact_call_shapes.status.active_caller <- function_index
-                            proof_check_structural_function(functions.type_indexes.enum_index, name, position.line, parameters, body, functions.externs.extern_contract_analysis_complete and function_index < functions.externs.reachable_extern_contract_unsafe.count, functions.externs.extern_contract_analysis_complete and function_index < functions.externs.reachable_extern_contract_unsafe.count and functions.externs.reachable_extern_contract_unsafe[function_index], unresolved_reachable, report.source_contracts.source_signature_contract_lines, report.source_contracts.source_signature_contract_kinds, report.source_contracts.source_signature_contracts, functions.lookup.module_resolution_work_used, report)
+                            proof_check_structural_function(functions.type_indexes.enum_index, name, position.line, parameters, body, functions.externs.extern_contract_analysis_complete and function_index < functions.externs.reachable_extern_contract_unsafe.count, functions.externs.extern_contract_analysis_complete and function_index < functions.externs.reachable_extern_contract_unsafe.count and functions.externs.reachable_extern_contract_unsafe[function_index], unresolved_reachable, report.source_contracts.source_signature_contract_lines, report.source_contracts.source_signature_contract_kinds, report.source_contracts.source_signature_contracts, functions.lookup.module_resolution_work_used, report, functions.lookup.owner_modules[function_index] if functions.lookup.owner_modules.count == functions.lookup.names.count else "", functions.lookup.owner_modules.count == functions.lookup.names.count)
                             report.analysis_2.fact_call_shapes.status.active_caller <- saved_caller
                     Ast::Decl.Module(_, module_body, _):
                         proof_check_structural_termination(file, module_body, functions, report, false)
@@ -403,198 +504,3 @@ extend ElisaProof:
             if source < functions.summaries.recursive_component_ids.count and target < functions.summaries.recursive_component_ids.count:
                 return functions.summaries.recursive_component_ids[source] == functions.summaries.recursive_component_ids[target]
             return proof_function_reaches(functions, source, target) and proof_function_reaches(functions, target, source)
-
-        # Compute executable SCCs with iterative Kosaraju traversal. Summary scheduling and
-        # structural recursion then use the stable component ids instead of re-running a full
-        # transitive reachability search for every pair of functions.
-        def proof_build_function_components(functions: mutable ProofFunctionTable&) -> void:
-            count: usize = functions.lookup.names.count
-            functions.summaries.recursive.clear()
-            functions.summaries.recursive_component_ids.clear()
-            return if count == 0
-            reverse_counts: mutable darray[usize] = []
-            reverse_counts.resize(count)
-            self_edges: mutable darray[bool] = []
-            self_edges.resize(count)
-            for source in 0..<count |source, functions, reverse_counts, self_edges|:
-                start: usize = functions.call_graph.call_starts[source] if source < functions.call_graph.call_starts.count else functions.call_graph.all_calls.count
-                edge_count: usize = functions.call_graph.call_counts[source] if source < functions.call_graph.call_counts.count else 0
-                valid_range: bool = start <= functions.call_graph.all_calls.count and edge_count <= functions.call_graph.all_calls.count - start
-                continue if not valid_range
-                for offset in 0..<edge_count |offset, source, start, functions, reverse_counts, self_edges|:
-                    called: sview = functions.call_graph.all_calls[start + offset]
-                    next: usize = proof_function_call_target(functions, start + offset)
-                    continue if next >= count
-                    reverse_counts[next] <- reverse_counts[next] + 1
-                    self_edges[source] <- true if next == source
-            reverse_starts: mutable darray[usize] = []
-            reverse_cursor: mutable usize = 0
-            for incoming in reverse_counts |reverse_starts, reverse_cursor|:
-                reverse_starts.push(reverse_cursor)
-                reverse_cursor <- reverse_cursor + incoming
-            reverse_edges: mutable darray[usize] = []
-            reverse_edges.resize(reverse_cursor)
-            reverse_write: mutable darray[usize] = []
-            reverse_write.extend(reverse_starts)
-            for source in 0..<count |source, functions, reverse_write, reverse_edges|:
-                start: usize = functions.call_graph.call_starts[source] if source < functions.call_graph.call_starts.count else functions.call_graph.all_calls.count
-                edge_count: usize = functions.call_graph.call_counts[source] if source < functions.call_graph.call_counts.count else 0
-                valid_range: bool = start <= functions.call_graph.all_calls.count and edge_count <= functions.call_graph.all_calls.count - start
-                continue if not valid_range
-                for offset in 0..<edge_count |offset, source, start, functions, reverse_write, reverse_edges|:
-                    next: usize = proof_function_call_target(functions, start + offset)
-                    continue if next >= count
-                    slot: usize = reverse_write[next]
-                    reverse_edges[slot] <- source
-                    reverse_write[next] <- slot + 1
-            visited: mutable darray[bool] = []
-            visited.resize(count)
-            order: mutable darray[usize] = []
-            for source in 0..<count |source, visited, order, functions|:
-                continue if visited[source]
-                stack_nodes: mutable darray[usize] = [source]
-                stack_offsets: mutable darray[usize] = [0]
-                visited[source] <- true
-                while stack_nodes.count > 0 |stack_nodes, stack_offsets, visited, order, functions|:
-                    top: usize = stack_nodes.count - 1
-                    current: usize = stack_nodes[top]
-                    start: usize = functions.call_graph.call_starts[current] if current < functions.call_graph.call_starts.count else functions.call_graph.all_calls.count
-                    edge_count: usize = functions.call_graph.call_counts[current] if current < functions.call_graph.call_counts.count else 0
-                    valid_range: bool = start <= functions.call_graph.all_calls.count and edge_count <= functions.call_graph.all_calls.count - start
-                    if valid_range and stack_offsets[top] < edge_count:
-                        offset: usize = stack_offsets[top]
-                        stack_offsets[top] <- offset + 1
-                        next: usize = proof_function_call_target(functions, start + offset)
-                        if next < count and not visited[next]:
-                            visited[next] <- true
-                            stack_nodes.push(next)
-                            stack_offsets.push(0)
-                    else:
-                        order.push(current)
-                        stack_nodes <- stack_nodes.truncate(top)
-                        stack_offsets <- stack_offsets.truncate(top)
-            component_ids: mutable darray[usize] = []
-            component_ids.resize(count)
-            for index in 0..<count |index, component_ids|:
-                component_ids[index] <- count
-            for order_index in 0..<order.count |order_index, order, component_ids, reverse_starts, reverse_counts, reverse_edges, count|:
-                seed: usize = order[order.count - 1 - order_index]
-                continue if component_ids[seed] < count
-                component_ids[seed] <- seed
-                component_work: mutable darray[usize] = [seed]
-                while component_work.count > 0 |component_work, component_ids, reverse_starts, reverse_counts, reverse_edges, count|:
-                    current: usize = component_work[component_work.count - 1]
-                    component_work <- component_work.truncate(component_work.count - 1)
-                    start: usize = reverse_starts[current]
-                    edge_count: usize = reverse_counts[current]
-                    for offset in 0..<edge_count |offset, start, reverse_edges, component_ids, component_work, current|:
-                        predecessor: usize = reverse_edges[start + offset]
-                        if component_ids[predecessor] == count:
-                            component_ids[predecessor] <- seed
-                            component_work.push(predecessor)
-            component_sizes: mutable darray[usize] = []
-            component_sizes.resize(count)
-            for index in 0..<count |index, component_ids, component_sizes, count|:
-                component_sizes[component_ids[index]] <- component_sizes[component_ids[index]] + 1
-            for index in 0..<count |index, component_ids, component_sizes, self_edges, functions|:
-                functions.summaries.recursive_component_ids.push(component_ids[index])
-                functions.summaries.recursive.push(component_sizes[component_ids[index]] > 1 or self_edges[index])
-
-        # Syntactic purity is intentionally a small total-function tier. It admits straight-line
-        # value computation, pure conditionals, and only the finite built-in loops admitted by
-        # purity_and_function_index. Assignments, hidden block scope, runtime assertions, and
-        # ownership/region effects remain outside this tier. Calls are allowed only after the
-        # declaration-independent fixed point below proves every reachable callee pure.
-        def proof_pure_expression_shape(expression: Ast::Expr) -> bool:
-            match expression:
-                Ast::Expr.Invalid:
-                    return false
-                Ast::Expr.Absent:
-                    return true
-                Ast::Expr.IntLit(_, _):
-                    return true
-                Ast::Expr.FloatLit(_, _):
-                    return true
-                Ast::Expr.StringLit(_, _):
-                    return true
-                Ast::Expr.CharLit(_, _):
-                    return true
-                Ast::Expr.BoolLit(_, _):
-                    return true
-                Ast::Expr.Ident(_, _):
-                    return true
-                Ast::Expr.Call(callee, arguments, _, _):
-                    return false if not proof_pure_expression_shape(callee)
-                    for argument in arguments:
-                        return false if not proof_pure_expression_shape(argument)
-                    return true
-                Ast::Expr.Paren(inner, _):
-                    return proof_pure_expression_shape(inner)
-                Ast::Expr.Unary(_, operand, _):
-                    return proof_pure_expression_shape(operand)
-                Ast::Expr.Binary(left, _, right, _):
-                    return proof_pure_expression_shape(left) and proof_pure_expression_shape(right)
-                Ast::Expr.Field(object, _, _):
-                    return proof_pure_expression_shape(object)
-                Ast::Expr.Scope(base, _, _):
-                    return proof_pure_expression_shape(base)
-                Ast::Expr.Index(object, index, _):
-                    return proof_pure_expression_shape(object) and proof_pure_expression_shape(index)
-                Ast::Expr.Slice(object, low, high, _):
-                    return proof_pure_expression_shape(object) and proof_pure_expression_shape(low) and proof_pure_expression_shape(high)
-                Ast::Expr.IndexN(object, arguments, _):
-                    return false if not proof_pure_expression_shape(object)
-                    for argument in arguments:
-                        return false if not proof_pure_expression_shape(argument)
-                    return true
-                Ast::Expr.Move(_, _):
-                    return false
-                Ast::Expr.RegionNew(_, _, _):
-                    return false
-                Ast::Expr.Array(elements, _):
-                    for element in elements:
-                        return false if not proof_pure_expression_shape(element)
-                    return true
-                Ast::Expr.Tuple(elements, _):
-                    for element in elements:
-                        return false if not proof_pure_expression_shape(element)
-                    return true
-                Ast::Expr.SetLit(elements, _):
-                    for element in elements:
-                        return false if not proof_pure_expression_shape(element)
-                    return true
-                Ast::Expr.DictLit(entries, _):
-                    for entry in entries:
-                        return false if not proof_pure_expression_shape(entry.key) or not proof_pure_expression_shape(entry.value)
-                    return true
-                Ast::Expr.Construct(type_expression, fields, _):
-                    return false if not proof_pure_expression_shape(type_expression)
-                    for field in fields:
-                        return false if not proof_pure_expression_shape(field.value)
-                    return true
-                Ast::Expr.RecordUpdate(base, fields, _):
-                    return false if not proof_pure_expression_shape(base)
-                    for field in fields:
-                        return false if not proof_pure_expression_shape(field.value)
-                    return true
-                Ast::Expr.If(condition, then_expr, else_expr, _):
-                    return proof_pure_expression_shape(condition) and proof_pure_expression_shape(then_expr) and proof_pure_expression_shape(else_expr)
-                Ast::Expr.Match(_, _, _):
-                    # The proof-safe value-match subset is lowered to a pure decision tree by
-                    # proof_expr_supported; using that same gate here keeps pure-summary
-                    # discovery aligned with the expression certificate boundary.
-                    return proof_expr_supported(expression)
-                Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    return proof_pure_expression_shape(iterable) and proof_pure_expression_shape(condition) and proof_pure_expression_shape(body)
-                Ast::Expr.Refinement(base, predicate, _):
-                    return proof_pure_expression_shape(base) and proof_pure_expression_shape(predicate)
-                Ast::Expr.Block(_, _, _, _):
-                    # Even a currently supported value block has a separate local scope and
-                    # can acquire hidden write-back semantics as the language evolves.
-                    return false
-                _:
-                    return false
-
-        # The parser stores canonical `x: mutable T` in the type expression; the separate
-        # ParamDecl bit is only populated for the legacy leading `mutable x: T` spelling.
-        # Mirror the compiler's recursive type mutability rule so both spellings affect purity.

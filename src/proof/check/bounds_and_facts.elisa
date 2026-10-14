@@ -5,19 +5,35 @@ extend ElisaProof:
         # The ordinary index path uses the first dimension of a collected place: a parameter,
         # or a field chain rooted at one (fixed_array_places.elisa). Calls and arbitrary paths
         # are excluded until their storage identity and aliasing are modeled.
-        def proof_fixed_array_extent_for_object(expression: Ast::Expr, places: darray[Ast::Expr]&, extents: darray[i64]&) -> i64:
-            return proof_fixed_array_dimension_extent(expression, 0, places, extents)
+        def proof_fixed_array_extent_for_object(expression: Ast::Expr, places: darray[Ast::Expr]&, extents: darray[i64]&, source_work: mutable usize&) -> (complete: bool, extent: i64):
+            return proof_fixed_array_dimension_extent(expression, 0, places, extents, source_work)
 
         # Multi-index expressions select the dimension by occurrence, so a place repeated in the
         # flat shape is deliberate and preserves the exact nesting order.
-        def proof_fixed_array_dimension_extent(expression: Ast::Expr, dimension: usize, places: darray[Ast::Expr]&, extents: darray[i64]&) -> i64:
-            limit: usize = places.count if places.count <= extents.count else extents.count
+        def proof_fixed_array_dimension_extent(expression: Ast::Expr, dimension: usize, places: darray[Ast::Expr]&, extents: darray[i64]&, source_work: mutable usize&) -> (complete: bool, extent: i64):
+            return (false, -1) if places.count > PROOF_FIXED_PLACE_ENTRY_LIMIT or places.count != extents.count
+            limit: usize = places.count
             occurrence: mutable usize = 0
-            for index in 0..<limit |index, places, extents, expression, dimension, occurrence|:
-                if proof_fixed_place_matches(expression, places[index]):
-                    return extents[index] if occurrence == dimension
+            for index in 0..<limit |index, places, extents, expression, dimension, occurrence, source_work|:
+                return (false, -1) if not proof_fixed_array_source_work_charge(1, source_work)
+                matched: (complete: bool, matches: bool) = proof_fixed_place_matches_with_work(expression, places[index], 0, source_work)
+                return (false, -1) if not matched.complete
+                if matched.matches:
+                    return (true, extents[index]) if occurrence == dimension
                     occurrence <- occurrence + 1
-            return -1
+            return (true, -1)
+
+        # Multi-index access checks each fixed dimension for the same object. Match the place
+        # table once, preserving its dimension order, instead of rescanning it for every index.
+        def proof_fixed_array_dimensions_for_object(expression: Ast::Expr, places: darray[Ast::Expr]&, extents: darray[i64]&, source_work: mutable usize&) -> (complete: bool, dimensions: darray[i64]):
+            dimensions: mutable darray[i64] = []
+            return (false, dimensions) if places.count > PROOF_FIXED_PLACE_ENTRY_LIMIT or places.count != extents.count
+            for index in 0..<places.count |index, places, extents, expression, dimensions, source_work|:
+                return (false, dimensions) if not proof_fixed_array_source_work_charge(1, source_work)
+                matched: (complete: bool, matches: bool) = proof_fixed_place_matches_with_work(expression, places[index], 0, source_work)
+                return (false, dimensions) if not matched.complete
+                dimensions.push(extents[index]) if matched.matches
+            return (true, dimensions)
 
         def proof_quantifier_rule(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> sview:
             kind: sview = proof_quantifier_kind(expression, annotations)
@@ -241,7 +257,7 @@ extend ElisaProof:
             return start <= total and count <= total - start
 
         def proof_declaration_has_enum(index: ProofEnumIndex, wanted: sview) -> bool:
-            return false if not index.complete or index.bucket_heads.count == 0 or index.names.count != index.name_hashes.count or index.names.count != index.next_indices.count or index.names.count != index.root_level.count or wanted == ""
+            return false if not index.complete or index.bucket_heads.count == 0 or index.names.count != index.name_hashes.count or index.names.count != index.next_indices.count or index.names.count != index.root_level.count or index.names.count != index.owners.count or index.names.count != index.declarations.count or index.names.count != index.const_enums.count or wanted == ""
             hash: u32 = proof_name_hash(wanted)
             slot: usize = (hash.i64() % index.bucket_heads.count.i64()).usize()
             entry: mutable usize = index.bucket_heads[slot]
@@ -249,6 +265,7 @@ extend ElisaProof:
             total_matches: mutable usize = 0
             root_matches: mutable usize = 0
             while entry < index.names.count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, hash, wanted, index|:
+                return false if entry >= index.next_indices.count or entry >= index.name_hashes.count or entry >= index.names.count
                 if index.name_hashes[entry] == hash and index.names[entry] == wanted:
                     total_matches <- total_matches + 1
                     root_matches <- root_matches + 1 if index.root_level[entry]

@@ -129,7 +129,7 @@ extend ElisaProof:
                             goal_id: usize = report.results.goal_attempts.count - 1
                             report.results.goal_attempts[goal_id].source_call_position <- position
                             require_goal_ids.push(goal_id)
-                            if not report.results.goal_attempts[goal_id].proven or not report.results.goal_attempts[goal_id].has_certificate:
+                            if not report.results.goal_attempts[goal_id].producer_proven or not report.results.goal_attempts[goal_id].has_certificate:
                                 required_proven <- false
                             else:
                                 if report.results.goal_attempts[goal_id].certificate_index >= report.analysis_1.certificates.count:
@@ -244,7 +244,10 @@ extend ElisaProof:
                 index <- index + 1
             return found
 
-        def proof_structural_check_expression(expression: Ast::Expr, own_name: sview, subject_position: usize, parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&, smaller: darray[ProofStructuralSmaller]&, report: mutable ProofReport&, name: sview) -> void:
+        def proof_structural_check_expression(expression: Ast::Expr, own_name: sview, subject_position: usize, parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&, smaller: darray[ProofStructuralSmaller]&, report: mutable ProofReport&, name: sview, source_work: mutable usize&) -> void:
+            if not proof_report_source_work_charge(1, source_work) or not proof_structural_environment_work_charge(parameters, destructurable, smaller, source_work, false):
+                proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "structural expression source work exceeded its validated bound")
+                return
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     called_name: sview = proof_callable_name(callee)
@@ -265,8 +268,11 @@ extend ElisaProof:
                         # callee's signature. Until callee formal names are available here,
                         # reject named mutual edges rather than proving descent on the wrong
                         # actual argument.
-                        has_named_argument: bool = any label in argument_names where label != ""
-                        if mutual_recursive and has_named_argument:
+                        named_argument_scan: (complete: bool, has_named: bool) = proof_structural_call_has_named_argument(argument_names, source_work) if mutual_recursive else (true, false)
+                        if not named_argument_scan.complete:
+                            proof_structural_termination_finding(report, position.line, name, "recursive call argument-label scan exceeded its validated bound")
+                            return
+                        if mutual_recursive and named_argument_scan.has_named:
                             proof_structural_termination_finding(report, position.line, name, "named arguments on mutual structural calls are not supported")
                         elif subject_position >= parameters.count and direct_recursive:
                             # When the ranking was inferred from an unannotated function with
@@ -275,22 +281,41 @@ extend ElisaProof:
                             # and at least one subject must be strict. This is the only place where
                             # a multi-parameter product ranking is admitted; explicit `decreases`
                             # clauses retain their exact single-subject meaning.
-                            enum_subjects: darray[sview] = proof_enum_parameter_names_from_parameters(parameters, destructurable)
+                            enum_subject_scan: (complete: bool, names: darray[sview]) = proof_enum_parameter_names_from_parameters(parameters, destructurable, source_work)
+                            if not enum_subject_scan.complete:
+                                proof_structural_termination_finding(report, position.line, name, "recursive subject enumeration exceeded its validated bound")
+                                return
+                            enum_subjects: darray[sview] = enum_subject_scan.names
                             multi_valid: mutable bool = enum_subjects.count > 0
                             multi_strict: mutable bool = false
                             witnesses: mutable darray[ProofStructuralWitness] = []
-                            for subject in enum_subjects |subject, arguments, argument_names, parameters, smaller, multi_valid, multi_strict, witnesses|:
-                                subject_index: usize = proof_parameter_position(parameters, subject)
-                                recursive_argument: Ast::Expr = proof_structural_call_argument(arguments, argument_names, parameters, subject_index)
+                            for subject in enum_subjects |subject, arguments, argument_names, parameters, smaller, multi_valid, multi_strict, witnesses, source_work, report, name, position|:
+                                resolved_subject_index: (complete: bool, position: usize) = proof_parameter_position(parameters, subject, source_work)
+                                if not resolved_subject_index.complete:
+                                    proof_structural_termination_finding(report, position.line, name, "recursive subject lookup exceeded its validated bound")
+                                    return
+                                subject_index: usize = resolved_subject_index.position
+                                mapped_argument: (complete: bool, argument: Ast::Expr) = proof_structural_call_argument(arguments, argument_names, parameters, subject_index, source_work)
+                                if not mapped_argument.complete:
+                                    proof_structural_termination_finding(report, position.line, name, "recursive call argument mapping exceeded its validated bound")
+                                    return
+                                recursive_argument: Ast::Expr = mapped_argument.argument
                                 recursive_name: sview = proof_ident_name(recursive_argument)
-                                if proof_structural_argument_is_smaller_for_subject(recursive_argument, subject, smaller):
+                                argument_metadata: (complete: bool, root: sview, found: bool, subject: sview, identity: usize, subject_identity: usize) = proof_structural_argument_metadata(recursive_argument, smaller, subject, source_work)
+                                if not argument_metadata.complete:
+                                    proof_structural_termination_finding(report, position.line, name, "recursive argument subterm lookup exceeded its validated bound")
+                                    return
+                                if argument_metadata.found:
                                     multi_strict <- true
-                                    argument_root: sview = proof_structural_argument_root(recursive_argument)
-                                    witnesses.push(ProofStructuralWitness{subject: subject, argument: argument_root, strict: true, subject_identity: proof_structural_argument_subject_identity(recursive_argument, smaller), argument_identity: proof_structural_argument_identity(recursive_argument, smaller)}) if argument_root != ""
+                                    witnesses.push(ProofStructuralWitness{subject: subject, argument: argument_metadata.root, strict: true, subject_identity: argument_metadata.subject_identity, argument_identity: argument_metadata.identity}) if argument_metadata.root != ""
                                 elif recursive_name != subject:
                                     multi_valid <- false
                                 else:
-                                    subject_identity: usize = proof_structural_parameter_identity(parameters, subject)
+                                    parameter_identity: (complete: bool, identity: usize) = proof_structural_parameter_identity_with_work(parameters, subject, source_work)
+                                    if not parameter_identity.complete:
+                                        proof_structural_termination_finding(report, position.line, name, "recursive subject identity lookup exceeded its validated bound")
+                                        return
+                                    subject_identity: usize = parameter_identity.identity
                                     witnesses.push(ProofStructuralWitness{subject: subject, argument: subject, strict: false, subject_identity: subject_identity, argument_identity: subject_identity})
                             if multi_valid and multi_strict:
                                 proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line, position.offset.usize())
@@ -299,13 +324,21 @@ extend ElisaProof:
                         else:
                             recursive_position: mutable usize = subject_position
                             recursive_position <- report.analysis_1.structural.subject_positions[called_index] if mutual_recursive and called_index < report.analysis_1.structural.subject_positions.count
-                            recursive_argument: Ast::Expr = proof_structural_call_argument(arguments, argument_names, parameters, recursive_position)
+                            mapped_argument: (complete: bool, argument: Ast::Expr) = proof_structural_call_argument(arguments, argument_names, parameters, recursive_position, source_work)
+                            if not mapped_argument.complete:
+                                proof_structural_termination_finding(report, position.line, name, "recursive call argument mapping exceeded its validated bound")
+                                return
+                            recursive_argument: Ast::Expr = mapped_argument.argument
                             recursive_name: sview = proof_ident_name(recursive_argument)
-                            if proof_structural_argument_is_smaller(recursive_argument, smaller):
-                                argument_root: sview = proof_structural_argument_root(recursive_argument)
-                                witness_subject: mutable sview = proof_structural_argument_subject(recursive_argument, smaller)
+                            argument_metadata: (complete: bool, root: sview, found: bool, subject: sview, identity: usize, subject_identity: usize) = proof_structural_argument_metadata(recursive_argument, smaller, "", source_work)
+                            if not argument_metadata.complete:
+                                proof_structural_termination_finding(report, position.line, name, "recursive argument subterm lookup exceeded its validated bound")
+                                return
+                            if argument_metadata.found:
+                                argument_root: sview = argument_metadata.root
+                                witness_subject: mutable sview = argument_metadata.subject
                                 witness_subject <- parameters[recursive_position].name if witness_subject == "" and recursive_position < parameters.count
-                                witnesses: darray[ProofStructuralWitness] = [ProofStructuralWitness{subject: witness_subject, argument: argument_root, strict: true, subject_identity: proof_structural_argument_subject_identity(recursive_argument, smaller), argument_identity: proof_structural_argument_identity(recursive_argument, smaller)}]
+                                witnesses: darray[ProofStructuralWitness] = [ProofStructuralWitness{subject: witness_subject, argument: argument_root, strict: true, subject_identity: argument_metadata.subject_identity, argument_identity: argument_metadata.identity}]
                                 proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line, position.offset.usize())
                             else:
                                 proof_structural_termination_finding(report, position.line, name, "recursive call does not pass a binder from a matched strict subterm")
@@ -313,103 +346,149 @@ extend ElisaProof:
                         Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
                             pass
                         _:
-                            proof_structural_check_expression(callee, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    for argument in arguments |own_name, subject_position, parameters, destructurable, smaller, report, name|:
-                        proof_structural_check_expression(argument, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                            proof_structural_check_expression(callee, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    for argument in arguments |own_name, subject_position, parameters, destructurable, smaller, report, name, source_work|:
+                        if not proof_report_source_work_charge(1, source_work):
+                            proof_structural_termination_finding(report, position.line, name, "structural call argument work exceeded its validated bound")
+                            return
+                        proof_structural_check_expression(argument, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Ident(value_name, position):
                     proof_structural_termination_finding(report, position.line, name, "a source callable value may escape structural call-graph checking") if proof_structural_name_shadows_function(report, value_name)
                 Ast::Expr.Paren(inner, _):
-                    proof_structural_check_expression(inner, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(inner, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Unary(_, operand, _):
-                    proof_structural_check_expression(operand, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(operand, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Binary(left, _, right, _):
-                    proof_structural_check_expression(left, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    proof_structural_check_expression(right, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(left, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    proof_structural_check_expression(right, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Field(object, _, _):
-                    proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Scope(base, scoped_name, position):
                     proof_structural_termination_finding(report, position.line, name, "a scoped callable value may escape structural call-graph checking") if proof_structural_name_shadows_function(report, scoped_name)
-                    proof_structural_check_expression(base, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(base, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Index(object, index, _):
-                    proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    proof_structural_check_expression(index, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    proof_structural_check_expression(index, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Slice(object, low, high, _):
-                    proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    proof_structural_check_expression(low, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    proof_structural_check_expression(high, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    proof_structural_check_expression(low, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    proof_structural_check_expression(high, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.IndexN(object, arguments, _):
-                    proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    for argument in arguments |own_name, subject_position, parameters, destructurable, smaller, report, name|:
-                        proof_structural_check_expression(argument, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    for argument in arguments |own_name, subject_position, parameters, destructurable, smaller, report, name, source_work|:
+                        if not proof_report_source_work_charge(1, source_work):
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "structural index argument work exceeded its validated bound")
+                            return
+                        proof_structural_check_expression(argument, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Move(operand, _):
-                    proof_structural_check_expression(operand, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(operand, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.RegionNew(operand, _, _):
-                    proof_structural_check_expression(operand, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(operand, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Array(elements, _):
-                    for element in elements |own_name, subject_position, parameters, destructurable, smaller, report, name|:
-                        proof_structural_check_expression(element, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    for element in elements |own_name, subject_position, parameters, destructurable, smaller, report, name, source_work|:
+                        if not proof_report_source_work_charge(1, source_work):
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "structural collection work exceeded its validated bound")
+                            return
+                        proof_structural_check_expression(element, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Tuple(elements, _):
-                    for element in elements |own_name, subject_position, parameters, destructurable, smaller, report, name|:
-                        proof_structural_check_expression(element, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    for element in elements |own_name, subject_position, parameters, destructurable, smaller, report, name, source_work|:
+                        if not proof_report_source_work_charge(1, source_work):
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "structural collection work exceeded its validated bound")
+                            return
+                        proof_structural_check_expression(element, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.SetLit(elements, _):
-                    for element in elements |own_name, subject_position, parameters, destructurable, smaller, report, name|:
-                        proof_structural_check_expression(element, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    for element in elements |own_name, subject_position, parameters, destructurable, smaller, report, name, source_work|:
+                        if not proof_report_source_work_charge(1, source_work):
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "structural collection work exceeded its validated bound")
+                            return
+                        proof_structural_check_expression(element, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.DictLit(entries, _):
-                    for entry in entries |own_name, subject_position, parameters, destructurable, smaller, report, name|:
-                        proof_structural_check_expression(entry.key, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                        proof_structural_check_expression(entry.value, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    for entry in entries |own_name, subject_position, parameters, destructurable, smaller, report, name, source_work|:
+                        if not proof_report_source_work_charge(1, source_work):
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "structural dictionary work exceeded its validated bound")
+                            return
+                        proof_structural_check_expression(entry.key, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                        proof_structural_check_expression(entry.value, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Construct(_, fields, _):
-                    for field in fields |own_name, subject_position, parameters, destructurable, smaller, report, name|:
-                        proof_structural_check_expression(field.value, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    for field in fields |own_name, subject_position, parameters, destructurable, smaller, report, name, source_work|:
+                        if not proof_report_source_work_charge(1, source_work):
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "structural constructor field work exceeded its validated bound")
+                            return
+                        proof_structural_check_expression(field.value, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.RecordUpdate(base, fields, _):
-                    proof_structural_check_expression(base, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    for field in fields |own_name, subject_position, parameters, destructurable, smaller, report, name|:
-                        proof_structural_check_expression(field.value, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(base, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    for field in fields |own_name, subject_position, parameters, destructurable, smaller, report, name, source_work|:
+                        if not proof_report_source_work_charge(1, source_work):
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "structural record update work exceeded its validated bound")
+                            return
+                        proof_structural_check_expression(field.value, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.If(condition, then_expr, else_expr, _):
-                    proof_structural_check_expression(condition, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    proof_structural_check_expression(then_expr, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    proof_structural_check_expression(else_expr, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(condition, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    proof_structural_check_expression(then_expr, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    proof_structural_check_expression(else_expr, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Comprehension(variable, iterable, condition, body, _):
-                    proof_structural_check_expression(iterable, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(iterable, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                     proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "a comprehension binding shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, variable)
                     comprehension_blocked: darray[sview] = [variable]
-                    comprehension_destructurable: darray[sview] = proof_structural_without(destructurable, comprehension_blocked)
-                    comprehension_smaller: darray[ProofStructuralSmaller] = proof_structural_smaller_without(smaller, comprehension_blocked)
-                    proof_structural_check_expression(condition, own_name, subject_position, parameters, comprehension_destructurable, comprehension_smaller, report, name)
-                    proof_structural_check_expression(body, own_name, subject_position, parameters, comprehension_destructurable, comprehension_smaller, report, name)
+                    comprehension_destructurable: darray[sview] = proof_structural_without(destructurable, comprehension_blocked, source_work)
+                    comprehension_smaller: darray[ProofStructuralSmaller] = proof_structural_smaller_without(smaller, comprehension_blocked, source_work)
+                    if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                        proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "structural comprehension shadow-filter work exceeded its validated bound")
+                        return
+                    proof_structural_check_expression(condition, own_name, subject_position, parameters, comprehension_destructurable, comprehension_smaller, report, name, source_work)
+                    proof_structural_check_expression(body, own_name, subject_position, parameters, comprehension_destructurable, comprehension_smaller, report, name, source_work)
                 Ast::Expr.Refinement(base, predicate, _):
-                    proof_structural_check_expression(base, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    proof_structural_check_expression(predicate, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(base, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    proof_structural_check_expression(predicate, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.Match(scrutinee, arms, _):
-                    proof_structural_check_expression(scrutinee, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    for arm in arms |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                    proof_structural_check_expression(scrutinee, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    for arm in arms |own_name, subject_position, parameters, destructurable, smaller, report, name, source_work|:
+                        if not proof_report_source_work_charge(1, source_work):
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "structural match arm work exceeded its validated bound")
+                            return
                         arm_bindings: mutable darray[sview] = []
-                        arm_pattern_complete: bool = proof_structural_pattern_bindings(arm.pattern, &arm_bindings)
-                        report.proof_obligation(false) if not arm_pattern_complete
+                        arm_pattern_complete: bool = proof_structural_pattern_bindings_with_source_work(arm.pattern, &arm_bindings, source_work)
+                        if not arm_pattern_complete:
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "match pattern binding analysis exceeded its validated bound")
+                            return
                         for arm_binding in arm_bindings |arm_binding, report, name, expression|:
                             proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "a match binding shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, arm_binding)
-                        arm_destructurable: mutable darray[sview] = proof_structural_without(destructurable, arm_bindings)
-                        arm_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(smaller, arm_bindings)
+                        arm_destructurable: mutable darray[sview] = proof_structural_without(destructurable, arm_bindings, source_work)
+                        arm_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(smaller, arm_bindings, source_work)
+                        if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "structural match shadow-filter work exceeded its validated bound")
+                            return
                         scrutinee_name: sview = proof_ident_name(scrutinee)
                         if proof_structural_name_in(destructurable, scrutinee_name):
-                            arm_destructurable_complete: bool = proof_structural_pattern_bindings(arm.pattern, &arm_destructurable)
-                            arm_subterms_complete: bool = proof_structural_pattern_subterms(arm.pattern, scrutinee_name, proof_structural_binding_identity(scrutinee, smaller, parameters), &arm_smaller, report)
-                            report.proof_obligation(false) if not arm_destructurable_complete or not arm_subterms_complete
-                        proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
-                        proof_structural_check_body(arm.body, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
+                            arm_destructurable_complete: bool = proof_structural_pattern_bindings_with_source_work(arm.pattern, &arm_destructurable, source_work)
+                            binding_identity: (complete: bool, identity: usize) = proof_structural_binding_identity_with_work(scrutinee, smaller, parameters, source_work)
+                            if not binding_identity.complete:
+                                proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "match subject identity lookup exceeded its validated bound")
+                                return
+                            arm_subterms_complete: bool = proof_structural_pattern_subterms_with_source_work(arm.pattern, scrutinee_name, binding_identity.identity, &arm_smaller, report, source_work)
+                            if not arm_destructurable_complete or not arm_subterms_complete:
+                                proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "match pattern subterm analysis exceeded its validated bound")
+                                return
+                        proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name, source_work)
+                        proof_structural_check_body(arm.body, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name, source_work)
                 Ast::Expr.Catch(guarded, arms, _):
-                    proof_structural_check_expression(guarded, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    for arm in arms |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                    proof_structural_check_expression(guarded, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    for arm in arms |own_name, subject_position, parameters, destructurable, smaller, report, name, source_work|:
+                        if not proof_report_source_work_charge(1, source_work):
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "structural catch arm work exceeded its validated bound")
+                            return
                         arm_bindings: mutable darray[sview] = []
-                        arm_pattern_complete: bool = proof_structural_pattern_bindings(arm.pattern, &arm_bindings)
-                        report.proof_obligation(false) if not arm_pattern_complete
+                        arm_pattern_complete: bool = proof_structural_pattern_bindings_with_source_work(arm.pattern, &arm_bindings, source_work)
+                        if not arm_pattern_complete:
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "catch pattern binding analysis exceeded its validated bound")
+                            return
                         for arm_binding in arm_bindings |arm_binding, report, name, expression|:
                             proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "a catch binding shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, arm_binding)
-                        proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                        proof_structural_check_body(arm.body, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                        proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                        proof_structural_check_body(arm.body, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.GetElse(guarded, recovery, _):
-                    proof_structural_check_expression(guarded, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                    proof_structural_check_body(recovery, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(guarded, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
+                    proof_structural_check_body(recovery, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                 Ast::Expr.ShorthandMember(_, _):
                     # A leading-dot const-enum member is a closed value atom and cannot hide a
                     # recursive call or structural projection.
@@ -417,9 +496,21 @@ extend ElisaProof:
                 Ast::Expr.Block(statements, value, captures, _):
                     block_destructurable: darray[sview] = proof_copy_names(destructurable)
                     block_smaller: darray[ProofStructuralSmaller] = proof_copy_structural_smaller(smaller)
-                    proof_structural_check_body(statements, own_name, subject_position, parameters, &block_destructurable, &block_smaller, report, name)
-                    proof_structural_check_expression(value, own_name, subject_position, parameters, block_destructurable, block_smaller, report, name)
-                    proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "captured value block is not structurally certified") if captures.count > 0 and proof_expr_has_call(expression) and proof_structural_captures_overlap(captures, block_smaller)
+                    proof_structural_check_body(statements, own_name, subject_position, parameters, &block_destructurable, &block_smaller, report, name, source_work)
+                    proof_structural_check_expression(value, own_name, subject_position, parameters, block_destructurable, block_smaller, report, name, source_work)
+                    if captures.count > 0:
+                        # The cost walk below reserves the separate `proof_expr_has_call` scan.
+                        # Nested captured blocks repeat this whole-subtree predicate, so account
+                        # for both passes at every block instead of charging only one.
+                        if not proof_replay_summary_expr_repeat_charge_with_work(expression, 1, source_work):
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "captured value block source work exceeded its validated bound")
+                            return
+                        if proof_expr_has_call(expression):
+                            capture_overlap: (complete: bool, overlaps: bool) = proof_structural_captures_overlap(captures, block_smaller, source_work)
+                            if not capture_overlap.complete:
+                                proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "captured value block overlap analysis exceeded its validated bound")
+                                return
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "captured value block is not structurally certified") if capture_overlap.overlaps
                 Ast::Expr.Lambda(_, _, position):
                     proof_structural_termination_finding(report, position.line, name, "recursive calls inside a closure are not structurally certified")
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, position):
@@ -429,7 +520,7 @@ extend ElisaProof:
                     # structural parameter positions are not uniquely known here.
                     lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
                     if lowered.known:
-                        proof_structural_check_expression(lowered.call, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                        proof_structural_check_expression(lowered.call, own_name, subject_position, parameters, destructurable, smaller, report, name, source_work)
                     else:
                         proof_structural_termination_finding(report, position.line, name, "unsupported expression may hide a structural recursive call")
                 _:

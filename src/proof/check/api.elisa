@@ -13,13 +13,19 @@ extend ElisaProof:
         def proof_reset_report(report: mutable ProofReport&) -> void:
             report.analysis_1.frame_producer.names.clear()
             report.analysis_1.frame_producer.lines.clear()
+            report.analysis_1.frame_producer.offsets.clear()
             report.analysis_1.frame_producer.starts.clear()
             report.analysis_1.frame_producer.counts.clear()
             report.analysis_1.frame_producer.rows.clear()
+            report.analysis_1.frame_producer.owner_lookup_hashes.clear()
+            report.analysis_1.frame_producer.owner_lookup_slots.clear()
+            report.analysis_1.frame_producer.owner_lookup_valid <- false
+            report.analysis_1.frame_producer.owner_lookup_work_used <- 0
+            report.analysis_1.frame_producer.source_preparation_complete <- false
             report.analysis_1.frame_producer.active_name <- ""
             report.results.declarations <- 0
             report.results.obligations <- 0
-            report.results.proven <- 0
+            report.results.producer_proven_count <- 0
             report.results.failed <- 0
             report.source.source_annotations.clear()
             report.source.source_annotation_args.clear()
@@ -41,7 +47,11 @@ extend ElisaProof:
             report.results.goal_attempts.clear()
             report.results.obligation_inventory.clear()
             report.source_syntax.assert_hole_positions.clear()
+            report.source_syntax.assert_hole_positions_offset_ordered <- false
             report.context.focused_function <- ""
+            report.context.focused_function_offset <- 0
+            report.context.focused_function_identity_valid <- false
+            report.context.current_source_postcondition_offset <- 0
             report.source.source_file_identity <- 0
             report.source.source_analysis_bound <- false
             proof_fact_call_shape_snapshot_reset(report.analysis_2.fact_call_shapes)
@@ -121,6 +131,7 @@ extend ElisaProof:
             report.analysis_1.structural.subject_types.clear()
             report.analysis_1.structural.component_ids.clear()
             report.analysis_1.structural.members.clear()
+            report.analysis_1.structural.verified_members.clear()
             report.analysis_1.structural.verified_names.clear()
             report.analysis_1.structural.identity_next <- 0
             report.analysis_1.declaration_effects.clear()
@@ -150,9 +161,12 @@ extend ElisaProof:
             report.analysis_2.trace_consumer_certificate_index <- 0
             report.analysis_2.trace_consumer_attempt_index <- 0
             report.analysis_2.replay_owner_line <- 0
+            report.analysis_2.replay_owner_offset <- 0
+            report.analysis_2.replay_owner_offset_valid <- false
             report.analysis_2.finding_function <- ""
             report.analysis_2.finding_owner <- ""
             report.analysis_2.finding_line <- 0
+            report.analysis_2.finding_offset <- 0
             report.analysis_2.finding_caller_index <- 0
 
         # The semantic table is deliberately consumed only by this short source-formation
@@ -182,7 +196,7 @@ extend ElisaProof:
                 return false
             for contract_index in 0..<signature_contract_rows |contract_index, file, report, signature_contract_work|:
                 contract_kind: sview = file.signature_contract_kinds[contract_index]
-                if not proof_report_source_work_charge(1 + sview_len(contract_kind), &signature_contract_work):
+                if not proof_report_source_work_charge(1, &signature_contract_work) or not proof_report_source_work_charge(sview_len(contract_kind), &signature_contract_work):
                     proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "signature contract source snapshot exceeded its validated work bound", "signature-contract-snapshot-work", signature_contract_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     return false
                 report.source_contracts.source_signature_contract_lines.push(file.signature_contract_lines[contract_index])
@@ -260,7 +274,7 @@ extend ElisaProof:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "lemma-annotation index could not be built within its validated bounds", lemma_marker_build.reason, lemma_marker_build.observed, lemma_marker_build.limit)
                 return
             lemma_markers: ProofLemmaAnnotationIndex = lemma_marker_build.index
-            proof_collect_lemmas(file, file.top_decls, lemma_markers, &lemmas, &name_index_work)
+            proof_collect_lemmas(file, file.top_decls, lemma_markers, "", &lemmas, &name_index_work)
             if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "lemma metadata collection exceeded its validated work bound", "lemma-metadata-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
@@ -268,7 +282,7 @@ extend ElisaProof:
             if not lemma_index_status.complete:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "lemma-name index could not be built within its validated bounds", lemma_index_status.reason, lemma_index_status.observed, lemma_index_status.limit)
                 return
-            proof_build_lemma_components(&lemmas)
+            return if not proof_build_lemma_components_or_report(&lemmas, &name_index_work, &report)
             functions.type_indexes.type_audit_index <- proof_type_audit_index(file.top_decls, &name_index_work)
             if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "type audit index exceeded its validated work bound", "type-audit-index-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
@@ -277,6 +291,7 @@ extend ElisaProof:
             if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "enum index exceeded its validated work bound", "enum-index-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
+            report.source_types.source_effect_index.enum_index <- functions.type_indexes.enum_index
             frame_annotation_build: (index: ProofFrameAnnotationIndex, complete: bool, reason: sview, observed: usize, limit: usize) = proof_frame_annotation_index(file, &name_index_work)
             if not frame_annotation_build.complete:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "frame-annotation index could not be built within its validated bounds", frame_annotation_build.reason, frame_annotation_build.observed, frame_annotation_build.limit)
@@ -323,7 +338,7 @@ extend ElisaProof:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "qualified contract call resolution exceeded its shared source-work bound", "module-call-resolution-work", functions.lookup.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
             name_index_work <- functions.lookup.module_resolution_work_used
-            proof_build_function_components(&functions)
+            return if not proof_build_function_components_or_report(&functions, &name_index_work, &report)
             proof_mark_pure_functions(file, file.top_decls, &functions, report)
             name_index_work <- functions.lookup.module_resolution_work_used
             if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
@@ -363,19 +378,19 @@ extend ElisaProof:
         # A direct API caller receives a report only after every supported simple source
         # postcondition has a matching goal attempt and, when proven, a matching certificate
         # claim. Kernel replay remains an explicit follow-up operation for compatibility.
-        def proof_api_source_binding_consistent(source_literal_ensures: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, report: ProofReport&) -> bool:
+        def proof_api_source_binding_consistent(source_literal_ensures: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, report: ProofReport&) -> bool:
             return proof_source_literal_ensure_binding_coverage(source_literal_ensures, report)
 
-        def proof_api_add_assert_by_inventory_finding(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, report: mutable ProofReport&) -> void:
+        def proof_api_add_assert_by_inventory_finding(inventory: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, report: mutable ProofReport&) -> void:
             proof_add_finding(report, "source-obligation-inventory", 0, "", "an assert-by target or proof step is unsupported, omitted, duplicated, falsely claimed, or unreplayed")
             report.results.findings[report.results.findings.count - 1].status <- "unsupported" if proof_source_assert_by_inventory_has_unsupported(inventory) and report.results.findings.count > 0
 
     public:
-        # Public compatibility wrapper; `ProofGoalAttempt.proven` is producer search only.
+        # Public compatibility wrapper; `ProofGoalAttempt.producer_proven` is producer search only.
         # Acceptance consumers must use proof_check_and_replay_with_source and ProofCheckedView.
         def proof_check(file: Ast::File&, report: mutable ProofReport&) -> void:
-            source_literal_ensures: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = proof_source_literal_ensure_inventory(file.top_decls)
-            source_assert_by_goals: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = proof_source_assert_by_inventory(file.top_decls)
+            source_literal_ensures: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = proof_source_literal_ensure_inventory(file.top_decls)
+            source_assert_by_goals: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = proof_source_assert_by_inventory(file.top_decls)
             ready: bool = (proof_prepare_semantic_source(file, report) can Global{Read,Write})
             if ready:
                 (proof_check_core(file, report, "") can Global{Read,Write})
@@ -387,11 +402,12 @@ extend ElisaProof:
         # Build compiler semantics once, prepare source propositions, and copy only structured
         # diagnostics. Returning releases the large compiler symbol table before the proof core,
         # replay, and JSON rendering retain their own working sets.
-        def proof_check_with_semantic_diagnostics(file: Ast::File&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&) -> void:
-            source_literal_ensures: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = proof_source_literal_ensure_inventory(file.top_decls)
-            source_assert_by_goals: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = proof_source_assert_by_inventory(file.top_decls)
+        def proof_check_with_semantic_diagnostics(file: Ast::File&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> void:
+            source_literal_ensures: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = proof_source_literal_ensure_inventory(file.top_decls)
+            source_assert_by_goals: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = proof_source_assert_by_inventory(file.top_decls)
             ready: bool = (proof_prepare_semantic_source_with_diagnostics(file, report, diagnostics) can Global{Read,Write})
             if ready:
+                proof_prepare_frame_producer_context(report, file, tokens, source, source_length)
                 (proof_check_core(file, report, "") can Global{Read,Write})
                 if not proof_api_source_binding_consistent(source_literal_ensures, report):
                     proof_add_finding(report, "source-obligation-inventory", 0, "", "a supported source postcondition has no distinct source-bound proof attempt")
@@ -401,11 +417,12 @@ extend ElisaProof:
         # Focused runs retain whole-file semantic/type context and the ordinary call-summary
         # scheduler, but spend the bounded proof arena only on the requested function and its
         # transitive executable callees. Unselected functions never gain verified summaries.
-        def proof_check_focused_with_semantic_diagnostics(file: Ast::File&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, focus_function: sview) -> void:
-            source_literal_ensures: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = proof_source_literal_ensure_inventory(file.top_decls)
-            source_assert_by_goals: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = proof_source_assert_by_inventory(file.top_decls)
+        def proof_check_focused_with_semantic_diagnostics(file: Ast::File&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, focus_function: sview, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> void:
+            source_literal_ensures: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = proof_source_literal_ensure_inventory(file.top_decls)
+            source_assert_by_goals: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = proof_source_assert_by_inventory(file.top_decls)
             ready: bool = (proof_prepare_semantic_source_with_diagnostics(file, report, diagnostics) can Global{Read,Write})
             if ready:
+                proof_prepare_frame_producer_context(report, file, tokens, source, source_length)
                 (proof_check_core(file, report, focus_function) can Global{Read,Write})
                 if not proof_api_focused_source_inventory_consistent(source_literal_ensures, source_assert_by_goals, report):
                     proof_add_finding(report, "source-obligation-inventory", 0, focus_function, "a focused source obligation has no distinct source-bound proof attempt")
@@ -428,9 +445,9 @@ extend ElisaProof:
             report.analysis_2.fact_call_shapes.status.source_check_active <- true
             report.source.source_file_identity <- source_file_identity
             if focus_function == "":
-                (proof_check_with_semantic_diagnostics(file, report, diagnostics) can Global{Read,Write})
+                (proof_check_with_semantic_diagnostics(file, report, diagnostics, source.tokens, &source.source[0], source.source_bytes) can Global{Read,Write})
             else:
-                (proof_check_focused_with_semantic_diagnostics(file, report, diagnostics, focus_function) can Global{Read,Write})
+                (proof_check_focused_with_semantic_diagnostics(file, report, diagnostics, focus_function, source.tokens, &source.source[0], source.source_bytes) can Global{Read,Write})
             report.analysis_2.fact_call_shapes.status.source_check_active <- false
             report.source.source_analysis_bound <- true
             return true
@@ -538,40 +555,11 @@ extend ElisaProof:
             ready: bool = proof_prepare_semantic_source_checked(file, report, source_types)
             proof_copy_normalized_semantic_diagnostics(source_types.diagnostics, diagnostics)
             return ready
-
-        # These legacy compiler proof checks can be superseded only after the custom
-        # kernel discharges their exact obligations. They are not malformed-source errors.
-        def proof_semantic_diagnostic_is_deferred_proof(diagnostic: Semantic::Diagnostic) -> bool:
-            match diagnostic.kind:
-                Semantic::DiagnosticKind.EnsureNotProven:
-                    return diagnostic.detail != "violated"
-                Semantic::DiagnosticKind.AssertByUnproven:
-                    return true
-                Semantic::DiagnosticKind.MutualDecreasesCycle:
-                    return true
-                _:
-                    return false
-            return false
-
-        # Ordinary compilation keeps these definite traps as warnings for compatibility.
-        # Verification cannot admit them as discharged safety obligations.
-        def proof_semantic_diagnostic_refutes_arithmetic_safety(kind: Semantic::DiagnosticKind) -> bool:
-            return kind == Semantic::DiagnosticKind.DivisionByZero or kind == Semantic::DiagnosticKind.ModuloByZero or kind == Semantic::DiagnosticKind.OversizedShift or kind == Semantic::DiagnosticKind.NegativeShift
-
-        # Compatibility warnings do not discharge permission obligations.
-        def proof_semantic_diagnostic_requires_permission(kind: Semantic::DiagnosticKind) -> bool:
-            effect_permission: bool = kind == Semantic::DiagnosticKind.UngrantedPanic or kind == Semantic::DiagnosticKind.UngrantedEffectCall
-            pointer_permission: bool = kind == Semantic::DiagnosticKind.UngrantedPointerCast or kind == Semantic::DiagnosticKind.UngrantedBufferReinterpret or kind == Semantic::DiagnosticKind.PointerArithmeticUngranted
-            reference_permission: bool = kind == Semantic::DiagnosticKind.UncheckedIndexUngranted or kind == Semantic::DiagnosticKind.MutableAliasUngranted or kind == Semantic::DiagnosticKind.UngrantedParallelFor
-            global_permission: bool = kind == Semantic::DiagnosticKind.MutableGlobalUngranted or kind == Semantic::DiagnosticKind.MutableGlobalPermissionUngranted or kind == Semantic::DiagnosticKind.MutableGlobalCallUngranted
-            return effect_permission or pointer_permission or reference_permission or global_permission
-
         def proof_prepare_semantic_source_checked(file: Ast::File&, report: mutable ProofReport&, source_types: Semantic::SymbolTable&) -> bool:
             for diagnostic in source_types.diagnostics:
                 if proof_semantic_diagnostic_refutes_arithmetic_safety(diagnostic.kind):
                     proof_reset_report(report)
                     proof_add_finding(report, "arithmetic-safety-refuted", diagnostic.line, "", "compiler identified a definite division, modulo, or shift safety failure; verification was skipped")
-                    report.results.findings[report.results.findings.count - 1].status <- "disproved"
                     return false
                 if proof_semantic_diagnostic_requires_permission(diagnostic.kind):
                     proof_reset_report(report)

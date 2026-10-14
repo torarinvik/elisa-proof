@@ -1,0 +1,190 @@
+# Bounded global-name index and one-pass purity expression reads.
+extend ElisaProof:
+    private:
+        const PROOF_PURITY_GLOBAL_SCAN_DEPTH_LIMIT: usize = 96
+
+        # Reserve shared work before the existing recursive purity/support visitors run. The
+        # bounded expression-cost walk rejects oversized or too-deep ASTs first; the factor
+        # covers the repeated linear walks performed by the callers below.
+        def proof_purity_expression_walks_bounded(expression: Ast::Expr, index: mutable ProofPureMutableGlobalIndex&) -> bool:
+            return false if index.source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            local_work: mutable usize = 0
+            exhausted: mutable bool = false
+            cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(expression, &local_work, &exhausted)
+            if not cost.complete or exhausted or cost.cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8:
+                index.source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            proof_report_source_work_charge(cost.cost * 8, &index.source_work)
+
+        def proof_purity_expression_supported_shape(expression: Ast::Expr, index: mutable ProofPureMutableGlobalIndex&) -> bool:
+            return false if not proof_purity_expression_walks_bounded(expression, index)
+            proof_expr_supported(expression) and proof_pure_expression_shape(expression)
+
+        struct ProofPureMutableGlobalIndex:
+            names: mutable darray[sview] = []
+            hashes: mutable darray[u32] = []
+            values: mutable darray[usize] = []
+            counts: mutable darray[usize] = []
+            source_work: mutable usize = 0
+            valid: mutable bool = false
+
+        struct ProofPureBodyShadowIndex:
+            names: mutable darray[sview] = []
+            hashes: mutable darray[u32] = []
+            values: mutable darray[usize] = []
+            counts: mutable darray[usize] = []
+            uncertain: mutable bool = false
+            valid: mutable bool = false
+
+        # Collect every declaration/binder that makes the legacy root-body shadow check refuse
+        # a loop candidate. Mark constructs it could not safely summarize as uncertain; a query
+        # against such a body declines the loop without another full scan.
+        def proof_pure_body_shadow_collect(body: darray[Ast::Stmt]&, index: mutable ProofPureBodyShadowIndex&, globals: mutable ProofPureMutableGlobalIndex&, depth: usize) -> bool:
+            if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT:
+                index.uncertain <- true
+                return true
+            for statement in body |index, globals, depth|:
+                return false if not proof_report_source_work_charge(1, &globals.source_work)
+                match statement:
+                    Ast::Stmt.VarDecl(name, _, _, _):
+                        index.names.push(name)
+                    Ast::Stmt.For(_, variables, _, nested, _):
+                        for variable in variables |index, globals|:
+                            return false if not proof_report_source_work_charge(1, &globals.source_work)
+                            index.names.push(variable)
+                        return false if not proof_pure_body_shadow_collect(nested, index, globals, depth + 1)
+                    Ast::Stmt.If(_, yes, no, _):
+                        return false if not proof_pure_body_shadow_collect(yes, index, globals, depth + 1)
+                        return false if not proof_pure_body_shadow_collect(no, index, globals, depth + 1)
+                    Ast::Stmt.Expr(Ast::Expr.Block(nested, _, _, _), _):
+                        return false if not proof_pure_body_shadow_collect(nested, index, globals, depth + 1)
+                    Ast::Stmt.Match(_, _, _) | Ast::Stmt.While(_, _, _) | Ast::Stmt.Block(_, _, _, _, _):
+                        index.uncertain <- true
+                        return true
+                    _:
+                        pass
+            return true
+
+        def proof_pure_body_shadow_index_build(body: darray[Ast::Stmt]&, index: mutable ProofPureBodyShadowIndex&, globals: mutable ProofPureMutableGlobalIndex&) -> bool:
+            return false if not proof_pure_body_shadow_collect(body, index, globals, 0)
+            if index.uncertain:
+                index.valid <- true
+                return true
+            built: bool = proof_source_conversion_name_index_build(index.names, &index.hashes, &index.values, &index.counts, &globals.source_work)
+            if not built:
+                globals.source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            index.valid <- true
+            return true
+
+        def proof_pure_body_shadow_index_contains(index: mutable ProofPureBodyShadowIndex&, name: sview, globals: mutable ProofPureMutableGlobalIndex&) -> bool:
+            return true if not index.valid or index.uncertain
+            found: (complete: bool, count: usize, row: usize) = proof_source_conversion_name_lookup_work(name, index.names, index.hashes, index.values, index.counts, globals.source_work)
+            return true if not found.complete
+            found.count > 0
+
+        def proof_pure_mutable_global_index_build(annotations: darray[Ast::EnumAnnotation]&, index: mutable ProofPureMutableGlobalIndex&) -> bool:
+            for annotation in annotations |annotation, index|:
+                return false if not proof_report_source_work_charge(1, &index.source_work) or not proof_report_source_work_charge(sview_len(annotation.name), &index.source_work) or not proof_report_source_work_charge(sview_len(annotation.owner), &index.source_work) or not proof_report_source_work_charge(sview_len("__global_mutable"), &index.source_work)
+                if annotation.name == "__global_mutable":
+                    index.names.push(annotation.owner)
+            built: bool = proof_source_conversion_name_index_build(index.names, &index.hashes, &index.values, &index.counts, &index.source_work)
+            if not built:
+                index.source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            index.valid <- true
+            return true
+
+        def proof_pure_mutable_global_index_contains(index: mutable ProofPureMutableGlobalIndex&, name: sview) -> bool:
+            return true if not index.valid
+            found: (complete: bool, count: usize, row: usize) = proof_source_conversion_name_lookup_work(name, index.names, index.hashes, index.values, index.counts, index.source_work)
+            return true if not found.complete
+            found.count > 0
+
+        def proof_pure_expression_has_mutable_global(expression: Ast::Expr, index: mutable ProofPureMutableGlobalIndex&) -> bool:
+            shadowed: mutable darray[sview] = []
+            proof_pure_global_expression_reads(expression, index, &shadowed, 0)
+
+        def proof_pure_global_expression_reads(expression: Ast::Expr, index: mutable ProofPureMutableGlobalIndex&, shadowed: mutable darray[sview]&, depth: usize) -> bool:
+            # This scan precedes several independent safety passes over the same function AST;
+            # reserve their per-node work here so those passes cannot multiply past the shared
+            # meter while each reports only one logical AST visit.
+            if depth >= PROOF_PURITY_GLOBAL_SCAN_DEPTH_LIMIT or not proof_report_source_work_charge(6, &index.source_work):
+                index.source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return true
+            match expression:
+                Ast::Expr.Invalid:
+                    return true
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _):
+                    return false
+                Ast::Expr.Ident(name, _):
+                    for local in shadowed |local, index, name|:
+                        return true if not proof_report_source_work_charge(1, &index.source_work) or not proof_report_source_work_charge(sview_len(local), &index.source_work) or not proof_report_source_work_charge(sview_len(name), &index.source_work)
+                        return false if local == name
+                    return proof_pure_mutable_global_index_contains(index, name)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    return proof_pure_global_expression_reads(inner, index, shadowed, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _) | Ast::Expr.Refinement(left, right, _):
+                    return proof_pure_global_expression_reads(left, index, shadowed, depth + 1) or proof_pure_global_expression_reads(right, index, shadowed, depth + 1)
+                Ast::Expr.Field(object, _, _):
+                    return proof_pure_global_expression_reads(object, index, shadowed, depth + 1)
+                Ast::Expr.Scope(base, member, _):
+                    # Qualified lookup bypasses lexical locals: `Mod::g` still names the
+                    # module's `g` even when this function has a parameter/local named `g`.
+                    # The index is name-only, so this can conservatively reject a same-named
+                    # member from another module, but it must not let that local hide a global.
+                    return true if proof_pure_mutable_global_index_contains(index, member)
+                    return proof_pure_global_expression_reads(base, index, shadowed, depth + 1)
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    return proof_pure_global_expression_reads(object, index, shadowed, depth + 1) or proof_pure_global_expression_reads(low, index, shadowed, depth + 1) or proof_pure_global_expression_reads(high, index, shadowed, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_pure_global_expression_reads(callee, index, shadowed, depth + 1)
+                    for argument in arguments |index, shadowed, depth|:
+                        return true if proof_pure_global_expression_reads(argument, index, shadowed, depth + 1)
+                    return false
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_pure_global_expression_reads(object, index, shadowed, depth + 1)
+                    for argument in arguments |index, shadowed, depth|:
+                        return true if proof_pure_global_expression_reads(argument, index, shadowed, depth + 1)
+                    return false
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |index, shadowed, depth|:
+                        return true if proof_pure_global_expression_reads(element, index, shadowed, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |index, shadowed, depth|:
+                        return true if proof_pure_global_expression_reads(entry.key, index, shadowed, depth + 1) or proof_pure_global_expression_reads(entry.value, index, shadowed, depth + 1)
+                    return false
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return true if proof_pure_global_expression_reads(type_expression, index, shadowed, depth + 1)
+                    for field in fields |index, shadowed, depth|:
+                        return true if proof_pure_global_expression_reads(field.value, index, shadowed, depth + 1)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_pure_global_expression_reads(base, index, shadowed, depth + 1)
+                    for field in fields |index, shadowed, depth|:
+                        return true if proof_pure_global_expression_reads(field.value, index, shadowed, depth + 1)
+                    return false
+                Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+                    return true if proof_pure_global_expression_reads(iterable, index, shadowed, depth + 1)
+                    return true if not proof_report_source_work_charge(sview_len(variable), &index.source_work)
+                    mark: usize = shadowed.count
+                    shadowed.push(variable)
+                    found: bool = proof_pure_global_expression_reads(condition, index, shadowed, depth + 1) or proof_pure_global_expression_reads(body, index, shadowed, depth + 1)
+                    shadowed.resize(mark)
+                    return found
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_pure_global_expression_reads(scrutinee, index, shadowed, depth + 1)
+                    for arm in arms |index, shadowed, depth|:
+                        return true if not proof_report_source_work_charge(6, &index.source_work)
+                        return true if proof_pure_global_expression_reads(arm.guard, index, shadowed, depth + 1) or arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_pure_global_expression_reads(value, index, shadowed, depth + 1)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Block(_, _, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    return true
+                _:
+                    return true

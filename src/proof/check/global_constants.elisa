@@ -5,6 +5,40 @@ extend ElisaProof:
     private:
         const PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT: usize = 127
 
+        def proof_global_constant_body_cost(body: darray[Ast::Stmt]&, report: mutable ProofReport&) -> (complete: bool, cost: usize):
+            work: usize = report.source_types.source_effect_index.work.implicit_effect_work
+            return (false, 0) if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_body(body, &cost, work, 0):
+                report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, 0)
+            return (false, 0) if not proof_source_index_work_charge(report, cost)
+            return (true, cost)
+
+        # Reserve a whole-body traversal before running one of the repeated constant-use
+        # predicates. The AST cost includes node and identifier widths; the factor covers
+        # comparing the sought spelling at each visited node.
+        def proof_global_constant_body_scan_charge(body_cost: usize, target: sview, report: mutable ProofReport&) -> bool:
+            target_bytes: usize = sview_len(target)
+            return false if target_bytes >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            factor: usize = 1 + target_bytes
+            return false if body_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / factor
+            proof_source_index_work_charge(report, body_cost * factor)
+
+        def proof_global_constant_body_scan_charge_lazy(body: darray[Ast::Stmt]&, body_cost: mutable usize&, body_cost_ready: mutable bool&, target: sview, report: mutable ProofReport&) -> bool:
+            if not body_cost_ready:
+                computed: (complete: bool, cost: usize) = proof_global_constant_body_cost(body, report)
+                return false if not computed.complete
+                body_cost <- computed.cost
+                body_cost_ready <- true
+            proof_global_constant_body_scan_charge(body_cost, target, report)
+
+        def proof_global_constant_name_in_vector(values: darray[sview]&, target: sview, report: mutable ProofReport&) -> (complete: bool, found: bool):
+            for value in values |value, target, report|:
+                return (false, false) if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(value)) or not proof_source_index_work_charge(report, sview_len(target))
+                return (true, true) if value == target
+            return (true, false)
+
         # The compiler resolves a bare name in the function's namespace before it considers a
         # file-global declaration. Keep the same priority here: importing every nested constant
         # into one flat table would make a module-local `LIMIT` look global, and importing the
@@ -14,6 +48,14 @@ extend ElisaProof:
             for index in 0..<left.count |index, left, right|:
                 return false if left[index] != right[index]
             return true
+
+        def proof_global_constant_scope_equal_with_work(left: darray[sview]&, right: darray[sview]&, report: mutable ProofReport&) -> (complete: bool, equal: bool):
+            return (false, false) if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, left.count) or not proof_source_index_work_charge(report, right.count)
+            for part in left |part, right, report|:
+                return (false, false) if not proof_source_index_work_charge(report, sview_len(part))
+            for part in right |part, left, report|:
+                return (false, false) if not proof_source_index_work_charge(report, sview_len(part))
+            (true, proof_global_constant_scope_equal(left, right))
 
         # Nested module AST names are stored fully qualified (for example,
         # `Studio::Filter`) even though the AST is already nested under
@@ -223,11 +265,14 @@ extend ElisaProof:
                     for contract_index in 0..<ensures_count |contract_index, functions, ensures_start, names, values|:
                         functions.contracts.obligations.all_ensures[ensures_start + contract_index] <- proof_substitute(functions.contracts.obligations.all_ensures[ensures_start + contract_index], names, values)
 
-        def proof_global_constant_find_function_scope(declarations: darray[Ast::Decl]&, function_name: sview, line: u32, current_scope: darray[sview]&, found_scope: mutable darray[sview]&, name_matches: mutable usize&, matches: mutable usize&, depth: usize) -> void:
+        def proof_global_constant_find_function_scope(declarations: darray[Ast::Decl]&, function_name: sview, line: u32, current_scope: darray[sview]&, found_scope: mutable darray[sview]&, name_matches: mutable usize&, matches: mutable usize&, work: mutable usize&, depth: usize) -> void:
             return if depth >= PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
-            for declaration in declarations |function_name, line, current_scope, found_scope, name_matches, matches, depth|:
+            return if not proof_report_source_work_charge(1, work) or not proof_report_source_work_charge(declarations.count, work)
+            for declaration in declarations |function_name, line, current_scope, found_scope, name_matches, matches, work, depth|:
+                return if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 match declaration:
                     Ast::Decl.Func(candidate_name, _, _, _, _, _, candidate_position):
+                        return if not proof_report_source_work_charge(sview_len(candidate_name), work) or not proof_report_source_work_charge(sview_len(function_name), work)
                         if candidate_name == function_name:
                             name_matches <- name_matches + 1
                             if candidate_position.line == line:
@@ -235,10 +280,11 @@ extend ElisaProof:
                                 found_scope.clear()
                                 found_scope.extend(current_scope)
                     Ast::Decl.Module(module_name, body, _):
+                        return if not proof_report_source_work_charge(sview_len(module_name), work)
                         next_scope: mutable darray[sview] = proof_global_constant_scope_with_module(current_scope, module_name)
-                        proof_global_constant_find_function_scope(body, function_name, line, &next_scope, found_scope, name_matches, matches, depth + 1)
+                        proof_global_constant_find_function_scope(body, function_name, line, &next_scope, found_scope, name_matches, matches, work, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        proof_global_constant_find_function_scope(body, function_name, line, current_scope, found_scope, name_matches, matches, depth + 1)
+                        proof_global_constant_find_function_scope(body, function_name, line, current_scope, found_scope, name_matches, matches, work, depth + 1)
                     _:
                         pass
 
@@ -247,42 +293,82 @@ extend ElisaProof:
         # root constants that namespace does not shadow. Name lookup tries the function's
         # namespace before the root, so a root constant is listed only when no module constant
         # of that name exists, mutable or not. An unidentified function gets neither list.
-        def proof_global_constant_static_scope(file: Ast::File&, function_name: sview, line: u32, scope: mutable darray[sview]&, names: mutable darray[sview]&, root_names: mutable darray[sview]&) -> void:
+        def proof_global_constant_static_scope(file: Ast::File&, function_name: sview, line: u32, scope: mutable darray[sview]&, names: mutable darray[sview]&, root_names: mutable darray[sview]&, report: mutable ProofReport&) -> void:
             scope.clear()
             names.clear()
             root_names.clear()
             root_scope: mutable darray[sview] = []
             name_matches: mutable usize = 0
             matches: mutable usize = 0
-            proof_global_constant_find_function_scope(file.top_decls, function_name, line, &root_scope, scope, &name_matches, &matches, 0)
+            proof_global_constant_find_function_scope(file.top_decls, function_name, line, &root_scope, scope, &name_matches, &matches, &report.source_types.source_effect_index.work.implicit_effect_work, 0)
+            if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                scope.clear()
+                return
             if matches != 1:
                 scope.clear()
                 return
             if scope.count > 0:
                 shadowing: mutable darray[sview] = []
-                proof_global_constant_collect_static_names(file.top_decls, scope, &root_scope, names, &shadowing, 0)
+                proof_global_constant_collect_static_names(file.top_decls, scope, &root_scope, names, &shadowing, report, 0)
                 root_candidates: mutable darray[sview] = []
                 root_mutable: mutable darray[sview] = []
-                proof_global_constant_collect_static_names(file.top_decls, &root_scope, &root_scope, &root_candidates, &root_mutable, 0)
-                for candidate in root_candidates |candidate, names, shadowing, root_names|:
-                    root_names.push(candidate) if not (any existing in names where existing == candidate) and not (any existing in shadowing where existing == candidate)
+                proof_global_constant_collect_static_names(file.top_decls, &root_scope, &root_scope, &root_candidates, &root_mutable, report, 0)
+                if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    scope.clear()
+                    names.clear()
+                    root_names.clear()
+                    return
+                for candidate in root_candidates |candidate, names, shadowing, root_names, report|:
+                    present: mutable bool = false
+                    for existing in names |existing, candidate, present, report|:
+                        if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(existing)) or not proof_source_index_work_charge(report, sview_len(candidate)):
+                            scope.clear()
+                            names.clear()
+                            root_names.clear()
+                            return
+                        present <- true if existing == candidate
+                    if not present:
+                        for existing in shadowing |existing, candidate, present, report|:
+                            if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(existing)) or not proof_source_index_work_charge(report, sview_len(candidate)):
+                                scope.clear()
+                                names.clear()
+                                root_names.clear()
+                                return
+                            present <- true if existing == candidate
+                    if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                        scope.clear()
+                        names.clear()
+                        root_names.clear()
+                        return
+                    root_names.push(candidate) if not present
                 return
             ignored_mutable: mutable darray[sview] = []
-            proof_global_constant_collect_static_names(file.top_decls, &root_scope, &root_scope, root_names, &ignored_mutable, 0)
+            proof_global_constant_collect_static_names(file.top_decls, &root_scope, &root_scope, root_names, &ignored_mutable, report, 0)
+            if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                root_names.clear()
 
-        def proof_global_constant_collect_static_names(declarations: darray[Ast::Decl]&, function_scope: darray[sview]&, current_scope: darray[sview]&, names: mutable darray[sview]&, mutable_names: mutable darray[sview]&, depth: usize) -> void:
+        def proof_global_constant_collect_static_names(declarations: darray[Ast::Decl]&, function_scope: darray[sview]&, current_scope: darray[sview]&, names: mutable darray[sview]&, mutable_names: mutable darray[sview]&, report: mutable ProofReport&, depth: usize) -> void:
             return if depth >= PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
-            in_scope: bool = proof_global_constant_scope_equal(current_scope, function_scope)
-            for declaration in declarations |function_scope, current_scope, names, mutable_names, depth, in_scope|:
+            return if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, declarations.count) or not proof_source_index_work_charge(report, function_scope.count) or not proof_source_index_work_charge(report, current_scope.count)
+            for part in function_scope |part, report|:
+                return if not proof_source_index_work_charge(report, sview_len(part))
+            for part in current_scope |part, report|:
+                return if not proof_source_index_work_charge(report, sview_len(part))
+            in_scope: (complete: bool, equal: bool) = proof_global_constant_scope_equal_with_work(current_scope, function_scope, report)
+            return if not in_scope.complete
+            for declaration in declarations |function_scope, current_scope, names, mutable_names, report, depth, in_scope|:
+                return if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 match declaration:
                     Ast::Decl.Const(constant_name, _, _, constant_mutable, _):
-                        names.push(constant_name) if in_scope and not constant_mutable
-                        mutable_names.push(constant_name) if in_scope and constant_mutable
+                        return if not proof_source_index_work_charge(report, sview_len(constant_name))
+                        names.push(constant_name) if in_scope.equal and not constant_mutable
+                        mutable_names.push(constant_name) if in_scope.equal and constant_mutable
                     Ast::Decl.Module(module_name, body, _):
+                        return if not proof_source_index_work_charge(report, sview_len(module_name))
                         next_scope: mutable darray[sview] = proof_global_constant_scope_with_module(current_scope, module_name)
-                        proof_global_constant_collect_static_names(body, function_scope, &next_scope, names, mutable_names, depth + 1)
+                        proof_global_constant_collect_static_names(body, function_scope, &next_scope, names, mutable_names, report, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        proof_global_constant_collect_static_names(body, function_scope, current_scope, names, mutable_names, depth + 1)
+                        proof_global_constant_collect_static_names(body, function_scope, current_scope, names, mutable_names, report, depth + 1)
                     _:
                         pass
 
@@ -293,7 +379,7 @@ extend ElisaProof:
                 reference <- Ast::Expr.Scope(reference, scope[index], position)
             return Ast::Expr.Scope(reference, constant_name, position)
 
-        def proof_global_constant_record_value(constant_name: sview, constant_value: i64, constant_expression: Ast::Expr, constant_type: Ast::Expr, constant_position: Ast::Pos, constant_scope: darray[sview]&, include_unqualified: bool, function_body: darray[Ast::Stmt]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, type_index: ProofTypeAuditIndex) -> void:
+        def proof_global_constant_record_value(constant_name: sview, constant_value: i64, constant_expression: Ast::Expr, constant_type: Ast::Expr, constant_position: Ast::Pos, constant_scope: darray[sview]&, include_unqualified: bool, function_body: darray[Ast::Stmt]&, body_cost: mutable usize&, body_cost_ready: mutable bool&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, type_index: ProofTypeAuditIndex) -> void:
             # Retain the signed source spelling in premises as well as substitutions.
             # A synthesized negative IntLit is indistinguishable from unsigned high bits.
             premise_value: Ast::Expr = constant_expression if constant_value < 0 else Ast::Expr.IntLit(constant_value, constant_position)
@@ -302,11 +388,19 @@ extend ElisaProof:
                 values.push(constant_expression)
                 constant_fact: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(constant_name, constant_position), TokenKind.EqEq, premise_value, constant_position)
                 proof_add_traced_fact(facts, report, constant_fact, "global-constant", constant_position.line, function_name)
+            return if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, constant_scope.count) or not proof_source_index_work_charge(report, sview_len(constant_name))
+            for scope_name in constant_scope |scope_name, report|:
+                return if not proof_source_index_work_charge(report, sview_len(scope_name))
             qualified_reference: Ast::Expr = proof_global_constant_reference(constant_scope, constant_name, constant_position)
-            import_qualified: bool = constant_scope.count > 0 and proof_global_constant_body_mentions_kind(function_body, constant_name, true)
+            import_qualified: bool = false
+            if constant_scope.count > 0:
+                return if not proof_global_constant_body_scan_charge_lazy(function_body, body_cost, body_cost_ready, constant_name, report)
+                import_qualified <- proof_global_constant_body_mentions_kind(function_body, constant_name, true)
             if import_qualified:
                 qualified_fact: Ast::Expr = Ast::Expr.Binary(qualified_reference, TokenKind.EqEq, premise_value, constant_position)
                 proof_add_traced_fact(facts, report, qualified_fact, "global-constant-qualified", constant_position.line, function_name)
+            if not proof_source_index_work_charge(report, sview_len(constant_name)):
+                return
             source_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
             is_machine_unsigned: bool = match constant_type:
                 Ast::Expr.Ident(type_name, _): type_name == "usize"
@@ -316,32 +410,46 @@ extend ElisaProof:
             if import_qualified and not is_machine_unsigned:
                 proof_add_primitive_operator_witnesses_with_work(facts, report, qualified_reference, constant_type, constant_position, constant_scope, 0, &source_work)
             report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+            return if not proof_global_constant_body_scan_charge_lazy(function_body, body_cost, body_cost_ready, constant_name, report)
             needs_scalar_witness: bool = proof_global_constant_body_mentions_name(function_body, constant_name)
             if needs_scalar_witness:
                 proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(constant_name, constant_position), constant_position.line, function_name) if include_unqualified
                 proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(qualified_reference, constant_position), constant_position.line, function_name) if import_qualified
 
-        def proof_global_constant_add_literal(constant_name: sview, constant_type: Ast::Expr, constant_initializer: Ast::Expr, constant_mutable: bool, constant_position: Ast::Pos, constant_scope: darray[sview]&, function_body: darray[Ast::Stmt]&, extent_constants: darray[sview]&, reserved_names: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, type_index: ProofTypeAuditIndex) -> void:
+        def proof_global_constant_add_literal(constant_name: sview, constant_type: Ast::Expr, constant_initializer: Ast::Expr, constant_mutable: bool, constant_position: Ast::Pos, constant_scope: darray[sview]&, function_body: darray[Ast::Stmt]&, body_cost: mutable usize&, body_cost_ready: mutable bool&, extent_constants: darray[sview]&, reserved_names: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, type_index: ProofTypeAuditIndex) -> void:
             # Reserve the name even when its declaration is not importable. Otherwise a malformed
             # or mutable module-local constant would be skipped and a same-named root constant
             # could be imported as if the local declaration did not shadow it.
-            parameter_shadowed: bool = any parameter in parameters where parameter.name == constant_name
-            already_reserved: bool = any existing in reserved_names where existing == constant_name
+            parameter_shadowed: mutable bool = false
+            for parameter in parameters |parameter_shadowed, constant_name, report|:
+                return if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(parameter.name)) or not proof_source_index_work_charge(report, sview_len(constant_name))
+                parameter_shadowed <- true if parameter.name == constant_name
+            reserved_lookup: (complete: bool, found: bool) = proof_global_constant_name_in_vector(reserved_names, constant_name, report)
+            return if not reserved_lookup.complete
+            already_reserved: bool = reserved_lookup.found
             return if already_reserved and not parameter_shadowed
             reserved_names.push(constant_name) if not already_reserved
             return if constant_mutable
             # Retain namespace/shadow reservations above, but do not duplicate unrelated
             # module constants into every branch snapshot. Removing unused premises adds
             # no proof power; source correspondence and replay checks are unchanged.
+            return if not proof_global_constant_body_scan_charge_lazy(function_body, body_cost, body_cost_ready, constant_name, report)
             return if not proof_global_constant_body_mentions_name(function_body, constant_name)
-            return if any existing in names where existing == constant_name and not parameter_shadowed
+            names_lookup: (complete: bool, found: bool) = proof_global_constant_name_in_vector(names, constant_name, report)
+            return if not names_lookup.complete
+            return if names_lookup.found and not parameter_shadowed
             match constant_type:
                 Ast::Expr.Ident(type_name, _):
+                    return if not proof_source_index_work_charge(report, sview_len(type_name))
                     return if type_name != "i64" and type_name != "usize" and type_name != "u64" and type_name != "u8" and type_name != "u32"
                     # A usize constant is unfolded where a contract names it, or where it is the
                     # extent of a fixed-array place the body indexes (`slot < N` over `T[M::N]`).
-                    extent_constant: bool = any extent in extent_constants where extent == constant_name
-                    return if type_name == "usize" and not extent_constant and not proof_global_constant_contract_mentions_name(function_body, constant_name)
+                    extent_lookup: (complete: bool, found: bool) = proof_global_constant_name_in_vector(extent_constants, constant_name, report)
+                    return if not extent_lookup.complete
+                    extent_constant: bool = extent_lookup.found
+                    if type_name == "usize" and not extent_constant:
+                        return if not proof_global_constant_body_scan_charge_lazy(function_body, body_cost, body_cost_ready, constant_name, report)
+                        return if not proof_global_constant_contract_mentions_name(function_body, constant_name)
                 _:
                     return
             match constant_initializer:
@@ -372,13 +480,15 @@ extend ElisaProof:
                         # Otherwise keep the name unsubstituted and add only its
                         # source-traced integer-classification witness where a contract names it, so exact
                         # term rules can use it without inventing a numeric value.
+                        return if not proof_global_constant_body_scan_charge_lazy(function_body, body_cost, body_cost_ready, constant_name, report)
                         return if not proof_global_constant_contract_mentions_name(function_body, constant_name)
+                        return if not proof_global_constant_body_scan_charge_lazy(function_body, body_cost, body_cost_ready, constant_name, report)
                         return if parameter_shadowed or proof_qualified_body_declares(function_body, constant_name, 0)
                         proof_add_scalar_type_witness(facts, report, proof_integer_type_marker(constant_name, constant_position), constant_position.line, function_name)
                         return
                     # Reuse the parser-owned positive literal. The independent
                     # fact below also binds its source name to the imported value.
-                    proof_global_constant_record_value(constant_name, constant_value, constant_initializer, constant_type, constant_position, constant_scope, not parameter_shadowed, function_body, names, values, facts, report, function_name, type_index)
+                    proof_global_constant_record_value(constant_name, constant_value, constant_initializer, constant_type, constant_position, constant_scope, not parameter_shadowed, function_body, body_cost, body_cost_ready, names, values, facts, report, function_name, type_index)
                 Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(magnitude, _), _):
                     # The proof AST stores integer payloads in signed i64. Import
                     # negative module literals only for i64 and only when the
@@ -391,36 +501,45 @@ extend ElisaProof:
                     # Preserve the source unary node in substitutions. Replacing it
                     # with a negative payload would erase the distinction between a
                     # signed i64 value and an unsigned 64-bit bit pattern in the kernel.
-                    proof_global_constant_record_value(constant_name, negative_value, constant_initializer, constant_type, constant_position, constant_scope, not parameter_shadowed, function_body, names, values, facts, report, function_name, type_index)
+                    proof_global_constant_record_value(constant_name, negative_value, constant_initializer, constant_type, constant_position, constant_scope, not parameter_shadowed, function_body, body_cost, body_cost_ready, names, values, facts, report, function_name, type_index)
                 _:
                     pass
 
-        def proof_global_constant_collect_scope(declarations: darray[Ast::Decl]&, function_scope: darray[sview]&, current_scope: darray[sview]&, include_root_scope: bool, function_body: darray[Ast::Stmt]&, extent_constants: darray[sview]&, reserved_names: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, type_index: ProofTypeAuditIndex, depth: usize) -> void:
+        def proof_global_constant_collect_scope(declarations: darray[Ast::Decl]&, function_scope: darray[sview]&, current_scope: darray[sview]&, include_root_scope: bool, function_body: darray[Ast::Stmt]&, body_cost: mutable usize&, body_cost_ready: mutable bool&, extent_constants: darray[sview]&, reserved_names: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, type_index: ProofTypeAuditIndex, depth: usize) -> void:
             return if depth >= PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
-            in_function_scope: bool = proof_global_constant_scope_equal(current_scope, function_scope)
+            return if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, declarations.count)
+            scope_match: (complete: bool, equal: bool) = proof_global_constant_scope_equal_with_work(current_scope, function_scope, report)
+            return if not scope_match.complete
+            in_function_scope: bool = scope_match.equal
             in_root_scope: bool = include_root_scope and current_scope.count == 0
-            for declaration in declarations |function_scope, current_scope, include_root_scope, extent_constants, reserved_names, parameters, names, values, facts, report, function_name, type_index, depth, in_function_scope, in_root_scope|:
+            for declaration in declarations |function_scope, current_scope, include_root_scope, function_body, body_cost, extent_constants, reserved_names, parameters, names, values, facts, report, function_name, type_index, depth, in_function_scope, in_root_scope|:
+                return if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 match declaration:
                     Ast::Decl.Const(constant_name, constant_type, constant_initializer, constant_mutable, constant_position):
                         if in_function_scope or in_root_scope:
-                            proof_global_constant_add_literal(constant_name, constant_type, constant_initializer, constant_mutable, constant_position, current_scope, function_body, extent_constants, reserved_names, parameters, names, values, facts, report, function_name, type_index)
+                            proof_global_constant_add_literal(constant_name, constant_type, constant_initializer, constant_position, current_scope, function_body, body_cost, body_cost_ready, extent_constants, reserved_names, parameters, names, values, facts, report, function_name, type_index)
                     Ast::Decl.Module(module_name, body, _):
+                        return if not proof_source_index_work_charge(report, sview_len(module_name))
                         next_scope: mutable darray[sview] = proof_global_constant_scope_with_module(current_scope, module_name)
-                        proof_global_constant_collect_scope(body, function_scope, &next_scope, include_root_scope, function_body, extent_constants, reserved_names, parameters, names, values, facts, report, function_name, type_index, depth + 1)
+                        proof_global_constant_collect_scope(body, function_scope, &next_scope, include_root_scope, function_body, body_cost, body_cost_ready, extent_constants, reserved_names, parameters, names, values, facts, report, function_name, type_index, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        proof_global_constant_collect_scope(body, function_scope, current_scope, include_root_scope, function_body, extent_constants, reserved_names, parameters, names, values, facts, report, function_name, type_index, depth + 1)
+                        proof_global_constant_collect_scope(body, function_scope, current_scope, include_root_scope, function_body, body_cost, body_cost_ready, extent_constants, reserved_names, parameters, names, values, facts, report, function_name, type_index, depth + 1)
                     _:
                         pass
 
         def proof_import_global_constant_facts(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, function_body: darray[Ast::Stmt]&, extent_constants: darray[sview]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, position: Ast::Pos, type_index: ProofTypeAuditIndex) -> void:
+            body_cost: mutable usize = 0
+            body_cost_ready: mutable bool = false
             function_scope: mutable darray[sview] = []
             function_name_matches: mutable usize = 0
             function_matches: mutable usize = 0
             root_scope: mutable darray[sview] = []
             reserved_names: mutable darray[sview] = []
-            for parameter in parameters:
+            for parameter in parameters |parameter, reserved_names, report|:
+                return if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(parameter.name))
                 reserved_names.push(parameter.name)
-            proof_global_constant_find_function_scope(file.top_decls, function_name, position.line, &root_scope, &function_scope, &function_name_matches, &function_matches, 0)
+            proof_global_constant_find_function_scope(file.top_decls, function_name, position.line, &root_scope, &function_scope, &function_name_matches, &function_matches, &report.source_types.source_effect_index.work.implicit_effect_work, 0)
+            return if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             # Same-named functions in different modules are told apart by declaration line: each
             # imported fact is stamped with this function's line, and replay resolves the constant
             # in that function's namespace and only for certificates owned by it.
@@ -429,6 +548,6 @@ extend ElisaProof:
             # First collect the declaration's own namespace. A root pass follows only for names
             # not already reserved, so a module-local constant shadows a same-named root
             # constant even when the local declaration is not importable.
-            proof_global_constant_collect_scope(file.top_decls, function_scope, &root_scope, false, function_body, extent_constants, &reserved_names, parameters, names, values, facts, report, function_name, type_index, 0)
-            proof_global_constant_collect_scope(file.top_decls, function_scope, &root_scope, true, function_body, extent_constants, &reserved_names, parameters, names, values, facts, report, function_name, type_index, 0) if function_scope.count > 0
+            proof_global_constant_collect_scope(file.top_decls, function_scope, &root_scope, false, function_body, &body_cost, &body_cost_ready, extent_constants, &reserved_names, parameters, names, values, facts, report, function_name, type_index, 0)
+            proof_global_constant_collect_scope(file.top_decls, function_scope, &root_scope, true, function_body, &body_cost, &body_cost_ready, extent_constants, &reserved_names, parameters, names, values, facts, report, function_name, type_index, 0) if function_scope.count > 0
             report.analysis_2.trace_owner_line <- 0
