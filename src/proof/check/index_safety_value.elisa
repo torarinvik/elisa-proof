@@ -1,5 +1,12 @@
 extend ElisaProof:
     private:
+        def proof_index_safety_preflight_expr_work(expression: Ast::Expr, passes: usize, report: mutable ProofReport&, name: sview, line: u32) -> bool:
+            # Share the existing per-function classification budget used by return, branch,
+            # and frame analysis so all repeated expression walks are bounded together.
+            proof_frame_expression_rechecks_with_work(expression, report, name, line, passes)
+
+        const PROOF_INDEX_SAFETY_SCAN_LIMIT: usize = 16384
+
         def proof_check_index_safety_value(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, line: u32, functions: mutable ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
             match expression:
                 Ast::Expr.Index(object, index, position):
@@ -63,14 +70,36 @@ extend ElisaProof:
                     # summary already describes -- and `live(t, s) and t.flags[s]` proves exactly
                     # as its `if` spelling does.
                     short_circuit: bool = binary_operator == TokenKind.And or binary_operator == TokenKind.Or
-                    guard_has_overloaded_operator: bool = proof_source_expression_has_overloaded_operator(left, report.source.source_primitive_operator_mask, 0)
-                    stable_guard: bool = not guard_has_overloaded_operator and not proof_expression_has_fresh_runtime_value(left, functions, 0) and not proof_expr_has_move(left) and (not proof_expr_has_call(left) or (proof_runtime_calls_are_pure(left, functions) and proof_runtime_calls_are_pure(right, functions)))
-                    guard_may_invalidate_state: bool = guard_has_overloaded_operator or proof_expr_has_move(left) or proof_expression_has_fresh_runtime_value(left, functions, 0) or (proof_expr_has_call(left) and not proof_runtime_calls_are_pure(left, functions))
-                    if short_circuit and stable_guard and not proof_expr_has_move(left) and proof_expr_supported(left):
+                    # The freshness classifier walks the term once for block-produced values
+                    # and again for call-produced values; precharge both passes alongside the
+                    # overloaded, move, call-presence, and supported-form scans.
+                    guard_scan_complete: bool = not short_circuit or proof_index_safety_preflight_expr_work(left, 7, report, name, line)
+                    guard_has_overloaded_operator: bool = true
+                    guard_has_fresh_value: bool = true
+                    guard_has_move: bool = true
+                    guard_has_call: bool = true
+                    guard_is_supported: bool = false
+                    guard_calls_are_pure: bool = false
+                    right_calls_are_pure: bool = false
+                    if short_circuit and guard_scan_complete:
+                        guard_has_overloaded_operator <- proof_source_expression_has_overloaded_operator(left, report.source.source_primitive_operator_mask, 0)
+                        guard_has_fresh_value <- proof_expression_has_fresh_runtime_value(left, functions, 0)
+                        scan_work: mutable usize = 0
+                        guard_has_move <- proof_expr_has_move_with_work(left, &scan_work, PROOF_INDEX_SAFETY_SCAN_LIMIT)
+                        scan_work <- 0
+                        guard_has_call <- proof_expr_has_call_with_work(left, &scan_work, PROOF_INDEX_SAFETY_SCAN_LIMIT)
+                        support_work: mutable usize = 0
+                        guard_is_supported <- proof_expr_supported_with_work(left, &support_work)
+                        if guard_has_call:
+                            guard_calls_are_pure <- proof_runtime_calls_are_pure(left, functions)
+                            right_calls_are_pure <- proof_runtime_calls_are_pure(right, functions)
+                    stable_guard: bool = guard_scan_complete and not guard_has_overloaded_operator and not guard_has_fresh_value and not guard_has_move and (not guard_has_call or (guard_calls_are_pure and right_calls_are_pure))
+                    guard_may_invalidate_state: bool = not guard_scan_complete or not guard_is_supported or guard_has_overloaded_operator or guard_has_move or guard_has_fresh_value or (guard_has_call and not guard_calls_are_pure)
+                    if short_circuit and stable_guard and guard_is_supported:
                         guarded_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
                         guard_position: Ast::Pos = Ast::Pos{line: line, column: 0, offset: 0, end_line: line, end_column: 0, end_offset: 0}
                         summaries_within_budget: mutable bool = true
-                        if proof_expr_has_call(left):
+                        if guard_has_call:
                             summaries_within_budget <- (proof_add_guard_call_summaries(left, facts, functions, annotations, guarded_facts, report, name, line, 0) can Global{Read,Write})
                             if not summaries_within_budget:
                                 # Keep only the incoming facts after incomplete summary expansion.
