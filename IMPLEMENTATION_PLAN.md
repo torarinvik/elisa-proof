@@ -25414,3 +25414,66 @@ conditional widths from their arms. This caused valid same-sort rewrites to be r
 replay. The scanner now uses that same strict-width helper for both forms; kernel replay continues
 to validate exact argument sorts at the transition boundary. `git diff --check` passes; no tests or
 builds were run.
+
+
+### 23.27.1452 Mirror generic-alias actual-shape validation in call replay (2026-10-14)
+
+Source type conversion checks each actual argument to a generic alias with
+`proof_source_conversion_alias_type_expression_safe` before normalization. The call-site replay
+path previously normalized those actuals directly, and its fallback preserved arbitrary AST forms.
+Replay now runs a bounded shape validator before both single- and multi-argument expansion. It
+admits identifier and qualified-name forms, supported type qualifiers, and built-in or validated
+generic applications; calls, fields, tuples, arithmetic, and other value expressions fail closed.
+Node, argument, and identifier-byte work uses the existing call-replay meter. The focused generic
+alias dispatch guard verifies scalar and multi-argument validation, bounded work accounting, and
+fail-closed behavior. Source-authority/admission guards, source-length, and `git diff --check` pass.
+Runtime qualification remains open because no source-matched compiler product is available.
+
+
+### 23.27.1453 Match replay alias fallback with source nominal precedence (2026-10-14)
+
+In source-bound call type normalization, the owner-unknown generic-alias application path looked up a
+global concrete declaration but ignored a positive match before selecting the alias. The source
+normalizer gives that concrete declaration precedence, so replay could normalize a type differently
+from the source index. Replay now declines the global alias when a nominal declaration exists. The
+generic-alias source guard asserts this ordering; source-authority, source-admission, source-length,
+and diff checks pass. No source-matched build or runtime regression was available.
+
+
+### 23.27.1454 Resolve builtin generic heads before replay admits alias actuals (2026-10-14)
+
+The replay-side shape validator recognized `array`, `darray`, and `view` from spelling alone,
+while source conversion checks the active owner, root declarations, and global aliases before
+treating those names as builtin constructors. Both paths also reject generic aliases that block
+parent lookup without producing an ordinary alias match. Replay now performs the same bounded
+lookups before admitting those forms. The source guard covers the lookup and shadowing checks at
+each validation site. The generic-alias dispatch guard, source-length, and `git diff --check` pass.
+No source-matched compiler or runtime qualification was available.
+
+
+### 23.27.1455 Remove the obsolete unmetered unsigned-maximum equality path (2026-10-14)
+
+The kernel replay module contained a private, unmetered unsigned-maximum equality helper with no
+callers; the active resource solver uses `proof_kernel_replay_unsigned_maximum_equality_with_work`.
+Removed the dead helper and its include so future changes cannot accidentally route replay through
+the unmetered copy. Repository search confirms no remaining references, and `git diff --check`
+passes. No tests or builds were run.
+
+
+### 23.27.1456 Remove orphaned numeric-cast type-bound replay helper (2026-10-14)
+
+An audit of imported `__cast__` handling found a private numeric-cast type-bound helper that
+rejects imports conservatively but has no callers. The live generic type-bound validator instead
+reconstructs parameter and constant facts and does not dispatch through this helper. Removed the
+orphan and its include to keep this dead cast-authorization path from becoming an accidental
+fallback. This does not establish the soundness of every raw replay entry point; those require
+separate source-authentication review. `git diff --check` passes; no tests or builds were run.
+
+
+### 23.27.1457 Reject caller-generic roots in qualified replay alias actuals (2026-10-14)
+
+The new call replay shape check rejected qualified generic roots in alias application positions but
+did not make the same check for qualified type expressions nested inside an actual, such as
+`T::Member`. Source conversion rejects those when `T` is a caller generic. Replay now performs the
+same metered generic lookup before descending through a qualified type actual. `git diff --check`
+passes; no tests or builds were run.

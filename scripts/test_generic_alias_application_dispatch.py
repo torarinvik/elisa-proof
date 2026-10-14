@@ -8,6 +8,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
     ROOT / "src/proof/check/source_conversion_alias_resolution.elisa",
     ROOT / "src/proof/check/source_conversion_generic_alias_application.elisa",
+    ROOT / "src/proof/check/source_conversion_type_aliases.elisa",
+    ROOT / "src/proof/replay/source_call_type_aliases.elisa",
+    ROOT / "src/proof/replay/source_call_type_argument_shape.elisa",
 )
 
 
@@ -39,3 +42,38 @@ applied = function_body("proof_source_conversion_type_alias_expand_applied")
 assert "actuals.count != index.aliases.alias_generic_formal_counts[row]" in applied
 assert "index.aliases.alias_generic_application_valid[row] == false" in applied
 assert "index.aliases.alias_owners[row]" in applied
+
+alias_validation = function_body("proof_source_conversion_generic_alias_bodies_validate")
+assert alias_validation.index("proof_report_source_work_charge(index.aliases.alias_names.count, source_work)") < alias_validation.index("generic_alias_safe.resize")
+assert "proof_source_conversion_alias_type_formals_safe(alias_row, &active_rows, report, 0)" in alias_validation
+assert "index.aliases.alias_generic_application_valid[alias_row] <- generic_alias_safe[alias_row]" in alias_validation
+
+index_build = function_body("proof_source_conversion_indexes_build")
+assert index_build.index("index.callables.callable_scope_index_valid <- true") < index_build.index("proof_source_conversion_generic_alias_bodies_validate(report, source_work)")
+assert "index.aliases.alias_generic_application_valid.clear()" in index_build
+
+replay_application = function_body("proof_replay_call_conversion_alias_application_target")
+global_name_fallback = replay_application.split("alias: (complete: bool, count: usize, row: usize) = proof_replay_call_conversion_name_lookup(name, aliases", 1)[1]
+global_name_fallback = global_name_fallback.split("Ast::Expr.Scope(parent, name, _):", 1)[0]
+assert "nominal.count > 0" in global_name_fallback
+assert global_name_fallback.index("nominal.count > 0") < global_name_fallback.index("return (true, true, alias.row")
+
+actual_shape = function_body("proof_replay_call_conversion_type_argument_shape_safe")
+scope_shape = actual_shape.split("Ast::Expr.Scope(parent, name, _):", 1)[1].split("Ast::Expr.Paren(inner, _):", 1)[0]
+assert "proof_replay_call_conversion_generic_root(parent, work, 0)" in scope_shape
+assert "proof_replay_call_conversion_alias_formal_head(root.name, formal_owner_row, call_target, work)" in scope_shape
+assert "not formal_head.complete or formal_head.found" in scope_shape
+
+replay_builtin_head = function_body("proof_replay_call_conversion_builtin_generic_type_head")
+assert 'name != "darray" and name != "view" and name != "array"' in replay_builtin_head
+assert "proof_replay_call_conversion_alias_target_in_owner(name, resolution_owner" in replay_builtin_head
+assert 'proof_replay_call_conversion_alias_target_in_owner(name, ""' in replay_builtin_head
+assert "proof_replay_call_conversion_alias_target(name, call_target, work)" in replay_builtin_head
+assert "owner_target.blocks_parent" in replay_builtin_head
+assert "root_target.blocks_parent" in replay_builtin_head
+shape = function_body("proof_replay_call_conversion_type_argument_shape_safe")
+assert shape.count("proof_replay_call_conversion_builtin_generic_type_head(head, resolution_owner, resolution_owner_known, call_target, work)") == 3
+
+source_builtin_head = function_body("proof_source_conversion_builtin_generic_type_head")
+assert "owner_target.blocks_parent" in source_builtin_head
+assert "root_target.blocks_parent" in source_builtin_head

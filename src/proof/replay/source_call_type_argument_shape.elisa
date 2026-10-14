@@ -1,0 +1,103 @@
+# Replay-side grammar validation for applied generic-alias type arguments.
+extend ElisaProof:
+    private:
+        # Generic alias actuals must use the same type-expression subset accepted by
+        # source conversion. The normalizer's fallback preserves some arbitrary AST forms,
+        # which is useful for already-formed type expressions but too permissive at this
+        # admission boundary. Keep this grammar walk bounded by the caller's replay meter.
+        def proof_replay_call_conversion_type_argument_shape_safe(expression: Ast::Expr, declaration_line: u32, check_caller_generics: bool, resolution_owner: sview, resolution_owner_known: bool, formal_owner_row: usize, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT or not proof_replay_call_conversion_alias_work_add(work, 1)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return proof_replay_call_conversion_alias_work_add(work, sview_len(name))
+                Ast::Expr.Scope(parent, name, _):
+                    return false if not proof_replay_call_conversion_alias_work_add(work, sview_len(name)) or name == ""
+                    root: (complete: bool, name: sview) = proof_replay_call_conversion_generic_root(parent, work, 0)
+                    return false if not root.complete
+                    if formal_owner_row < call_target.aliases.field_conversion_alias_names.count:
+                        formal_head: (complete: bool, found: bool) = proof_replay_call_conversion_alias_formal_head(root.name, formal_owner_row, call_target, work)
+                        return false if not formal_head.complete or formal_head.found
+                    if root.name != "" and check_caller_generics:
+                        generic_root: (complete: bool, count: usize) = proof_replay_call_conversion_generic_name(root.name, call_target.generics.field_conversion_generic_param_line, call_target, work)
+                        return false if not generic_root.complete or generic_root.count > 0
+                    caller_owner: sview = call_target.generics.field_conversion_generic_param_owner if check_caller_generics and resolution_owner == "" else resolution_owner
+                    caller_owner_known: bool = (call_target.generics.field_conversion_generic_param_owner_known if resolution_owner == "" else true) if check_caller_generics else true
+                    normalized_head: (complete: bool, head: Ast::Expr) = proof_replay_call_conversion_module_alias_head(parent, caller_owner, caller_owner_known, call_target, work)
+                    return false if not normalized_head.complete
+                    qualified: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal_count: usize) = proof_replay_call_conversion_qualified_alias_target(normalized_head.head, name, call_target, work)
+                    return false if not qualified.complete or qualified.count > 1
+                    if qualified.count == 1:
+                        # Source conversion recursively validates a qualified alias body
+                        # before allowing it as a generic actual. Replay must not accept a
+                        # value-shaped body merely because alias expansion preserves it.
+                        active_aliases: mutable darray[usize] = []
+                        expanded: (complete: bool, type_expression: Ast::Expr) = proof_replay_call_conversion_alias_expand(qualified.row, qualified.target, call_target, &active_aliases, work, depth + 1)
+                        return false if not expanded.complete
+                        return proof_replay_call_conversion_type_argument_shape_safe(expanded.type_expression, declaration_line, check_caller_generics, caller_owner, caller_owner_known, formal_owner_row, call_target, work, depth + 1)
+                    return true if qualified.nominal_count == 1
+                    return false if check_caller_generics and formal_owner_row < call_target.aliases.field_conversion_alias_names.count
+                    return proof_replay_call_conversion_type_argument_shape_safe(parent, declaration_line, check_caller_generics, caller_owner, caller_owner_known, formal_owner_row, call_target, work, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_call_conversion_type_argument_shape_safe(inner, declaration_line, check_caller_generics, resolution_owner, resolution_owner_known, formal_owner_row, call_target, work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return false if operator != TokenKind.Ampersand and operator != TokenKind.Lmut and operator != TokenKind.Mutable and operator != TokenKind.Static and operator != TokenKind.Heap and operator != TokenKind.Stack and operator != TokenKind.Tail
+                    return proof_replay_call_conversion_type_argument_shape_safe(inner, declaration_line, check_caller_generics, resolution_owner, resolution_owner_known, formal_owner_row, call_target, work, depth + 1)
+                Ast::Expr.Index(head, argument, _):
+                    builtin_head: sview = proof_ident_name(head)
+                    if builtin_head == "darray" or builtin_head == "view":
+                        return false if not proof_replay_call_conversion_builtin_generic_type_head(head, resolution_owner, resolution_owner_known, call_target, work)
+                        return proof_replay_call_conversion_type_argument_shape_safe(argument, declaration_line, check_caller_generics, resolution_owner, resolution_owner_known, formal_owner_row, call_target, work, depth + 1)
+                    root: (complete: bool, name: sview) = proof_replay_call_conversion_generic_root(head, work, 0)
+                    return false if not root.complete
+                    if formal_owner_row < call_target.aliases.field_conversion_alias_names.count:
+                        formal_head: (complete: bool, found: bool) = proof_replay_call_conversion_alias_formal_head(root.name, formal_owner_row, call_target, work)
+                        return false if not formal_head.complete or formal_head.found
+                    if check_caller_generics:
+                        generic: (complete: bool, count: usize) = proof_replay_call_conversion_generic_name(root.name, call_target.generics.field_conversion_generic_param_line, call_target, work)
+                        return false if not generic.complete or generic.count > 0
+                    application: (complete: bool, found: bool, row: usize, target: Ast::Expr) = proof_replay_call_conversion_alias_application_target(head, resolution_owner, resolution_owner_known, call_target, work)
+                    alias_count: usize = call_target.aliases.field_conversion_alias_names.count
+                    return false if:
+                        not application.complete or not application.found or application.row >= alias_count
+                        call_target.aliases.field_conversion_alias_generic_application_valid.count != alias_count
+                        call_target.aliases.field_conversion_alias_generic_formal_counts.count != alias_count
+                        not call_target.aliases.field_conversion_alias_generic_application_valid[application.row]
+                        call_target.aliases.field_conversion_alias_generic_formal_counts[application.row] != 1
+                    return proof_replay_call_conversion_type_argument_shape_safe(argument, declaration_line, check_caller_generics, resolution_owner, resolution_owner_known, formal_owner_row, call_target, work, depth + 1)
+                Ast::Expr.IndexN(head, arguments, _):
+                    builtin_head: sview = proof_ident_name(head)
+                    if builtin_head == "array":
+                        return false if arguments.count != 2 or not proof_replay_call_conversion_alias_work_add(work, arguments.count) or not proof_replay_call_conversion_builtin_generic_type_head(head, resolution_owner, resolution_owner_known, call_target, work)
+                        return false if not proof_replay_call_conversion_type_argument_shape_safe(arguments[0], declaration_line, check_caller_generics, resolution_owner, resolution_owner_known, formal_owner_row, call_target, work, depth + 1)
+                        match arguments[1]:
+                            Ast::Expr.IntLit(extent, _):
+                                return extent >= 0
+                            _:
+                                return false
+                    if builtin_head == "darray" or builtin_head == "view":
+                        return false if arguments.count != 1 or not proof_replay_call_conversion_alias_work_add(work, 1) or not proof_replay_call_conversion_builtin_generic_type_head(head, resolution_owner, resolution_owner_known, call_target, work)
+                        return proof_replay_call_conversion_type_argument_shape_safe(arguments[0], declaration_line, check_caller_generics, resolution_owner, resolution_owner_known, formal_owner_row, call_target, work, depth + 1)
+                    root: (complete: bool, name: sview) = proof_replay_call_conversion_generic_root(head, work, 0)
+                    return false if not root.complete
+                    if formal_owner_row < call_target.aliases.field_conversion_alias_names.count:
+                        formal_head: (complete: bool, found: bool) = proof_replay_call_conversion_alias_formal_head(root.name, formal_owner_row, call_target, work)
+                        return false if not formal_head.complete or formal_head.found
+                    if check_caller_generics:
+                        generic: (complete: bool, count: usize) = proof_replay_call_conversion_generic_name(root.name, call_target.generics.field_conversion_generic_param_line, call_target, work)
+                        return false if not generic.complete or generic.count > 0
+                    application: (complete: bool, found: bool, row: usize, target: Ast::Expr) = proof_replay_call_conversion_alias_application_target(head, resolution_owner, resolution_owner_known, call_target, work)
+                    alias_count: usize = call_target.aliases.field_conversion_alias_names.count
+                    return false if:
+                        not application.complete or not application.found or application.row >= alias_count
+                        call_target.aliases.field_conversion_alias_has_formals.count != alias_count
+                        call_target.aliases.field_conversion_alias_generic_application_valid.count != alias_count
+                        call_target.aliases.field_conversion_alias_generic_formal_counts.count != alias_count
+                        not call_target.aliases.field_conversion_alias_has_formals[application.row]
+                        not call_target.aliases.field_conversion_alias_generic_application_valid[application.row]
+                        arguments.count != call_target.aliases.field_conversion_alias_generic_formal_counts[application.row]
+                        not proof_replay_call_conversion_alias_work_add(work, arguments.count)
+                    for argument in arguments |declaration_line, check_caller_generics, resolution_owner, resolution_owner_known, formal_owner_row, call_target, work, depth|:
+                        return false if not proof_replay_call_conversion_type_argument_shape_safe(argument, declaration_line, check_caller_generics, resolution_owner, resolution_owner_known, formal_owner_row, call_target, work, depth + 1)
+                    return true
+                _:
+                    return false
