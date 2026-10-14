@@ -28,8 +28,10 @@ assert 'nodes[root].operator != ""' in key_literal
 assert 'nodes[root].kind != "int" or nodes[root].name != "" or nodes[root].value < 0' in key_literal
 assert "ElisaProofKernelCore::typed_literal_value(nodes[root])" in key_literal
 assert "nodes[root].name, literal.unsigned, literal.width" in key_literal
+assert "proof_kernel_replay_arena_scalar_shape(nodes[root])" in key_literal
+assert "not shape.known or not shape.valid" in key_literal
 assert "proof_kernel_replay_constant_int_remaining_with_work_limit" not in key_literal
-for field in ("kind", "operator", "name"):
+for field in ("kind", "operator", "name", "secondary_name"):
     assert f"sview_len(nodes[root].{field})" in key_literal
     assert "proof_kernel_replay_arena_shape_text_work_charge" in key_literal
 
