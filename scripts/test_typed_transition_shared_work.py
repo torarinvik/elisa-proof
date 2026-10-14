@@ -37,7 +37,8 @@ assert "typing_work_used > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET" 
 assert "sview_len(action) > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT / 64" in step
 assert "sview_len(detail) > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT / 4" in step
 assert "action == \"rewrite\"" in step
-assert "proof_kernel_replay_term_sort(nodes, children, environment, typing_index.index, argument" in step
+assert step.count("proof_kernel_replay_term_sort(nodes, children, environment, typing_index.index, argument") == 1
+assert "argument_sort_cache <- proof_kernel_replay_term_sort(nodes, children, environment, typing_index.index, argument" in step
 assert "proof_kernel_replay_sort_equal(argument_sort, secondary_sort" in step
 assert 'argument_sort.family != "integer" and argument_sort.family != "character" and argument_sort.family != "boolean" and argument_sort.family != "string"' in step
 
