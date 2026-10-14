@@ -6,7 +6,7 @@ extend ElisaProofFrameSource:
             place: ElisaProofKernelFramePolicy::Place
 
     private:
-        def condition_effects_walk(expression: Ast::Expr, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, formals: darray[sview]&, types: darray[Ast::Expr]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, depth: usize, work: mutable usize&, expression_work: mutable usize&, effects: mutable darray[CallEffect]&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def condition_effects_walk(expression: Ast::Expr, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, owner_offset: u32, exact_owner: bool, formals: darray[sview]&, types: darray[Ast::Expr]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, depth: usize, work: mutable usize&, expression_work: mutable usize&, effects: mutable darray[CallEffect]&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if depth >= 64 or expression_work >= 4096 or not replay_work_charge(1, work)
             expression_work <- expression_work + 1
             match expression:
@@ -15,11 +15,16 @@ extend ElisaProofFrameSource:
                     # Nested calls need their own evaluation-order inventory.
                     for argument in arguments |formals, types, depth, work|:
                         return false if not scalar_value(argument, formals, types, depth + 1, work)
-                    invocation = source_call_with_work(declarations, annotations, name, line, position, work)
-                    return false if not invocation.known
-                    callee = owner_with_work(declarations, invocation.callee, invocation.callee_line, work)
+                    if exact_owner:
+                        invocation = source_call_at_owner_with_work(declarations, annotations, name, line, owner_offset, position, work)
+                        return false if not invocation.known
+                        callee = owner_at_offset_with_work(declarations, invocation.callee, invocation.callee_line, invocation.callee_offset, work)
+                    else:
+                        invocation = source_call_with_offset_with_work(declarations, annotations, name, line, position, work)
+                        return false if not invocation.known
+                        callee = owner_at_offset_with_work(declarations, invocation.callee, invocation.callee_line, invocation.callee_offset, work)
                     return false if not callee.known or not contract_scalar_type_with_work(callee.return_type, work)
-                    mapping = (source_call_changes_with_work(declarations, annotations, name, line, position, tokens, source, source_length, work) can Global{Read,Write})
+                    mapping = (source_call_changes_at_owner_with_work(declarations, annotations, name, line, owner_offset, position, tokens, source, source_length, work) can Global{Read,Write}) if exact_owner else (source_call_changes_with_work(declarations, annotations, name, line, position, tokens, source, source_length, work) can Global{Read,Write})
                     return false if:
                         not mapping.known
                         not replay_work_charge(mapping.places.count, work)
@@ -28,16 +33,16 @@ extend ElisaProofFrameSource:
                         effects.push(CallEffect{position: position, change_index: index, place: mapping.places[index]})
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return (condition_effects_walk(inner, declarations, annotations, name, line, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
+                    return (condition_effects_walk(inner, declarations, annotations, name, line, owner_offset, exact_owner, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
                 Ast::Expr.Unary(operator, inner, _):
                     return false if operator != TokenKind.Not and operator != TokenKind.Plus and operator != TokenKind.Minus
-                    return (condition_effects_walk(inner, declarations, annotations, name, line, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
+                    return (condition_effects_walk(inner, declarations, annotations, name, line, owner_offset, exact_owner, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if:
                         operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent and operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq and operator != TokenKind.And and operator != TokenKind.Or
-                        not (condition_effects_walk(left, declarations, annotations, name, line, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
+                        not (condition_effects_walk(left, declarations, annotations, name, line, owner_offset, exact_owner, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
                     before_right: usize = effects.count
-                    return false if not (condition_effects_walk(right, declarations, annotations, name, line, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
+                    return false if not (condition_effects_walk(right, declarations, annotations, name, line, owner_offset, exact_owner, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
                     # A skipped pure call adds no physical-write event. A skipped
                     # effectful call must not be claimed to have certainly run.
                     return false if (operator == TokenKind.And or operator == TokenKind.Or) and effects.count != before_right
@@ -48,9 +53,9 @@ extend ElisaProofFrameSource:
                     # same frame policy. This is an intentional conservative union:
                     # it never treats an arm call as an unconditional state update.
                     return false if:
-                        not (condition_effects_walk(condition, declarations, annotations, name, line, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
-                        not (condition_effects_walk(then_expression, declarations, annotations, name, line, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
-                    return (condition_effects_walk(else_expression, declarations, annotations, name, line, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
+                        not (condition_effects_walk(condition, declarations, annotations, name, line, owner_offset, exact_owner, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
+                        not (condition_effects_walk(then_expression, declarations, annotations, name, line, owner_offset, exact_owner, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
+                    return (condition_effects_walk(else_expression, declarations, annotations, name, line, owner_offset, exact_owner, formals, types, tokens, source, source_length, depth + 1, work, expression_work, effects) can Global{Read,Write})
                 _:
                     return scalar_read(expression, formals, types, depth + 1, work)
 
@@ -62,7 +67,14 @@ extend ElisaProofFrameSource:
             return (source_condition_effects_with_work(declarations, [], name, line, statement_index, tokens, source, source_length, &work) can Global{Read,Write})
 
         def source_condition_effects_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, statement_index: usize, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, effects: darray[CallEffect]) can[Memory.Allocate, Abort.Panic]:
-            context = owner_with_work(declarations, name, line, work)
+            return source_condition_effects_for_owner_with_work(declarations, annotations, name, line, 0, false, statement_index, tokens, source, source_length, work)
+
+        def source_condition_effects_at_owner_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, owner_offset: u32, statement_index: usize, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, effects: darray[CallEffect]) can[Memory.Allocate, Abort.Panic]:
+            return source_condition_effects_for_owner_with_work(declarations, annotations, name, line, owner_offset, true, statement_index, tokens, source, source_length, work)
+
+    private:
+        def source_condition_effects_for_owner_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, owner_offset: u32, exact_owner: bool, statement_index: usize, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, effects: darray[CallEffect]) can[Memory.Allocate, Abort.Panic]:
+            context = owner_at_offset_with_work(declarations, name, line, owner_offset, work) if exact_owner else owner_with_work(declarations, name, line, work)
             return (false, []) if:
                 not context.known or statement_index >= context.body.count
                 not contract_environment(declarations, 0, work)
@@ -91,15 +103,20 @@ extend ElisaProofFrameSource:
             effects: mutable darray[CallEffect] = []
             match context.body[statement_index]:
                 Ast::Stmt.If(condition, _, _, _):
-                    return (false, []) if not (condition_effects_walk(condition, declarations, annotations, name, line, &names, &types, tokens, source, source_length, 0, work, &expression_work, &effects) can Global{Read,Write})
+                    return (false, []) if not (condition_effects_walk(condition, declarations, annotations, name, line, owner_offset, exact_owner, &names, &types, tokens, source, source_length, 0, work, &expression_work, &effects) can Global{Read,Write})
                     return (true, effects)
                 Ast::Stmt.VarDecl(_, declared_type, expression, _):
                     return (false, []) if not contract_scalar_type_with_work(declared_type, work)
                     match expression:
                         Ast::Expr.Call(_, _, _, position):
-                            invocation = source_call_with_work(declarations, annotations, name, line, position, work)
-                            return (false, []) if not invocation.known
-                            callee = owner_with_work(declarations, invocation.callee, invocation.callee_line, work)
+                            if exact_owner:
+                                invocation = source_call_at_owner_with_work(declarations, annotations, name, line, owner_offset, position, work)
+                                return (false, []) if not invocation.known
+                                callee = owner_at_offset_with_work(declarations, invocation.callee, invocation.callee_line, invocation.callee_offset, work)
+                            else:
+                                invocation = source_call_with_offset_with_work(declarations, annotations, name, line, position, work)
+                                return (false, []) if not invocation.known
+                                callee = owner_at_offset_with_work(declarations, invocation.callee, invocation.callee_line, invocation.callee_offset, work)
                             match declared_type:
                                 Ast::Expr.Ident(expected, _):
                                     match callee.return_type:
@@ -114,16 +131,17 @@ extend ElisaProofFrameSource:
                                     return (false, [])
                         _:
                             pass
-                    return (false, []) if not (condition_effects_walk(expression, declarations, annotations, name, line, &names, &types, tokens, source, source_length, 0, work, &expression_work, &effects) can Global{Read,Write})
+                    return (false, []) if not (condition_effects_walk(expression, declarations, annotations, name, line, owner_offset, exact_owner, &names, &types, tokens, source, source_length, 0, work, &expression_work, &effects) can Global{Read,Write})
                     return (true, effects)
                 _:
                     return (false, [])
 
+    public:
         # Returning an effectful call evaluates its complete scalar return expression
         # before the caller exits. Recover that expression from the original statement
         # ordinal and reuse the same exact call-site and frame-change reconstruction as
         # conditional expressions.
-        def source_return_effects_with_work(body: darray[Ast::Stmt]&, statement_index: usize, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, names: darray[sview]&, types: darray[Ast::Expr]&, return_type: Ast::Expr, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, effects: darray[CallEffect]) can[Memory.Allocate, Abort.Panic]:
+        def source_return_effects_with_work(body: darray[Ast::Stmt]&, statement_index: usize, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, owner_offset: u32, exact_owner: bool, names: darray[sview]&, types: darray[Ast::Expr]&, return_type: Ast::Expr, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, effects: darray[CallEffect]) can[Memory.Allocate, Abort.Panic]:
             return (false, []) if:
                 statement_index >= body.count or names.count != types.count
                 not contract_scalar_type_with_work(return_type, work)
@@ -131,7 +149,7 @@ extend ElisaProofFrameSource:
             effects: mutable darray[CallEffect] = []
             match body[statement_index]:
                 Ast::Stmt.Return(expression, _):
-                    return (false, []) if not (condition_effects_walk(expression, declarations, annotations, name, line, names, types, tokens, source, source_length, 0, work, &expression_work, &effects) can Global{Read,Write})
+                    return (false, []) if not (condition_effects_walk(expression, declarations, annotations, name, line, owner_offset, exact_owner, names, types, tokens, source, source_length, 0, work, &expression_work, &effects) can Global{Read,Write})
                     return (true, effects)
                 _:
                     return (false, [])

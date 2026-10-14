@@ -1,5 +1,51 @@
 extend ElisaProof:
     private:
+        def proof_frame_producer_owner_hash(name: sview, line: u32, offset: u32) -> u32:
+            key: u32 = proof_expr_shape_mix(proof_name_hash(name), line.i64())
+            proof_expr_shape_mix(key, offset.i64())
+
+        def proof_frame_producer_owner_index_build(report: mutable ProofReport&, work: mutable usize&) -> bool:
+            table: ProofFrameProducerWorkspace& = report.analysis_1.frame_producer
+            table.owner_lookup_hashes.clear()
+            table.owner_lookup_slots.clear()
+            table.owner_lookup_valid <- false
+            table.owner_lookup_work_used <- 0
+            count: usize = table.names.count
+            return false if count != table.lines.count or count != table.offsets.count or count != table.starts.count or count != table.counts.count
+            if count == 0:
+                table.owner_lookup_valid <- true
+                return true
+            capacity: usize = proof_name_index_capacity(count)
+            return false if capacity == 0 or not ElisaProofFrameSource::replay_work_charge(capacity * 2, work)
+            table.owner_lookup_hashes.resize(capacity)
+            table.owner_lookup_slots.resize(capacity)
+            for slot in 0..<capacity |slot, table, count|:
+                table.owner_lookup_slots[slot] <- count
+            for row in 0..<count |row, table, count, capacity, work|:
+                return false if not ElisaProofFrameSource::replay_work_charge(1, work) or not ElisaProofFrameSource::replay_work_charge(sview_len(table.names[row]), work)
+                hash: u32 = proof_frame_producer_owner_hash(table.names[row], table.lines[row], table.offsets[row])
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, row, table, count, capacity, work|:
+                    return false if not ElisaProofFrameSource::replay_work_charge(1, work)
+                    current: usize = table.owner_lookup_slots[slot]
+                    if current == count:
+                        table.owner_lookup_hashes[slot] <- hash
+                        table.owner_lookup_slots[slot] <- row
+                        placed <- true
+                        break
+                    return false if current >= count
+                    if table.owner_lookup_hashes[slot] == hash:
+                        return false if not ElisaProofFrameSource::replay_work_charge(sview_len(table.names[current]), work)
+                        if table.names[current] == table.names[row] and table.lines[current] == table.lines[row] and table.offsets[current] == table.offsets[row]:
+                            return false
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            table.owner_lookup_valid <- true
+            return true
+
         def proof_prepare_frame_producer_declarations(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, depth: usize, frame_work: mutable usize&, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if depth >= 64
             for declaration in declarations |report, all_declarations, tokens, source, source_length, depth, frame_work, work|:
@@ -8,49 +54,78 @@ extend ElisaProof:
                 match declaration:
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
                         return false if not (proof_prepare_frame_producer_declarations(report, &nested, all_declarations, tokens, source, source_length, depth + 1, frame_work, work) can Global{Read,Write})
-                    Ast::Decl.Func(name, _, _, _, _, _, position):
-                        inventory = (ElisaProofFrameSource::direct_events_with_work(all_declarations, report.source.source_annotations, name, position.line, tokens, source, source_length, frame_work) can Global{Read,Write})
-                        if inventory.known and inventory.events.count > 0:
-                            return false if report.analysis_1.frame_producer.rows.count > 4096 or inventory.events.count > 4096 - report.analysis_1.frame_producer.rows.count
-                            lowered = (ElisaProofFrameSource::lower_direct_events_with_work(all_declarations, report.source.source_annotations, name, position.line, tokens, source, source_length, &report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET, ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET, frame_work) can Global{Read,Write})
-                            if lowered.known:
-                                decisions = (ElisaProofFrameSource::direct_event_decisions_with_work(all_declarations, report.source.source_annotations, name, position.line, tokens, source, source_length, &report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, &lowered.roots, frame_work) can Global{Read,Write})
-                                if decisions.known:
-                                    report.analysis_1.frame_producer.names.push(name)
-                                    report.analysis_1.frame_producer.lines.push(position.line)
-                                    report.analysis_1.frame_producer.starts.push(report.analysis_1.frame_producer.rows.count)
-                                    report.analysis_1.frame_producer.counts.push(decisions.decisions.count)
-                                    for index in 0..<decisions.decisions.count |index, decisions, report|:
-                                        decision = decisions.decisions[index]
-                                        report.analysis_1.frame_producer.rows.push(ProofFrameProducerRow{kind: decision.event.kind, position: decision.event.position, source_index: index, root: decision.kernel_root, proven: decision.proven})
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        presence = (ElisaProofFrameSource::frame_policy_present_at_position(name, position, body, tokens, source, source_length, frame_work) can Global{Read,Write})
+                        return false if not presence.known
+                        if presence.present:
+                            policy = (ElisaProofFrameSource::source_policy_at_offset_with_work(all_declarations, name, position.line, position.offset, tokens, source, source_length, frame_work) can Global{Read,Write})
+                            return false if not policy.known or policy.clauses.count == 0
+                            inventory = (ElisaProofFrameSource::direct_events_at_offset_with_work(all_declarations, report.source.source_annotations, name, position.line, position.offset, tokens, source, source_length, frame_work) can Global{Read,Write})
+                            return false if not inventory.known
+                            if inventory.events.count > 0:
+                                return false if report.analysis_1.frame_producer.rows.count > 4096 or inventory.events.count > 4096 - report.analysis_1.frame_producer.rows.count
+                                lowered = (ElisaProofFrameSource::lower_direct_events_from_inventory_at_offset_with_work(all_declarations, name, position.line, position.offset, inventory.events, tokens, source, source_length, &report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET, ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET, frame_work) can Global{Read,Write})
+                                return false if not lowered.known
+                                decisions = (ElisaProofFrameSource::direct_event_decisions_from_inventory_at_owner_with_work(all_declarations, report.source.source_annotations, name, position.line, position.offset, true, inventory.events, tokens, source, source_length, &report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, &lowered.roots, frame_work) can Global{Read,Write})
+                                return false if not decisions.known
+                                report.analysis_1.frame_producer.names.push(name)
+                                report.analysis_1.frame_producer.lines.push(position.line)
+                                report.analysis_1.frame_producer.offsets.push(position.offset)
+                                report.analysis_1.frame_producer.starts.push(report.analysis_1.frame_producer.rows.count)
+                                report.analysis_1.frame_producer.counts.push(decisions.decisions.count)
+                                for index in 0..<decisions.decisions.count |index, decisions, report|:
+                                    decision = decisions.decisions[index]
+                                    report.analysis_1.frame_producer.rows.push(ProofFrameProducerRow{kind: decision.event.kind, position: decision.event.position, source_index: index, root: decision.kernel_root, proven: decision.proven})
                     _:
                         pass
             return true
 
     public:
-        # No source bytes or compiler semantic table escape this preparation phase.
-        # Unsupported source mappings retain the existing checker and its obligations.
-        def proof_check_with_source_context(file: Ast::File&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, focus_function: sview) -> void can[Memory.Allocate, Abort.Panic]:
-            ready: bool = (proof_prepare_semantic_source_with_diagnostics(file, report, diagnostics) can Global{Read,Write})
-            return if not ready
+        def proof_prepare_frame_producer_context(report: mutable ProofReport&, file: Ast::File&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> void can[Memory.Allocate, Abort.Panic]:
+            report.analysis_1.frame_producer.names.clear()
+            report.analysis_1.frame_producer.lines.clear()
+            report.analysis_1.frame_producer.offsets.clear()
+            report.analysis_1.frame_producer.starts.clear()
+            report.analysis_1.frame_producer.counts.clear()
+            report.analysis_1.frame_producer.rows.clear()
+            report.analysis_1.frame_producer.owner_lookup_hashes.clear()
+            report.analysis_1.frame_producer.owner_lookup_slots.clear()
+            report.analysis_1.frame_producer.owner_lookup_valid <- false
+            report.analysis_1.frame_producer.owner_lookup_work_used <- 0
+            report.analysis_1.frame_producer.source_preparation_complete <- false
+            report.analysis_1.frame_producer.active_name <- ""
             work: mutable usize = 0
             frame_import_work: mutable usize = 0
             unresolved_frame_imports: bool = proof_replay_summary_has_unresolved_import(report.source.source_annotations, &frame_import_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
             return if not proof_source_analysis_charge_work(frame_import_work, work)
-            complete: mutable bool = true
-            return if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            frame_work_seed: usize = ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT - (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work)
+            complete: mutable bool = work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            frame_work_seed: usize = ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT - (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) if complete else ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT
             frame_work: mutable usize = frame_work_seed
-            if not unresolved_frame_imports:
+            if complete and not unresolved_frame_imports:
                 complete <- (proof_prepare_frame_producer_declarations(report, &file.top_decls, &file.top_decls, tokens, source, source_length, 0, &frame_work, &work) can Global{Read,Write})
+                complete <- complete and proof_frame_producer_owner_index_build(report, &frame_work)
                 frame_work_debit: usize = frame_work - frame_work_seed
                 frame_work_charged: bool = proof_source_analysis_charge_work(frame_work_debit, work)
                 complete <- complete and frame_work_charged
             if not complete:
                 report.analysis_1.frame_producer.names.clear()
                 report.analysis_1.frame_producer.lines.clear()
+                report.analysis_1.frame_producer.offsets.clear()
                 report.analysis_1.frame_producer.starts.clear()
                 report.analysis_1.frame_producer.counts.clear()
                 report.analysis_1.frame_producer.rows.clear()
+                report.analysis_1.frame_producer.owner_lookup_hashes.clear()
+                report.analysis_1.frame_producer.owner_lookup_slots.clear()
+                report.analysis_1.frame_producer.owner_lookup_valid <- false
+                report.analysis_1.frame_producer.owner_lookup_work_used <- 0
+            report.analysis_1.frame_producer.source_preparation_complete <- complete
+            report.analysis_1.frame_producer.active_name <- ""
+
+        # No source bytes or compiler semantic table escape this preparation phase.
+        # Unsupported source mappings retain the existing checker and its obligations.
+        def proof_check_with_source_context(file: Ast::File&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, focus_function: sview) -> void can[Memory.Allocate, Abort.Panic]:
+            ready: bool = (proof_prepare_semantic_source_with_diagnostics(file, report, diagnostics) can Global{Read,Write})
+            return if not ready
+            proof_prepare_frame_producer_context(report, file, tokens, source, source_length)
             (proof_check_core(file, report, focus_function) can Global{Read,Write})
             report.analysis_1.frame_producer.active_name <- ""

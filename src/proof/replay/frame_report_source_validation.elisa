@@ -12,38 +12,60 @@ extend ElisaProof:
 
         # Original source determines cardinality, occurrence and predicate. This
         # validates failed events too; it never marks a certificate replayed.
-        def proof_direct_frame_report_matches_source(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, report_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def proof_direct_frame_report_matches_source(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, certificate_index: ProofReplayFrameCertificateIndex&, certificate_owner_index: usize, report_index: mutable ProofReplayFrameReportIndex&, imports_resolved: bool, name: sview, line: u32, declaration_offset: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, report_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if:
-                proof_replay_summary_has_unresolved_import(report.source.source_annotations, report_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
-                not proof_replay_frame_report_work_charge(report.results.obligation_inventory.count, report_work)
+                not imports_resolved
+                not report_index.complete or report_index.entry_indices.count != report_index.next_indices.count
+                certificate_owner_index > certificate_index.owners.count
+                certificate_owner_index < certificate_index.owners.count and (certificate_index.owners[certificate_owner_index].name != name or certificate_index.owners[certificate_owner_index].declaration_line != line or certificate_index.owners[certificate_owner_index].declaration_offset != declaration_offset)
+            source_owner = ElisaProofFrameSource::owner_at_offset_with_work(declarations, name, line, declaration_offset, report_work)
+            return false if not source_owner.known or source_owner.position.line != line or source_owner.position.offset != declaration_offset
+            report_owner_lookup: (complete: bool, owner_index: usize) = proof_replay_frame_report_owner_lookup(report_index, name, line, declaration_offset, report_work)
+            return false if not report_owner_lookup.complete
+            sentinel: usize = ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT + 1
+            report_owner_index: usize = report_owner_lookup.owner_index
+            if report_owner_index < report_index.owners.count:
+                return false if report_index.owners[report_owner_index].source_seen
+                report_index.owners[report_owner_index].source_seen <- true
+            report_owner_count: usize = report_index.owners[report_owner_index].entry_count if report_owner_index < report_index.owners.count else 0
+            report_attempt_count: usize = report_index.owners[report_owner_index].attempt_count if report_owner_index < report_index.owners.count else 0
             event_entries: mutable darray[usize] = []
             event_attempt_starts: mutable darray[usize] = []
             roots: mutable darray[usize] = []
             ordinal: mutable usize = 0
             next_attempt: mutable usize = 0
-            for entry_index in 0..<report.results.obligation_inventory.count |entry_index, report, name, line, event_entries, event_attempt_starts, roots, ordinal, next_attempt, report_work|:
+            row: mutable usize = report_index.owners[report_owner_index].entry_head if report_owner_index < report_index.owners.count else sentinel
+            visited: mutable usize = 0
+            while visited < report_owner_count |report, report_index, report_owner_index, report_owner_count, name, line, declaration_offset, sentinel, row, visited, event_entries, event_attempt_starts, roots, ordinal, next_attempt, report_work|:
+                return false if row >= report_index.entry_indices.count or row >= report_index.next_indices.count
+                return false if not proof_replay_frame_report_work_charge(1, report_work)
+                entry_index: usize = report_index.entry_indices[row]
+                return false if entry_index >= report.results.obligation_inventory.count
                 entry = report.results.obligation_inventory[entry_index]
                 return false if not proof_replay_frame_report_work_charge(sview_len(entry.source_name), report_work)
-                if entry.source_name == name and entry.source_line == line and (entry.source_kind in {"changes", "preserves", "allow", "preserve"}):
-                    return false if:
-                        not proof_replay_frame_report_work_charge(sview_len(entry.source_kind), report_work)
-                        entry.source_obligation_index != ordinal or entry.attempts_count != 1 or entry.attempts_start >= report.results.goal_attempts.count
-                        entry.attempts_start < next_attempt
-                    next_attempt <- entry.attempts_start + 1
-                    attempt = report.results.goal_attempts[entry.attempts_start]
-                    rule: sview = "frame-allow" if entry.source_kind == "allow" else "frame-preserve" if entry.source_kind == "preserve" else "frame-spec"
-                    return false if:
-                        not proof_replay_frame_report_work_charge(sview_len(attempt.name), report_work)
-                        not proof_replay_frame_report_work_charge(sview_len(attempt.rule), report_work)
-                        not proof_replay_frame_report_work_charge(sview_len(name), report_work)
-                        not proof_replay_frame_report_work_charge(sview_len(rule), report_work)
-                        attempt.name != name or attempt.rule != rule or attempt.budget_exhausted or attempt.facts_count != 0 or attempt.kernel_facts_count != 0
-                        attempt.facts_start > report.analysis_1.certificate_facts.count or attempt.kernel_facts_start > report.analysis_1.kernel.certificate_facts.count
-                    event_entries.push(entry_index)
-                    event_attempt_starts.push(entry.attempts_start)
-                    roots.push(attempt.kernel_goal)
-                    ordinal <- ordinal + 1
-            outcomes = (ElisaProofFrameSource::direct_event_decisions_with_work(declarations, report.source.source_annotations, name, line, tokens, source, source_length, &report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, &roots, report_work) can Global{Read,Write})
+                return false if entry.source_name != name or entry.source_line != line or entry.owner_function_line != line or entry.owner_function_offset != declaration_offset
+                return false if:
+                    not proof_replay_frame_report_work_charge(sview_len(entry.source_kind), report_work)
+                    entry.source_obligation_index != ordinal or entry.attempts_count != 1 or entry.attempts_start >= report.results.goal_attempts.count
+                    entry.attempts_start < next_attempt
+                next_attempt <- entry.attempts_start + 1
+                attempt = report.results.goal_attempts[entry.attempts_start]
+                rule: sview = "frame-allow" if entry.source_kind == "allow" else "frame-preserve" if entry.source_kind == "preserve" else "frame-spec"
+                return false if:
+                    not proof_replay_frame_report_work_charge(sview_len(attempt.name), report_work)
+                    not proof_replay_frame_report_work_charge(sview_len(attempt.rule), report_work)
+                    not proof_replay_frame_report_work_charge(sview_len(name), report_work)
+                    not proof_replay_frame_report_work_charge(sview_len(rule), report_work)
+                    attempt.name != name or attempt.rule != rule or attempt.owner_function_line != line or attempt.owner_function_offset != declaration_offset or attempt.budget_exhausted or attempt.facts_count != 0 or attempt.kernel_facts_count != 0
+                    attempt.facts_start > report.analysis_1.certificate_facts.count or attempt.kernel_facts_start > report.analysis_1.kernel.certificate_facts.count
+                event_entries.push(entry_index)
+                event_attempt_starts.push(entry.attempts_start)
+                roots.push(attempt.kernel_goal)
+                ordinal <- ordinal + 1
+                row <- report_index.next_indices[row]
+                visited <- visited + 1
+            return false if visited != report_owner_count or row != sentinel
+            outcomes = (ElisaProofFrameSource::direct_event_decisions_at_offset_with_work(declarations, report.source.source_annotations, name, line, declaration_offset, tokens, source, source_length, &report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, &roots, report_work) can Global{Read,Write})
             return false if not outcomes.known or ordinal != outcomes.decisions.count
             proven_count: mutable usize = 0
             next_certificate: mutable usize = 0
@@ -63,9 +85,9 @@ extend ElisaProof:
                     not proof_replay_frame_report_work_charge(sview_len(attempt.rule), report_work)
                     not proof_replay_frame_report_work_charge(sview_len(name), report_work)
                     not proof_replay_frame_report_work_charge(sview_len(rule), report_work)
-                    attempt.name != name or attempt.line != event.position.line or attempt.rule != rule or not proof_frame_mirror_matches(attempt.goal, event.position)
+                    attempt.name != name or attempt.line != event.position.line or attempt.rule != rule or attempt.owner_function_line != line or attempt.owner_function_offset != declaration_offset or not proof_frame_mirror_matches(attempt.goal, event.position)
                 proven: bool = outcomes.decisions[index].proven
-                return false if entry.proven != proven or attempt.proven != proven or attempt.has_certificate != proven
+                return false if entry.proven != proven or attempt.producer_proven != proven or attempt.has_certificate != proven
                 if proven:
                     return false if:
                         attempt.certificate_index >= report.analysis_1.certificates.count
@@ -78,20 +100,10 @@ extend ElisaProof:
                         not proof_replay_attempt_matches_certificate_with_work(report, &report.results.goal_attempts[event_attempt_starts[index]], certificate, attempt.certificate_index, report_work)
                         certificate.kernel_goal != attempt.kernel_goal or certificate.name != name or certificate.line != event.position.line or certificate.rule != rule or certificate.facts_count != 0 or certificate.kernel_facts_count != 0 or not proof_frame_mirror_matches(certificate.goal, event.position)
                     proven_count <- proven_count + 1
-            # Reject extra unattached family records rather than checking only the
-            # subset selected by producer-owned obligation annotations.
-            attempts: mutable usize = 0
-            certificates: mutable usize = 0
-            return false if not proof_replay_frame_report_work_charge(report.results.goal_attempts.count, report_work)
-            for attempt in report.results.goal_attempts |attempts, name, report_work|:
-                return false if:
-                    not proof_replay_frame_report_work_charge(sview_len(attempt.name), report_work)
-                    not proof_replay_frame_report_work_charge(sview_len(attempt.rule), report_work)
-                attempts <- attempts + 1 if attempt.name == name and (attempt.rule in {"frame-spec", "frame-allow", "frame-preserve"})
-            return false if not proof_replay_frame_report_work_charge(report.analysis_1.certificates.count, report_work)
-            for certificate in report.analysis_1.certificates |certificates, name, report_work|:
-                return false if:
-                    not proof_replay_frame_report_work_charge(sview_len(certificate.name), report_work)
-                    not proof_replay_frame_report_work_charge(sview_len(certificate.rule), report_work)
-                certificates <- certificates + 1 if certificate.name == name and (certificate.rule in {"frame-spec", "frame-allow", "frame-preserve"})
-            return attempts == outcomes.decisions.count and certificates == proven_count
+            # The prebuilt report index counts all frame attempts for this exact owner,
+            # including unproven attempts that intentionally have no certificate.
+            return false if report_attempt_count != outcomes.decisions.count
+            if certificate_owner_index < certificate_index.owners.count:
+                indexed_owner: ProofReplayFrameCertificateOwner = certificate_index.owners[certificate_owner_index]
+                return indexed_owner.count == proven_count
+            return proven_count == 0

@@ -1,32 +1,22 @@
 extend ElisaProof:
     private:
-        def proof_frame_certificate_family(rule: sview) -> bool:
-            return rule in {"frame-spec", "frame-allow", "frame-preserve"}
-
-        def proof_replay_frame_source_declarations(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, depth: usize, work: mutable usize&, report_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def proof_replay_frame_source_declarations(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, certificate_index: ProofReplayFrameCertificateIndex&, report_index: mutable ProofReplayFrameReportIndex&, imports_resolved: bool, depth: usize, work: mutable usize&, report_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if depth >= 64
             for declaration in declarations |report, all_declarations, tokens, source, source_length, depth, work, report_work|:
                 return false if work >= 4096
                 work <- work + 1
                 match declaration:
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not (proof_replay_frame_source_declarations(report, &nested, all_declarations, tokens, source, source_length, depth + 1, work, report_work) can Global{Read,Write})
-                    Ast::Decl.Func(name, _, _, _, _, _, position):
-                        has_frame: mutable bool = false
-                        return false if not proof_replay_frame_report_work_charge(report.analysis_1.certificates.count, report_work)
-                        for certificate in report.analysis_1.certificates |has_frame, name, report_work|:
-                            return false if:
-                                not proof_replay_frame_report_work_charge(sview_len(certificate.name), report_work)
-                                not proof_replay_frame_report_work_charge(sview_len(certificate.rule), report_work)
-                            has_frame <- true if certificate.name == name and proof_frame_certificate_family(certificate.rule)
-                        if has_frame and (proof_direct_frame_report_matches_source(report, all_declarations, name, position.line, tokens, source, source_length, report_work) can Global{Read,Write}):
-                            return false if not proof_replay_frame_report_work_charge(report.analysis_1.certificates.count, report_work)
-                            for index in 0..<report.analysis_1.certificates.count |index, report, name, report_work|:
-                                certificate = report.analysis_1.certificates[index]
-                                return false if:
-                                    not proof_replay_frame_report_work_charge(sview_len(certificate.name), report_work)
-                                    not proof_replay_frame_report_work_charge(sview_len(certificate.rule), report_work)
-                                report.analysis_1.certificates[index].replayed <- true if certificate.name == name and proof_frame_certificate_family(certificate.rule)
+                        return false if not (proof_replay_frame_source_declarations(report, &nested, all_declarations, tokens, source, source_length, certificate_index, report_index, imports_resolved, depth + 1, work, report_work) can Global{Read,Write})
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        presence = (ElisaProofFrameSource::frame_policy_present_at_position(name, position, body, tokens, source, source_length, report_work) can Global{Read,Write})
+                        return false if not presence.known
+                        owner_lookup: (complete: bool, owner_index: usize) = proof_replay_frame_certificate_owner_lookup(certificate_index, name, position.line, position.offset, report_work)
+                        return false if not owner_lookup.complete
+                        if presence.present or owner_lookup.owner_index < certificate_index.owners.count:
+                            return false if not (proof_direct_frame_report_matches_source(report, all_declarations, certificate_index, owner_lookup.owner_index, report_index, imports_resolved, name, position.line, position.offset, tokens, source, source_length, report_work) can Global{Read,Write})
+                            if owner_lookup.owner_index < certificate_index.owners.count:
+                                return false if not proof_replay_frame_certificate_owner_mark(report, certificate_index, owner_lookup.owner_index, report_work)
                     _:
                         pass
             return true
@@ -37,15 +27,38 @@ extend ElisaProof:
         # callers must consume an immutable receipt bound to complete source admission.
         def proof_replay_certificates_with_source(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> void can[Memory.Allocate, Abort.Panic]:
             (proof_replay_certificates(report) can Global{Read,Write})
+            return if not report.analysis_1.kernel.arena_validated or report.analysis_1.kernel.budget_exhausted
             work: mutable usize = 0
             report_work: mutable usize = 0
-            complete: bool = report.analysis_1.kernel.arena_validated and (proof_replay_frame_source_declarations(report, declarations, declarations, tokens, source, source_length, 0, &work, &report_work) can Global{Read,Write})
+            imports_resolved: bool = not proof_replay_summary_has_unresolved_import(report.source.source_annotations, &report_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            index_result: (complete: bool, index: ProofReplayFrameCertificateIndex) = proof_replay_frame_certificate_index_build(report, &report_work)
+            report_index_result: (complete: bool, index: ProofReplayFrameReportIndex) = proof_replay_frame_report_index_build(report, &report_work)
+            certificate_index: mutable ProofReplayFrameCertificateIndex = index_result.index
+            report_index: mutable ProofReplayFrameReportIndex = report_index_result.index
+            complete: mutable bool = false
+            if index_result.complete and report_index_result.complete:
+                complete <- imports_resolved and report.analysis_1.kernel.arena_validated and report.analysis_1.frame_producer.source_preparation_complete and (proof_replay_frame_source_declarations(report, declarations, declarations, tokens, source, source_length, &certificate_index, &report_index, imports_resolved, 0, &work, &report_work) can Global{Read,Write})
+            if complete:
+                for owner in report_index.owners |owner, report_work, complete|:
+                    if not proof_replay_frame_report_work_charge(1, report_work):
+                        complete <- false
+                        break
+                    complete <- false if not owner.source_seen
             report.analysis_2.replayed <- 0
             report.analysis_2.replay_gaps <- 0
-            for index in 0..<report.analysis_1.certificates.count |index, report, complete|:
-                report.analysis_1.certificates[index].replayed <- false if not complete and proof_frame_certificate_family(report.analysis_1.certificates[index].rule)
+            completion_work: mutable usize = 0
+            for index in 0..<report.analysis_1.certificates.count |index, report, complete, report_work|:
+                if not proof_replay_frame_report_work_charge(1, report_work):
+                    report.analysis_2.replay_gaps <- PROOF_REPLAY_INCOMPLETE_SENTINEL_GAPS
+                    return
+                if not complete:
+                    if not proof_replay_frame_report_work_charge(sview_len(report.analysis_1.certificates[index].rule), report_work):
+                        report.analysis_2.replay_gaps <- PROOF_REPLAY_INCOMPLETE_SENTINEL_GAPS
+                        return
+                    report.analysis_1.certificates[index].replayed <- false if proof_replay_frame_certificate_family(report.analysis_1.certificates[index].rule)
                 if report.analysis_1.certificates[index].replayed:
                     report.analysis_2.replayed <- report.analysis_2.replayed + 1
                 else:
                     report.analysis_2.replay_gaps <- report.analysis_2.replay_gaps + 1
-            report.analysis_2.replay_gaps <- PROOF_REPLAY_INCOMPLETE_SENTINEL_GAPS if report.analysis_2.replay_gaps == 0 and not proof_replay_certificates_complete(report)
+            report.analysis_2.replay_gaps <- PROOF_REPLAY_INCOMPLETE_SENTINEL_GAPS if report.analysis_2.replay_gaps == 0 and not proof_replay_certificates_complete_with_work(report, &completion_work)
+            report.analysis_2.replay_gaps <- PROOF_REPLAY_INCOMPLETE_SENTINEL_GAPS if not complete

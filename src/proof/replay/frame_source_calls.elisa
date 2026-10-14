@@ -65,14 +65,39 @@ extend ElisaProofFrameSource:
                         return false
             return true
 
-        def call_find_caller_module(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, depth: usize, work: mutable usize&, current_path: mutable darray[sview]&, found_path: mutable darray[sview]&, matches: mutable usize&) -> bool:
+        # Canonical module traversal must agree with the resolved callee path: a fully
+        # qualified declaration replaces the current prefix, while a bare module is relative.
+        def call_module_scope_with_work(current: darray[sview]&, module_name: sview, work: mutable usize&) -> (complete: bool, scope: darray[sview]):
+            module_length: usize = sview_len(module_name)
+            if module_length > FRAME_SOURCE_REPLAY_WORK_LIMIT / 3:
+                work <- FRAME_SOURCE_REPLAY_WORK_LIMIT + 1
+                return (false, [])
+            return (false, []) if not replay_work_charge(module_length * 3, work)
+            segments: mutable darray[sview] = []
+            segment_start: mutable usize = 0
+            qualified: mutable bool = false
+            for cursor in 0..<module_length |cursor, module_name, segments, segment_start, qualified, work|:
+                if sview_at(module_name, cursor) == 58 and cursor + 1 < module_length and sview_at(module_name, cursor + 1) == 58:
+                    segments.push(string_view_prefix(string_view_suffix(module_name, segment_start.i64()), (cursor - segment_start).i64()))
+                    segment_start <- cursor + 2
+                    qualified <- true
+            if segment_start < module_length:
+                segments.push(string_view_suffix(module_name, segment_start.i64()))
+            return (true, segments) if qualified
+            return (false, []) if not replay_work_charge(current.count, work)
+            normalized: mutable darray[sview] = []
+            normalized.extend(current)
+            normalized.extend(segments)
+            (true, normalized)
+
+        def call_find_caller_module(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: u32, exact_owner: bool, depth: usize, work: mutable usize&, current_path: mutable darray[sview]&, found_path: mutable darray[sview]&, matches: mutable usize&) -> bool:
             return false if depth >= 64 or not replay_work_charge(declarations.count, work)
-            for declaration in declarations |owner, owner_line, depth, work, current_path, found_path, matches|:
+            for declaration in declarations |owner, owner_line, owner_offset, exact_owner, depth, work, current_path, found_path, matches|:
                 return false if not replay_work_charge(1, work)
                 match declaration:
                     Ast::Decl.Func(candidate, _, _, _, _, _, position):
                         return false if not replay_work_charge(sview_len(candidate), work)
-                        if candidate == owner and position.line == owner_line:
+                        if candidate == owner and position.line == owner_line and (not exact_owner or position.offset == owner_offset):
                             matches <- matches + 1
                             return false if:
                                 matches > 1
@@ -81,12 +106,10 @@ extend ElisaProofFrameSource:
                                 return false if not replay_work_charge(sview_len(module_name), work)
                             found_path.extend(current_path)
                     Ast::Decl.Module(module_name, nested, _):
-                        return false if not replay_work_charge(sview_len(module_name), work)
-                        current_path.push(module_name)
-                        return false if not call_find_caller_module(nested, owner, owner_line, depth + 1, work, current_path, found_path, matches)
-                        current_path <- current_path.truncate(current_path.count - 1)
+                        nested_path: (complete: bool, scope: darray[sview]) = call_module_scope_with_work(current_path, module_name, work)
+                        return false if not nested_path.complete or not call_find_caller_module(nested, owner, owner_line, owner_offset, exact_owner, depth + 1, work, nested_path.scope, found_path, matches)
                     Ast::Decl.Scoped(nested, _):
-                        return false if not call_find_caller_module(nested, owner, owner_line, depth + 1, work, current_path, found_path, matches)
+                        return false if not call_find_caller_module(nested, owner, owner_line, owner_offset, exact_owner, depth + 1, work, current_path, found_path, matches)
                     Ast::Decl.Invalid:
                         return false
                     Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
@@ -95,11 +118,11 @@ extend ElisaProofFrameSource:
                         return false
             return true
 
-        def call_owner_line(declarations: darray[Ast::Decl]&, name: sview, lemma_name: bool, caller_path: darray[sview]&, depth: usize, work: mutable usize&, current_path: mutable darray[sview]&, best_depth: mutable usize&, best_matches: mutable usize&, best_line: mutable u32&, best_path: mutable darray[sview]&, relevant_import: mutable bool&) -> bool:
+        def call_owner_line(declarations: darray[Ast::Decl]&, name: sview, lemma_name: bool, caller_path: darray[sview]&, depth: usize, work: mutable usize&, current_path: mutable darray[sview]&, best_depth: mutable usize&, best_matches: mutable usize&, best_line: mutable u32&, best_offset: mutable u32&, best_path: mutable darray[sview]&, relevant_import: mutable bool&) -> bool:
             return false if:
                 depth >= 64
                 not replay_work_charge(declarations.count, work)
-            for declaration in declarations |name, lemma_name, caller_path, depth, work, current_path, best_depth, best_matches, best_line, best_path, relevant_import|:
+            for declaration in declarations |name, lemma_name, caller_path, depth, work, current_path, best_depth, best_matches, best_line, best_offset, best_path, relevant_import|:
                 return false if not replay_work_charge(1, work)
                 match declaration:
                     Ast::Decl.Func(candidate, _, _, _, _, _, position):
@@ -120,6 +143,7 @@ extend ElisaProofFrameSource:
                                     best_depth <- candidate_depth
                                     best_matches <- 1
                                     best_line <- position.line
+                                    best_offset <- position.offset
                                     best_path.clear()
                                     return false if not replay_work_charge(current_path.count, work)
                                     for module_name in current_path |module_name, work|:
@@ -128,13 +152,12 @@ extend ElisaProofFrameSource:
                                 elif candidate_depth == best_depth:
                                     best_matches <- best_matches + 1
                                     best_line <- position.line
+                                    best_offset <- position.offset
                     Ast::Decl.Module(module_name, nested, _):
-                        return false if not replay_work_charge(sview_len(module_name), work)
-                        current_path.push(module_name)
-                        return false if not call_owner_line(nested, name, lemma_name, caller_path, depth + 1, work, current_path, best_depth, best_matches, best_line, best_path, relevant_import)
-                        current_path <- current_path.truncate(current_path.count - 1)
+                        nested_path: (complete: bool, scope: darray[sview]) = call_module_scope_with_work(current_path, module_name, work)
+                        return false if not nested_path.complete or not call_owner_line(nested, name, lemma_name, caller_path, depth + 1, work, nested_path.scope, best_depth, best_matches, best_line, best_offset, best_path, relevant_import)
                     Ast::Decl.Scoped(nested, _):
-                        return false if not call_owner_line(nested, name, lemma_name, caller_path, depth + 1, work, current_path, best_depth, best_matches, best_line, best_path, relevant_import)
+                        return false if not call_owner_line(nested, name, lemma_name, caller_path, depth + 1, work, current_path, best_depth, best_matches, best_line, best_offset, best_path, relevant_import)
                     Ast::Decl.Invalid:
                         return false
                     Ast::Decl.Import(candidate, _):
@@ -160,30 +183,47 @@ extend ElisaProofFrameSource:
         # Type-only source queries may use a lemma's module scope as the caller; lemma names
         # remain excluded from callee resolution in call_owner_line.
         def resolve_callee_line_with_work_and_caller_policy(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, caller_name: sview, caller_line: u32, callee_name: sview, allow_lemma_caller: bool, work: mutable usize&) -> (known: bool, line: u32, module_path: darray[sview]) can[Memory.Allocate, Abort.Panic]:
+            resolved = resolve_callee_owner_impl(declarations, annotations, caller_name, caller_line, 0, false, callee_name, allow_lemma_caller, work)
+            return (resolved.known, resolved.line, resolved.module_path)
+
+        # Frame-call reconstruction carries the caller declaration key, so module
+        # precedence and callee selection remain tied to that exact source owner.
+        def resolve_callee_owner_at_offset_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, caller_name: sview, caller_line: u32, caller_offset: u32, callee_name: sview, work: mutable usize&) -> (known: bool, line: u32, offset: u32, module_path: darray[sview]) can[Memory.Allocate, Abort.Panic]:
+            return resolve_callee_owner_at_offset_with_caller_policy_with_work(declarations, annotations, caller_name, caller_line, caller_offset, callee_name, false, work)
+
+        # Type-bound call-result replay can use a lemma declaration as a caller, while
+        # still resolving the callee under ordinary executable-call rules.
+        def resolve_callee_owner_at_offset_with_caller_policy_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, caller_name: sview, caller_line: u32, caller_offset: u32, callee_name: sview, allow_lemma_caller: bool, work: mutable usize&) -> (known: bool, line: u32, offset: u32, module_path: darray[sview]) can[Memory.Allocate, Abort.Panic]:
+            return resolve_callee_owner_impl(declarations, annotations, caller_name, caller_line, caller_offset, true, callee_name, allow_lemma_caller, work)
+
+    private:
+        def resolve_callee_owner_impl(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, caller_name: sview, caller_line: u32, caller_offset: u32, exact_caller: bool, callee_name: sview, allow_lemma_caller: bool, work: mutable usize&) -> (known: bool, line: u32, offset: u32, module_path: darray[sview]) can[Memory.Allocate, Abort.Panic]:
             caller_path: mutable darray[sview] = []
             current_path: mutable darray[sview] = []
             owner_matches: mutable usize = 0
-            return (false, 0, []) if caller_name == "" or caller_line == 0 or callee_name == ""
+            return (false, 0, 0, []) if caller_name == "" or caller_line == 0 or callee_name == ""
             caller_is_lemma: (complete: bool, lemma: bool) = call_name_is_lemma(annotations, caller_name, work)
-            return (false, 0, []) if not caller_is_lemma.complete or caller_is_lemma.lemma and not allow_lemma_caller
+            return (false, 0, 0, []) if not caller_is_lemma.complete or caller_is_lemma.lemma and not allow_lemma_caller
             callee_is_lemma: (complete: bool, lemma: bool) = call_name_is_lemma(annotations, callee_name, work)
-            return (false, 0, []) if:
+            return (false, 0, 0, []) if:
                 not callee_is_lemma.complete
-                not call_find_caller_module(declarations, caller_name, caller_line, 0, work, &current_path, &caller_path, &owner_matches) or owner_matches != 1
+                not call_find_caller_module(declarations, caller_name, caller_line, caller_offset, exact_caller, 0, work, &current_path, &caller_path, &owner_matches) or owner_matches != 1
             current_path.clear()
             best_depth: mutable usize = 0
             best_matches: mutable usize = 0
             best_line: mutable u32 = 0
+            best_offset: mutable u32 = 0
             best_path: mutable darray[sview] = []
             relevant_import: mutable bool = false
-            return (false, 0, []) if not call_owner_line(declarations, callee_name, callee_is_lemma.lemma, caller_path, 0, work, &current_path, &best_depth, &best_matches, &best_line, &best_path, &relevant_import)
+            return (false, 0, 0, []) if not call_owner_line(declarations, callee_name, callee_is_lemma.lemma, caller_path, 0, work, &current_path, &best_depth, &best_matches, &best_line, &best_offset, &best_path, &relevant_import)
             # The compiler resolves bare functions in the caller module, then each parent
             # module, before consulting visible imports. A globally unique peer-module name
             # is not callable without an import, and an import cannot shadow a local winner.
-            return (true, best_line, best_path) if best_matches == 1
-            return (false, 0, []) if best_matches > 1 or relevant_import
-            return (false, 0, [])
+            return (true, best_line, best_offset, best_path) if best_matches == 1
+            return (false, 0, 0, []) if best_matches > 1 or relevant_import
+            return (false, 0, 0, [])
 
+    public:
         # Resolve one exact original occurrence; no producer call/summary row is
         # consulted. Leaf targets must resolve uniquely under caller-module precedence
         # and remain unshadowed at the call site.
@@ -194,25 +234,37 @@ extend ElisaProofFrameSource:
         def source_call_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, position: Ast::Pos, work: mutable usize&) -> (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32) can[Memory.Allocate, Abort.Panic]:
             context = owner_with_work(declarations, name, line, work)
             return (false, Ast::Expr.Invalid, "", 0) if not context.known
+            exact: (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) = source_call_in_owner_with_work(declarations, annotations, name, line, context.position.offset, &context.body, &context.formals, position, work)
+            return (exact.known, exact.expression, exact.callee, exact.callee_line)
+
+        # Callers that need to inspect the resolved declaration must retain its offset.
+        # The legacy wrapper above remains name-and-line-only and fails closed on ambiguity.
+        def source_call_with_offset_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, position: Ast::Pos, work: mutable usize&) -> (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) can[Memory.Allocate, Abort.Panic]:
+            context = owner_with_work(declarations, name, line, work)
+            return (false, Ast::Expr.Invalid, "", 0, 0) if not context.known
+            source_call_in_owner_with_work(declarations, annotations, name, line, context.position.offset, &context.body, &context.formals, position, work)
+
+        def source_call_at_owner_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, owner_offset: u32, position: Ast::Pos, work: mutable usize&) -> (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) can[Memory.Allocate, Abort.Panic]:
+            context = owner_at_offset_with_work(declarations, name, line, owner_offset, work)
+            return (false, Ast::Expr.Invalid, "", 0, 0) if not context.known
+            source_call_in_owner_with_work(declarations, annotations, name, line, context.position.offset, &context.body, &context.formals, position, work)
+
+        def source_call_in_owner_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, owner_offset: u32, body: darray[Ast::Stmt]&, formals: darray[sview]&, position: Ast::Pos, work: mutable usize&) -> (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) can[Memory.Allocate, Abort.Panic]:
             matches: mutable usize = 0
             found: mutable Ast::Expr = Ast::Expr.Invalid
-            return (false, Ast::Expr.Invalid, "", 0) if not call_statements_at(&context.body, position, 0, work, &matches, &found) or matches != 1
+            return (false, Ast::Expr.Invalid, "", 0, 0) if not call_statements_at(body, position, 0, work, &matches, &found) or matches != 1
             match found:
                 Ast::Expr.Call(Ast::Expr.Ident(callee, _), _, _, _):
-                    return (false, Ast::Expr.Invalid, "", 0) if not replay_work_charge(context.formals.count, work)
-                    for formal in context.formals |callee, work|:
-                        return (false, Ast::Expr.Invalid, "", 0) if:
+                    return (false, Ast::Expr.Invalid, "", 0, 0) if not replay_work_charge(formals.count, work)
+                    for formal in formals |callee, work|:
+                        return (false, Ast::Expr.Invalid, "", 0, 0) if:
                             not replay_work_charge(sview_len(formal), work)
                             formal == callee
-                    return (false, Ast::Expr.Invalid, "", 0) if not ElisaProof::source_call_locals_unshadowed_at_with_work(context.body, annotations, found, work)
-                    resolved: (known: bool, line: u32, module_path: darray[sview]) = resolve_callee_line_with_work(declarations, annotations, name, line, callee, work)
-                    return (false, Ast::Expr.Invalid, "", 0) if not resolved.known
-                    # Downstream frame helpers still address owners by name and line.
-                    # Refuse repeated source identities here until those APIs carry the
-                    # selected module path, so a successful scoped resolution cannot be
-                    # redirected by another module's same-line declaration.
-                    selected_owner = owner_with_work(declarations, callee, resolved.line, work)
-                    return (false, Ast::Expr.Invalid, "", 0) if not selected_owner.known
-                    return (true, found, callee, resolved.line)
+                    return (false, Ast::Expr.Invalid, "", 0, 0) if not ElisaProof::source_call_locals_unshadowed_at_with_work(body, annotations, found, work)
+                    resolved = resolve_callee_owner_at_offset_with_work(declarations, annotations, name, line, owner_offset, callee, work)
+                    return (false, Ast::Expr.Invalid, "", 0, 0) if not resolved.known
+                    selected_owner = owner_at_offset_with_work(declarations, callee, resolved.line, resolved.offset, work)
+                    return (false, Ast::Expr.Invalid, "", 0, 0) if not selected_owner.known
+                    return (true, found, callee, resolved.line, resolved.offset)
                 _:
-                    return (false, Ast::Expr.Invalid, "", 0)
+                    return (false, Ast::Expr.Invalid, "", 0, 0)

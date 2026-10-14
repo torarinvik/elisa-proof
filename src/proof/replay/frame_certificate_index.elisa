@@ -1,0 +1,246 @@
+# Owner-indexed frame certificate rows for source replay.
+extend ElisaProof:
+    private:
+        def proof_replay_frame_certificate_family(rule: sview) -> bool:
+            rule in {"frame-spec", "frame-allow", "frame-preserve"}
+
+        def proof_replay_frame_certificate_text_charge(value: sview, work: mutable usize&) -> bool:
+            ElisaProofFrameSource::replay_work_charge(1, work) and ElisaProofFrameSource::replay_work_charge(sview_len(value), work)
+
+        def proof_replay_frame_certificate_owner_hash(name: sview, declaration_line: u32, declaration_offset: u32) -> u32:
+            first: u32 = proof_expr_shape_mix(proof_name_hash(name), declaration_line.i64())
+            proof_expr_shape_mix(first, declaration_offset.i64())
+
+        def proof_replay_frame_report_owner_slot(index: ProofReplayFrameReportIndex&, name: sview, line: u32, offset: u32, work: mutable usize&) -> (complete: bool, owner_index: usize):
+            capacity: usize = index.slots.count
+            return (false, 0) if capacity == 0 or index.hashes.count != capacity or not proof_replay_frame_certificate_text_charge(name, work)
+            hash: u32 = proof_replay_frame_certificate_owner_hash(name, line, offset)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            sentinel: usize = ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT + 1
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, name, line, offset, index, capacity, work, sentinel|:
+                return (false, 0) if not ElisaProofFrameSource::replay_work_charge(1, work)
+                current: usize = index.slots[slot]
+                if current == sentinel:
+                    return (true, slot)
+                return (false, 0) if current >= index.owners.count
+                if index.hashes[slot] == hash:
+                    owner: ProofReplayFrameReportOwner = index.owners[current]
+                    return (false, 0) if not proof_replay_frame_certificate_text_charge(owner.name, work)
+                    return (true, slot) if owner.name == name and owner.declaration_line == line and owner.declaration_offset == offset
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, 0)
+
+        def proof_replay_frame_report_owner_ensure(index: mutable ProofReplayFrameReportIndex&, name: sview, line: u32, offset: u32, work: mutable usize&) -> (complete: bool, owner_index: usize):
+            result: (complete: bool, slot: usize) = proof_replay_frame_report_owner_slot(index, name, line, offset, work)
+            return (false, 0) if not result.complete
+            sentinel: usize = ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT + 1
+            current: usize = index.slots[result.slot]
+            if current == sentinel:
+                return (false, 0) if not ElisaProofFrameSource::replay_work_charge(1, work) or not ElisaProofFrameSource::replay_work_charge(sview_len(name), work)
+                index.owners.push(ProofReplayFrameReportOwner{name: name, declaration_line: line, declaration_offset: offset, entry_head: sentinel, entry_last: sentinel, entry_count: 0, attempt_count: 0, source_seen: false})
+                owner_index: usize = index.owners.count - 1
+                index.hashes[result.slot] <- proof_replay_frame_certificate_owner_hash(name, line, offset)
+                index.slots[result.slot] <- owner_index
+                return (true, owner_index)
+            return (false, 0) if current >= index.owners.count
+            return (true, current)
+
+        def proof_replay_frame_report_index_build(report: ProofReport&, work: mutable usize&) -> (complete: bool, index: ProofReplayFrameReportIndex):
+            index: mutable ProofReplayFrameReportIndex = ProofReplayFrameReportIndex{owners: [], hashes: [], slots: [], entry_indices: [], next_indices: [], complete: false}
+            candidates: mutable usize = 0
+            for attempt in report.results.goal_attempts |attempt, candidates, work|:
+                return (false, index) if not ElisaProofFrameSource::replay_work_charge(1, work)
+                if proof_replay_frame_certificate_family(attempt.rule):
+                    return (false, index) if attempt.name == "" or attempt.owner_function_line == 0 or not proof_replay_frame_certificate_text_charge(attempt.name, work)
+                    candidates <- candidates + 1
+            for entry in report.results.obligation_inventory |entry, candidates, work|:
+                return (false, index) if not ElisaProofFrameSource::replay_work_charge(1, work)
+                if entry.source_kind in {"changes", "preserves", "allow", "preserve"}:
+                    return (false, index) if entry.source_name == "" or entry.owner_function_line == 0 or not proof_replay_frame_certificate_text_charge(entry.source_name, work)
+                    candidates <- candidates + 1
+            return (false, index) if candidates > ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT / 3
+            if candidates == 0:
+                index.complete <- true
+                return (true, index)
+            capacity: usize = proof_index_capacity(candidates + 1)
+            return (false, index) if capacity <= candidates or not ElisaProofFrameSource::replay_work_charge(capacity * 2, work)
+            index.hashes.resize(capacity)
+            index.slots.resize(capacity)
+            sentinel: usize = ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT + 1
+            for slot in 0..<capacity |slot, index, sentinel, work|:
+                return (false, index) if not ElisaProofFrameSource::replay_work_charge(1, work)
+                index.slots[slot] <- sentinel
+            for attempt in report.results.goal_attempts |attempt, index, work|:
+                return (false, index) if not ElisaProofFrameSource::replay_work_charge(1, work)
+                continue if not proof_replay_frame_certificate_family(attempt.rule)
+                owner: (complete: bool, owner_index: usize) = proof_replay_frame_report_owner_ensure(&index, attempt.name, attempt.owner_function_line, attempt.owner_function_offset, work)
+                return (false, index) if not owner.complete or owner.owner_index >= index.owners.count
+                return (false, index) if not ElisaProofFrameSource::replay_work_charge(1, work)
+                index.owners[owner.owner_index].attempt_count <- index.owners[owner.owner_index].attempt_count + 1
+            for entry_index in 0..<report.results.obligation_inventory.count |entry_index, report, index, sentinel, work|:
+                entry: ProofObligationEntry = report.results.obligation_inventory[entry_index]
+                return (false, index) if not ElisaProofFrameSource::replay_work_charge(1, work)
+                continue if not (entry.source_kind in {"changes", "preserves", "allow", "preserve"})
+                owner: (complete: bool, owner_index: usize) = proof_replay_frame_report_owner_ensure(&index, entry.source_name, entry.owner_function_line, entry.owner_function_offset, work)
+                return (false, index) if not owner.complete or owner.owner_index >= index.owners.count
+                row: usize = index.entry_indices.count
+                return (false, index) if not ElisaProofFrameSource::replay_work_charge(3, work)
+                index.entry_indices.push(entry_index)
+                index.next_indices.push(sentinel)
+                if index.owners[owner.owner_index].entry_head == sentinel:
+                    index.owners[owner.owner_index].entry_head <- row
+                else:
+                    last: usize = index.owners[owner.owner_index].entry_last
+                    return (false, index) if last >= row or last >= index.next_indices.count
+                    index.next_indices[last] <- row
+                index.owners[owner.owner_index].entry_last <- row
+                index.owners[owner.owner_index].entry_count <- index.owners[owner.owner_index].entry_count + 1
+            index.complete <- true
+            return (true, index)
+
+        def proof_replay_frame_report_owner_lookup(index: ProofReplayFrameReportIndex&, name: sview, line: u32, offset: u32, work: mutable usize&) -> (complete: bool, owner_index: usize):
+            return (false, 0) if not index.complete
+            return (true, 0) if index.slots.count == 0 and index.owners.count == 0
+            result: (complete: bool, slot: usize) = proof_replay_frame_report_owner_slot(index, name, line, offset, work)
+            return (false, 0) if not result.complete
+            sentinel: usize = ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT + 1
+            current: usize = index.slots[result.slot]
+            return (true, index.owners.count) if current == sentinel
+            return (false, 0) if current >= index.owners.count
+            return (true, current)
+
+        def proof_replay_frame_certificate_index_build(report: ProofReport&, work: mutable usize&) -> (complete: bool, index: ProofReplayFrameCertificateIndex):
+            index: mutable ProofReplayFrameCertificateIndex = ProofReplayFrameCertificateIndex{owners: [], hashes: [], slots: [], certificate_indices: [], next_indices: [], complete: false}
+            frame_count: mutable usize = 0
+            for certificate in report.analysis_1.certificates |certificate, frame_count, work|:
+                return (false, index) if not proof_replay_frame_certificate_text_charge(certificate.rule, work)
+                if proof_replay_frame_certificate_family(certificate.rule):
+                    return (false, index) if certificate.name == "" or not proof_replay_frame_certificate_text_charge(certificate.name, work)
+                    return (false, index) if frame_count >= ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+                    frame_count <- frame_count + 1
+            certificate_count: usize = report.analysis_1.certificates.count
+            return (false, index) if work > ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT or certificate_count > (ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT - work) / 2
+            work <- work + certificate_count * 2
+            index.certificate_owner_lines.resize(certificate_count)
+            index.certificate_owner_offsets.resize(certificate_count)
+            for certificate_index in 0..<certificate_count |certificate_index, index, certificate_count|:
+                index.certificate_owner_lines[certificate_index] <- 0
+                index.certificate_owner_offsets[certificate_index] <- 0
+            for attempt in report.results.goal_attempts |attempt, report, index, work|:
+                return (false, index) if not ElisaProofFrameSource::replay_work_charge(1, work)
+                continue if not attempt.has_certificate or not proof_replay_frame_certificate_family(attempt.rule)
+                return (false, index) if:
+                    attempt.certificate_index >= report.analysis_1.certificates.count
+                    attempt.owner_function_line == 0
+                    not proof_replay_frame_certificate_text_charge(attempt.name, work)
+                certificate: ProofGoalCertificate = report.analysis_1.certificates[attempt.certificate_index]
+                return (false, index) if:
+                    not proof_replay_frame_certificate_text_charge(certificate.rule, work)
+                    not proof_replay_frame_certificate_text_charge(certificate.name, work)
+                    certificate.rule != attempt.rule or certificate.name != attempt.name
+                    index.certificate_owner_lines[attempt.certificate_index] != 0
+                index.certificate_owner_lines[attempt.certificate_index] <- attempt.owner_function_line
+                index.certificate_owner_offsets[attempt.certificate_index] <- attempt.owner_function_offset
+            if frame_count == 0:
+                index.complete <- true
+                return (true, index)
+            capacity: usize = proof_index_capacity(frame_count + 1)
+            return (false, index) if capacity <= frame_count or not ElisaProofFrameSource::replay_work_charge(capacity, work)
+            index.hashes.resize(capacity)
+            index.slots.resize(capacity)
+            for slot in 0..<capacity |slot, index, work|:
+                return (false, index) if not ElisaProofFrameSource::replay_work_charge(1, work)
+                index.slots[slot] <- 0
+            sentinel: usize = ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT + 1
+            for certificate_index in 0..<report.analysis_1.certificates.count |certificate_index, report, index, capacity, sentinel, work|:
+                certificate: ProofGoalCertificate = report.analysis_1.certificates[certificate_index]
+                return (false, index) if not proof_replay_frame_certificate_text_charge(certificate.rule, work)
+                continue if not proof_replay_frame_certificate_family(certificate.rule)
+                name: sview = certificate.name
+                return (false, index) if not proof_replay_frame_certificate_text_charge(name, work)
+                declaration_line: u32 = index.certificate_owner_lines[certificate_index]
+                declaration_offset: u32 = index.certificate_owner_offsets[certificate_index]
+                return (false, index) if declaration_line == 0
+                hash: u32 = proof_replay_frame_certificate_owner_hash(name, declaration_line, declaration_offset)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                owner_index: mutable usize = index.owners.count
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, name, declaration_line, declaration_offset, index, capacity, sentinel, work, owner_index|:
+                    return (false, index) if not ElisaProofFrameSource::replay_work_charge(1, work)
+                    current: usize = index.slots[slot]
+                    if current == 0:
+                        return (false, index) if not ElisaProofFrameSource::replay_work_charge(5, work)
+                        owner_index <- index.owners.count
+                        index.owners.push(ProofReplayFrameCertificateOwner{name: name, declaration_line: declaration_line, declaration_offset: declaration_offset, head: sentinel, last_index: sentinel, count: 0})
+                        index.hashes[slot] <- hash
+                        index.slots[slot] <- owner_index + 1
+                        placed <- true
+                        break
+                    owner_index <- current - 1
+                    return (false, index) if owner_index >= index.owners.count
+                    if index.hashes[slot] == hash:
+                        return (false, index) if not proof_replay_frame_certificate_text_charge(index.owners[owner_index].name, work)
+                        if index.owners[owner_index].name == name and index.owners[owner_index].declaration_line == declaration_line and index.owners[owner_index].declaration_offset == declaration_offset:
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (false, index) if not placed or owner_index >= index.owners.count
+                row: usize = index.certificate_indices.count
+                return (false, index) if row >= frame_count or not ElisaProofFrameSource::replay_work_charge(3, work)
+                index.certificate_indices.push(certificate_index)
+                index.next_indices.push(sentinel)
+                if index.owners[owner_index].head == sentinel:
+                    index.owners[owner_index].head <- row
+                else:
+                    last_index: usize = index.owners[owner_index].last_index
+                    return (false, index) if last_index >= row or last_index >= index.next_indices.count
+                    index.next_indices[last_index] <- row
+                index.owners[owner_index].last_index <- row
+                index.owners[owner_index].count <- index.owners[owner_index].count + 1
+            return (false, index) if index.certificate_indices.count != frame_count or index.next_indices.count != frame_count
+            index.complete <- true
+            return (true, index)
+
+        def proof_replay_frame_certificate_owner_lookup(index: ProofReplayFrameCertificateIndex&, wanted: sview, declaration_line: u32, declaration_offset: u32, work: mutable usize&) -> (complete: bool, owner_index: usize):
+            return (false, 0) if not index.complete or index.hashes.count != index.slots.count
+            capacity: usize = index.slots.count
+            return (true, index.owners.count) if capacity == 0
+            return (false, 0) if not proof_replay_frame_certificate_text_charge(wanted, work)
+            hash: u32 = proof_replay_frame_certificate_owner_hash(wanted, declaration_line, declaration_offset)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, wanted, declaration_line, declaration_offset, index, capacity, work|:
+                return (false, 0) if not ElisaProofFrameSource::replay_work_charge(1, work)
+                current: usize = index.slots[slot]
+                return (true, index.owners.count) if current == 0
+                owner_index: usize = current - 1
+                return (false, 0) if owner_index >= index.owners.count
+                if index.hashes[slot] == hash:
+                    return (false, 0) if not proof_replay_frame_certificate_text_charge(index.owners[owner_index].name, work)
+                    owner: ProofReplayFrameCertificateOwner = index.owners[owner_index]
+                    return (true, owner_index) if owner.name == wanted and owner.declaration_line == declaration_line and owner.declaration_offset == declaration_offset
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, 0)
+
+        def proof_replay_frame_certificate_owner_mark(report: mutable ProofReport&, index: ProofReplayFrameCertificateIndex&, owner_index: usize, work: mutable usize&) -> bool:
+            return false if owner_index >= index.owners.count or index.certificate_indices.count != index.next_indices.count
+            owner: ProofReplayFrameCertificateOwner = index.owners[owner_index]
+            sentinel: usize = ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT + 1
+            row: mutable usize = owner.head
+            visited: mutable usize = 0
+            while visited < owner.count |visited, row, owner, index, report, sentinel, work|:
+                return false if row >= index.certificate_indices.count or row >= index.next_indices.count
+                return false if not ElisaProofFrameSource::replay_work_charge(1, work)
+                certificate_index: usize = index.certificate_indices[row]
+                return false if certificate_index >= report.analysis_1.certificates.count
+                report.analysis_1.certificates[certificate_index].replayed <- true
+                next: usize = index.next_indices[row]
+                return false if next != sentinel and (next <= row or next >= index.next_indices.count)
+                row <- next
+                visited <- visited + 1
+            return visited == owner.count and row == sentinel

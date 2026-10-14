@@ -22,9 +22,9 @@ extend ElisaProofFrameSource:
 
         # Complete only for the explicit direct-body subset. Unknown statement,
         # expression or write mappings invalidate the entire inventory.
-        def source_events_impl(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, calls: bool, work: mutable usize&) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
-            policy = source_policy_with_work(declarations, name, line, tokens, source, source_length, work)
-            context = owner_with_work(declarations, name, line, work)
+        def source_events_impl(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, owner_offset: u32, exact_owner: bool, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, calls: bool, work: mutable usize&) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
+            policy = source_policy_at_offset_with_work(declarations, name, line, owner_offset, tokens, source, source_length, work) if exact_owner else source_policy_with_work(declarations, name, line, tokens, source, source_length, work)
+            context = owner_at_offset_with_work(declarations, name, line, owner_offset, work) if exact_owner else owner_with_work(declarations, name, line, work)
             return (false, []) if not policy.known or not context.known
             events: mutable darray[Event] = []
             has_changes: mutable bool = false
@@ -39,7 +39,7 @@ extend ElisaProofFrameSource:
                 clause = policy.clauses[index]
                 return (false, []) if:
                     not replay_work_charge(sview_len(clause.kind), work)
-                    not place_typed_with_work(declarations, name, line, clause.place, work)
+                    not (place_typed_at_offset_with_work(declarations, name, line, owner_offset, clause.place, work) if exact_owner else place_typed_with_work(declarations, name, line, clause.place, work))
                 has_changes <- true if clause.kind == "changes"
                 events.push(Event{call_effect: false, change_index: 0, kind: clause.kind, position: clause.position, statement_index: 0, clause_index: index, place: clause.place})
             return (false, []) if not replay_work_charge(context.body.count, work)
@@ -57,8 +57,8 @@ extend ElisaProofFrameSource:
                         return (false, []) if operator != TokenKind.LArrow
                         if not inert_value(value, 0, work):
                             return (false, []) if not scalar_environment or not scalar_read(value, &local_names, &local_types, 0, work)
-                        actual = direct_write_with_work(declarations, name, line, position, work)
-                        return (false, []) if not actual.known or not place_typed_with_work(declarations, name, line, actual.place, work)
+                        actual = direct_write_at_offset_with_work(declarations, name, line, owner_offset, position, work) if exact_owner else direct_write_with_work(declarations, name, line, position, work)
+                        return (false, []) if not actual.known or not (place_typed_at_offset_with_work(declarations, name, line, owner_offset, actual.place, work) if exact_owner else place_typed_with_work(declarations, name, line, actual.place, work))
                         if has_changes:
                             return (false, []) if events.count >= 4096
                             events.push(Event{call_effect: false, change_index: 0, kind: "allow", position: position, statement_index: index, clause_index: 0, place: actual.place})
@@ -73,7 +73,7 @@ extend ElisaProofFrameSource:
                             if not inert_value(expression, 0, work):
                                 return (false, []) if not scalar_environment
                                 if calls:
-                                    mapped = (source_return_effects_with_work(&context.body, index, declarations, annotations, name, line, &local_names, &local_types, context.return_type, tokens, source, source_length, work) can Global{Read,Write})
+                                    mapped = (source_return_effects_with_work(&context.body, index, declarations, annotations, name, line, owner_offset, exact_owner, &local_names, &local_types, context.return_type, tokens, source, source_length, work) can Global{Read,Write})
                                     return (false, []) if:
                                         not mapped.known
                                         not replay_work_charge(mapped.effects.count, work)
@@ -100,7 +100,7 @@ extend ElisaProofFrameSource:
                                             return (false, []) if not scalar_environment or not scalar_read(expression, &local_names, &local_types, 0, work)
                                     _:
                                         return (false, [])
-                        mapped = (source_condition_effects_with_work(declarations, annotations, name, line, index, tokens, source, source_length, work) can Global{Read,Write})
+                        mapped = (source_condition_effects_at_owner_with_work(declarations, annotations, name, line, owner_offset, index, tokens, source, source_length, work) can Global{Read,Write}) if exact_owner else (source_condition_effects_with_work(declarations, annotations, name, line, index, tokens, source, source_length, work) can Global{Read,Write})
                         return (false, []) if:
                             not mapped.known
                             not replay_work_charge(mapped.effects.count, work)
@@ -123,7 +123,7 @@ extend ElisaProofFrameSource:
                                 not replay_work_charge(sview_len(existing), work)
                                 not replay_work_charge(sview_len(binding), work)
                                 existing == binding
-                        mapped = (source_condition_effects_with_work(declarations, annotations, name, line, index, tokens, source, source_length, work) can Global{Read,Write})
+                        mapped = (source_condition_effects_at_owner_with_work(declarations, annotations, name, line, owner_offset, index, tokens, source, source_length, work) can Global{Read,Write}) if exact_owner else (source_condition_effects_with_work(declarations, annotations, name, line, index, tokens, source, source_length, work) can Global{Read,Write})
                         return (false, []) if:
                             not mapped.known
                             not replay_work_charge(mapped.effects.count, work)
@@ -148,7 +148,10 @@ extend ElisaProofFrameSource:
             return (strict_direct_events_with_work(declarations, [], name, line, tokens, source, source_length, &work) can Global{Read,Write})
 
         def strict_direct_events_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
-            return (source_events_impl(declarations, annotations, name, line, tokens, source, source_length, false, work) can Global{Read,Write})
+            return (source_events_impl(declarations, annotations, name, line, 0, false, tokens, source, source_length, false, work) can Global{Read,Write})
+
+        def strict_direct_events_at_offset_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, owner_offset: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
+            return (source_events_impl(declarations, annotations, name, line, owner_offset, true, tokens, source, source_length, false, work) can Global{Read,Write})
 
         def direct_events(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
             work: mutable usize = 0
@@ -159,7 +162,10 @@ extend ElisaProofFrameSource:
             return (direct_events_with_work(declarations, annotations, name, line, tokens, source, source_length, &work) can Global{Read,Write})
 
         def direct_events_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
-            return (source_events_impl(declarations, annotations, name, line, tokens, source, source_length, true, work) can Global{Read,Write})
+            return (source_events_impl(declarations, annotations, name, line, 0, false, tokens, source, source_length, true, work) can Global{Read,Write})
+
+        def direct_events_at_offset_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, owner_offset: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
+            return (source_events_impl(declarations, annotations, name, line, owner_offset, true, tokens, source, source_length, true, work) can Global{Read,Write})
 
         def direct_events_match(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, claimed: darray[Event]&) -> bool can[Memory.Allocate, Abort.Panic]:
             expected = (direct_events(declarations, name, line, tokens, source, source_length) can Global{Read,Write})

@@ -4,6 +4,63 @@ extend ElisaProofFrameSource:
             start: usize = token.start.usize()
             return start <= source_length and token.length.usize() <= source_length - start
 
+        def source_def_token_at_position(position: Ast::Pos, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, found: bool, token_index: usize) can[Abort.Panic]:
+            return (false, false, 0) if tokens.count > 1000000
+            low: mutable usize = 0
+            high: mutable usize = tokens.count
+            while low < high |low, high, tokens, position, work|:
+                return (false, false, 0) if not replay_work_charge(1, work)
+                middle: usize = low + (high - low) / 2
+                if tokens[middle].start.usize() < position.offset.usize():
+                    low <- middle + 1
+                else:
+                    high <- middle
+            return (true, false, 0) if low >= tokens.count
+            return (false, false, 0) if not replay_work_charge(1, work) or not replay_work_charge(tokens[low].length.usize(), work) or not token_bounded(tokens[low], source_length)
+            token: Lexer::Token = tokens[low]
+            actual: Ast::Pos = Ast::pos_of_token(token)
+            exact: bool = actual.line == position.line and actual.column == position.column and actual.offset == position.offset and actual.end_line == position.end_line and actual.end_column == position.end_column and actual.end_offset == position.end_offset
+            return (true, exact, low) if exact and token.kind == TokenKind.Def and Lexer::text_or_empty(token, source) == "def"
+            return (true, false, 0)
+
+        def header_bounds_at_position(name: sview, position: Ast::Pos, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, start: usize, end: usize) can[Memory.Allocate, Abort.Panic]:
+            return (false, 0, 0) if not replay_work_charge(sview_len(name), work)
+            definition: (known: bool, found: bool, token_index: usize) = source_def_token_at_position(position, tokens, source, source_length, work)
+            return (false, 0, 0) if not definition.known or not definition.found
+            return (false, 0, 0) if:
+                definition.token_index + 2 >= tokens.count
+            start: usize = definition.token_index
+            identifier: Lexer::Token = tokens[start + 1]
+            return (false, 0, 0) if:
+                not replay_work_charge(identifier.length.usize(), work)
+                not replay_work_charge(sview_len(name), work)
+                identifier.kind != TokenKind.Ident or not token_bounded(identifier, source_length) or Lexer::text_or_empty(identifier, source) != name
+                tokens[start + 2].kind != TokenKind.LParen
+            delimiters: mutable darray[TokenKind] = []
+            index: mutable usize = start + 2
+            steps: mutable usize = 0
+            previous_end: mutable usize = identifier.start.usize() + identifier.length.usize()
+            while index < tokens.count |index, steps, delimiters, previous_end, tokens, source_length, start, work|:
+                return (false, 0, 0) if steps >= 4096 or not replay_work_charge(1, work)
+                token = tokens[index]
+                return (false, 0, 0) if not token_bounded(token, source_length) or token.start.usize() < previous_end
+                previous_end <- token.start.usize() + token.length.usize()
+                kind = token.kind
+                if kind == TokenKind.LParen or kind == TokenKind.LBracket or kind == TokenKind.LBrace:
+                    return (false, 0, 0) if delimiters.count >= 64
+                    delimiters.push(kind)
+                elif kind == TokenKind.RParen or kind == TokenKind.RBracket or kind == TokenKind.RBrace:
+                    return (false, 0, 0) if delimiters.count == 0
+                    opening = delimiters[delimiters.count - 1]
+                    return (false, 0, 0) if (kind == TokenKind.RParen and opening != TokenKind.LParen) or (kind == TokenKind.RBracket and opening != TokenKind.LBracket) or (kind == TokenKind.RBrace and opening != TokenKind.LBrace)
+                    delimiters.resize(delimiters.count - 1)
+                elif delimiters.count == 0:
+                    return (true, start, index) if kind == TokenKind.Colon
+                    return (false, 0, 0) if kind == TokenKind.Newline or kind == TokenKind.Eof or kind == TokenKind.Def or kind == TokenKind.Assign
+                index <- index + 1
+                steps <- steps + 1
+            return (false, 0, 0)
+
     public:
         # Locate a balanced signature using the exact AST def-keyword position.
         # Source bytes/tokens must share the independently checked file identity.

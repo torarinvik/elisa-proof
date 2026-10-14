@@ -5,6 +5,38 @@ extend ElisaProofFrameSource:
                 "can" | "requires" | "require" | "ensures" | "ensure" | "fulfills" | "changes" | "preserves" | "decreases" | "invariant" | "uses" | "raises" | "where" | "at" | "abi" -> true
                 _ -> false
 
+        def frame_policy_present_at_position(name: sview, position: Ast::Pos, body: darray[Ast::Stmt]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, present: bool) can[Memory.Allocate, Abort.Panic]:
+            body_present: mutable bool = false
+            for statement in body |statement, body_present, work|:
+                return (false, false) if not replay_work_charge(1, work)
+                match statement:
+                    Ast::Stmt.Contract(kind, _, _):
+                        return (false, false) if not replay_work_charge(sview_len(kind), work)
+                        body_present <- true if kind == "changes" or kind == "preserves"
+                    _:
+                        pass
+            definition: (known: bool, found: bool, token_index: usize) = source_def_token_at_position(position, tokens, source, source_length, work)
+            return (false, false) if not definition.known
+            return (false, false) if not definition.found and body_present
+            return (true, false) if not definition.found
+            bounds = header_bounds_at_position(name, position, tokens, source, source_length, work)
+            return (false, false) if not bounds.known
+            depth: mutable usize = 0
+            for index in (bounds.start + 2)..bounds.end |index, bounds, depth, tokens, source, work|:
+                return (false, false) if not replay_work_charge(1, work)
+                token: Lexer::Token = tokens[index]
+                if token.kind == TokenKind.LParen or token.kind == TokenKind.LBracket or token.kind == TokenKind.LBrace:
+                    depth <- depth + 1
+                elif token.kind == TokenKind.RParen or token.kind == TokenKind.RBracket or token.kind == TokenKind.RBrace:
+                    return (false, false) if depth == 0
+                    depth <- depth - 1
+                elif depth == 0 and token.kind == TokenKind.Ident:
+                    return (false, false) if not replay_work_charge(token.length.usize(), work)
+                    word: sview = Lexer::text_or_empty(token, source)
+                    preceding_selector: bool = index > bounds.start and (tokens[index - 1].kind == TokenKind.Dot or tokens[index - 1].kind == TokenKind.Scope)
+                    return (true, true) if not preceding_selector and word in {"changes", "preserves"}
+            return (true, body_present)
+
         def header_target(tokens: darray[Lexer::Token]&, source: u8&, index: usize, end: usize, formals: darray[sview]&, work: mutable usize&) -> (known: bool, place: ElisaProofKernelFramePolicy::Place, next: usize, position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
             empty: ElisaProofKernelFramePolicy::Place = ElisaProofKernelFramePolicy::Place{parameter: 0, depth: 0, field: "", field2: "", field3: ""}
             return (false, empty, 0, Ast::pos_at_line(0)) if:
@@ -39,9 +71,18 @@ extend ElisaProofFrameSource:
 
         def header_policy_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, parameter_count: usize, clauses: darray[Clause]) can[Memory.Allocate, Abort.Panic]:
             bounds = header_bounds_with_work(declarations, name, line, tokens, source, source_length, work)
-            return (false, 0, []) if not bounds.known
             context = owner_with_work(declarations, name, line, work)
+            return header_policy_for_context(name, bounds, context, tokens, source, source_length, work)
+
+        def header_policy_at_offset_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, offset: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, parameter_count: usize, clauses: darray[Clause]) can[Memory.Allocate, Abort.Panic]:
+            context = owner_at_offset_with_work(declarations, name, line, offset, work)
             return (false, 0, []) if not context.known
+            bounds = header_bounds_at_position(name, context.position, tokens, source, source_length, work)
+            return header_policy_for_context(name, bounds, context, tokens, source, source_length, work)
+
+    private:
+        def header_policy_for_context(name: sview, bounds: (known: bool, start: usize, end: usize), context: (known: bool, formals: darray[sview], body: darray[Ast::Stmt], position: Ast::Pos, formal_types: darray[Ast::Expr], return_type: Ast::Expr), tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, parameter_count: usize, clauses: darray[Clause]) can[Memory.Allocate, Abort.Panic]:
+            return (false, 0, []) if not bounds.known or not context.known
             clauses: mutable darray[Clause] = []
             index: mutable usize = bounds.start + 2
             depth: mutable usize = 0
@@ -73,14 +114,24 @@ extend ElisaProofFrameSource:
                 index <- index + 1
             return (true, context.formals.count, clauses)
 
+    public:
         def source_policy(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, parameter_count: usize, clauses: darray[Clause]) can[Memory.Allocate, Abort.Panic]:
             work: mutable usize = 0
             return source_policy_with_work(declarations, name, line, tokens, source, source_length, &work)
 
         def source_policy_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, parameter_count: usize, clauses: darray[Clause]) can[Memory.Allocate, Abort.Panic]:
             header = header_policy_with_work(declarations, name, line, tokens, source, source_length, work)
-            return (false, 0, []) if not header.known
             body = body_policy_with_work(declarations, name, line, work)
+            return combine_source_policy(header, body, work)
+
+        def source_policy_at_offset_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, offset: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, parameter_count: usize, clauses: darray[Clause]) can[Memory.Allocate, Abort.Panic]:
+            header = header_policy_at_offset_with_work(declarations, name, line, offset, tokens, source, source_length, work)
+            body = body_policy_at_offset_with_work(declarations, name, line, offset, work)
+            return combine_source_policy(header, body, work)
+
+    private:
+        def combine_source_policy(header: (known: bool, parameter_count: usize, clauses: darray[Clause]), body: (known: bool, parameter_count: usize, clauses: darray[Clause]), work: mutable usize&) -> (known: bool, parameter_count: usize, clauses: darray[Clause]) can[Memory.Allocate, Abort.Panic]:
+            return (false, 0, []) if not header.known
             return (false, 0, []) if not body.known or body.parameter_count != header.parameter_count
             clauses: mutable darray[Clause] = []
             changes: mutable usize = 0

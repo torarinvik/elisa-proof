@@ -2,16 +2,42 @@
 # these certificates to the original source before any report admission.
 extend ElisaProof:
     private:
+        def proof_direct_frame_recording_owner(declarations: darray[Ast::Decl]&, name: sview, line: u32, depth: usize, work: mutable usize&) -> (complete: bool, found: bool, offset: u32):
+            return (false, false, 0) if depth >= 64
+            found: mutable bool = false
+            offset: mutable u32 = 0
+            for declaration in declarations |declaration, name, line, depth, work, found, offset|:
+                return (false, false, 0) if not proof_report_source_work_charge(1, &work)
+                match declaration:
+                    Ast::Decl.Func(candidate_name, _, _, _, _, _, position):
+                        return (false, false, 0) if:
+                            not proof_report_source_work_charge(sview_len(candidate_name), &work)
+                            not proof_report_source_work_charge(sview_len(name), &work)
+                        if candidate_name == name and position.line == line:
+                            return (false, false, 0) if found
+                            offset <- position.offset
+                            found <- true
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        nested_owner: (complete: bool, found: bool, offset: u32) = proof_direct_frame_recording_owner(nested, name, line, depth + 1, work)
+                        return (false, false, 0) if not nested_owner.complete or (found and nested_owner.found)
+                        if nested_owner.found:
+                            found <- true
+                            offset <- nested_owner.offset
+                    _:
+                        pass
+            return (true, found, offset)
+
         def proof_record_direct_frame_events(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            frame_work: mutable usize = 0
+            owner: (complete: bool, found: bool, offset: u32) = proof_direct_frame_recording_owner(declarations, name, line, 0, &frame_work)
+            return false if not owner.complete or not owner.found
             # Do not let a preceding unaccounted attempt join the first frame event.
             accounted: usize = 0 if report.results.obligation_inventory.count == 0 else report.results.obligation_inventory[report.results.obligation_inventory.count - 1].attempts_start + report.results.obligation_inventory[report.results.obligation_inventory.count - 1].attempts_count
             return false if accounted != report.results.goal_attempts.count or report.analysis_1.kernel.budget_exhausted
-            import_work: mutable usize = 0
-            return false if proof_replay_summary_has_unresolved_import(report.source.source_annotations, &import_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
-            frame_work: mutable usize = 0
-            lowered = ElisaProofFrameSource::lower_direct_events_with_work(declarations, report.source.source_annotations, name, line, tokens, source, source_length, &report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET, ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET, &frame_work)
+            return false if proof_replay_summary_has_unresolved_import(report.source.source_annotations, &frame_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            lowered = ElisaProofFrameSource::lower_direct_events_at_offset_with_work(declarations, report.source.source_annotations, name, line, owner.offset, tokens, source, source_length, &report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET, ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET, &frame_work)
             return false if not lowered.known
-            outcomes = ElisaProofFrameSource::direct_event_decisions_with_work(declarations, report.source.source_annotations, name, line, tokens, source, source_length, &report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, &lowered.roots, &frame_work)
+            outcomes = ElisaProofFrameSource::direct_event_decisions_at_offset_with_work(declarations, report.source.source_annotations, name, line, owner.offset, tokens, source, source_length, &report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, &lowered.roots, &frame_work)
             return false if not outcomes.known
             for index in 0..<outcomes.decisions.count |index, outcomes, report, name, line|:
                 decision = outcomes.decisions[index]
@@ -19,7 +45,7 @@ extend ElisaProof:
                 rule: sview = "frame-allow" if event.kind == "allow" else "frame-preserve" if event.kind == "preserve" else "frame-spec"
                 mirror: Ast::Expr = Ast::Expr.BoolLit(true, event.position)
                 certificate_index: usize = report.analysis_1.certificates.count
-                report.results.goal_attempts.push(ProofGoalAttempt{goal: mirror, budget_exhausted: false, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: decision.kernel_root, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: event.position.line, name: name, rule: rule, proven: decision.proven, has_certificate: decision.proven, certificate_index: certificate_index})
+                report.results.goal_attempts.push(ProofGoalAttempt{goal: mirror, budget_exhausted: false, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: decision.kernel_root, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: event.position.line, name: name, rule: rule, producer_proven: decision.proven, has_certificate: decision.proven, certificate_index: certificate_index, owner_function_line: line, owner_function_offset: owner.offset})
                 if decision.proven:
                     report.analysis_1.certificates.push(ProofGoalCertificate{goal: mirror, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: decision.kernel_root, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: event.position.line, name: name, rule: rule, replayed: false})
                 report.proof_obligation_for_source(decision.proven, line, name, event.kind, index)
