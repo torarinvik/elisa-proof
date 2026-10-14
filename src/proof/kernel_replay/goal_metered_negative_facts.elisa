@@ -9,7 +9,7 @@ extend ElisaProofKernelReplay:
 
         # Exact shared-meter counterpart of the equality-pin lookup. It only accepts raw,
         # untagged integer literals and left-side identifier/scope pins, matching legacy replay.
-        def proof_kernel_replay_pinned_constant_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, work_used: mutable usize&) -> (known: bool, value: i64):
+        def proof_kernel_replay_pinned_constant_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, markers: mutable darray[ProofKernelReplayWitnessMarker]&, markers_ready: mutable bool&, work_used: mutable usize&) -> (known: bool, value: i64):
             return (false, 0) if:
                 root >= nodes.count or not proof_kernel_replay_goal_search_charge(work_used)
                 not proof_kernel_replay_goal_search_charge_node_text(nodes, root, work_used)
@@ -26,6 +26,12 @@ extend ElisaProofKernelReplay:
                     work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 fact: ElisaProofKernelCore::ProofKernelNode = nodes[fact_root]
                 continue if fact.kind != "binary" or fact.operator != "=="
+                if not markers_ready:
+                    return (false, 0) if not proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, &markers, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    markers_ready <- true
+                pin_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_markers_and_work(nodes, children, markers, fact_root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                return (false, 0) if not pin_admission.complete or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                continue if pin_admission.untrusted
                 pin_root: usize = fact.left
                 continue if pin_root >= nodes.count or not proof_kernel_replay_valid(nodes, pin_root)
                 return (false, 0) if:
@@ -40,16 +46,16 @@ extend ElisaProofKernelReplay:
                 return pinned_literal if pinned_literal.known
             return (false, 0)
 
-        def proof_kernel_replay_operand_matches_through_pins_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], fact_root: usize, goal_root: usize, work_used: mutable usize&) -> bool:
+        def proof_kernel_replay_operand_matches_through_pins_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], fact_root: usize, goal_root: usize, markers: mutable darray[ProofKernelReplayWitnessMarker]&, markers_ready: mutable bool&, work_used: mutable usize&) -> bool:
             same_term: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, fact_root, goal_root, work_used)
             return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             return true if same_term
-            fact_constant: (known: bool, value: i64) = proof_kernel_replay_pinned_constant_with_goal_work(nodes, children, facts, fact_root, work_used)
+            fact_constant: (known: bool, value: i64) = proof_kernel_replay_pinned_constant_with_goal_work(nodes, children, facts, fact_root, markers, markers_ready, work_used)
             return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not fact_constant.known
-            goal_constant: (known: bool, value: i64) = proof_kernel_replay_pinned_constant_with_goal_work(nodes, children, facts, goal_root, work_used)
+            goal_constant: (known: bool, value: i64) = proof_kernel_replay_pinned_constant_with_goal_work(nodes, children, facts, goal_root, markers, markers_ready, work_used)
             return work_used <= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT and goal_constant.known and goal_constant.value == fact_constant.value
 
-        def proof_kernel_replay_negative_fact_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, left_root: usize, operator: sview, right_root: usize, work_used: mutable usize&, depth: usize) -> bool:
+        def proof_kernel_replay_negative_fact_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, left_root: usize, operator: sview, right_root: usize, markers: mutable darray[ProofKernelReplayWitnessMarker]&, markers_ready: mutable bool&, work_used: mutable usize&, depth: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
             return false if:
@@ -59,14 +65,19 @@ extend ElisaProofKernelReplay:
                 work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             if node.kind == "binary" and node.operator == "and":
-                return true if proof_kernel_replay_negative_fact_with_goal_work(nodes, children, facts, node.left, left_root, operator, right_root, work_used, depth + 1)
+                return true if proof_kernel_replay_negative_fact_with_goal_work(nodes, children, facts, node.left, left_root, operator, right_root, markers, markers_ready, work_used, depth + 1)
                 return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                return proof_kernel_replay_negative_fact_with_goal_work(nodes, children, facts, node.right, left_root, operator, right_root, work_used, depth + 1)
+                return proof_kernel_replay_negative_fact_with_goal_work(nodes, children, facts, node.right, left_root, operator, right_root, markers, markers_ready, work_used, depth + 1)
             if node.kind == "unary" and node.operator == "not":
                 inner_root: usize = node.left
                 return false if:
                     inner_root >= nodes.count or not proof_kernel_replay_goal_search_charge_node_text(nodes, inner_root, work_used)
                     work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or nodes[inner_root].kind != "binary"
+                if not markers_ready:
+                    return false if not proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, &markers, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    markers_ready <- true
+                inner_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_markers_and_work(nodes, children, markers, inner_root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                return false if not inner_admission.complete or inner_admission.untrusted or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 if not proof_kernel_replay_goal_search_charge_amount(work_used, sview_len(operator)):
                     return false
                 if proof_kernel_replay_is_order_operator(operator):
@@ -77,17 +88,19 @@ extend ElisaProofKernelReplay:
                 inner: ElisaProofKernelCore::ProofKernelNode = nodes[inner_root]
                 complementary: bool = proof_kernel_replay_goal_search_text_equal(inner.operator, proof_kernel_replay_negation(operator), work_used)
                 return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not complementary
-                same_left: bool = proof_kernel_replay_operand_matches_through_pins_with_goal_work(nodes, children, facts, inner.left, left_root, work_used)
+                same_left: bool = proof_kernel_replay_operand_matches_through_pins_with_goal_work(nodes, children, facts, inner.left, left_root, markers, markers_ready, work_used)
                 return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not same_left
-                return proof_kernel_replay_operand_matches_through_pins_with_goal_work(nodes, children, facts, inner.right, right_root, work_used)
+                return proof_kernel_replay_operand_matches_through_pins_with_goal_work(nodes, children, facts, inner.right, right_root, markers, markers_ready, work_used)
             return false
 
         def proof_kernel_replay_negative_fact_in_context_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left_root: usize, operator: sview, right_root: usize, work_used: mutable usize&, depth: usize) -> bool:
+            markers: mutable darray[ProofKernelReplayWitnessMarker] = []
+            markers_ready: mutable bool = false
             for fact_root in facts |fact_root, nodes, children, facts, left_root, operator, right_root, work_used, depth|:
                 return false if:
                     not proof_kernel_replay_goal_search_charge(work_used)
                     work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                return true if proof_kernel_replay_negative_fact_with_goal_work(nodes, children, facts, fact_root, left_root, operator, right_root, work_used, depth)
+                return true if proof_kernel_replay_negative_fact_with_goal_work(nodes, children, facts, fact_root, left_root, operator, right_root, markers, markers_ready, work_used, depth)
                 return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             return false
 

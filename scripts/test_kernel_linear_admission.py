@@ -76,6 +76,38 @@ assert "markers_ready: mutable bool = false" in complementary
 assert "proof_kernel_replay_readable_order_with_markers_and_work" in complementary
 assert "&markers, &markers_ready" in complementary
 
+distinct = body(kernel / "goal_metered_distinct_disequality.elisa", "proof_kernel_replay_distinct_disequality_disjunction_with_goal_work")
+assert distinct.count("proof_kernel_replay_witness_marker_cache_fill_with_work") == 1
+assert "proof_kernel_replay_signed_disequality_constant_with_goal_work(nodes, children, facts, markers," in distinct
+assert "proof_kernel_replay_unsigned_disequality_constant_with_goal_work(nodes, children, facts, markers," in distinct
+for function in (
+    "proof_kernel_replay_signed_disequality_constant_with_goal_work",
+    "proof_kernel_replay_unsigned_disequality_constant_with_goal_work",
+):
+    reader = body(kernel / "goal_metered_distinct_disequality.elisa", function)
+    assert "proof_kernel_replay_comparison_root_untrusted_with_markers_and_work" in reader
+    assert "proof_kernel_replay_primitive_comparison_with_markers_with_work" in reader
+
+fact_inconsistency = kernel / "goal_metered_fact_inconsistency.elisa"
+inconsistent_node = body(fact_inconsistency, "proof_kernel_replay_fact_inconsistent_node_with_goal_work")
+assert "markers: mutable darray[ProofKernelReplayWitnessMarker]&" in inconsistent_node
+assert "markers_ready: mutable bool&" in inconsistent_node
+assert "if not markers_ready:" in inconsistent_node
+assert "proof_kernel_replay_comparison_root_untrusted_with_markers_and_work" in inconsistent_node
+assert "proof_kernel_replay_witness_marker_cache_fill_with_work" in inconsistent_node
+assert "not admission.complete or admission.untrusted" in inconsistent_node
+assert "proof_kernel_replay_fact_negated_constant_comparison_with_goal_work(nodes, children, markers," in inconsistent_node
+facts_inconsistent = body(fact_inconsistency, "proof_kernel_replay_facts_inconsistent_with_goal_work")
+assert "markers_ready: mutable bool = false" in facts_inconsistent
+assert "proof_kernel_replay_fact_inconsistent_node_with_goal_work(nodes, children, roots, markers, markers_ready," in facts_inconsistent
+
+summary = body(kernel / "fact_model_integrated_helpers.elisa", "proof_kernel_replay_fact_proves_call_summary_with_work")
+assert "markers_ready: mutable bool = false" in summary
+assert "if not markers_ready:" in summary
+assert "proof_kernel_replay_witness_marker_cache_fill_with_work" in summary
+assert "proof_kernel_replay_comparison_root_untrusted_with_markers_and_work" in summary
+assert "proof_kernel_replay_comparison_root_untrusted_with_work" not in summary
+
 collector = body(ROOT / "src/proof/kernel_replay/term_arithmetic.elisa", "proof_kernel_replay_collect_bounds_with_work")
 and_branch = collector.index('if node.operator == "and":')
 and_return = collector.index("                return", and_branch)

@@ -354,13 +354,15 @@ extend ElisaProofKernelReplay:
             if spans.count + reserve + 2 <= PROOF_KERNEL_REPLAY_LINEAR_CONSTRAINT_LIMIT or effective != "==":
                 proof_kernel_replay_linear_push_comparison_with_work(nodes, children, node.left, effective, node.right, signed_only, facts, terms, spans, work_used)
 
-        def proof_kernel_replay_linear_fact_constraints_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], reserve: usize, signed_only: bool, bounds: darray[ProofKernelReplayBound]&, terms: mutable darray[ProofKernelReplayNormalTerm]&, spans: mutable darray[ProofKernelReplayLinearSpan]&, work_used: mutable usize&) -> void:
+        def proof_kernel_replay_linear_fact_constraints_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], reserve: usize, signed_only: bool, bounds: darray[ProofKernelReplayBound]&, terms: mutable darray[ProofKernelReplayNormalTerm]&, spans: mutable darray[ProofKernelReplayLinearSpan]&, work_used: mutable usize&) -> bool:
             markers: mutable darray[ProofKernelReplayWitnessMarker] = []
-            return if not proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, &markers, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return false if not proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, &markers, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
             for fact in facts |fact, nodes, children, facts, markers, reserve, terms, spans, work_used|:
-                return if not proof_kernel_replay_goal_search_charge(work_used)
+                return false if not proof_kernel_replay_goal_search_charge(work_used)
                 break if spans.count + reserve >= PROOF_KERNEL_REPLAY_LINEAR_CONSTRAINT_LIMIT
                 proof_kernel_replay_linear_fact_parts_with_work(nodes, children, fact, false, facts, markers, reserve, signed_only, bounds, terms, spans, work_used, 0)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            true
 
         def proof_kernel_replay_linear_gcd_with_work(left: i64, right: i64, work_used: mutable usize&) -> i64:
             a: mutable i64 = left
@@ -512,29 +514,29 @@ extend ElisaProofKernelReplay:
             terms: mutable darray[ProofKernelReplayNormalTerm] = []
             spans: mutable darray[ProofKernelReplayLinearSpan] = []
             empty_bounds: darray[ProofKernelReplayBound] = []
-            proof_kernel_replay_linear_fact_constraints_with_work(nodes, children, facts, 1, false, empty_bounds, &terms, &spans, work_used)
+            constraints_complete: bool = proof_kernel_replay_linear_fact_constraints_with_work(nodes, children, facts, 1, false, empty_bounds, &terms, &spans, work_used)
             return false if:
-                work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                not constraints_complete or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 not proof_kernel_replay_linear_push_comparison_with_work(nodes, children, left, negated, right, false, facts, &terms, &spans, work_used)
                 work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             proof_kernel_replay_linear_refutes_with_work(terms, spans, work_used)
 
-        def proof_kernel_replay_linear_disequality_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize, work_used: mutable usize&) -> (known: bool, left: usize, right: usize):
-            return (false, 0, 0) if:
+        def proof_kernel_replay_linear_disequality_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize, work_used: mutable usize&) -> (known: bool, left: usize, right: usize, relation_root: usize):
+            return (false, 0, 0, 0) if:
                 not proof_kernel_replay_goal_search_charge(work_used)
                 depth >= 8 or root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return proof_kernel_replay_linear_disequality_with_work(nodes, node.left, depth + 1, work_used) if node.kind == "paren"
-            return (true, node.left, node.right) if node.kind == "binary" and node.operator == "!="
-            return (false, 0, 0) if node.kind != "unary" or node.operator != "not"
+            return (true, node.left, node.right, root) if node.kind == "binary" and node.operator == "!="
+            return (false, 0, 0, 0) if node.kind != "unary" or node.operator != "not"
             inner: mutable usize = node.left
             for step in 0..<8 |step, nodes, inner, work_used|:
-                return (false, 0, 0) if not proof_kernel_replay_goal_search_charge(work_used)
+                return (false, 0, 0, 0) if not proof_kernel_replay_goal_search_charge(work_used)
                 break if inner >= nodes.count or not proof_kernel_replay_valid(nodes, inner) or nodes[inner].kind != "paren"
                 inner <- nodes[inner].left
-            return (false, 0, 0) if inner >= nodes.count or not proof_kernel_replay_valid(nodes, inner)
-            return (true, nodes[inner].left, nodes[inner].right) if nodes[inner].kind == "binary" and nodes[inner].operator == "=="
-            (false, 0, 0)
+            return (false, 0, 0, 0) if inner >= nodes.count or not proof_kernel_replay_valid(nodes, inner)
+            return (true, nodes[inner].left, nodes[inner].right, inner) if nodes[inner].kind == "binary" and nodes[inner].operator == "=="
+            (false, 0, 0, 0)
 
         # Same recognized disequality forms and Farkas checks as the legacy entry point, with
         # every fact scan, normalization step, matrix operation, and certificate check on the
@@ -542,9 +544,12 @@ extend ElisaProofKernelReplay:
         def proof_kernel_replay_linear_disequality_refuted_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], work_used: mutable usize&) -> bool:
             for fact in facts |fact, nodes, children, facts, work_used|:
                 return false if not proof_kernel_replay_goal_search_charge(work_used)
-                pair: (known: bool, left: usize, right: usize) = proof_kernel_replay_linear_disequality_with_work(nodes, fact, 0, work_used)
+                pair: (known: bool, left: usize, right: usize, relation_root: usize) = proof_kernel_replay_linear_disequality_with_work(nodes, fact, 0, work_used)
                 return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 continue if not pair.known
+                admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_work(nodes, children, facts, pair.relation_root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                return false if not admission.complete or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                continue if admission.untrusted
                 primitive: bool = proof_kernel_replay_primitive_comparison_with_work(nodes, children, facts, pair.left, pair.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
                 return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 continue if not primitive

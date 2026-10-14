@@ -162,7 +162,7 @@ extend ElisaProofKernelReplay:
             return proof_kernel_replay_nested_condition_stable_with_work(nodes, node.left, depth + 1, work_used) and proof_kernel_replay_nested_condition_stable_with_work(nodes, node.right, depth + 1, work_used) if node.kind == "binary"
             return false
 
-        def proof_kernel_replay_conditional_result_guard_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, depth: usize, work_used: mutable usize&) -> bool:
+        def proof_kernel_replay_conditional_result_guard_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], markers: darray[ProofKernelReplayWitnessMarker], root: usize, depth: usize, work_used: mutable usize&) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
             return false if:
@@ -170,11 +170,13 @@ extend ElisaProofKernelReplay:
                 not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not proof_kernel_replay_valid(nodes, root)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             if node.kind == "unary" and node.operator == "not":
-                return proof_kernel_replay_conditional_result_guard_with_work(nodes, children, facts, node.left, depth + 1, work_used)
+                return proof_kernel_replay_conditional_result_guard_with_work(nodes, children, facts, markers, node.left, depth + 1, work_used)
             if node.kind == "binary" and (node.operator in {"and", "or"}):
-                return proof_kernel_replay_conditional_result_guard_with_work(nodes, children, facts, node.left, depth + 1, work_used) and proof_kernel_replay_conditional_result_guard_with_work(nodes, children, facts, node.right, depth + 1, work_used)
+                return proof_kernel_replay_conditional_result_guard_with_work(nodes, children, facts, markers, node.left, depth + 1, work_used) and proof_kernel_replay_conditional_result_guard_with_work(nodes, children, facts, markers, node.right, depth + 1, work_used)
             if node.kind == "binary" and (node.operator in {"==", "!=", "<", "<=", ">", ">="}):
-                return proof_kernel_replay_primitive_comparison_with_work(nodes, children, facts, node.left, node.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_markers_and_work(nodes, children, markers, root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                return false if not admission.complete or admission.untrusted or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                return proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, node.left, node.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
             proof_kernel_replay_scalar_term_witnessed_with_work(nodes, children, facts, root, depth, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
 
         def proof_kernel_replay_conditional_result_disjunction(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, split_depth: usize, depth: usize, work_used: mutable usize&, remaining: usize) -> bool can[Global.Read, Global.Write]:
@@ -189,8 +191,11 @@ extend ElisaProofKernelReplay:
             conditional: (found: bool, root: usize) = proof_kernel_replay_first_nested_conditional_with_work(nodes, goal_root, 0, work_used)
             return false if not conditional.found or not proof_kernel_replay_valid(nodes, conditional.root)
             branch: ElisaProofKernelCore::ProofKernelNode = nodes[conditional.root]
+            markers: mutable darray[ProofKernelReplayWitnessMarker] = []
+            return false if not proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, &markers, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             return false if:
-                branch.kind != "if" or not proof_kernel_replay_conditional_result_guard_with_work(nodes, children, facts, branch.left, 0, work_used)
+                branch.kind != "if" or not proof_kernel_replay_conditional_result_guard_with_work(nodes, children, facts, markers, branch.left, 0, work_used)
                 not proof_kernel_replay_scalar_term_pair_witnessed_with_work(nodes, children, facts, branch.right, branch.auxiliary, 0, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
             # Establish exact occurrence in each side separately. A matching guard alone or a
             # merely similar conditional in one arm is insufficient for this shared-result rule.
@@ -215,12 +220,14 @@ extend ElisaProofKernelReplay:
             else_facts.push(negated_condition)
             return (proof_kernel_replay_goal_depth_remaining_with_work(nodes, children, then_facts, then_rewrite.value, split_depth + 1, depth + 1, work_used, remaining: remaining - 1) can Global{Read,Write}) and (proof_kernel_replay_goal_depth_remaining_with_work(nodes, children, else_facts, else_rewrite.value, split_depth + 1, depth + 1, work_used, remaining: remaining - 1) can Global{Read,Write})
 
-        def proof_kernel_replay_conditional_equality_other_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, comparison_root: usize, conditional_root: usize, work_used: mutable usize&) -> (known: bool, other: usize):
+        def proof_kernel_replay_conditional_equality_other_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, markers: darray[ProofKernelReplayWitnessMarker], comparison_root: usize, conditional_root: usize, work_used: mutable usize&) -> (known: bool, other: usize):
             return (false, 0) if:
                 not proof_kernel_replay_goal_search_charge(work_used)
                 not proof_kernel_replay_valid(nodes, comparison_root)
             comparison: ElisaProofKernelCore::ProofKernelNode = nodes[comparison_root]
             return (false, 0) if comparison.kind != "binary" or comparison.operator != "=="
+            admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_markers_and_work(nodes, children, markers, comparison_root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return (false, 0) if not admission.complete or admission.untrusted or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             return (true, comparison.right) if proof_kernel_replay_goal_search_expr_equal(nodes, children, comparison.left, conditional_root, work_used)
             return (true, comparison.left) if proof_kernel_replay_goal_search_expr_equal(nodes, children, comparison.right, conditional_root, work_used)
             return (false, 0)
@@ -243,7 +250,7 @@ extend ElisaProofKernelReplay:
         # fixed-width operations are in range under the source facts and the positive guard.
         # This deliberately does not normalize arbitrary expressions or infer general guard
         # implications.
-        def proof_kernel_replay_signed_unit_shift_order_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], antecedent_root: usize, consequent_root: usize, work_used: mutable usize&) -> bool:
+        def proof_kernel_replay_signed_unit_shift_order_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], markers: darray[ProofKernelReplayWitnessMarker], antecedent_root: usize, consequent_root: usize, work_used: mutable usize&) -> bool:
             return false if:
                 not proof_kernel_replay_goal_search_charge(work_used)
                 not proof_kernel_replay_valid(nodes, antecedent_root) or not proof_kernel_replay_valid(nodes, consequent_root)
@@ -252,6 +259,10 @@ extend ElisaProofKernelReplay:
             return false if:
                 antecedent.kind != "binary" or antecedent.operator != "<" or consequent.kind != "binary" or consequent.operator != "<"
                 not proof_kernel_replay_valid(nodes, antecedent.left) or not proof_kernel_replay_valid(nodes, antecedent.right) or not proof_kernel_replay_valid(nodes, consequent.left) or not proof_kernel_replay_valid(nodes, consequent.right)
+            antecedent_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_markers_and_work(nodes, children, markers, antecedent_root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return false if not antecedent_admission.complete or antecedent_admission.untrusted or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            consequent_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_markers_and_work(nodes, children, markers, consequent_root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return false if not consequent_admission.complete or consequent_admission.untrusted or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             successor: ElisaProofKernelCore::ProofKernelNode = nodes[antecedent.left]
             predecessor: ElisaProofKernelCore::ProofKernelNode = nodes[consequent.right]
             return false if successor.kind != "binary" or successor.operator != "+" or predecessor.kind != "binary" or predecessor.operator != "-"
@@ -270,8 +281,8 @@ extend ElisaProofKernelReplay:
                 work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 proof_kernel_replay_signed_width_in_expression_with_goal_work(nodes, children, facts, consequent.left, work_used, 0) != width or proof_kernel_replay_signed_width_in_expression_with_goal_work(nodes, children, facts, consequent.right, work_used, 0) != width
                 work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                not proof_kernel_replay_primitive_comparison_with_work(nodes, children, facts, antecedent.left, antecedent.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-                not proof_kernel_replay_primitive_comparison_with_work(nodes, children, facts, consequent.left, consequent.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                not proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, antecedent.left, antecedent.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                not proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, consequent.left, consequent.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
             # Establish wrap safety from source facts only; never let the guard whose truth is
             # being used discharge its own operation-range obligation.
             unsigned_bounds: mutable darray[ProofKernelReplayBound] = []
@@ -293,7 +304,7 @@ extend ElisaProofKernelReplay:
 
         # Search only the positive conjunction spine: no disjunction, negation, or arbitrary
         # implication is allowed to supply the shifted comparison premise.
-        def proof_kernel_replay_condition_has_signed_unit_shift_order_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], condition_root: usize, consequent_root: usize, depth: usize, work_used: mutable usize&) -> bool:
+        def proof_kernel_replay_condition_has_signed_unit_shift_order_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], markers: darray[ProofKernelReplayWitnessMarker], condition_root: usize, consequent_root: usize, depth: usize, work_used: mutable usize&) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
             return false if:
@@ -301,12 +312,12 @@ extend ElisaProofKernelReplay:
                 depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not proof_kernel_replay_valid(nodes, condition_root)
             condition: ElisaProofKernelCore::ProofKernelNode = nodes[condition_root]
             if condition.kind == "paren":
-                return proof_kernel_replay_condition_has_signed_unit_shift_order_with_work(nodes, children, facts, condition.left, consequent_root, depth + 1, work_used)
+                return proof_kernel_replay_condition_has_signed_unit_shift_order_with_work(nodes, children, facts, markers, condition.left, consequent_root, depth + 1, work_used)
             if condition.kind == "binary" and condition.operator == "and" and proof_kernel_replay_arena_shape_valid(condition):
-                left_proves: bool = proof_kernel_replay_condition_has_signed_unit_shift_order_with_work(nodes, children, facts, condition.left, consequent_root, depth + 1, work_used)
+                left_proves: bool = proof_kernel_replay_condition_has_signed_unit_shift_order_with_work(nodes, children, facts, markers, condition.left, consequent_root, depth + 1, work_used)
                 return true if left_proves
-                proof_kernel_replay_condition_has_signed_unit_shift_order_with_work(nodes, children, facts, condition.right, consequent_root, depth + 1, work_used)
-            proof_kernel_replay_signed_unit_shift_order_with_work(nodes, children, facts, condition_root, consequent_root, work_used)
+                proof_kernel_replay_condition_has_signed_unit_shift_order_with_work(nodes, children, facts, markers, condition.right, consequent_root, depth + 1, work_used)
+            proof_kernel_replay_signed_unit_shift_order_with_work(nodes, children, facts, markers, condition_root, consequent_root, work_used)
 
         # Exact branch proof for `(if c then x else y) == y or g` (in either
         # disjunct/equality orientation), where c is g or a positive conjunction
@@ -341,14 +352,17 @@ extend ElisaProofKernelReplay:
                 if not markers_ready:
                     return false if not proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, &markers, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
                     markers_ready <- true
+                guard_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_markers_and_work(nodes, children, markers, guard_root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                continue if not guard_admission.complete or guard_admission.untrusted
                 primitive: bool = proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, guard.left, guard.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
                 continue if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not primitive
                 direct_guard: bool = proof_kernel_replay_condition_has_positive_conjunct_with_work(nodes, children, branch.left, guard_root, 0, work_used)
                 continue if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                shifted_guard: bool = proof_kernel_replay_condition_has_signed_unit_shift_order_with_work(nodes, children, facts, branch.left, guard_root, 0, work_used)
+                shifted_guard: bool = proof_kernel_replay_condition_has_signed_unit_shift_order_with_work(nodes, children, facts, markers, branch.left, guard_root, 0, work_used)
                 continue if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 continue if not direct_guard and not shifted_guard
-                fallback: (known: bool, other: usize) = proof_kernel_replay_conditional_equality_other_with_work(nodes, children, equality_root, conditional.root, work_used)
+                fallback: (known: bool, other: usize) = proof_kernel_replay_conditional_equality_other_with_work(nodes, children, markers, equality_root, conditional.root, work_used)
                 continue if not fallback.known or not proof_kernel_replay_goal_search_expr_equal(nodes, children, fallback.other, branch.auxiliary, work_used)
                 continue if not proof_kernel_replay_scalar_term_witnessed_with_markers_work(nodes, children, markers, branch.right, 0, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
                 continue if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
@@ -375,8 +389,11 @@ extend ElisaProofKernelReplay:
             return false if:
                 branch.kind != "if" or not proof_kernel_replay_nested_condition_stable_with_work(nodes, branch.left, 0, work_used)
                 not proof_kernel_replay_scalar_term_pair_witnessed_with_work(nodes, children, facts, branch.right, branch.auxiliary, 0, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-            first: (known: bool, other: usize) = proof_kernel_replay_conditional_equality_other_with_work(nodes, children, goal.left, conditional.root, work_used)
-            second: (known: bool, other: usize) = proof_kernel_replay_conditional_equality_other_with_work(nodes, children, goal.right, conditional.root, work_used)
+            markers: mutable darray[ProofKernelReplayWitnessMarker] = []
+            return false if not proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, &markers, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            first: (known: bool, other: usize) = proof_kernel_replay_conditional_equality_other_with_work(nodes, children, markers, goal.left, conditional.root, work_used)
+            second: (known: bool, other: usize) = proof_kernel_replay_conditional_equality_other_with_work(nodes, children, markers, goal.right, conditional.root, work_used)
             return false if not first.known or not second.known
             then_then: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, first.other, branch.right, work_used) and proof_kernel_replay_goal_search_expr_equal(nodes, children, second.other, branch.right, work_used)
             covers_both: bool = (proof_kernel_replay_goal_search_expr_equal(nodes, children, first.other, branch.right, work_used) and proof_kernel_replay_goal_search_expr_equal(nodes, children, second.other, branch.auxiliary, work_used)) or (proof_kernel_replay_goal_search_expr_equal(nodes, children, first.other, branch.auxiliary, work_used) and proof_kernel_replay_goal_search_expr_equal(nodes, children, second.other, branch.right, work_used))

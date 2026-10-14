@@ -35,7 +35,7 @@ guarded_source = guarded.read_text(encoding="utf-8")
 assert not re.search(r"\bdef\s+proof_kernel_replay_close_plain_bounds\b", guarded_source)
 collector = body(guarded, "proof_kernel_replay_collect_plain_differences")
 for required in (
-    "proof_kernel_replay_primitive_comparison_with_work",
+    "proof_kernel_replay_primitive_comparison_with_markers_with_work",
     "proof_kernel_replay_guarded_difference_import_with_work",
     "proof_kernel_replay_plain_order_side_with_goal_work",
     "proof_kernel_replay_collect_differences_with_goal_work",
@@ -43,6 +43,7 @@ for required in (
     assert required in collector, required
 for legacy in (
     "proof_kernel_replay_primitive_comparison(",
+    "proof_kernel_replay_primitive_comparison_with_work(",
     "proof_kernel_replay_guarded_difference_import(",
     "proof_kernel_replay_collect_differences(",
 ):

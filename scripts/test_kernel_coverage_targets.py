@@ -25,7 +25,7 @@ for source in (root / "src/proof/kernel_replay").glob("*.elisa"):
 missing = sorted(targets - declared)
 if missing:
     raise SystemExit(f"required kernel coverage declarations are missing: {missing}")
-if "proof_kernel_replay_term_pin" not in targets:
+if "proof_kernel_replay_term_pin_with_goal_work" not in targets:
     raise SystemExit("qualified-constant replay must retain its verified term-pin target")
 
 print(f"kernel coverage targets: all {len(targets)} required declarations exist")
