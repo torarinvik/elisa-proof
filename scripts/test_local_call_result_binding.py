@@ -1,11 +1,12 @@
 """Stored unsigned call results use this invocation's checked summary."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BIN = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BIN = qualified_test_binary.proof_test_binary(ROOT)
 SOURCE = ROOT / "examples/local_call_result_binding_probe.elisa"
 if not __debug__:
     raise SystemExit("run without Python -O: assertions must remain enabled")

@@ -1,6 +1,6 @@
 """Literal comparison helpers must retain complete independently replayed summaries."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
@@ -8,7 +8,8 @@ if not __debug__:
     raise SystemExit("run without Python -O")
 
 root = Path(__file__).resolve().parents[1]
-binary = os.environ.get("ELISA_PROOF_BIN", str(root / "build/elisa-proof"))
+
+binary = qualified_test_binary.proof_test_binary(root)
 # proof_kernel_replay_integer_values_compare was folded into the typed comparison replay by a
 # later kernel refactor (95daaeaa line), so only the remaining helpers are checked.
 for name in ("proof_kernel_replay_nonnegative_literal_constant",

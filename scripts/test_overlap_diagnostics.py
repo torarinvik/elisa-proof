@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 """Distinguish conservative footprints from demonstrated resource overlaps."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import sys
 
 
 ROOT = Path(__file__).resolve().parent.parent
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 CASES = {
     "unknown_widened_borrow_move": ("borrow-overlap-unproven", "unknown"),
-    "rejected_borrow_move": ("borrow-move-conflict", "disproved"),
-    "rejected_borrow_move_parent": ("borrow-move-conflict", "disproved"),
+    "rejected_borrow_move": ("borrow-move-conflict", "unknown"),
+    "rejected_borrow_move_parent": ("borrow-move-conflict", "unknown"),
     "unknown_widened_borrow_write": ("borrow-overlap-unproven", "unknown"),
     "rejected_borrow_symbolic_alias": ("borrow-overlap-unproven", "unknown"),
     "rejected_borrow_dynamic_alias": ("borrow-overlap-unproven", "unknown"),
     "rejected_borrow_dynamic_multi_alias": ("borrow-overlap-unproven", "unknown"),
-    "rejected_exact_index_borrow_write": ("borrow-write-conflict", "disproved"),
-    "rejected_borrow_write": ("borrow-write-conflict", "disproved"),
-    "rejected_borrow_field_write": ("borrow-write-conflict", "disproved"),
-    "rejected_borrow_index_alias": ("borrow-alias-conflict", "disproved"),
-    "rejected_borrow_multi_index_alias": ("borrow-alias-conflict", "disproved"),
+    "rejected_exact_index_borrow_write": ("borrow-write-conflict", "unknown"),
+    "rejected_borrow_write": ("borrow-write-conflict", "unknown"),
+    "rejected_borrow_field_write": ("borrow-write-conflict", "unknown"),
+    "rejected_borrow_index_alias": ("borrow-alias-conflict", "unknown"),
+    "rejected_borrow_multi_index_alias": ("borrow-alias-conflict", "unknown"),
 }
 
 

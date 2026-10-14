@@ -1,12 +1,13 @@
 """Zero-payload enum values do not provide storage for escaped references."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = (ROOT / "examples/plain_enum_resource_call.elisa").read_text()
 CASES = (
     ("plain", BASE, True),

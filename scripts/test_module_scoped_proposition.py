@@ -1,13 +1,14 @@
 """A module-local function can type and replay target-sized range propositions."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 SOURCE = """module Foo:
     def valid_slice(start: usize, length: usize, data_count: usize) -> bool:
         requires start <= data_count and length <= data_count - start

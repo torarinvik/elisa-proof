@@ -1,11 +1,12 @@
 """Mutable aggregate references do not collapse `old` to the current pointee."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 result = subprocess.run(
     [str(BINARY), "--json", str(ROOT / "examples/rejected_old_mutable_reference.elisa")],
     capture_output=True,

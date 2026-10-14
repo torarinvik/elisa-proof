@@ -1,88 +1,17 @@
 """Reject pattern facts that collide across distinct source literal spellings."""
 import json
-import os
 from pathlib import Path
-import selectors
-import subprocess
-import sys
-import time
 import tempfile
+from pattern_literal_process_runner import run, verify_process_limits
 from qualified_test_binary import proof_test_binary
-from pattern_literal_fixed_width_cases import FIXED_WIDTH_PATTERN_COLLISIONS
+from pattern_literal_fixed_width_cases import (
+    FIXED_WIDTH_PATTERN_COLLISIONS,
+    FIXED_WIDTH_RANGE_CONTROLS,
+)
 from pattern_literal_collision_report_checks import check_pattern_collision_reports
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = proof_test_binary(ROOT)
-PROCESS_TIMEOUT_SECONDS = 120
-PROCESS_OUTPUT_LIMIT = 8 * 1024 * 1024
-
-
-def run(command, label, timeout_seconds=PROCESS_TIMEOUT_SECONDS):
-    """Bound each prover invocation so a bad child cannot hang or exhaust this gate."""
-    stdout = bytearray()
-    stderr = bytearray()
-    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE)
-    deadline = time.monotonic() + timeout_seconds
-    try:
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ, stdout)
-            selector.register(process.stderr, selectors.EVENT_READ, stderr)
-            output_size = 0
-            while selector.get_map():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise AssertionError(f'{label} timed out after {timeout_seconds}s')
-                for key, _ in selector.select(remaining):
-                    chunk = os.read(key.fd, 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        key.fileobj.close()
-                        continue
-                    output_size += len(chunk)
-                    if output_size > PROCESS_OUTPUT_LIMIT:
-                        raise AssertionError(
-                            f'{label} output exceeded {PROCESS_OUTPUT_LIMIT} bytes')
-                    key.data.extend(chunk)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise AssertionError(f'{label} timed out after {timeout_seconds}s')
-        returncode = process.wait(timeout=remaining)
-        return subprocess.CompletedProcess(
-            command, returncode, stdout.decode('utf-8', errors='replace'),
-            stderr.decode('utf-8', errors='replace'),
-        )
-    except subprocess.TimeoutExpired as error:
-        raise AssertionError(f'{label} timed out after {timeout_seconds}s') from error
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        if process.stdout is not None and not process.stdout.closed:
-            process.stdout.close()
-        if process.stderr is not None and not process.stderr.closed:
-            process.stderr.close()
-
-
-def verify_process_limits():
-    noisy = [sys.executable, '-c',
-             f"import sys; sys.stdout.write('x' * {PROCESS_OUTPUT_LIMIT + 1}); sys.stdout.flush()"]
-    try:
-        run(noisy, 'output-cap self-test', timeout_seconds=10)
-    except AssertionError as error:
-        assert 'output exceeded' in str(error), error
-    else:
-        raise AssertionError('pattern test runner accepted output beyond its shared cap')
-
-    slow = [sys.executable, '-c', 'import time; time.sleep(2)']
-    try:
-        run(slow, 'timeout self-test', timeout_seconds=0.05)
-    except AssertionError as error:
-        assert 'timed out' in str(error), error
-    else:
-        raise AssertionError('pattern test runner accepted a child beyond its deadline')
-
-
 verify_process_limits()
 
 # Pattern ASTs erase source literal kinds, while the compiler lowers these patterns according to
@@ -452,6 +381,18 @@ def generic_char_type_parameter[char](value: char) -> i64:
             return 0
         _:
             return 0
+
+module NestedGeneric:
+    public:
+        def generic_nested_char_type_parameter[char](value: char) -> i64:
+            ensure result == 0
+            match value:
+                'A':
+                    assert value == 'A' by:
+                        assert value == 'A'
+                    return 0
+                _:
+                    return 0
 '''
 
 GROUPED_STRING_PATTERN_CONTROL = '''
@@ -481,7 +422,7 @@ with tempfile.TemporaryDirectory() as folder:
     path.write_text('\n'.join(PATTERN_COLLISIONS.values()) + '\n' + THEOREM_PATTERN_COLLISION + '\n' + THEOREM_FIXED_WIDTH_PATTERN_COLLISION)
 
     control_path = Path(folder) / 'string-pattern-control.elisa'
-    control_path.write_text(STRING_PATTERN_CONTROL + '\n' + CSTR_PATTERN_CONTROL + '\n' + PUNCTUATED_STRING_PATTERN_CONTROLS + '\n' + EMPTY_STRING_PATTERN_CONTROLS + '\n' + CHAR_PATTERN_CONTROL + '\n' + GROUPED_STRING_PATTERN_CONTROL)
+    control_path.write_text(STRING_PATTERN_CONTROL + '\n' + CSTR_PATTERN_CONTROL + '\n' + PUNCTUATED_STRING_PATTERN_CONTROLS + '\n' + EMPTY_STRING_PATTERN_CONTROLS + '\n' + CHAR_PATTERN_CONTROL + '\n' + GROUPED_STRING_PATTERN_CONTROL + '\n' + '\n'.join(FIXED_WIDTH_RANGE_CONTROLS.values()))
     control = run([BINARY, '--json', str(control_path)], 'pattern positive controls')
     control_report = json.loads(control.stdout)
     assert control.returncode == 0 and control_report['status'] == 'proved', control_report
@@ -490,6 +431,21 @@ with tempfile.TemporaryDirectory() as folder:
     assert control_report['replay']['gaps'] == 0, control_report['replay']
     assert control_report['replay']['certificates'] == control_report['replay']['replayed'], control_report['replay']
     assert not control_report['trust']['trusted_assumptions'], control_report['trust']
+    for name in FIXED_WIDTH_RANGE_CONTROLS:
+        function = next((row for row in control_report['functions'] if row['name'] == name), None)
+        assert function is not None and function['proved'], (name, function, control_report)
+        # All endpoints are checked in the combined report; sample one focused proof per type
+        # to cover the independent declaration-selection route without doubling prover runs.
+        if not name.endswith('_lower_endpoint_control'):
+            continue
+        focused = run([BINARY, '--function-json', name, str(control_path)],
+                      f'focused fixed-width range endpoint control {name}')
+        focused_report = json.loads(focused.stdout)
+        assert focused.returncode == 0 and focused_report['status'] == 'proved', (
+            name, focused.returncode, focused_report.get('status'))
+        assert focused_report['replay']['gaps'] == 0, (name, focused_report['replay'])
+        assert focused_report['replay']['certificates'] == focused_report['replay']['replayed'], (
+            name, focused_report['replay'])
     expected_string_controls = {
         'sview_identifier_pattern_control': 'ready',
         'cstr_identifier_pattern_control': 'ready',
@@ -550,7 +506,7 @@ with tempfile.TemporaryDirectory() as folder:
 
     generic_path = Path(folder) / 'generic-type-name-shadow.elisa'
     generic_path.write_text(GENERIC_BUILTIN_TYPE_NAME_SHADOW)
-    for name in ('generic_sview_type_parameter', 'generic_cstr_type_parameter', 'generic_char_type_parameter'):
+    for name in ('generic_sview_type_parameter', 'generic_cstr_type_parameter', 'generic_char_type_parameter', 'generic_nested_char_type_parameter'):
         generic_run = run([BINARY, '--function-json', name, str(generic_path)],
                           f'generic builtin-name pattern shadow {name}')
         generic_report = json.loads(generic_run.stdout)
@@ -565,8 +521,10 @@ with tempfile.TemporaryDirectory() as folder:
                                  and goal['goal'].get('operator') == '=='
                                  and goal['goal'].get('left', {}).get('kind') == 'ident'
                                  and goal['goal'].get('left', {}).get('name') == 'value'
-                                 and ((name == 'generic_char_type_parameter' and goal['goal'].get('right', {}).get('kind') == 'char')
-                                      or (name != 'generic_char_type_parameter' and goal['goal'].get('right') == {'kind': 'string', 'text': 'ready'}))]
+                                 and ((name in ('generic_char_type_parameter', 'generic_nested_char_type_parameter')
+                                       and goal['goal'].get('right', {}).get('kind') == 'char')
+                                      or (name not in ('generic_char_type_parameter', 'generic_nested_char_type_parameter')
+                                          and goal['goal'].get('right') == {'kind': 'string', 'text': 'ready'}))]
         assert len(generic_pattern_goals) == 1 and not generic_pattern_goals[0]['proven'], (
             name, generic_pattern_goals, generic_report['goals'])
 

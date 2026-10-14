@@ -1,12 +1,13 @@
 """Owned call-initialized record fields retain their fixed storage extent."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get('ELISA_PROOF_BIN', str(ROOT / 'build/elisa-proof'))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = (ROOT / 'examples/local_record_fixed_index.elisa').read_text()
 LOOP = 'struct Item:\n    value: i64\nstruct Store:\n    count: mutable usize\n    flags: mutable Item[3]\ndef make() -> Store:\n    Store{flags: zeroed, count: 0}\ndef checked() -> void:\n    store: mutable Store = make()\n    for index in 0..<3 |store|:\n        store.count <- index.usize()\n        store.flags[index] <- Item{value: 1}\n'
 SHADOW = 'struct Item:\n    value: i64\nstruct Store:\n    flags: mutable Item[3]\ndef make() -> Store:\n    Store{flags: zeroed}\nstruct Small:\n    flags: mutable Item[2]\ndef small() -> Small:\n    Small{flags: zeroed}\ndef checked(index: usize) -> void:\n    store: mutable Store = make()\n    region inner_scope:\n        store: mutable Small = small()\n        return if index >= 3\n        store.flags[index] <- Item{value: 1}\n'

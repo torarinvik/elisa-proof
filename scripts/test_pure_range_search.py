@@ -1,12 +1,13 @@
 """Finite searches preserve caller guards; effectful or unsupported bodies do not."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = (ROOT / "test/repro/read_only_search_call_guard.elisa").read_text()
 MUTABLE = BASE.replace("search(store: Store&)", "search(store: mutable Store&)").replace("    for index", "    store.count <- 4\n    for index")
 GLOBAL = BASE.replace("def search", "global mutable active: bool = false\n\ndef search").replace("if store.flags[index]", "if store.flags[index] or active")

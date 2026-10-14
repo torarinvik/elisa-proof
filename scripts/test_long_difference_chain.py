@@ -3,13 +3,14 @@ stated at the far end of a chain reaches its first name however many links apart
 and the kernel alike. The rejected fixture pins that it invents no bound, and that a contradictory
 cycle, which would tighten forever, stops at the limit."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(path):

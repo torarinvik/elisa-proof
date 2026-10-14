@@ -1,12 +1,13 @@
 """Mutable captured-for entry facts are source checked, never reused as exit facts."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get('ELISA_PROOF_BIN', str(ROOT/'build/elisa-proof'))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = '''def entry(start: usize, stop: usize) -> usize:
     requires start <= stop and stop <= 100
     cursor: mutable usize = start

@@ -10,9 +10,9 @@ import subprocess
 import sys
 import tempfile
 from source_binding_harness_support import run_source_binding_replay_harness
-
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+from qualified_test_binary import proof_test_binary
+BINARY = Path(proof_test_binary(ROOT))
 REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
 COMPILER = os.environ.get("ELISA_COMPILER_BIN", "")
 FIXTURE = ROOT / "examples/loop_invariants_compile.elisa"

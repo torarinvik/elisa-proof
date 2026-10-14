@@ -8,13 +8,14 @@ took 35-42 s against 1 s. The adversarial fixtures pin that the shortcuts decide
 strict invariant, a wrong step and a wrong literal are still refused, a malformed chain is a
 parse error, and a long chain stays bounded and claims nothing it does not replay."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 EXAMPLES = ROOT / "examples"
 
 

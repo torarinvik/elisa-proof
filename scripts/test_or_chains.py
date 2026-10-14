@@ -4,12 +4,13 @@ chain unrelated to the goal must not stop the range facts beside it from proving
 without top-level disjunctive facts). An uncovered case, a goal no disjunct satisfies, a claim
 past the range and a five-case off-by-one stay unproven, and a true six-case chain is refused\nat the split budget (four nested splits), as a timeout rather than a disproof."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(path):

@@ -4,7 +4,7 @@ Run against a separately provenance-validated native proof product. The syscall
 shim is test-only; macOS marks its direct syscall interface deprecated.
 """
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import platform
 import subprocess
@@ -12,7 +12,8 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-binary = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+binary = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(qualified_test_binary.proof_test_binary(ROOT))
 system = platform.system()
 if system not in ("Darwin", "Linux"):
     raise SystemExit("output-write regression requires macOS or Linux")

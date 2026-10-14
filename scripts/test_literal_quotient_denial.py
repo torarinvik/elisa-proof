@@ -1,12 +1,13 @@
 """Closed literal quotient guards replay without admitting invalid arithmetic."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get('ELISA_PROOF_BIN', str(ROOT/'build/elisa-proof'))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 TEMPLATE = '''def saturation(value: u64, byte: u64) -> u64:
     requires value <= CAP
     requires byte <= 255

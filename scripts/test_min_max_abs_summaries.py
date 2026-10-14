@@ -3,12 +3,13 @@ disjunctive ensure `result == a or result == b` over a conditional result is spl
 conditional across the whole disjunction, in the producer and the replay kernel, and a caller
 (`clamp`) uses the summaries. Off-by-one and wrong-side ensures stay unproven."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(path):

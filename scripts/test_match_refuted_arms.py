@@ -3,12 +3,13 @@ positive file proves and replays in full. In the rejected file, each earlier arm
 reason its condition does not capture (a guard, a payload literal, a pin, or a call in an earlier
 guard), so the refutation it would need is withheld."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(name):

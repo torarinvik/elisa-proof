@@ -1,12 +1,13 @@
 """A refused call replays individually established literal preconditions."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = """def checked(value: i64, weight: i64) -> i64:
     requires value >= 0
     requires weight >= 0

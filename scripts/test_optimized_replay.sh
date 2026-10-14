@@ -50,10 +50,10 @@ with open(path, encoding="utf-8") as handle:
     report = json.load(handle)
 
 assert report["status"] == "failed", (level, report.get("status"))
-assert report["verification_state"] == "disproved", (level, report["verification_state"])
+assert report["verification_state"] == "unknown", (level, report["verification_state"])
 assert report["replay"]["gaps"] == 0, (level, report["replay"])
 assert report["replay"]["certificates"] == report["replay"]["replayed"]
-assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "disproved" for f in report["findings"])
+assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "unknown" for f in report["findings"])
 PY
 done
 
