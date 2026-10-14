@@ -1,0 +1,244 @@
+# Generic alias application resolution, validation, and type-safe substitution.
+extend ElisaProof:
+    private:
+        def proof_source_conversion_alias_application_target(head: Ast::Expr, resolution_owner: sview, resolution_owner_known: bool, report: mutable ProofReport&) -> (complete: bool, found: bool, row: usize, target: Ast::Expr):
+            index: ProofSourceEffectIndex& = report.source_types.source_effect_index
+            none: usize = index.aliases.alias_names.count
+            match head:
+                Ast::Expr.Ident(name, _):
+                    return (true, false, none, Ast::Expr.Invalid) if proof_source_conversion_builtin_type_name(name)
+                    if resolution_owner_known:
+                        owner_target: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal: bool, blocks_parent: bool) = proof_source_conversion_alias_target_in_owner(name, resolution_owner, report)
+                        return (false, false, none, Ast::Expr.Invalid) if not owner_target.complete
+                        return (true, true, owner_target.row, owner_target.target) if owner_target.count == 1
+                        return (false, false, none, Ast::Expr.Invalid) if owner_target.blocks_parent
+                        return (true, false, none, Ast::Expr.Invalid) if owner_target.nominal
+                        if resolution_owner != "":
+                            root_target: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal: bool, blocks_parent: bool) = proof_source_conversion_alias_target_in_owner(name, "", report)
+                            return (false, false, none, Ast::Expr.Invalid) if not root_target.complete
+                            return (true, true, root_target.row, root_target.target) if root_target.count == 1
+                            return (false, false, none, Ast::Expr.Invalid) if root_target.blocks_parent
+                            return (true, false, none, Ast::Expr.Invalid) if root_target.nominal
+                    global: (complete: bool, count: usize, row: usize, target: Ast::Expr) = proof_source_conversion_alias_target(name, report)
+                    return (false, false, none, Ast::Expr.Invalid) if not global.complete or global.count > 1
+                    return (true, global.count == 1, global.row, global.target)
+                Ast::Expr.Scope(parent, name, _):
+                    normalized_head: (complete: bool, head: Ast::Expr) = proof_source_conversion_module_alias_head(parent, resolution_owner, resolution_owner_known, report)
+                    return (false, false, none, Ast::Expr.Invalid) if not normalized_head.complete
+                    qualified: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal_count: usize) = proof_source_conversion_qualified_alias_target(normalized_head.head, name, report)
+                    return (false, false, none, Ast::Expr.Invalid) if not qualified.complete
+                    return (true, true, qualified.row, qualified.target) if qualified.count == 1
+                    return (true, false, none, Ast::Expr.Invalid) if qualified.nominal_count > 0
+                    simple_module_head: bool = match normalized_head.head:
+                        Ast::Expr.Ident(_, _): true
+                        _: false
+                    if simple_module_head:
+                        root_target: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal: bool, blocks_parent: bool) = proof_source_conversion_alias_target_in_owner(name, "", report)
+                        return (false, false, none, Ast::Expr.Invalid) if not root_target.complete
+                        return (true, true, root_target.row, root_target.target) if root_target.count == 1
+                        return (false, false, none, Ast::Expr.Invalid) if root_target.blocks_parent
+                        return (true, false, none, Ast::Expr.Invalid) if root_target.nominal
+                        global: (complete: bool, count: usize, row: usize, target: Ast::Expr) = proof_source_conversion_alias_target(name, report)
+                        return (false, false, none, Ast::Expr.Invalid) if not global.complete or global.count > 1
+                        return (true, global.count == 1, global.row, global.target)
+                    return (true, false, none, Ast::Expr.Invalid)
+                _:
+                    return (true, false, none, Ast::Expr.Invalid)
+
+        def proof_source_conversion_builtin_generic_type_head(head: Ast::Expr, resolution_owner: sview, resolution_owner_known: bool, report: mutable ProofReport&) -> bool:
+            name: sview = match head:
+                Ast::Expr.Ident(value, _): value
+                _: return false
+            return false if name != "darray" and name != "view" and name != "array"
+            if resolution_owner_known:
+                owner_target: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal: bool, blocks_parent: bool) = proof_source_conversion_alias_target_in_owner(name, resolution_owner, report)
+                return false if not owner_target.complete or owner_target.count != 0 or owner_target.nominal
+                if resolution_owner != "":
+                    root_target: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal: bool, blocks_parent: bool) = proof_source_conversion_alias_target_in_owner(name, "", report)
+                    return false if not root_target.complete or root_target.count != 0 or root_target.nominal
+            global_target: (complete: bool, count: usize, row: usize, target: Ast::Expr) = proof_source_conversion_alias_target(name, report)
+            return global_target.complete and global_target.count == 0
+
+        def proof_source_conversion_alias_non_generic_target_safe(row: usize, target: Ast::Expr, active_rows: mutable darray[usize]&, report: mutable ProofReport&, depth: usize) -> bool:
+            index: ProofSourceEffectIndex& = report.source_types.source_effect_index
+            alias_count: usize = index.aliases.alias_names.count
+            return false if row >= alias_count or index.aliases.alias_has_formals.count != alias_count or index.aliases.alias_lines.count != alias_count or index.aliases.alias_owners.count != alias_count or index.aliases.alias_has_formals[row] or depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT
+            for active in active_rows |active, row, report|:
+                return false if not proof_source_index_work_charge(report, 1) or active == row
+            return false if not proof_source_index_work_charge(report, 1)
+            active_rows.push(row)
+            no_formals: mutable darray[bool] = []
+            valid: bool = proof_source_conversion_alias_type_expression_safe(target, index.aliases.alias_names.count, &no_formals, active_rows, index.aliases.alias_owners[row], index.aliases.alias_lines[row], false, true, report, depth + 1)
+            active_rows.resize(active_rows.count - 1)
+            return valid
+
+        # These spellings have built-in generic type forms. Check ordinary name resolution
+        # first so a source alias or nominal declaration cannot be mistaken for the built-in.
+        def proof_source_conversion_alias_type_expression_safe(expression: Ast::Expr, formal_owner_row: usize, used_formals: mutable darray[bool]&, active_rows: mutable darray[usize]&, resolution_owner: sview, declaration_line: u32, check_caller_generics: bool, resolution_owner_known: bool, report: mutable ProofReport&, depth: usize) -> bool:
+            index: ProofSourceEffectIndex& = report.source_types.source_effect_index
+            return false if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT or not proof_source_index_work_charge(report, 1)
+            return false if formal_owner_row < index.aliases.alias_names.count and (index.aliases.alias_generic_application_valid.count != index.aliases.alias_names.count or index.aliases.alias_generic_formal_starts.count != index.aliases.alias_names.count or index.aliases.alias_generic_formal_counts.count != index.aliases.alias_names.count)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return false if not proof_source_index_work_charge(report, sview_len(name))
+                    if formal_owner_row < index.aliases.alias_names.count:
+                        return false if:
+                            index.aliases.alias_generic_application_valid.count != index.aliases.alias_names.count
+                            index.aliases.alias_generic_formal_starts.count != index.aliases.alias_names.count
+                            index.aliases.alias_generic_formal_counts.count != index.aliases.alias_names.count
+                            not index.aliases.alias_generic_application_valid[formal_owner_row]
+                        start: usize = index.aliases.alias_generic_formal_starts[formal_owner_row]
+                        count: usize = index.aliases.alias_generic_formal_counts[formal_owner_row]
+                        return false if start > index.aliases.alias_generic_formal_names.count or count > index.aliases.alias_generic_formal_names.count - start or count != used_formals.count
+                        for formal_index in 0..<count |formal_index, name, start, index, used_formals, report|:
+                            formal_name: sview = index.aliases.alias_generic_formal_names[start + formal_index]
+                            return false if not proof_source_index_work_charge(report, sview_len(formal_name))
+                            if formal_name == name:
+                                used_formals[formal_index] <- true
+                                return true
+                    if check_caller_generics:
+                        generic: (complete: bool, count: usize) = proof_source_conversion_generic_name(name, declaration_line, report, resolution_owner_known)
+                        return false if not generic.complete
+                        return true if generic.count == 1
+                        return false if generic.count > 0
+                    return true if proof_source_conversion_builtin_type_name(name)
+                    if resolution_owner_known:
+                        owner_target: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal: bool, blocks_parent: bool) = proof_source_conversion_alias_target_in_owner(name, resolution_owner, report)
+                        return false if not owner_target.complete
+                        if owner_target.count == 1:
+                            return false if index.aliases.alias_has_formals[owner_target.row]
+                            return proof_source_conversion_alias_non_generic_target_safe(owner_target.row, owner_target.target, active_rows, report, depth + 1)
+                        return true if owner_target.nominal
+                        if owner_target.blocks_parent:
+                            return true
+                        if resolution_owner != "":
+                            root_target: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal: bool, blocks_parent: bool) = proof_source_conversion_alias_target_in_owner(name, "", report)
+                            return false if not root_target.complete or root_target.blocks_parent
+                            if root_target.count == 1:
+                                return false if index.aliases.alias_has_formals[root_target.row]
+                                return proof_source_conversion_alias_non_generic_target_safe(root_target.row, root_target.target, active_rows, report, depth + 1)
+                            return true if root_target.nominal
+                        return false
+                    global_target: (complete: bool, count: usize, row: usize, target: Ast::Expr) = proof_source_conversion_alias_target(name, report)
+                    return false if not global_target.complete or global_target.count > 1
+                    return true if global_target.count == 0
+                    return false if index.aliases.alias_has_formals.count != index.aliases.alias_names.count or index.aliases.alias_has_formals[global_target.row]
+                    return proof_source_conversion_alias_non_generic_target_safe(global_target.row, global_target.target, active_rows, report, depth + 1)
+                Ast::Expr.Scope(parent, name, _):
+                    root: (complete: bool, name: sview) = proof_source_conversion_scope_root_name(parent, report, 0)
+                    return false if not root.complete
+                    if formal_owner_row < index.aliases.alias_names.count:
+                        start: usize = index.aliases.alias_generic_formal_starts[formal_owner_row]
+                        count: usize = index.aliases.alias_generic_formal_counts[formal_owner_row]
+                        return false if start > index.aliases.alias_generic_formal_names.count or count > index.aliases.alias_generic_formal_names.count - start
+                        for formal_index in 0..<count |formal_index, root, start, index, report|:
+                            formal_name: sview = index.aliases.alias_generic_formal_names[start + formal_index]
+                            return false if not proof_source_index_work_charge(report, sview_len(formal_name))
+                            return false if formal_name == root.name
+                    if root.name != "" and check_caller_generics:
+                        generic_root: (complete: bool, count: usize) = proof_source_conversion_generic_name(root.name, declaration_line, report, resolution_owner_known)
+                        return false if not generic_root.complete or generic_root.count > 0
+                    normalized_head: (complete: bool, head: Ast::Expr) = proof_source_conversion_module_alias_head(parent, resolution_owner, resolution_owner_known, report)
+                    return false if not normalized_head.complete
+                    qualified: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal_count: usize) = proof_source_conversion_qualified_alias_target(normalized_head.head, name, report)
+                    return false if not qualified.complete or qualified.count > 1
+                    if qualified.count == 1:
+                        return false if index.aliases.alias_has_formals[qualified.row]
+                        return proof_source_conversion_alias_non_generic_target_safe(qualified.row, qualified.target, active_rows, report, depth + 1)
+                    return true if qualified.nominal_count == 1
+                    if check_caller_generics:
+                        generic_leaf: (complete: bool, count: usize) = proof_source_conversion_generic_name(name, declaration_line, report, resolution_owner_known)
+                        return false if not generic_leaf.complete
+                        return true if generic_leaf.count == 1
+                        return false if generic_leaf.count > 0
+                    return false
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_conversion_alias_type_expression_safe(inner, formal_owner_row, used_formals, active_rows, resolution_owner, declaration_line, check_caller_generics, resolution_owner_known, report, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return false if operator != TokenKind.Ampersand and operator != TokenKind.Lmut and operator != TokenKind.Mutable and operator != TokenKind.Static and operator != TokenKind.Heap and operator != TokenKind.Stack and operator != TokenKind.Tail
+                    return proof_source_conversion_alias_type_expression_safe(inner, formal_owner_row, used_formals, active_rows, resolution_owner, declaration_line, check_caller_generics, resolution_owner_known, report, depth + 1)
+                Ast::Expr.Index(head, argument, _):
+                    root: (complete: bool, name: sview) = proof_source_conversion_scope_root_name(head, report, 0)
+                    return false if not root.complete
+                    if formal_owner_row < index.aliases.alias_names.count:
+                        formal_head: (complete: bool, found: bool) = proof_source_conversion_alias_formal_head(root.name, formal_owner_row, report)
+                        return false if not formal_head.complete or formal_head.found
+                    builtin_head: sview = proof_ident_name(head)
+                    if builtin_head == "darray" or builtin_head == "view":
+                        return false if not proof_source_conversion_builtin_generic_type_head(head, resolution_owner, resolution_owner_known, report)
+                        return proof_source_conversion_alias_type_expression_safe(argument, formal_owner_row, used_formals, active_rows, resolution_owner, declaration_line, check_caller_generics, resolution_owner_known, report, depth + 1)
+                    application: (complete: bool, found: bool, row: usize, target: Ast::Expr) = proof_source_conversion_alias_application_target(head, resolution_owner, resolution_owner_known, report)
+                    return false if not application.complete or not application.found
+                    return false if not proof_source_conversion_alias_type_formals_safe(application.row, active_rows, report, depth + 1)
+                    return false if application.row >= index.aliases.alias_generic_formal_counts.count or index.aliases.alias_generic_formal_counts[application.row] != 1
+                    return proof_source_conversion_alias_type_expression_safe(argument, formal_owner_row, used_formals, active_rows, resolution_owner, declaration_line, check_caller_generics, resolution_owner_known, report, depth + 1)
+                Ast::Expr.IndexN(head, arguments, _):
+                    root: (complete: bool, name: sview) = proof_source_conversion_scope_root_name(head, report, 0)
+                    return false if not root.complete
+                    if formal_owner_row < index.aliases.alias_names.count:
+                        formal_head: (complete: bool, found: bool) = proof_source_conversion_alias_formal_head(root.name, formal_owner_row, report)
+                        return false if not formal_head.complete or formal_head.found
+                    builtin_head: sview = proof_ident_name(head)
+                    if builtin_head == "darray" or builtin_head == "view":
+                        return false if arguments.count != 1 or not proof_source_conversion_builtin_generic_type_head(head, resolution_owner, resolution_owner_known, report)
+                        return proof_source_conversion_alias_type_expression_safe(arguments[0], formal_owner_row, used_formals, active_rows, resolution_owner, declaration_line, check_caller_generics, resolution_owner_known, report, depth + 1)
+                    if builtin_head == "array":
+                        return false if arguments.count != 2 or not proof_source_conversion_builtin_generic_type_head(head, resolution_owner, resolution_owner_known, report)
+                        for argument_index in 0..<arguments.count |argument_index, arguments, formal_owner_row, used_formals, active_rows, resolution_owner, declaration_line, check_caller_generics, resolution_owner_known, report, depth|:
+                            if argument_index == 0:
+                                return false if not proof_source_conversion_alias_type_expression_safe(arguments[argument_index], formal_owner_row, used_formals, active_rows, resolution_owner, declaration_line, check_caller_generics, resolution_owner_known, report, depth + 1)
+                            else:
+                                match arguments[argument_index]:
+                                    Ast::Expr.IntLit(extent, _):
+                                        return false if extent < 0
+                                        pass
+                                    _:
+                                        return false
+                        return true
+                    application: (complete: bool, found: bool, row: usize, target: Ast::Expr) = proof_source_conversion_alias_application_target(head, resolution_owner, resolution_owner_known, report)
+                    return false if not application.complete or not application.found
+                    return false if not proof_source_conversion_alias_type_formals_safe(application.row, active_rows, report, depth + 1)
+                    return false if application.row >= index.aliases.alias_generic_formal_counts.count or index.aliases.alias_generic_formal_counts[application.row] != arguments.count
+                    for argument in arguments |formal_owner_row, used_formals, active_rows, resolution_owner, declaration_line, check_caller_generics, resolution_owner_known, report, depth|:
+                        return false if not proof_source_conversion_alias_type_expression_safe(argument, formal_owner_row, used_formals, active_rows, resolution_owner, declaration_line, check_caller_generics, resolution_owner_known, report, depth + 1)
+                    return true
+                _:
+                    # These forms can contain values or alias value parameters, which the
+                    # current parser metadata does not distinguish from type formals.
+                    return false
+
+        def proof_source_conversion_alias_type_formals_safe(row: usize, active_rows: mutable darray[usize]&, report: mutable ProofReport&, depth: usize) -> bool:
+            index: ProofSourceEffectIndex& = report.source_types.source_effect_index
+            alias_count: usize = index.aliases.alias_names.count
+            return false if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT or row >= alias_count
+            return false if:
+                index.aliases.alias_targets.count != alias_count
+                index.aliases.alias_lines.count != alias_count
+                index.aliases.alias_offsets.count != alias_count
+                index.aliases.alias_owners.count != alias_count
+                index.aliases.alias_has_formals.count != alias_count
+                index.aliases.alias_generic_application_valid.count != alias_count
+                index.aliases.alias_generic_formal_starts.count != alias_count
+                index.aliases.alias_generic_formal_counts.count != alias_count
+                index.aliases.alias_has_formals[row] == false
+                index.aliases.alias_generic_application_valid[row] == false
+                index.aliases.alias_generic_formal_starts[row] > index.aliases.alias_generic_formal_names.count
+                index.aliases.alias_generic_formal_counts[row] == 0
+                index.aliases.alias_generic_formal_counts[row] > index.aliases.alias_generic_formal_names.count - index.aliases.alias_generic_formal_starts[row]
+            for active in active_rows |active, row, report|:
+                return false if not proof_source_index_work_charge(report, 1) or active == row
+            return false if not proof_source_index_work_charge(report, 1)
+            active_rows.push(row)
+            count: usize = index.aliases.alias_generic_formal_counts[row]
+            used: mutable darray[bool] = []
+            return false if not proof_source_index_work_charge(report, count)
+            used.resize(count)
+            for position in 0..<count |position, used|:
+                used[position] <- false
+            valid: bool = proof_source_conversion_alias_type_expression_safe(index.aliases.alias_targets[row], row, &used, active_rows, index.aliases.alias_owners[row], index.aliases.alias_lines[row], false, true, report, depth + 1)
+            if valid:
+                for is_used in used |report, valid|:
+                    return false if not proof_source_index_work_charge(report, 1)
+                    valid <- false if not is_used
+            active_rows.resize(active_rows.count - 1)
+            return valid

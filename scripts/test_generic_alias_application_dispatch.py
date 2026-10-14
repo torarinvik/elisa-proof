@@ -5,20 +5,24 @@ import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "src/proof/check/source_conversion_alias_resolution.elisa"
+SOURCES = (
+    ROOT / "src/proof/check/source_conversion_alias_resolution.elisa",
+    ROOT / "src/proof/check/source_conversion_generic_alias_application.elisa",
+)
 
 
 def function_body(name: str) -> str:
-    lines = SOURCE.read_text(encoding="utf-8").splitlines()
-    for index, line in enumerate(lines):
-        if re.match(rf"\s*def {re.escape(name)}\b", line):
-            indent = len(line) - len(line.lstrip())
-            body = [line]
-            for following in lines[index + 1 :]:
-                if following.strip() and len(following) - len(following.lstrip()) <= indent:
-                    break
-                body.append(following)
-            return "\n".join(body)
+    for source in SOURCES:
+        lines = source.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if re.match(rf"\s*def {re.escape(name)}\b", line):
+                indent = len(line) - len(line.lstrip())
+                body = [line]
+                for following in lines[index + 1 :]:
+                    if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                        break
+                    body.append(following)
+                return "\n".join(body)
     raise AssertionError(f"function {name} not found")
 
 
