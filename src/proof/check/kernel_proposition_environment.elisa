@@ -11,10 +11,10 @@ extend ElisaProof:
             children: mutable darray[usize]
             visible_name_slots: mutable darray[usize]
             type_index: ProofSourceKernelTypeIndex
-            generic_param_lines: darray[u32]
-            generic_param_names: darray[sview]
-            generic_params_valid: bool
+            generic_param_index: ProofSourceKernelGenericParamIndex
             owner_declaration_line: mutable u32
+            owner_declaration_offset: mutable usize
+            owner_context_epoch: mutable usize
             tuple_label_index: ProofSourceKernelTupleLabelIndex
             validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace
             typing_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayTypingWorkspace
@@ -26,6 +26,9 @@ extend ElisaProof:
             # The source meter is shared across this checker run. After the first refusal, stop
             # encoding later clauses and statements; that refusal already makes the report fail.
             source_work_exhaustion_reported: mutable bool
+
+        def proof_source_kernel_context_changed(workspace: mutable ProofSourceKernelFormationWorkspace&) -> void:
+            workspace.owner_context_epoch <- workspace.owner_context_epoch + 1
 
         def proof_source_kernel_comparison_family(sort: sview) -> sview:
             match sort:
@@ -49,78 +52,6 @@ extend ElisaProof:
                     return "named"
                 _:
                     return ""
-
-        # Generic parameter names live in parser side tables rather than the declaration AST.
-        # Check them at the owning declaration before a spelling such as `i64` is treated as a
-        # primitive by the source-to-kernel type projection.
-        def proof_source_kernel_generic_type_name_at_owner(name: sview, declaration_line: u32, generic_lines: darray[u32]&, generic_names: darray[sview]&, generic_valid: bool, source_work: mutable usize&) -> (complete: bool, matches: usize):
-            return (false, 0) if not generic_valid or generic_lines.count != generic_names.count
-            matches: mutable usize = 0
-            for index in 0..<generic_lines.count |index, declaration_line, generic_lines, generic_names, source_work, matches|:
-                return (false, 0) if not proof_source_kernel_charge_work(1, source_work)
-                continue if generic_lines[index] != declaration_line
-                current_name: sview = generic_names[index]
-                return (false, 0) if:
-                    not proof_source_kernel_charge_work(sview_len(name), source_work)
-                    not proof_source_kernel_charge_work(sview_len(current_name), source_work)
-                matches <- matches + 1 if current_name == name
-                return (false, 0) if matches > 1
-            return (true, matches)
-
-        def proof_source_kernel_type_mentions_owner_generic(expression: Ast::Expr, declaration_line: u32, generic_lines: darray[u32]&, generic_names: darray[sview]&, generic_valid: bool, source_work: mutable usize&, depth: usize) -> (complete: bool, matches: bool) can[Memory.Allocate, Abort.Panic]:
-            requires depth <= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            decreases PROOF_TYPE_AUDIT_DEPTH_LIMIT - depth
-            return (false, false) if not generic_valid or generic_lines.count != generic_names.count
-            return (true, false) if generic_lines.count == 0
-            return (false, false) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_source_kernel_charge_work(1, source_work)
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    lookup: (complete: bool, matches: usize) = proof_source_kernel_generic_type_name_at_owner(name, declaration_line, generic_lines, generic_names, generic_valid, source_work)
-                    return (lookup.complete, lookup.matches != 0)
-                Ast::Expr.Scope(base, name, _):
-                    leaf: (complete: bool, matches: usize) = proof_source_kernel_generic_type_name_at_owner(name, declaration_line, generic_lines, generic_names, generic_valid, source_work)
-                    return (false, false) if not leaf.complete
-                    return (true, true) if leaf.matches != 0
-                    return proof_source_kernel_type_mentions_owner_generic(base, declaration_line, generic_lines, generic_names, generic_valid, source_work, depth + 1)
-                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
-                    return proof_source_kernel_type_mentions_owner_generic(inner, declaration_line, generic_lines, generic_names, generic_valid, source_work, depth + 1)
-                Ast::Expr.Refinement(base, predicate, _):
-                    first: (complete: bool, matches: bool) = proof_source_kernel_type_mentions_owner_generic(base, declaration_line, generic_lines, generic_names, generic_valid, source_work, depth + 1)
-                    return (false, false) if not first.complete
-                    return (true, true) if first.matches
-                    return proof_source_kernel_type_mentions_owner_generic(predicate, declaration_line, generic_lines, generic_names, generic_valid, source_work, depth + 1)
-                Ast::Expr.Index(base, argument, _) | Ast::Expr.Binary(base, _, argument, _):
-                    first: (complete: bool, matches: bool) = proof_source_kernel_type_mentions_owner_generic(base, declaration_line, generic_lines, generic_names, generic_valid, source_work, depth + 1)
-                    return (false, false) if not first.complete
-                    return (true, true) if first.matches
-                    return proof_source_kernel_type_mentions_owner_generic(argument, declaration_line, generic_lines, generic_names, generic_valid, source_work, depth + 1)
-                Ast::Expr.IndexN(base, arguments, _) | Ast::Expr.Call(base, arguments, _, _):
-                    first: (complete: bool, matches: bool) = proof_source_kernel_type_mentions_owner_generic(base, declaration_line, generic_lines, generic_names, generic_valid, source_work, depth + 1)
-                    return (false, false) if not first.complete
-                    return (true, true) if first.matches
-                    for argument in arguments |argument, declaration_line, generic_lines, generic_names, generic_valid, source_work, depth|:
-                        nested: (complete: bool, matches: bool) = proof_source_kernel_type_mentions_owner_generic(argument, declaration_line, generic_lines, generic_names, generic_valid, source_work, depth + 1)
-                        return (false, false) if not nested.complete
-                        return (true, true) if nested.matches
-                    return (true, false)
-                Ast::Expr.Tuple(elements, _) | Ast::Expr.Array(elements, _) | Ast::Expr.SetLit(elements, _):
-                    for element in elements |element, declaration_line, generic_lines, generic_names, generic_valid, source_work, depth|:
-                        nested: (complete: bool, matches: bool) = proof_source_kernel_type_mentions_owner_generic(element, declaration_line, generic_lines, generic_names, generic_valid, source_work, depth + 1)
-                        return (false, false) if not nested.complete
-                        return (true, true) if nested.matches
-                    return (true, false)
-                Ast::Expr.Construct(type_expression, _, _):
-                    return proof_source_kernel_type_mentions_owner_generic(type_expression, declaration_line, generic_lines, generic_names, generic_valid, source_work, depth + 1)
-                Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _):
-                    return (true, false)
-                Ast::Expr.Absent:
-                    return (true, false)
-                Ast::Expr.Invalid:
-                    return (false, false)
-                _:
-                    # Unknown AST forms may contain a generic name. Refuse to publish a
-                    # primitive source type until this traversal explicitly covers them.
-                    return (false, false)
 
         def proof_source_kernel_numeric_binary(operator: TokenKind) -> bool:
             return operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent
@@ -262,11 +193,11 @@ extend ElisaProof:
                 return true if decorator.name == "c_variadic"
             return false
 
-        def proof_source_kernel_add_function_signature(bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, name: sview, owner_identity: usize, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, position: Ast::Pos, reference_parameters: ProofSourceKernelReferenceParameterIndex, declarations: darray[Ast::Decl]&, type_index: ProofSourceKernelTypeIndex, generic_param_lines: darray[u32]&, generic_param_names: darray[sview]&, generic_params_valid: bool, source_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def proof_source_kernel_add_function_signature(bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, name: sview, owner_identity: usize, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, position: Ast::Pos, reference_parameters: ProofSourceKernelReferenceParameterIndex, declarations: darray[Ast::Decl]&, type_index: ProofSourceKernelTypeIndex, generic_index: ProofSourceKernelGenericParamIndex, source_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             return_expression: mutable Ast::Expr = Ast::Expr.Ident("void", Ast::pos_at_line(0))
             if return_type is declared_return_type:
                 return_expression <- declared_return_type
-            return_generic: (complete: bool, matches: bool) = proof_source_kernel_type_mentions_owner_generic(return_expression, position.line, generic_param_lines, generic_param_names, generic_params_valid, source_work, 0)
+            return_generic: (complete: bool, matches: bool) = proof_source_kernel_type_mentions_owner_generic(return_expression, position.line, generic_index, source_work, 0)
             return false if not return_generic.complete
             return_marker_known: mutable bool = false
             return_reference: mutable bool = false
@@ -294,7 +225,7 @@ extend ElisaProof:
                 return false if:
                     not proof_source_kernel_charge_work(1, source_work)
                     not proof_source_kernel_charge_work(sview_len(parameter.name), source_work)
-                parameter_generic: (complete: bool, matches: bool) = proof_source_kernel_type_mentions_owner_generic(parameter.type_expression, position.line, generic_param_lines, generic_param_names, generic_params_valid, source_work, 0)
+                parameter_generic: (complete: bool, matches: bool) = proof_source_kernel_type_mentions_owner_generic(parameter.type_expression, position.line, generic_index, source_work, 0)
                 return false if not parameter_generic.complete
                 marker_known: mutable bool = false
                 marker_reference: mutable bool = false
@@ -355,7 +286,7 @@ extend ElisaProof:
                 bindings.push(ElisaProofKernelCore::ProofKernelTypingBinding{kind: "type-scope-segment", name: segment, owner: type_name, sort: "named", type_name: type_name, element_sort: "", element_type_name: "", type_identity: type_identity, owner_type_identity: 0, element_type_identity: 0, signature_identity: 0, parameter_index: index, parameter_count: segment_count, parameter_has_default: false, parameter_by_reference: false})
             return true
 
-        def proof_source_kernel_collect_declarations(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, tuple_label_index: ProofSourceKernelTupleLabelIndex, reference_parameters: ProofSourceKernelReferenceParameterIndex, type_index: ProofSourceKernelTypeIndex, generic_param_lines: darray[u32]&, generic_param_names: darray[sview]&, generic_params_valid: bool, bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, module_owner: sview, module_owner_identity: usize, module_scope: darray[sview]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+        def proof_source_kernel_collect_declarations(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, tuple_label_index: ProofSourceKernelTupleLabelIndex, reference_parameters: ProofSourceKernelReferenceParameterIndex, type_index: ProofSourceKernelTypeIndex, generic_index: ProofSourceKernelGenericParamIndex, bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, module_owner: sview, module_owner_identity: usize, module_scope: darray[sview]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
             requires depth <= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             decreases PROOF_TYPE_AUDIT_DEPTH_LIMIT - depth
             return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
@@ -384,7 +315,7 @@ extend ElisaProof:
                         if proof_source_kernel_function_is_variadic(decorators, source_work):
                             return false if not proof_source_kernel_add_incomplete_function_signature(bindings, name, module_owner_identity, position, source_work)
                             continue
-                        added: bool = proof_source_kernel_add_function_signature(bindings, name, module_owner_identity, parameters, return_type, position, reference_parameters, all_declarations, type_index, generic_param_lines, generic_param_names, generic_params_valid, source_work)
+                        added: bool = proof_source_kernel_add_function_signature(bindings, name, module_owner_identity, parameters, return_type, position, reference_parameters, all_declarations, type_index, generic_index, source_work)
                         return false if not added
                     Ast::Decl.Struct(name, members, _, _, _, _, _):
                         return false if:
@@ -459,24 +390,24 @@ extend ElisaProof:
                         nested_identity: (known: bool, identity: usize) = proof_source_kernel_register_module_owner(bindings, nested_scope, position.offset.usize() + PROOF_SOURCE_KERNEL_IDENTITY_OFFSET, source_work)
                         return false if:
                             not nested_identity.known
-                            not proof_source_kernel_collect_declarations(body, all_declarations, annotations, tuple_label_index, reference_parameters, type_index, generic_param_lines, generic_param_names, generic_params_valid, bindings, module_name, nested_identity.identity, nested_scope, source_work, depth + 1)
+                            not proof_source_kernel_collect_declarations(body, all_declarations, annotations, tuple_label_index, reference_parameters, type_index, generic_index, bindings, module_name, nested_identity.identity, nested_scope, source_work, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        return false if not proof_source_kernel_collect_declarations(body, all_declarations, annotations, tuple_label_index, reference_parameters, type_index, generic_param_lines, generic_param_names, generic_params_valid, bindings, module_owner, module_owner_identity, module_scope, source_work, depth + 1)
+                        return false if not proof_source_kernel_collect_declarations(body, all_declarations, annotations, tuple_label_index, reference_parameters, type_index, generic_index, bindings, module_owner, module_owner_identity, module_scope, source_work, depth + 1)
                     _:
                         pass
             return true
 
-        def proof_source_kernel_global_bindings(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, tuple_label_index: ProofSourceKernelTupleLabelIndex, type_index: ProofSourceKernelTypeIndex, generic_param_lines: darray[u32]&, generic_param_names: darray[sview]&, generic_params_valid: bool, bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, source_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def proof_source_kernel_global_bindings(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, tuple_label_index: ProofSourceKernelTupleLabelIndex, type_index: ProofSourceKernelTypeIndex, generic_index: ProofSourceKernelGenericParamIndex, bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, source_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             references: (index: ProofSourceKernelReferenceParameterIndex, complete: bool) = proof_source_kernel_reference_parameter_index(annotations, source_work)
             return false if not references.complete
             root_scope: darray[sview] = []
-            return proof_source_kernel_collect_declarations(declarations, declarations, annotations, tuple_label_index, references.index, type_index, generic_param_lines, generic_param_names, generic_params_valid, bindings, "", 0, root_scope, source_work, 0)
+            return proof_source_kernel_collect_declarations(declarations, declarations, annotations, tuple_label_index, references.index, type_index, generic_index, bindings, "", 0, root_scope, source_work, 0)
 
         # Shared source-derived base context for checker formation and source-authenticated
         # replay. The returned rows come only from the parsed declaration tree and annotations;
         # callers must keep the AST alive and charge subsequent context projection to this same
         # source_work counter.
-        def proof_source_kernel_base_context(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, generic_param_lines: darray[u32]&, generic_param_names: darray[sview]&, generic_params_valid: bool, source_work: mutable usize&) -> (known: bool, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) can[Memory.Allocate, Abort.Panic]:
+        def proof_source_kernel_base_context(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, generic_param_index: ProofSourceKernelGenericParamIndex, source_work: mutable usize&) -> (known: bool, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, generic_param_index: ProofSourceKernelGenericParamIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) can[Memory.Allocate, Abort.Panic]:
             entries: mutable darray[ProofSourceKernelTypeEntry] = []
             root_module_path: darray[sview] = []
             owner_path_segments: mutable usize = 0
@@ -486,15 +417,18 @@ extend ElisaProof:
             tuple_label_index: ProofSourceKernelTupleLabelIndex = proof_source_kernel_build_tuple_label_index(annotations, &source_work)
             bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding] = []
             if known:
-                known <- proof_source_kernel_global_bindings(declarations, annotations, tuple_label_index, type_index, generic_param_lines, generic_param_names, generic_params_valid, &bindings, &source_work)
+                known <- generic_param_index.valid and proof_source_kernel_global_bindings(declarations, annotations, tuple_label_index, type_index, generic_param_index, &bindings, &source_work)
             known <- false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return (known, type_index, tuple_label_index, bindings)
+            return (known, type_index, tuple_label_index, generic_param_index, bindings)
 
         def proof_source_kernel_type_environment(names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, module_path: darray[sview]&, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], workspace: mutable ProofSourceKernelFormationWorkspace&, declarations: darray[Ast::Decl]&, scoped_function_index: mutable ProofSourceKernelScopedFunctionIndex&) -> (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) can[Memory.Allocate, Abort.Panic]:
             local_bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding] = []
             return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if not proof_source_kernel_charge_work(1, workspace.source_work_used)
-            workspace.type_index.container_descriptor_epoch <- workspace.type_index.container_descriptor_epoch + 1
-            return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if workspace.type_index.container_descriptor_epoch == 0
+            return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if workspace.type_index.container_descriptor_epoch_counter.count != 1 or workspace.type_index.container_descriptor_epoch_counter[0] == 0
+            next_descriptor_epoch: usize = workspace.type_index.container_descriptor_epoch_counter[0] + 1
+            return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if next_descriptor_epoch == 0
+            workspace.type_index.container_descriptor_epoch_counter[0] <- next_descriptor_epoch
+            workspace.type_index.container_descriptor_epoch <- next_descriptor_epoch
             module_context: (known: bool, identity: usize) = proof_source_kernel_module_owner_identity(module_path, global_bindings, workspace.source_work_used)
             if workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings})
@@ -506,7 +440,7 @@ extend ElisaProof:
             return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if names.count > PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
             # Use the proposition owner's parser path directly. The shared type index's scope
             # scratch space is reused by alias and type projection and may hold a different path.
-            scoped_globals: (known: bool, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) = proof_source_kernel_scoped_function_bindings(global_bindings, names, module_path, module_owner_identity, scoped_function_index, workspace.source_work_used)
+            scoped_globals: (known: bool, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) = proof_source_kernel_scoped_function_bindings(global_bindings, names, module_path, module_owner_identity, workspace.owner_declaration_line, workspace.owner_declaration_offset, workspace.owner_context_epoch, scoped_function_index, workspace.source_work_used)
             return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if:
                 not scoped_globals.known
                 not proof_source_kernel_add_bare_call_owner_markers(scoped_globals.bindings, &local_bindings, &workspace.source_work_used)
@@ -514,7 +448,7 @@ extend ElisaProof:
             # for each name so the kernel sees Elisa's resolved binding, not an ambiguous pair.
             # The names are AST-backed sviews; the imported file outlives this whole formation pass.
             slot_capacity: usize = proof_index_capacity(names.count * 2)
-            return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if not proof_source_kernel_charge_work(slot_capacity, workspace.source_work_used)
+            return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if not proof_source_kernel_charge_work(slot_capacity, workspace.source_work_used) or not proof_source_kernel_charge_work(slot_capacity, workspace.source_work_used)
             workspace.visible_name_slots.clear()
             workspace.visible_name_slots.resize(slot_capacity)
             for slot in 0..<slot_capacity |slot, workspace|:
@@ -525,6 +459,7 @@ extend ElisaProof:
                 index: usize = names.count - reverse_offset - 1
                 shadowed: mutable bool = false
                 inserted: mutable bool = false
+                return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if not proof_source_kernel_charge_work(sview_len(names[index]), workspace.source_work_used)
                 slot: mutable usize = (proof_name_hash(names[index]).i64() % slot_capacity.i64()).usize()
                 probes: mutable usize = 0
                 while probes < slot_capacity and probes < PROOF_SOURCE_KERNEL_CONTEXT_PROBE_LIMIT |probes, slot, slot_capacity, workspace, names, index, shadowed, inserted|:
@@ -543,9 +478,9 @@ extend ElisaProof:
                     probes <- probes + 1
                 return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if not shadowed and not inserted
                 if not shadowed:
-                    generic_type: mutable (complete: bool, matches: bool) = proof_source_kernel_type_mentions_owner_generic(source_types[index], workspace.owner_declaration_line, workspace.generic_param_lines, workspace.generic_param_names, workspace.generic_params_valid, workspace.source_work_used, 0)
+                    generic_type: mutable (complete: bool, matches: bool) = proof_source_kernel_type_mentions_owner_generic(source_types[index], workspace.owner_declaration_line, workspace.generic_param_index, workspace.source_work_used, 0)
                     if source_types[index] is Ast::Expr.Absent:
-                        fallback_generic: (complete: bool, matches: usize) = proof_source_kernel_generic_type_name_at_owner(types[index], workspace.owner_declaration_line, workspace.generic_param_lines, workspace.generic_param_names, workspace.generic_params_valid, workspace.source_work_used)
+                        fallback_generic: (complete: bool, matches: usize) = proof_source_kernel_generic_type_name_at_owner(types[index], workspace.owner_declaration_line, workspace.generic_param_index, workspace.source_work_used)
                         generic_type <- (fallback_generic.complete, fallback_generic.matches != 0)
                     if not generic_type.complete:
                         return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings})

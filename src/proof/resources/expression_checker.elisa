@@ -106,7 +106,10 @@ extend ElisaProof:
                     # collection builtin and receive an incomplete effect model.
                     builtin: (known: bool, receiver: Ast::Expr) = proof_resource_collection_builtin(callee, functions, report)
                     builtin_admitted: bool = builtin.known and method_call.known and proof_resource_function_name_count(functions, method_call.method) == 0 and not region_argument and not region_polymorphic_call and not proof_resource_argument_moves(arguments)
-                    is_builtin_conversion: bool = method_call.known and proof_resource_function_name_count(functions, method_call.method) == 0 and proof_resource_pure_conversion(method_call.method)
+                    # Numeric selector spellings may dispatch to a source or imported
+                    # `__cast__` hook. Keep the receiver opaque whenever that resolution is
+                    # possible; purity of the builtin conversion list alone is not a witness.
+                    is_builtin_conversion: bool = method_call.known and proof_resource_function_name_count(functions, method_call.method) == 0 and proof_resource_pure_conversion(method_call.method) and not functions.externs.custom_cast_hook_present
                     unmodelled_receiver: bool = method_call.known and not builtin_admitted and not is_builtin_conversion
                     if builtin_admitted:
                         (proof_resource_check_write(builtin.receiver, state, report, function_name, position, functions) can Global{Read,Write})
@@ -222,8 +225,15 @@ extend ElisaProof:
                         (proof_resource_check_expression(field.value, state, report, function_name, functions) can Global{Read,Write})
                 Ast::Expr.If(condition, then_expr, else_expr, _):
                     (proof_resource_check_expression(condition, state, report, function_name, functions) can Global{Read,Write})
-                    (proof_resource_check_expression(then_expr, state, report, function_name, functions) can Global{Read,Write})
-                    (proof_resource_check_expression(else_expr, state, report, function_name, functions) can Global{Read,Write})
+                    then_state: mutable ProofResourceState = proof_resource_empty()
+                    else_state: mutable ProofResourceState = proof_resource_empty()
+                    proof_resource_copy_into(state, &then_state, report)
+                    proof_resource_copy_into(state, &else_state, report)
+                    proof_resource_mark_scope_inherited(state, &then_state)
+                    proof_resource_mark_scope_inherited(state, &else_state)
+                    (proof_resource_check_expression(then_expr, &then_state, report, function_name, functions) can Global{Read,Write})
+                    (proof_resource_check_expression(else_expr, &else_state, report, function_name, functions) can Global{Read,Write})
+                    proof_resource_close_if_children(state, &then_state, &else_state, report)
                 Ast::Expr.Comprehension(variable, iterable, condition, body, _):
                     (proof_resource_check_expression(iterable, state, report, function_name, functions) can Global{Read,Write})
                     # The bound variable is a fresh value binding scoped like a `for` variable;
@@ -243,27 +253,31 @@ extend ElisaProof:
                     pattern_source_classified: mutable bool = false
                     pattern_source_supported: mutable bool = false
                     pattern_source_carries_resource: mutable bool = false
-                    for arm in arms |arm, state, report, function_name, functions, pattern_source_classified, pattern_source_supported, pattern_source_carries_resource|:
+                    moved_any: mutable ProofResourceAlternativeMoves = proof_resource_alternative_move_mask(state, report)
+                    for arm in arms |arm, state, report, function_name, functions, pattern_source_classified, pattern_source_supported, pattern_source_carries_resource, moved_any|:
                         arm_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &arm_state, report)
                         proof_resource_mark_scope_inherited(state, &arm_state)
                         proof_resource_check_pattern_names_with_source(arm.pattern, scrutinee, &pattern_source_classified, &pattern_source_supported, &pattern_source_carries_resource, &arm_state, report, functions, position, function_name)
                         (proof_resource_check_expression(arm.guard, &arm_state, report, function_name, functions) can Global{Read,Write})
                         (proof_resource_check_statements(arm.body, &arm_state, report, function_name, functions) can Global{Read,Write})
-                        proof_resource_close_child(state, arm_state, report, true)
+                        proof_resource_close_alternative_child(state, &arm_state, report, &moved_any)
+                    proof_resource_merge_alternative_moves(state, &moved_any, report)
                 Ast::Expr.Catch(guarded, arms, position):
                     (proof_resource_check_expression(guarded, state, report, function_name, functions) can Global{Read,Write})
                     pattern_source_classified: mutable bool = false
                     pattern_source_supported: mutable bool = false
                     pattern_source_carries_resource: mutable bool = false
-                    for arm in arms |arm, state, report, function_name, functions, pattern_source_classified, pattern_source_supported, pattern_source_carries_resource|:
+                    moved_any: mutable ProofResourceAlternativeMoves = proof_resource_alternative_move_mask(state, report)
+                    for arm in arms |arm, state, report, function_name, functions, pattern_source_classified, pattern_source_supported, pattern_source_carries_resource, moved_any|:
                         arm_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &arm_state, report)
                         proof_resource_mark_scope_inherited(state, &arm_state)
                         proof_resource_check_pattern_names_with_source(arm.pattern, guarded, &pattern_source_classified, &pattern_source_supported, &pattern_source_carries_resource, &arm_state, report, functions, position, function_name)
                         (proof_resource_check_expression(arm.guard, &arm_state, report, function_name, functions) can Global{Read,Write})
                         (proof_resource_check_statements(arm.body, &arm_state, report, function_name, functions) can Global{Read,Write})
-                        proof_resource_close_child(state, arm_state, report, true)
+                        proof_resource_close_alternative_child(state, &arm_state, report, &moved_any)
+                    proof_resource_merge_alternative_moves(state, &moved_any, report)
                 Ast::Expr.GetElse(guarded, recovery, _):
                     (proof_resource_check_expression(guarded, state, report, function_name, functions) can Global{Read,Write})
                     recovery_state: mutable ProofResourceState = proof_resource_empty()

@@ -405,6 +405,96 @@ extend ElisaProof:
             report.analysis_1.budgets.match_lowering_source_work <- work.match_work_used
             return (true, substituted)
 
+        # Runtime assertion admission makes independent structural passes after substitution
+        # (call, move, freshness, and operator classification). One charge includes the AST-cost
+        # preflight and one consumer traversal; callers with multiple readers charge each one.
+        def proof_return_rewrite_bound_add_product(left: usize, right: usize, accumulated: mutable usize&, limit: usize) -> bool:
+            return false if accumulated > limit or left > 0 and right > (limit - accumulated) / left
+            accumulated <- accumulated + left * right
+            true
+
+        def proof_return_pure_call_rewrite_reserve(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, line: u32) -> bool:
+            work: mutable ProofBlockPurityWork = ProofBlockPurityWork{used: report.analysis_1.budgets.return_source_work, reported: report.analysis_1.budgets.return_source_reported, match_work_used: report.analysis_1.budgets.match_lowering_source_work}
+            return false if work.reported
+            cost_work: mutable usize = 0
+            expression_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(expression, &expression_cost, cost_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) or expression_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - cost_work:
+                proof_purity_budget_finding(report, name, line, "return-call-summary-rewrite-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, &work)
+                report.analysis_1.budgets.return_source_reported <- work.reported
+                return false
+            cost_work <- cost_work + expression_cost
+            facts_cost: mutable usize = 0
+            for fact in facts |fact, facts_cost, cost_work, report, name, line, work|:
+                fact_cost: mutable usize = 0
+                if not proof_replay_summary_expr_cost_with_limit(fact, &fact_cost, cost_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) or fact_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - cost_work:
+                    proof_purity_budget_finding(report, name, line, "return-call-summary-rewrite-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, &work)
+                    report.analysis_1.budgets.return_source_reported <- work.reported
+                    return false
+                cost_work <- cost_work + fact_cost
+                facts_cost <- facts_cost + fact_cost
+            combined_cost: usize = expression_cost + facts_cost
+            available: usize = PROOF_PURITY_WALK_WORK_LIMIT - work.used if work.used <= PROOF_PURITY_WALK_WORK_LIMIT else 0
+            if cost_work > available:
+                proof_purity_budget_finding(report, name, line, "return-call-summary-rewrite-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, &work)
+                report.analysis_1.budgets.return_source_reported <- work.reported
+                return false
+            available <- available - cost_work
+            # The rewrite visits at most the combined expression/fact AST size per depth.
+            # Each call node performs at most two replacement scans. A scan may compare three
+            # endpoints per fact (including the repeated left-side selection check), and each
+            # proof_expr_equal performs quick-difference, two support, and structural walks.
+            # Its occurrence guard compares against each fact subtree twice; bound repeated
+            # query cost by expression size and nested-subtree cost by the term depth limit.
+            # Bound these costs separately, then multiply by rewrite fuel.
+            # Visited call nodes are at most the combined expression/fact AST size because each
+            # AST node costs at least one. Every product below is
+            # checked against the remaining allowance before multiplication.
+            depth: usize = PROOF_PURE_CALL_REWRITE_DEPTH_LIMIT
+            if expression_cost == 0 or available / depth < combined_cost:
+                proof_purity_budget_finding(report, name, line, "return-call-summary-rewrite-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, &work)
+                report.analysis_1.budgets.return_source_reported <- work.reported
+                return false
+            per_depth_allowance: usize = (available / depth - combined_cost) / combined_cost
+            per_call_cost: mutable usize = 0
+            if not proof_return_rewrite_bound_add_product(facts.count, expression_cost * 24, &per_call_cost, per_depth_allowance) or not proof_return_rewrite_bound_add_product(facts_cost, 30, &per_call_cost, per_depth_allowance) or not proof_return_rewrite_bound_add_product(facts_cost, expression_cost * 8, &per_call_cost, per_depth_allowance) or not proof_return_rewrite_bound_add_product(facts_cost, (PROOF_TERM_OCCURS_DEPTH_LIMIT + 1) * 8, &per_call_cost, per_depth_allowance) or not proof_return_rewrite_bound_add_product(combined_cost, 16, &per_call_cost, per_depth_allowance):
+                proof_purity_budget_finding(report, name, line, "return-call-summary-rewrite-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, &work)
+                report.analysis_1.budgets.return_source_reported <- work.reported
+                return false
+            per_depth_cost: usize = combined_cost + combined_cost * per_call_cost
+            rewrite_cost: usize = per_depth_cost * depth
+            total_cost: usize = cost_work + rewrite_cost
+            if not proof_purity_work_charge(total_cost, &work):
+                proof_purity_budget_finding(report, name, line, "return-call-summary-rewrite-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, &work)
+                report.analysis_1.budgets.return_source_work <- work.used
+                report.analysis_1.budgets.return_source_reported <- work.reported
+                return false
+            report.analysis_1.budgets.return_source_work <- work.used
+            report.analysis_1.budgets.return_source_reported <- work.reported
+            report.analysis_1.budgets.match_lowering_source_work <- work.match_work_used
+            true
+
+        def proof_return_expression_scan_charge(expression: Ast::Expr, report: mutable ProofReport&, name: sview, line: u32) -> bool:
+            work: mutable ProofBlockPurityWork = ProofBlockPurityWork{used: report.analysis_1.budgets.return_source_work, reported: report.analysis_1.budgets.return_source_reported, match_work_used: report.analysis_1.budgets.match_lowering_source_work}
+            return false if work.reported
+            # The replay AST cost walker has a stricter 1 Mi per-expression ceiling than the
+            # aggregate return-source meter. Measure from zero under its own limit, then debit
+            # the full preflight plus one reader pass to the shared per-function budget.
+            scan_work: mutable usize = 0
+            if not proof_replay_summary_expr_repeat_charge_with_limit(expression, 1, &scan_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                proof_purity_budget_finding(report, name, line, "return-expression-scan-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, &work)
+                report.analysis_1.budgets.return_source_work <- work.used
+                report.analysis_1.budgets.return_source_reported <- work.reported
+                return false
+            if not proof_purity_work_charge(scan_work, &work):
+                proof_purity_budget_finding(report, name, line, "return-expression-scan-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, &work)
+                report.analysis_1.budgets.return_source_work <- work.used
+                report.analysis_1.budgets.return_source_reported <- work.reported
+                return false
+            report.analysis_1.budgets.return_source_work <- work.used
+            report.analysis_1.budgets.return_source_reported <- work.reported
+            report.analysis_1.budgets.match_lowering_source_work <- work.match_work_used
+            true
+
         def proof_block_lemma_return_expression_prepare(expression: Ast::Expr, lemma_steps: bool, names: darray[sview]&, values: darray[Ast::Expr]&, facts: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview, line: u32) -> (ready: bool, expression: Ast::Expr) can[Global.Read, Global.Write]:
             match expression:
                 Ast::Expr.Call(callee, _, _, _) if proof_callable_name(callee) == "assert":

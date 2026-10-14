@@ -2,18 +2,55 @@
 # loop accumulators and mutable locals, gathered once per file into the function table.
 extend ElisaProof:
     private:
+        def proof_collect_functions_with_region_index(file: Ast::File&, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, generic_index: ProofSourceEffectIndex&, generic_metadata_valid: bool, report: mutable ProofReport&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
+            region_index: mutable ProofLocalRegionAnnotationIndex = ProofLocalRegionAnnotationIndex{}
+            if not proof_local_region_annotation_index_build(file.local_region_annotations, &region_index, &source_work, false):
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "local region annotation index could not be built within its validated work bound", "local-region-annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return false
+            declaration_path: mutable darray[usize] = []
+            proof_collect_functions(file, file.top_decls, lemmas, &functions, generic_index, generic_metadata_valid, region_index, &declaration_path, "", 0, &source_work)
+            if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function collection could not classify lemma names within its validated work bound", "lemma-name-lookup-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return false
+            return true
+
         # Preserve explicit local region pins from the parser side table. `@region` is consumed
         # while parsing a local type annotation, so the ordinary statement AST cannot recover it.
         def proof_collect_local_region_bindings(file: Ast::File&, functions: mutable ProofFunctionTable&, source_work: mutable usize&) -> void:
-            for pin in file.local_region_annotations |file, functions, source_work|:
+            region_value_index: mutable ProofLocalRegionAnnotationIndex = ProofLocalRegionAnnotationIndex{}
+            if not proof_local_region_annotation_index_build(file.local_region_annotations, &region_value_index, &source_work, true):
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return
+            for pin in file.local_region_annotations |file, functions, source_work, region_value_index|:
                 return if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(pin.name), source_work) or not proof_report_source_work_charge(sview_len(pin.region), source_work)
                 continue if pin.name != "__region_pin"
-                for binding in file.local_region_annotations |file, pin, functions, source_work|:
-                    return if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(binding.name), source_work) or not proof_report_source_work_charge(sview_len(binding.region), source_work)
-                    if binding.name != "__region_pin" and binding.line == pin.line and binding.region == pin.region:
+                bindings: (complete: bool, head: usize, tail: usize) = proof_local_region_annotation_lookup(pin.line, pin.region, file.local_region_annotations, region_value_index, source_work, true)
+                if not bindings.complete:
+                    source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return
+                binding_row: mutable usize = bindings.head
+                binding_steps: mutable usize = 0
+                binding_last: mutable usize = region_value_index.annotation_count
+                while binding_row < region_value_index.annotation_count and binding_steps < region_value_index.annotation_count |binding_row, binding_steps, binding_last, bindings, region_value_index, file, functions, pin, source_work|:
+                    if binding_row >= file.local_region_annotations.count:
+                        source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return
+                    return if not proof_report_source_work_charge(1, source_work)
+                    binding: Ast::EnumAnnotation = file.local_region_annotations[binding_row]
+                    if binding.line != pin.line or binding.region != pin.region:
+                        source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return
+                    return if not proof_report_source_work_charge(sview_len(binding.name), source_work) or not proof_report_source_work_charge(sview_len(binding.region), source_work)
+                    if binding.name != "__region_pin":
                         functions.parameters.locals.local_region_binding_names.push(binding.name)
                         functions.parameters.locals.local_region_binding_regions.push(binding.region)
                         functions.parameters.locals.local_region_binding_lines.push(binding.line)
+                    binding_last <- binding_row
+                    binding_row <- region_value_index.next_rows[binding_row]
+                    binding_steps <- binding_steps + 1
+                if binding_row != region_value_index.annotation_count or binding_last != bindings.tail:
+                    source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return
 
         # A loop-header accumulator is declared with its bare type, so only the parser's side
         # table records that the loop assigns it. Key each row by name and source offset.

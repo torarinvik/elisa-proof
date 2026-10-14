@@ -38,14 +38,44 @@ extend ElisaProof:
                         pass
             return (count, selected)
 
+        # Replay source witnesses must resolve a formal from the exact owner declaration whose
+        # body was selected. Name-only lookup can otherwise combine same-line overloads.
+        def proof_scalar_reference_parameter_type_at_owner_offset_with_work(declarations: darray[Ast::Decl]&, function_name: sview, parameter_name: sview, owner_line: u32, owner_offset: usize, owner_offset_valid: bool, depth: usize, source_work: mutable usize&) -> (count: usize, type_expression: Ast::Expr):
+            selected: mutable Ast::Expr = Ast::Expr.Invalid
+            count: mutable usize = 0
+            return (2, selected) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not owner_offset_valid or not proof_type_audit_work_charge(1, source_work)
+            for declaration in declarations |declaration, function_name, parameter_name, owner_line, owner_offset, selected, count, source_work, depth|:
+                return (2, Ast::Expr.Invalid) if not proof_type_audit_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, _, _, _, position):
+                        return (2, Ast::Expr.Invalid) if:
+                            not proof_type_audit_work_charge(sview_len(name), source_work)
+                            not proof_type_audit_work_charge(sview_len(function_name), source_work)
+                        continue if name != function_name or position.line != owner_line or position.offset.usize() != owner_offset
+                        for parameter in parameters |parameter, parameter_name, selected, count, source_work|:
+                            return (2, Ast::Expr.Invalid) if:
+                                not proof_type_audit_work_charge(1, source_work)
+                                not proof_type_audit_work_charge(sview_len(parameter.name), source_work)
+                                not proof_type_audit_work_charge(sview_len(parameter_name), source_work)
+                            if parameter.name == parameter_name:
+                                selected <- parameter.type_expression
+                                count <- count + 1
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_scalar_reference_parameter_type_at_owner_offset_with_work(body, function_name, parameter_name, owner_line, owner_offset, owner_offset_valid, depth + 1, source_work)
+                        count <- count + nested.count
+                        selected <- nested.type_expression if nested.count == 1
+                    _:
+                        pass
+            return (count, selected)
+
         const PROOF_PURE_CALL_WITNESS_DEPTH_LIMIT: usize = 32
 
-        def proof_initialize_old_parameter_values_with_work(parameters: darray[Ast::ParamDecl]&, old_values: mutable darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, declaration_line: u32, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, position: Ast::Pos, source_work: mutable usize&) -> void:
+        def proof_initialize_old_parameter_values_with_work(parameters: darray[Ast::ParamDecl]&, old_values: mutable darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, declaration_line: u32, declaration_offset: u32, exact_metadata_complete: bool, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, position: Ast::Pos, source_work: mutable usize&) -> void:
             parameter_index: mutable usize = 0
-            for parameter in parameters |parameter_index, old_values, declarations, generic_lines, generic_names, declaration_line, generic_index, position, source_work|:
+            for parameter in parameters |parameter_index, old_values, declarations, generic_lines, generic_names, declaration_line, declaration_offset, exact_metadata_complete, generic_index, position, source_work|:
                 return if not proof_type_audit_work_charge(1, source_work) or not proof_type_audit_work_charge(sview_len(parameter.name), source_work)
                 scalar_reference: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type_with_work(parameter.type_expression, declarations, 0, source_work)
-                parameter_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(parameter.type_expression, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work)
+                parameter_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(parameter.type_expression, declarations, generic_lines, generic_names, declaration_line, declaration_offset, exact_metadata_complete, generic_index, generic_names_complete, source_work)
                 if scalar_reference.known and parameter_index < old_values.count:
                     initial_value: Ast::Expr = Ast::Expr.Index(Ast::Expr.Ident(parameter.name, position), Ast::Expr.IntLit(0, position), position)
                     old_values[parameter_index] <- proof_scalar_reference_state_marker(initial_value, position)
@@ -278,34 +308,65 @@ extend ElisaProof:
         # `bool` return and a callee with no requires; their exact call AST (including arguments)
         # is the atom identity. This lets conjunction denial reason about the same checked helper
         # result without treating an arbitrary call or a partial function as stable.
-        def proof_add_pure_call_witnesses(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, depth: usize) -> void:
-            return if depth >= PROOF_PURE_CALL_WITNESS_DEPTH_LIMIT
+        def proof_add_pure_call_witnesses(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, depth: usize) -> bool:
+            budget: mutable usize = report.analysis_1.budgets.frame_call_source_work
+            exhausted: mutable bool = false
+            proof_add_pure_call_witnesses_with_work(expression, facts, functions, report, line, owner, depth, &budget, &exhausted)
+            report.analysis_1.budgets.frame_call_source_work <- budget
+            proof_frame_source_work_report_exhaustion(report, owner, line, "pure-call-witness-work", "pure-call witness expansion exceeded its bounded source-work budget") if exhausted
+            return not exhausted
+
+        def proof_add_pure_call_witnesses_with_work(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> void:
+            return if exhausted
+            if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                exhausted <- true
+                return
+            if depth >= PROOF_PURE_CALL_WITNESS_DEPTH_LIMIT:
+                exhausted <- true
+                return
+            return if not proof_linear_safety_work_charge(budget, exhausted, 1)
             source_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    proof_add_pure_call_witnesses(inner, facts, functions, report, line, owner, depth + 1)
+                    proof_add_pure_call_witnesses_with_work(inner, facts, functions, report, line, owner, depth + 1, budget, exhausted)
                 Ast::Expr.Scope(_, _, position):
                     proof_add_qualified_constant_witness(expression, facts, functions, report, line, owner, position)
+                    if report.source_types.source_effect_index.work.implicit_effect_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                        exhausted <- true
                 Ast::Expr.Unary(_, operand, _):
-                    proof_add_pure_call_witnesses(operand, facts, functions, report, line, owner, depth + 1)
+                    proof_add_pure_call_witnesses_with_work(operand, facts, functions, report, line, owner, depth + 1, budget, exhausted)
                 Ast::Expr.Binary(left, operator, right, position):
-                    proof_add_pure_call_witnesses(left, facts, functions, report, line, owner, depth + 1)
-                    proof_add_pure_call_witnesses(right, facts, functions, report, line, owner, depth + 1)
+                    proof_add_pure_call_witnesses_with_work(left, facts, functions, report, line, owner, depth + 1, budget, exhausted)
+                    return if exhausted
+                    proof_add_pure_call_witnesses_with_work(right, facts, functions, report, line, owner, depth + 1, budget, exhausted)
+                    return if exhausted
                     # `name is Enum.Variant` is the builtin tag test: never overloaded, one bool
                     # for the one value a name denotes in a goal.
                     if operator == TokenKind.Is and proof_ident_name(left) != "":
                         match right:
                             Ast::Expr.Field(Ast::Expr.Ident(_, _), _, _):
-                                proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(expression, position), line, owner)
+                                exhausted <- not proof_pure_call_add_scalar_witness_with_work(facts, report, proof_scalar_term_marker(expression, position), line, owner, budget, exhausted)
                             _:
                                 pass
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    proof_add_pure_call_witnesses(condition, facts, functions, report, line, owner, depth + 1)
-                    proof_add_pure_call_witnesses(then_expression, facts, functions, report, line, owner, depth + 1)
-                    proof_add_pure_call_witnesses(else_expression, facts, functions, report, line, owner, depth + 1)
+                    proof_add_pure_call_witnesses_with_work(condition, facts, functions, report, line, owner, depth + 1, budget, exhausted)
+                    return if exhausted
+                    proof_add_pure_call_witnesses_with_work(then_expression, facts, functions, report, line, owner, depth + 1, budget, exhausted)
+                    return if exhausted
+                    proof_add_pure_call_witnesses_with_work(else_expression, facts, functions, report, line, owner, depth + 1, budget, exhausted)
                 Ast::Expr.Call(callee, arguments, _, position):
-                    for argument in arguments |facts, functions, report, line, owner, depth|:
-                        proof_add_pure_call_witnesses(argument, facts, functions, report, line, owner, depth + 1)
+                    for argument in arguments |facts, functions, report, line, owner, depth, budget, exhausted|:
+                        proof_add_pure_call_witnesses_with_work(argument, facts, functions, report, line, owner, depth + 1, budget, exhausted)
+                        return if exhausted
+                    return if exhausted
+                    # Recursive scope arguments update the shared implicit-effect meter. Reload
+                    # after visiting them so return-type checks cannot overwrite their charges.
+                    source_work <- report.source_types.source_effect_index.work.implicit_effect_work
+                    call_shape: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(expression, budget, exhausted)
+                    return if not call_shape.complete or exhausted
+                    # The numeric-cast recognizer is constant-time; only its receiver's legacy
+                    # nested-call check walks an expression, so reserve one measured pass.
+                    return if not proof_linear_safety_work_charge_scaled(budget, exhausted, call_shape.cost, 1)
                     # Builtin integer casts have a stable scalar result even when the cast is
                     # not a value-preserving widening. Admit only a cast without a custom hook
                     # and with a call-free receiver; this records its result type, not a relation
@@ -318,47 +379,75 @@ extend ElisaProof:
                                 signed_cast_width: i64 = proof_signed_primitive_width(target_type)
                                 unsigned_cast_width: i64 = proof_unsigned_primitive_width(target_type)
                                 if signed_cast_width > 0:
-                                    proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(expression, position), line, owner)
-                                    proof_add_scalar_type_witness(facts, report, proof_signed_place_marker(expression, signed_cast_width, position), line, owner)
+                                    return if not proof_pure_call_add_scalar_witness_with_work(facts, report, proof_scalar_term_marker(expression, position), line, owner, budget, exhausted)
+                                    return if not proof_pure_call_add_scalar_witness_with_work(facts, report, proof_signed_place_marker(expression, signed_cast_width, position), line, owner, budget, exhausted)
                                 elif unsigned_cast_width > 0:
-                                    proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(expression, position), line, owner)
-                                    proof_add_scalar_type_witness(facts, report, proof_unsigned_place_marker(expression, unsigned_cast_width, position), line, owner)
+                                    return if not proof_pure_call_add_scalar_witness_with_work(facts, report, proof_scalar_term_marker(expression, position), line, owner, budget, exhausted)
+                                    return if not proof_pure_call_add_scalar_witness_with_work(facts, report, proof_unsigned_place_marker(expression, unsigned_cast_width, position), line, owner, budget, exhausted)
                             _:
                                 pass
-                    proof_add_widening_cast_witnesses(expression, callee, arguments.count, facts, functions, report, line, owner, position)
-                    return if not proof_contract_calls_are_pure(expression, functions)
+                    return if not proof_add_widening_cast_witnesses_with_work(expression, callee, arguments.count, facts, functions, report, line, owner, position, budget, exhausted)
+                    return if exhausted
+                    pure: bool = proof_contract_calls_are_pure_with_source_work(expression, functions, true, budget)
+                    if budget > PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                        exhausted <- true
+                        return
+                    return if not pure
                     called: usize = proof_function_index_for_callee(functions, callee)
+                    if functions.lookup.module_resolution_work_exhausted:
+                        exhausted <- true
+                        return
                     return if called >= functions.returns.return_scalar.count or not functions.returns.return_scalar[called]
                     return if called >= functions.returns.return_types.count
                     return_type: Ast::Expr = functions.returns.return_types[called]
                     boolean_atom: bool = proof_ident_name(return_type) == "bool" and called < functions.contracts.obligations.requires_counts.count and functions.contracts.obligations.requires_counts[called] == 0
                     if not boolean_atom:
-                        for argument in arguments |facts, report|:
-                            continue if proof_value_binding_argument(argument, report, 0)
-                            return if not proof_scalar_term_witnessed(argument, facts, 0)
+                        # The fact frame does not change during this argument check. Build its
+                        # scalar marker index once, rather than rescanning and reindexing every
+                        # fact separately for each argument.
+                        scalar_markers_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, false, budget, exhausted)
+                        return if not scalar_markers_result.complete or exhausted
+                        scalar_markers: mutable ProofScalarWitnesses = scalar_markers_result.witnesses
+                        marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(scalar_markers, budget, exhausted)
+                        return if not marker_scale.complete or exhausted
+                        for argument in arguments |facts, report, scalar_markers, marker_scale, budget, exhausted|:
+                            value_binding: (complete: bool, argument: bool) = proof_value_binding_argument_with_work(argument, report, 0, budget, exhausted)
+                            return if not value_binding.complete or exhausted
+                            continue if value_binding.argument
+                            witnessed: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(argument, scalar_markers, marker_scale.scale, budget, exhausted)
+                            return if not witnessed.complete or exhausted or not witnessed.matches
                     if boolean_atom:
                         return if called >= functions.lookup.owner_modules.count
                         atom_arguments: darray[Ast::Expr] = [expression, Ast::Expr.StringLit(functions.lookup.owner_modules[called], position)]
                         atom: Ast::Expr = Ast::Expr.Call(Ast::Expr.Ident("__elisa_verified_total_bool_atom", position), atom_arguments, [], position)
-                        proof_add_type_bound_fact(facts, report, atom, line, owner)
+                        return if not proof_pure_call_add_type_fact_with_work(facts, report, atom, line, owner, budget, exhausted)
                     else:
-                        proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(expression, position), line, owner)
+                        return if not proof_pure_call_add_scalar_witness_with_work(facts, report, proof_scalar_term_marker(expression, position), line, owner, budget, exhausted)
                     # The call's value has its callee's declared signed width, which is what lets
                     # `size(left) + size(right) + 1` be bounded without wrapping. The bare name
                     # must select exactly one source declaration; anything else keeps no width.
                     return_declaration_line: u32 = functions.lookup.lines[called] if called < functions.lookup.lines.count else 0
-                    return_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(return_type, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, return_declaration_line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work)
+                    return_declaration_offset: u32 = functions.lookup.offsets[called] if called < functions.lookup.offsets.count else 0
+                    source_work <- report.source_types.source_effect_index.work.implicit_effect_work
+                    return_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(return_type, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, return_declaration_line, return_declaration_offset, report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work)
                     report.source_types.source_effect_index.work.implicit_effect_work <- source_work
-                    return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or return_markers.reference
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not return_markers.complete:
+                        exhausted <- true
+                        return
+                    return if return_markers.reference
                     unsigned_width: i64 = proof_unsigned_primitive_width(return_type)
-                    proof_add_scalar_type_witness(facts, report, proof_unsigned_place_marker(expression, unsigned_width, position), line, owner) if unsigned_width > 0
+                    return if unsigned_width > 0 and not proof_pure_call_add_scalar_witness_with_work(facts, report, proof_unsigned_place_marker(expression, unsigned_width, position), line, owner, budget, exhausted)
                     width: i64 = proof_signed_type_width_with_work(return_type, report.source.source_declarations, 0, &source_work)
                     report.source_types.source_effect_index.work.implicit_effect_work <- source_work
-                    return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                    proof_add_scalar_type_witness(facts, report, proof_signed_place_marker(expression, width, position), line, owner) if width > 0
+                    return if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return if width > 0 and not proof_pure_call_add_scalar_witness_with_work(facts, report, proof_signed_place_marker(expression, width, position), line, owner, budget, exhausted)
                 Ast::Expr.Field(object, field, position):
-                    proof_add_pure_call_witnesses(object, facts, functions, report, line, owner, depth + 1)
-                    proof_add_tuple_field_call_witnesses(object, field, facts, functions, report, line, owner, position)
+                    proof_add_pure_call_witnesses_with_work(object, facts, functions, report, line, owner, depth + 1, budget, exhausted)
+                    return if exhausted
+                    tuple_complete: bool = proof_add_tuple_field_call_witnesses_with_work(object, field, facts, functions, report, line, owner, position, budget, exhausted)
+                    if not tuple_complete:
+                        exhausted <- true
+                        return
                 _:
                     pass
 
@@ -391,9 +480,16 @@ extend ElisaProof:
                     for fact in facts |fact, budget, exhausted, fact_scan_cost|:
                         fact_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, &budget, &exhausted)
                         return (false, false, Ast::Expr.Invalid, "") if not fact_cost.complete
-                        fact_scan_cost <- fact_scan_cost + fact_cost.cost
+                        if fact_scan_cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                            exhausted <- true
+                            return (false, false, Ast::Expr.Invalid, "")
+                        remaining_scan_cost: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - fact_scan_cost - 1
+                        if fact_cost.cost > remaining_scan_cost:
+                            exhausted <- true
+                            return (false, false, Ast::Expr.Invalid, "")
+                        fact_scan_cost <- fact_scan_cost + fact_cost.cost + 1
                     return (false, false, Ast::Expr.Invalid, "") if not proof_linear_safety_charge_cross_with_work(&budget, &exhausted, fact_scan_cost, receiver_cost.cost, 8)
-                    return (false, false, Ast::Expr.Invalid, "") if not proof_linear_safety_fact_term_scan_with_work(receiver, facts, fact_scan_cost, 1, &budget, &exhausted)
+                    return (false, false, Ast::Expr.Invalid, "") if not proof_linear_safety_fact_scan_with_work(fact_scan_cost, 1, &budget, &exhausted)
                     return (true, false, Ast::Expr.Invalid, "") if not proof_builtin_index_expression_witnessed(receiver, facts) or not proof_expr_is_zero(index)
                 _:
                     return (true, false, Ast::Expr.Invalid, "")
@@ -402,7 +498,7 @@ extend ElisaProof:
             target_unsigned: i64 = proof_unsigned_primitive_width(target)
             target_signed: i64 = proof_signed_primitive_width(target)
             return (true, false, Ast::Expr.Invalid, "") if target_unsigned <= 0 and target_signed <= 0
-            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, false, &budget, &exhausted)
+            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, &budget, &exhausted)
             return (false, false, Ast::Expr.Invalid, "") if not marker_result.complete
             marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(marker_result.witnesses, &budget, &exhausted)
             return (false, false, Ast::Expr.Invalid, "") if not marker_scale.complete
@@ -438,52 +534,67 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_add_widening_cast_witnesses(expression: Ast::Expr, callee: Ast::Expr, argument_count: usize, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void:
-            budget: mutable usize = report.analysis_1.budgets.frame_call_source_work
-            exhausted: mutable bool = false
-            widening: (complete: bool, known: bool, receiver: Ast::Expr, target: sview) = proof_widening_cast_receiver_with_work(callee, argument_count, facts, functions, &budget, &exhausted)
+        def proof_add_widening_cast_witnesses_with_work(expression: Ast::Expr, callee: Ast::Expr, argument_count: usize, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            widening: (complete: bool, known: bool, receiver: Ast::Expr, target: sview) = proof_widening_cast_receiver_with_work(callee, argument_count, facts, functions, budget, exhausted)
             report.analysis_1.budgets.frame_call_source_work <- budget
             source_work_stopped: bool = proof_frame_source_work_stop(report, owner, line)
             if exhausted or not widening.complete or source_work_stopped:
+                exhausted <- true
                 proof_frame_source_work_report_exhaustion(report, owner, line, "widening-cast-work", "widening-cast classification exceeded its bounded source-work budget")
-                return
-            return if not widening.known
+                return false
+            return true if not widening.known
             target: Ast::Expr = Ast::Expr.Ident(widening.target, position)
             target_unsigned: i64 = proof_unsigned_primitive_width(target)
             target_signed: i64 = proof_signed_primitive_width(target)
-            budget <- report.analysis_1.budgets.frame_call_source_work
-            exhausted: mutable bool = false
-            output_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(expression, &budget, &exhausted)
+            output_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(expression, budget, exhausted)
             if not output_cost.complete or exhausted:
                 report.analysis_1.budgets.frame_call_source_work <- budget
                 proof_frame_source_work_report_exhaustion(report, owner, line, "widening-cast-work", "widening-cast witness insertion exceeded its bounded source-work budget")
-                return
-            receiver_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(widening.receiver, &budget, &exhausted)
+                exhausted <- true
+                return false
+            receiver_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(widening.receiver, budget, exhausted)
             if not receiver_cost.complete or exhausted:
                 report.analysis_1.budgets.frame_call_source_work <- budget
                 proof_frame_source_work_report_exhaustion(report, owner, line, "widening-cast-work", "widening-cast witness insertion exceeded its bounded source-work budget")
-                return
-            fact_scan_cost: mutable usize = facts.count
+                exhausted <- true
+                return false
+            fact_scan_cost: mutable usize = 0
             for fact in facts |fact, budget, exhausted, fact_scan_cost|:
-                fact_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, &budget, &exhausted)
+                fact_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
                 if not fact_cost.complete or exhausted:
                     report.analysis_1.budgets.frame_call_source_work <- budget
                     proof_frame_source_work_report_exhaustion(report, owner, line, "widening-cast-work", "widening-cast witness insertion exceeded its bounded source-work budget")
-                    return
+                    exhausted <- true
+                    return false
+                if fact_scan_cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT or fact_cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - fact_scan_cost - 1:
+                    exhausted <- true
+                    report.analysis_1.budgets.frame_call_source_work <- budget
+                    proof_frame_source_work_report_exhaustion(report, owner, line, "widening-cast-work", "widening-cast witness insertion exceeded its bounded source-work budget")
+                    return false
                 fact_scan_cost <- fact_scan_cost + fact_cost.cost
+                fact_scan_cost <- fact_scan_cost + 1
             witness_passes: usize = 1
             witness_passes <- witness_passes + 1 if target_unsigned > 0
             witness_passes <- witness_passes + 2 if target_signed > 0
             comparison_multiplier: usize = witness_passes * 8
             generated_marker_cost: usize = output_cost.cost + 4
-            complete: bool = proof_linear_safety_charge_cross_with_work(&budget, &exhausted, facts.count, generated_marker_cost, comparison_multiplier)
-            complete <- complete and proof_linear_safety_work_charge_scaled(&budget, &exhausted, fact_scan_cost, comparison_multiplier)
+            complete: bool = proof_linear_safety_charge_cross_with_work(budget, exhausted, facts.count, generated_marker_cost, comparison_multiplier)
+            complete <- complete and proof_linear_safety_work_charge_scaled(budget, exhausted, fact_scan_cost, comparison_multiplier)
             report.analysis_1.budgets.frame_call_source_work <- budget
             if not complete or exhausted:
                 proof_frame_source_work_report_exhaustion(report, owner, line, "widening-cast-work", "widening-cast witness insertion exceeded its bounded source-work budget")
-                return
-            return if proof_frame_source_work_stop(report, owner, line)
+                exhausted <- true
+                return false
+            if proof_frame_source_work_stop(report, owner, line):
+                exhausted <- true
+                return false
             proof_add_scalar_type_witness(facts, report, proof_unsigned_place_marker(expression, target_unsigned, position), line, owner) if target_unsigned > 0
             proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(expression, position), line, owner)
             proof_add_scalar_type_witness(facts, report, proof_signed_type_marker(expression, target_signed, position), line, owner) if target_signed > 0
             proof_add_scalar_type_witness(facts, report, Ast::Expr.Binary(expression, TokenKind.EqEq, widening.receiver, position), line, owner)
+            report.analysis_1.budgets.frame_call_source_work <- budget
+            if report.source_types.source_effect_index.work.implicit_effect_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                exhausted <- true
+                proof_frame_source_work_report_exhaustion(report, owner, line, "widening-cast-work", "widening-cast witness insertion exceeded its bounded source-work budget")
+                return false
+            return true

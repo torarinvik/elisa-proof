@@ -320,27 +320,35 @@ extend ElisaProof:
             # their whole byte cost at each visited expression node before using the legacy
             # membership predicates, so repeated nested queries share one source-work limit.
             name_scan_cost: mutable usize = 0
-            for name in names |source_work, name_scan_cost|:
+            name_scan_entries: mutable usize = 0
+            for name in names |source_work, name_scan_cost, name_scan_entries|:
                 return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
                 name_scan_cost <- name_scan_cost + 1 + sview_len(name)
-            for name in parameters |source_work, name_scan_cost|:
+                name_scan_entries <- name_scan_entries + 1
+            for name in parameters |source_work, name_scan_cost, name_scan_entries|:
                 return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
                 name_scan_cost <- name_scan_cost + 1 + sview_len(name)
-            for name in aliased |source_work, name_scan_cost|:
+                name_scan_entries <- name_scan_entries + 1
+            for name in aliased |source_work, name_scan_cost, name_scan_entries|:
                 return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
                 name_scan_cost <- name_scan_cost + 1 + sview_len(name)
-            for name in shared_extents |source_work, name_scan_cost|:
+                name_scan_entries <- name_scan_entries + 1
+            for name in shared_extents |source_work, name_scan_cost, name_scan_entries|:
                 return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
                 name_scan_cost <- name_scan_cost + 1 + sview_len(name)
-            for name in shared_fixed |source_work, name_scan_cost|:
+                name_scan_entries <- name_scan_entries + 1
+            for name in shared_fixed |source_work, name_scan_cost, name_scan_entries|:
                 return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
                 name_scan_cost <- name_scan_cost + 1 + sview_len(name)
-            for name in local_extents |source_work, name_scan_cost|:
+                name_scan_entries <- name_scan_entries + 1
+            for name in local_extents |source_work, name_scan_cost, name_scan_entries|:
                 return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
                 name_scan_cost <- name_scan_cost + 1 + sview_len(name)
-            for name in report.threading.threaded_symbols |source_work, name_scan_cost|:
+                name_scan_entries <- name_scan_entries + 1
+            for name in report.threading.threaded_symbols |source_work, name_scan_cost, name_scan_entries|:
                 return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
                 name_scan_cost <- name_scan_cost + 1 + sview_len(name)
+                name_scan_entries <- name_scan_entries + 1
             return (false, false) if:
                 name_scan_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8
                 not proof_replay_source_work_charge_or_exhaust(name_scan_cost * 8, source_work)
@@ -469,11 +477,23 @@ extend ElisaProof:
                     # callee's summary -- `not f(...) or p` -- past the next call in the body,
                     # together with the witness recorded beside that fact when it is built.
                     return false if not proof_call_stable_scalar_term_with_work(expression, markers, marker_scale, linear_budget, exhausted)
-                    for argument in arguments |facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost|:
-                        if not proof_replay_summary_expr_repeat_charge_with_work(argument, name_scan_cost + 1, source_work):
-                            source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
-                            return false
-                        continue if proof_value_argument_stable(argument, names, parameters, aliased, local_extents, 0)
+                    for argument in arguments |facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost, name_scan_entries|:
+                        value_shape: (complete: bool, supported: bool, cost: usize, terminal_name: sview) = proof_value_argument_shape_with_work(argument, source_work, 0)
+                        return false if not value_shape.complete
+                        if value_shape.supported:
+                            # The shape walk already paid for one AST pass. The value shortcut
+                            # traverses that chain once more and scans membership lists only at
+                            # its terminal identifier, so reserve one chain cost plus one bounded
+                            # list scan instead of multiplying every field/paren by list size.
+                            reserved_name_entries: usize = name_scan_entries + PROOF_INTERNAL_REBIND_SYMBOL_COUNT + 24
+                            terminal_name_bytes: usize = sview_len(value_shape.terminal_name)
+                            return false if terminal_name_bytes != 0 and reserved_name_entries > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / terminal_name_bytes
+                            membership_work: usize = name_scan_cost + terminal_name_bytes * reserved_name_entries
+                            return false if value_shape.cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                            remaining_after_chain: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work - value_shape.cost
+                            return false if membership_work > remaining_after_chain
+                            return false if not proof_replay_source_work_charge_or_exhaust(value_shape.cost + membership_work, source_work)
+                            continue if proof_value_argument_stable(argument, names, parameters, aliased, local_extents, 0)
                         return false if not proof_expr_call_stable_core_with_work(argument, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost)
                     return true
                 Ast::Expr.Paren(inner, _):
@@ -505,6 +525,29 @@ extend ElisaProof:
         # symbol `proof_freshen_opaque_bindings` registered because its scrutinee is such a
         # binding. A field chain under it is part of the same value. An index is not followed:
         # its subscript is a separate term with its own stability question.
+        # First recognize the narrow place-chain subset. Complex arguments are rejected by the
+        # value shortcut at their root, so charging a full repeated AST/list scan for them would
+        # spend budget on work the classifier never performs. This bounded prefix scan is charged
+        # independently; supported chains reserve one metered shortcut traversal and terminal
+        # membership scan.
+        def proof_value_argument_shape_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, supported: bool, cost: usize, terminal_name: sview):
+            return (true, false, 0, "") if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return (false, false, 0, "") if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return (false, false, 0, "") if not proof_replay_source_work_charge_or_exhaust(sview_len(name), source_work)
+                    return (true, name != "", 1 + sview_len(name), name)
+                Ast::Expr.Field(object, field_name, _):
+                    return (false, false, 0, "") if not proof_replay_source_work_charge_or_exhaust(sview_len(field_name), source_work)
+                    return (true, false, 1 + sview_len(field_name), "") if field_name == ""
+                    nested: (complete: bool, supported: bool, cost: usize, terminal_name: sview) = proof_value_argument_shape_with_work(object, source_work, depth + 1)
+                    (nested.complete, nested.supported, nested.cost + 1 + sview_len(field_name), nested.terminal_name)
+                Ast::Expr.Paren(inner, _):
+                    nested: (complete: bool, supported: bool, cost: usize, terminal_name: sview) = proof_value_argument_shape_with_work(inner, source_work, depth + 1)
+                    (nested.complete, nested.supported, nested.cost + 1, nested.terminal_name)
+                _:
+                    (true, false, 1, "")
+
         def proof_value_argument_stable(expression: Ast::Expr, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, local_extents: darray[sview]&, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:

@@ -19,8 +19,11 @@ extend ElisaProof:
             selected_scope_identity_valid: mutable bool
             selected_scope_valid: mutable bool
             selected_bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]
-            selected_bindings_names: mutable darray[sview]
             selected_bindings_scope_identity: mutable usize
+            selected_bindings_context_line: mutable u32
+            selected_bindings_context_offset: mutable usize
+            selected_bindings_context_epoch: mutable usize
+            selected_bindings_context_known: mutable bool
             selected_bindings_source_count: mutable usize
             selected_bindings_valid: mutable bool
 
@@ -44,7 +47,7 @@ extend ElisaProof:
             owners: mutable ProofSourceKernelScopedFunctionIndexOwners
 
         def proof_source_kernel_scoped_function_index_new() -> ProofSourceKernelScopedFunctionIndex:
-            return ProofSourceKernelScopedFunctionIndex{functions: ProofSourceKernelScopedFunctionIndexFunctions{build_attempted: false, valid: false, function_count: 0, hashes: [], slots: [], counts: [], heads: [], next_rows: [], function_slots: [], selected_function_rows: [], selected_scope_identity: 0, selected_scope_identity_valid: false, selected_scope_valid: false, selected_bindings: [], selected_bindings_names: [], selected_bindings_scope_identity: 0, selected_bindings_source_count: 0, selected_bindings_valid: false}, owners: ProofSourceKernelScopedFunctionIndexOwners{owner_hashes: [], owner_slots: [], owner_ids: [], owner_heads: [], owner_next: [], owner_counts: [], owner_expected_counts: [], owner_scope_depths: [], owner_scope_depth_computed: [], selected_owner_epochs: [], selected_owner_epoch: 0, owner_scope_identity: 0, owner_scope_identity_valid: false}}
+            return ProofSourceKernelScopedFunctionIndex{functions: ProofSourceKernelScopedFunctionIndexFunctions{build_attempted: false, valid: false, function_count: 0, hashes: [], slots: [], counts: [], heads: [], next_rows: [], function_slots: [], selected_function_rows: [], selected_scope_identity: 0, selected_scope_identity_valid: false, selected_scope_valid: false, selected_bindings: [], selected_bindings_scope_identity: 0, selected_bindings_context_line: 0, selected_bindings_context_offset: 0, selected_bindings_context_epoch: 0, selected_bindings_context_known: false, selected_bindings_source_count: 0, selected_bindings_valid: false}, owners: ProofSourceKernelScopedFunctionIndexOwners{owner_hashes: [], owner_slots: [], owner_ids: [], owner_heads: [], owner_next: [], owner_counts: [], owner_expected_counts: [], owner_scope_depths: [], owner_scope_depth_computed: [], selected_owner_epochs: [], selected_owner_epoch: 0, owner_scope_identity: 0, owner_scope_identity_valid: false}}
 
         # Module-owner segment rows use a bounded open-addressed identity table. Each owner
         # maps to a linked chain containing only its segment rows.
@@ -121,20 +124,17 @@ extend ElisaProof:
             owner_scope_depth_computed[owner_index] <- true
             return depth
 
-        def proof_source_kernel_scoped_function_bindings(global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], names: darray[sview]&, scope_path: darray[sview]&, scope_identity: usize, scoped_index: mutable ProofSourceKernelScopedFunctionIndex&, source_work: mutable usize&) -> (known: bool, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) can[Memory.Allocate, Abort.Panic]:
+        def proof_source_kernel_scoped_function_bindings(global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], names: darray[sview]&, scope_path: darray[sview]&, scope_identity: usize, context_line: u32, context_offset: usize, context_epoch: usize, scoped_index: mutable ProofSourceKernelScopedFunctionIndex&, source_work: mutable usize&) -> (known: bool, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) can[Memory.Allocate, Abort.Panic]:
             selected_signatures: mutable darray[usize] = []
             selected_signature_owners: mutable darray[usize] = []
             scoped: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding] = []
-            if scoped_index.functions.selected_bindings_valid and scoped_index.functions.selected_bindings_scope_identity == scope_identity and scoped_index.functions.selected_bindings_source_count == global_bindings.count and scoped_index.functions.selected_bindings_names.count == names.count:
-                same_names: mutable bool = true
-                for index in 0..<names.count |index, names, scoped_index, same_names, source_work|:
-                    cached_name: sview = scoped_index.functions.selected_bindings_names[index]
-                    current_name: sview = names[index]
-                    return (false, scoped) if not proof_source_kernel_charge_text_comparison(cached_name, current_name, source_work)
-                    if cached_name != current_name:
-                        same_names <- false
-                        break
-                return (true, scoped_index.functions.selected_bindings) if same_names
+            # Once the context epoch saturates, later lexical changes can no longer get
+            # distinct cache keys. Disable reuse at that boundary instead of risking a hit
+            # on bindings selected for an earlier context.
+            context_known: bool = context_line != 0 and context_epoch < PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if context_known and scoped_index.functions.selected_bindings_valid and scoped_index.functions.selected_bindings_context_known and scoped_index.functions.selected_bindings_scope_identity == scope_identity and scoped_index.functions.selected_bindings_context_line == context_line and scoped_index.functions.selected_bindings_context_offset == context_offset and scoped_index.functions.selected_bindings_context_epoch == context_epoch and scoped_index.functions.selected_bindings_source_count == global_bindings.count and scoped_index.functions.selected_bindings.count <= PROOF_SOURCE_KERNEL_GLOBAL_BINDING_LIMIT:
+                return (false, scoped) if not proof_source_kernel_charge_work(scoped_index.functions.selected_bindings.count, source_work)
+                return (true, scoped_index.functions.selected_bindings)
             scoped_index.functions.selected_bindings_valid <- false
             hashes: mutable darray[u32]& = &scoped_index.functions.hashes
             slots: mutable darray[usize]& = &scoped_index.functions.slots
@@ -486,12 +486,13 @@ extend ElisaProof:
                             signature_slot <- (signature_slot + 1) % signature_capacity
                             signature_probes <- signature_probes + 1
                     scoped.push(binding) if include_parameter
-            scoped_index.functions.selected_bindings_names.clear()
-            for name in names |name, scoped_index, source_work|:
-                return (false, scoped) if not proof_source_kernel_charge_work(1 + sview_len(name), source_work)
-                scoped_index.functions.selected_bindings_names.push(name)
+            return (false, scoped) if not proof_source_kernel_charge_work(scoped.count, source_work)
             scoped_index.functions.selected_bindings <- scoped
             scoped_index.functions.selected_bindings_scope_identity <- scope_identity
+            scoped_index.functions.selected_bindings_context_line <- context_line
+            scoped_index.functions.selected_bindings_context_offset <- context_offset
+            scoped_index.functions.selected_bindings_context_epoch <- context_epoch
+            scoped_index.functions.selected_bindings_context_known <- context_known
             scoped_index.functions.selected_bindings_source_count <- global_bindings.count
-            scoped_index.functions.selected_bindings_valid <- true
+            scoped_index.functions.selected_bindings_valid <- context_known
             return (true, scoped)

@@ -1,0 +1,113 @@
+extend ElisaProof:
+    private:
+        def proof_check_captured_block(body: darray[Ast::Stmt]&, captures: darray[sview]&, block_position: Ast::Pos, loop_entry: bool, entry_conditions: darray[Ast::Expr]&, entry_invariants: darray[Ast::Expr]&, loop_scope_count: usize, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, end_names: mutable darray[sview]&, end_values: mutable darray[Ast::Expr]&, end_facts: mutable darray[Ast::Expr]&, end_flow: mutable ProofFlow&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, flow: mutable ProofFlow&) -> void can[Global.Read, Global.Write]:
+            if not proof_return_analysis_budget_available(facts, names, values, report, name, block_position.line):
+                flow.normal <- true
+                flow.valid <- false
+                end_flow.normal <- true
+                end_flow.valid <- false
+                return
+            statement_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
+            block_names: mutable darray[sview] = proof_copy_names(names)
+            block_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+            block_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+            proof_forget_loop_entry(block_names, &block_values, &block_facts, body, functions, frame_parameters, report, name, block_position) if loop_entry
+            for entry_condition in entry_conditions |block_facts, block_names, block_values, report, name, block_position|:
+                proof_add_traced_fact(&block_facts, report, proof_substitute(entry_condition, block_names, block_values), "loop-condition", block_position.line, name)
+            for entry_invariant in entry_invariants |block_facts, block_names, block_values, loop_scope_count, frame_parameters, old_values, report, name, block_position|:
+                entry_invariant_value: Ast::Expr = proof_substitute_scoped_contract(entry_invariant, block_names, block_values, loop_scope_count, frame_parameters, old_values)
+                proof_add_traced_fact(&block_facts, report, entry_invariant_value, "loop-invariant", block_position.line, name) if not proof_expression_has_fresh_runtime_value(entry_invariant_value, functions, 0)
+            block_flow: mutable ProofFlow = proof_empty_flow()
+            empty_block_invariants: mutable darray[Ast::Expr] = []
+            (proof_check_returns(body, &block_names, &block_values, &block_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", empty_block_invariants, 0, &block_flow) can Global{Read,Write})
+            if report.analysis_1.budgets.return_reported:
+                flow.normal <- true
+                flow.valid <- false
+                end_flow.normal <- true
+                end_flow.valid <- false
+                return
+            flow.valid <- false if not block_flow.valid
+            flow.breaks <- flow.breaks or block_flow.breaks
+            flow.continues <- flow.continues or block_flow.continues
+            proof_append_continue_states(flow, block_flow)
+            proof_copy_flow_into(end_flow, block_flow)
+            proof_replace_names(end_names, block_names)
+            proof_replace_exprs(end_values, block_values)
+            proof_replace_exprs(end_facts, block_facts)
+            # The capture list is not a bound on what the block writes. `elisac-stage1`
+            # compiles a captured block whose body assigns an outer binding the list omits,
+            # and the program observes the assignment, so scoping the write-back to the
+            # capture list alone would restore a fact the block falsified. The write-back
+            # set is the capture list together with everything the body assigns or
+            # references, computed exactly as the loop entry computes it.
+            # The capture list is also not *evidence* of a write. A block writes an outer binding
+            # by assigning it or by handing it to something, and both are in the body's own sets,
+            # which is why those are still taken in full. A capture the body neither assigns nor
+            # references cannot be written by it, and forgetting it discards a precondition the
+            # loop never touched -- which is what a `requires depth <= 127` beside a captured loop
+            # was losing. The exemption is limited to a witnessed scalar, so an owning value that
+            # a capture could move out of keeps the conservative treatment.
+            body_writes: mutable darray[sview] = []
+            proof_collect_assignment_roots(body, &body_writes)
+            proof_collect_aliased_names(body, functions, &body_writes, false, report.aliases.value_collection_names)
+            # A reference capture copies the reference, not its referent. A body
+            # with only witnessed scalar writes and no executable calls/transfers
+            # cannot mutate an untouched parameter through another path.
+            scalar_only_body: mutable bool = false
+            if not proof_body_has_call(body, report.source.source_primitive_operator_mask):
+                if body_writes.count > 1:
+                    body_witnesses: ProofScalarWitnesses = proof_scalar_witness_markers(block_facts)
+                    scalar_only_body <- all written in body_writes where proof_scalar_witnesses_name(body_witnesses, written)
+                else:
+                    scalar_only_body <- all written in body_writes where proof_scalar_witnessed(block_facts, written)
+            writeback: mutable darray[sview] = []
+            capture_witnesses: mutable ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], name_unsigned_widths: [], signed_terms: [], signed_widths: [], element_terms: [], element_depths: [], element_widths: [], unsigned_terms: [], unsigned_widths: [], name_hashes: [], name_slots: [], sorted_name_indices: [], signed_hashes: [], signed_slots: [], unsigned_hashes: [], unsigned_slots: []}
+            capture_witnesses <- proof_scalar_witness_markers(statement_facts) if captures.count > 1
+            for capture in captures |writeback, body_writes, capture_witnesses, scalar_only_body, names, frame_parameters, name, functions|:
+                if not (any existing in body_writes where existing == capture):
+                    scalar_capture: bool = proof_scalar_witnesses_name(capture_witnesses, capture) if captures.count > 1 else proof_scalar_witnessed(statement_facts, capture)
+                    continue if scalar_capture
+                continue if scalar_only_body and not (any existing in body_writes where existing == capture) and proof_current_parameter(names, frame_parameters, capture) and proof_mutable_reference_parameter(name, capture, functions)
+                proof_push_aliased(writeback, capture)
+            for existing in body_writes |writeback|:
+                proof_push_aliased(writeback, existing)
+            # A block that wraps a single loop is that loop's capture list and nothing else. The
+            # loop handler has already modeled the loop -- an arbitrary iteration, its own entry
+            # forgetting, its invariants and its post-loop state -- exactly as it does when the
+            # same loop is written with no capture list, and it records `loop-invariant-missing`
+            # itself where an invariant is what is missing. Recording a second failing obligation
+            # here made the two spellings of one program disagree. Every other captured block is
+            # still an unmodeled step: its exit state is discarded rather than merged.
+            if not proof_body_is_one_loop(body):
+                report.proof_obligation(false)
+                proof_add_finding(report, "captured-block-unsupported", block_position.line, name, "a captured block's write-back is havocked rather than modeled")
+            # For the same reason the loop's own post state -- opaque current values and the
+            # invariants it checked -- is the block's exit state, as it is for the uncaptured
+            # spelling. Havocking it again here dropped every invariant after the loop.
+            elif not loop_entry and block_flow.valid and block_flow.normal and block_names.count == names.count:
+                # A binding outside the write-back keeps its entry value and facts, exactly as
+                # the havoc below keeps them; the loop handler's own state may have forgotten it.
+                retained_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+                proof_forget_captured_values(names, &retained_values, statement_facts, writeback, frame_parameters, report, name, block_position)
+                proof_replace_names(names, block_names)
+                proof_replace_exprs(values, block_values)
+                proof_replace_exprs(facts, block_facts)
+                return if any candidate in writeback where candidate == "*"
+                for index in 0..<values.count |index, names, values, retained_values, writeback|:
+                    continue if index >= names.count or index >= retained_values.count
+                    continue if any written in writeback where written == names[index]
+                    values[index] <- retained_values[index]
+                proof_restore_uncaptured_facts(statement_facts, writeback, facts, names, frame_parameters, report, name)
+                return
+            if any candidate in writeback where candidate == "*":
+                proof_forget_values(names, values, block_position)
+                proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                return
+            proof_forget_captured_values(names, values, statement_facts, writeback, frame_parameters, report, name, block_position)
+            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+            # A fact over a binding the block neither names nor writes survives it. Import
+            # those under exactly the rule the opaque call boundary uses:
+            # `proof_expr_call_stable` refuses an aliased or unwitnessed name, so a binding
+            # the block could still reach through a captured reference is never restored
+            # here.
+            proof_restore_uncaptured_facts(statement_facts, writeback, facts, names, frame_parameters, report, name)

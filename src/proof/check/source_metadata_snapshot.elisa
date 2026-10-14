@@ -2,8 +2,19 @@ extend ElisaProof:
     private:
         const PROOF_SOURCE_GENERIC_BOUND_LINE_FLAG: u32 = 2147483648
 
+        def proof_source_generic_metadata_reset(report: mutable ProofReport&) -> void:
+            report.source_types.source_generic_param_lines.clear()
+            report.source_types.source_generic_param_names.clear()
+            report.source_types.source_generic_param_owner_offsets.clear()
+            report.source_types.source_generic_owner_params_valid <- false
+            report.source_types.source_generic_params_valid <- false
+            report.source_types.source_metadata_work_used <- 0
+
         def proof_source_generic_owner_line_hash(line: u32) -> u32:
             return proof_expr_shape_mix(0, line.i64())
+
+        def proof_source_generic_owner_key_hash(line: u32, owner_offset: u32) -> u32:
+            return proof_expr_shape_mix(proof_source_generic_owner_line_hash(line), owner_offset.i64())
 
         def proof_source_generic_owner_line_slot(line: u32, lines: darray[u32]&, occupied: darray[bool]&, work: mutable usize&) -> (complete: bool, found: bool, slot: usize):
             ensure result.complete implies result.slot < lines.count
@@ -22,6 +33,23 @@ extend ElisaProof:
                 probes <- probes + 1
             return (false, false, 0)
 
+        def proof_source_generic_owner_key_slot(line: u32, owner_offset: u32, lines: darray[u32]&, offsets: darray[u32]&, occupied: darray[bool]&, work: mutable usize&) -> (complete: bool, found: bool, slot: usize):
+            ensure result.complete implies result.slot < lines.count
+            ensure result.complete and result.found implies occupied[result.slot] and lines[result.slot] == line and offsets[result.slot] == owner_offset
+            ensure result.complete and not result.found implies not occupied[result.slot]
+            capacity: usize = lines.count
+            return (false, false, 0) if capacity == 0 or offsets.count != capacity or occupied.count != capacity
+            hash: u32 = proof_source_generic_owner_key_hash(line, owner_offset)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, line, owner_offset, hash, lines, offsets, occupied, capacity, work|:
+                return (false, false, 0) if not proof_report_source_work_charge(1, work)
+                return (true, false, slot) if not occupied[slot]
+                return (true, true, slot) if lines[slot] == line and offsets[slot] == owner_offset
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false, 0)
+
         def proof_source_generic_synthetic_marker_hash(offset: u32) -> u32:
             return proof_expr_shape_mix(0, offset.i64())
 
@@ -34,7 +62,7 @@ extend ElisaProof:
                 marker_count <- marker_count + 1 if annotation.name == "__typestate_generated"
             return true if marker_count == 0
             capacity: usize = proof_name_index_capacity(marker_count)
-            return false if capacity == 0 or not proof_report_source_work_charge(capacity, work) or not proof_report_source_work_charge(marker_count, work)
+            return false if capacity == 0 or not proof_report_source_work_charge(capacity, work) or not proof_report_source_work_charge(capacity, work) or not proof_report_source_work_charge(capacity, work) or not proof_report_source_work_charge(capacity, work) or not proof_report_source_work_charge(marker_count, work)
             hashes.resize(capacity)
             offsets.resize(capacity)
             occupied.resize(capacity)
@@ -77,15 +105,12 @@ extend ElisaProof:
                 probes <- probes + 1
             return (false, false)
 
-        # The compiler side table retained by proof replay has only a declaration line and
-        # binder name. Count every generic-capable source declaration on represented lines so
-        # an unrelated same-line function or struct cannot impersonate the generic owner. The generated typestate
-        # constructor is the one synthetic declaration deliberately sharing its source line;
-        # its parser marker's exact source offset lets us omit it without a source-name prefix.
+        # Preserve the old line-only validity rule while independently checking exact owner
+        # offsets. Generated typestate constructors are omitted by their parser marker offset.
         # Protocol default methods live outside top_decls and are scanned as a separate list.
-        def proof_source_generic_owner_lines_scan(declarations: darray[Ast::Decl]&, lines: darray[u32]&, occupied: darray[bool]&, owner_counts: mutable darray[usize]&, synthetic_hashes: darray[u32]&, synthetic_offsets: darray[u32]&, synthetic_occupied: darray[bool]&, work: mutable usize&, depth: usize) -> bool:
+        def proof_source_generic_owner_lines_scan(declarations: darray[Ast::Decl]&, lines: darray[u32]&, occupied: darray[bool]&, owner_counts: mutable darray[usize]&, owner_key_lines: darray[u32]&, owner_key_offsets: darray[u32]&, owner_key_occupied: darray[bool]&, owner_key_counts: mutable darray[usize]&, exact_owner_valid: bool, synthetic_hashes: darray[u32]&, synthetic_offsets: darray[u32]&, synthetic_occupied: darray[bool]&, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 64
-            for declaration in declarations |declaration, lines, occupied, owner_counts, synthetic_hashes, synthetic_offsets, synthetic_occupied, work, depth|:
+            for declaration in declarations |declaration, lines, occupied, owner_counts, owner_key_lines, owner_key_offsets, owner_key_occupied, owner_key_counts, exact_owner_valid, synthetic_hashes, synthetic_offsets, synthetic_occupied, work, depth|:
                 return false if not proof_report_source_work_charge(1, work)
                 match declaration:
                     Ast::Decl.Func(_, _, _, _, _, _, position):
@@ -95,15 +120,26 @@ extend ElisaProof:
                             synthetic_offset: u32 = position.offset
                             synthetic: (complete: bool, synthetic: bool) = proof_source_generic_owner_is_synthetic(synthetic_offset, synthetic_hashes, synthetic_offsets, synthetic_occupied, work)
                             return false if not synthetic.complete
-                            if not synthetic.synthetic and owner_counts[slot.slot] < 2:
-                                owner_counts[slot.slot] <- owner_counts[slot.slot] + 1
+                            if not synthetic.synthetic:
+                                if owner_counts[slot.slot] < 2:
+                                    owner_counts[slot.slot] <- owner_counts[slot.slot] + 1
+                                if exact_owner_valid:
+                                    exact: (complete: bool, found: bool, slot: usize) = proof_source_generic_owner_key_slot(position.line, position.offset, owner_key_lines, owner_key_offsets, owner_key_occupied, work)
+                                    return false if not exact.complete
+                                    if exact.found and owner_key_counts[exact.slot] < 2:
+                                        owner_key_counts[exact.slot] <- owner_key_counts[exact.slot] + 1
                     Ast::Decl.Struct(_, _, _, _, _, _, position):
                         slot: (complete: bool, found: bool, slot: usize) = proof_source_generic_owner_line_slot(position.line, lines, occupied, work)
                         return false if not slot.complete
                         if slot.found and owner_counts[slot.slot] < 2:
                             owner_counts[slot.slot] <- owner_counts[slot.slot] + 1
+                        if exact_owner_valid:
+                            exact: (complete: bool, found: bool, slot: usize) = proof_source_generic_owner_key_slot(position.line, position.offset, owner_key_lines, owner_key_offsets, owner_key_occupied, work)
+                            return false if not exact.complete
+                            if exact.found and owner_key_counts[exact.slot] < 2:
+                                owner_key_counts[exact.slot] <- owner_key_counts[exact.slot] + 1
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_source_generic_owner_lines_scan(nested, lines, occupied, owner_counts, synthetic_hashes, synthetic_offsets, synthetic_occupied, work, depth + 1)
+                        return false if not proof_source_generic_owner_lines_scan(nested, lines, occupied, owner_counts, owner_key_lines, owner_key_offsets, owner_key_occupied, owner_key_counts, exact_owner_valid, synthetic_hashes, synthetic_offsets, synthetic_occupied, work, depth + 1)
                     _:
                         pass
             return true
@@ -111,15 +147,27 @@ extend ElisaProof:
         def proof_report_snapshot_source_metadata(file: Ast::File&, report: mutable ProofReport&, source_work: mutable usize&) -> bool:
             report.source_types.source_generic_param_lines.clear()
             report.source_types.source_generic_param_names.clear()
-            report.source_types.source_generic_params_valid <- file.generic_param_lines.count == file.generic_param_names.count
+            report.source_types.source_generic_param_owner_offsets.clear()
+            line_rows_aligned: bool = file.generic_param_lines.count == file.generic_param_names.count
+            exact_owner_rows_aligned: bool = line_rows_aligned and file.generic_param_lines.count == file.generic_param_owner_offsets.count
+            report.source_types.source_generic_owner_params_valid <- exact_owner_rows_aligned
+            report.source_types.source_generic_params_valid <- line_rows_aligned
             if report.source_types.source_generic_params_valid:
                 for index in 0..<file.generic_param_lines.count |index, report, file, source_work|:
                     generic_name: sview = file.generic_param_names[index]
-                    if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(generic_name), source_work):
+                    encoded_line: u32 = file.generic_param_lines[index]
+                    owner_line: u32 = encoded_line if encoded_line < PROOF_SOURCE_GENERIC_BOUND_LINE_FLAG else encoded_line - PROOF_SOURCE_GENERIC_BOUND_LINE_FLAG
+                    report.source_types.source_generic_owner_params_valid <- false if owner_line == 0 or generic_name == ""
+                    generic_row_work: usize = 7 if exact_owner_rows_aligned else 5
+                    if not proof_report_source_work_charge(generic_row_work, source_work) or not proof_report_source_work_charge(sview_len(generic_name), source_work):
+                        report.source_types.source_generic_params_valid <- false
+                        report.source_types.source_generic_owner_params_valid <- false
                         proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "generic-parameter source snapshot exceeded its validated work bound", "generic-parameter-snapshot-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                         return false
                     report.source_types.source_generic_param_lines.push(file.generic_param_lines[index])
                     report.source_types.source_generic_param_names.push(generic_name)
+                    report.source_types.source_generic_param_owner_offsets.push(file.generic_param_owner_offsets[index]) if exact_owner_rows_aligned
+                exact_owner_index_build_enabled: bool = report.source_types.source_generic_owner_params_valid
                 generic_line_count: usize = file.generic_param_lines.count
                 capacity: usize = proof_name_index_capacity(generic_line_count)
                 if generic_line_count > 0:
@@ -129,53 +177,98 @@ extend ElisaProof:
                     synthetic_hashes: mutable darray[u32] = []
                     synthetic_offsets: mutable darray[u32] = []
                     synthetic_occupied: mutable darray[bool] = []
-                    if capacity == 0 or not proof_report_source_work_charge(capacity, &source_work) or not proof_report_source_work_charge(generic_line_count, &source_work):
+                    if capacity == 0 or not proof_report_source_work_charge(capacity, &source_work) or not proof_report_source_work_charge(capacity, &source_work) or not proof_report_source_work_charge(capacity, &source_work) or not proof_report_source_work_charge(capacity, &source_work) or not proof_report_source_work_charge(capacity, &source_work) or not proof_report_source_work_charge(generic_line_count, &source_work):
                         report.source_types.source_generic_params_valid <- false
+                        report.source_types.source_generic_owner_params_valid <- false
                         proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "generic declaration identity scan exceeded its validated work bound", "generic-owner-line-scan-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                        return false
+                    if exact_owner_index_build_enabled and (not proof_report_source_work_charge(capacity, &source_work) or not proof_report_source_work_charge(capacity, &source_work) or not proof_report_source_work_charge(capacity, &source_work) or not proof_report_source_work_charge(capacity, &source_work) or not proof_report_source_work_charge(capacity, &source_work) or not proof_report_source_work_charge(capacity, &source_work)):
+                        report.source_types.source_generic_params_valid <- false
+                        report.source_types.source_generic_owner_params_valid <- false
+                        proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "generic declaration identity scan exceeded its validated work bound", "generic-owner-offset-scan-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                         return false
                     lines.resize(capacity)
                     occupied.resize(capacity)
                     owner_counts.resize(capacity)
-                    for slot in 0..<capacity |slot, occupied, owner_counts|:
+                    owner_key_lines: mutable darray[u32] = []
+                    owner_key_offsets: mutable darray[u32] = []
+                    owner_key_occupied: mutable darray[bool] = []
+                    owner_key_counts: mutable darray[usize] = []
+                    if exact_owner_index_build_enabled:
+                        owner_key_lines.resize(capacity)
+                        owner_key_offsets.resize(capacity)
+                        owner_key_occupied.resize(capacity)
+                        owner_key_counts.resize(capacity)
+                    for slot in 0..<capacity |slot, occupied, owner_counts, owner_key_occupied, owner_key_counts, exact_owner_index_build_enabled|:
                         occupied[slot] <- false
                         owner_counts[slot] <- 0
+                        if exact_owner_index_build_enabled:
+                            owner_key_occupied[slot] <- false
+                            owner_key_counts[slot] <- 0
                     if not proof_source_generic_synthetic_marker_index_build(file.enum_annotations, &synthetic_hashes, &synthetic_offsets, &synthetic_occupied, &source_work):
                         report.source_types.source_generic_params_valid <- false
+                        report.source_types.source_generic_owner_params_valid <- false
                         proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "generic declaration identity scan exceeded its validated work bound", "generic-owner-line-scan-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                         return false
-                    for index in 0..<generic_line_count |index, file, lines, occupied, source_work|:
+                    for index in 0..<generic_line_count |index, file, lines, occupied, owner_key_lines, owner_key_offsets, owner_key_occupied, exact_owner_index_build_enabled, source_work|:
                         encoded_line: u32 = file.generic_param_lines[index]
                         line: u32 = encoded_line if encoded_line < PROOF_SOURCE_GENERIC_BOUND_LINE_FLAG else encoded_line - PROOF_SOURCE_GENERIC_BOUND_LINE_FLAG
                         found: (complete: bool, found: bool, slot: usize) = proof_source_generic_owner_line_slot(line, lines, occupied, &source_work)
                         if not found.complete:
                             report.source_types.source_generic_params_valid <- false
+                            report.source_types.source_generic_owner_params_valid <- false
                             proof_add_budget_finding(report, "resource-analysis-budget", line, "", "generic declaration identity scan exceeded its validated work bound", "generic-owner-line-scan-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                             return false
                         if not found.found:
                             lines[found.slot] <- line
                             occupied[found.slot] <- true
+                        if exact_owner_index_build_enabled:
+                            owner_key: (complete: bool, found: bool, slot: usize) = proof_source_generic_owner_key_slot(line, file.generic_param_owner_offsets[index], owner_key_lines, owner_key_offsets, owner_key_occupied, &source_work)
+                            if not owner_key.complete:
+                                report.source_types.source_generic_params_valid <- false
+                                report.source_types.source_generic_owner_params_valid <- false
+                                proof_add_budget_finding(report, "resource-analysis-budget", line, "", "generic declaration owner-offset scan exceeded its validated work bound", "generic-owner-offset-scan-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                                return false
+                            if not owner_key.found:
+                                owner_key_lines[owner_key.slot] <- line
+                                owner_key_offsets[owner_key.slot] <- file.generic_param_owner_offsets[index]
+                                owner_key_occupied[owner_key.slot] <- true
                     complete: bool =
-                        proof_source_generic_owner_lines_scan(file.top_decls, lines, occupied, &owner_counts, synthetic_hashes, synthetic_offsets, synthetic_occupied, &source_work, 0)
-                        and proof_source_generic_owner_lines_scan(file.protocol_default_methods, lines, occupied, &owner_counts, synthetic_hashes, synthetic_offsets, synthetic_occupied, &source_work, 0)
+                        proof_source_generic_owner_lines_scan(file.top_decls, lines, occupied, &owner_counts, owner_key_lines, owner_key_offsets, owner_key_occupied, &owner_key_counts, exact_owner_index_build_enabled, synthetic_hashes, synthetic_offsets, synthetic_occupied, &source_work, 0)
+                        and proof_source_generic_owner_lines_scan(file.protocol_default_methods, lines, occupied, &owner_counts, owner_key_lines, owner_key_offsets, owner_key_occupied, &owner_key_counts, exact_owner_index_build_enabled, synthetic_hashes, synthetic_offsets, synthetic_occupied, &source_work, 0)
                     if not complete:
                         report.source_types.source_generic_params_valid <- false
+                        report.source_types.source_generic_owner_params_valid <- false
                         proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "generic declaration identity scan exceeded its validated work bound", "generic-owner-line-scan-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                         return false
                     for slot in 0..<capacity |slot, occupied, owner_counts, report|:
+                        if not proof_report_source_work_charge(1, source_work):
+                            report.source_types.source_generic_params_valid <- false
+                            report.source_types.source_generic_owner_params_valid <- false
+                            proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "generic declaration identity scan exceeded its validated work bound", "generic-owner-line-scan-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                            return false
                         if occupied[slot] and owner_counts[slot] != 1:
                             report.source_types.source_generic_params_valid <- false
                             break
+                    if exact_owner_index_build_enabled:
+                        for slot in 0..<capacity |slot, owner_key_occupied, owner_key_counts, report|:
+                            if not proof_report_source_work_charge(1, source_work):
+                                report.source_types.source_generic_owner_params_valid <- false
+                                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "generic declaration owner-offset validation exceeded its validated work bound", "generic-owner-offset-scan-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                                return false
+                            if owner_key_occupied[slot] and owner_key_counts[slot] != 1:
+                                report.source_types.source_generic_owner_params_valid <- false
             # Contract quantifier syntax is erased from the AST. Preserve the exact compiler-owned
             # annotations so a source-bound tactic store cannot substitute quantifier kinds.
             report.source.source_annotations.clear()
             for annotation in file.enum_annotations |report|:
-                if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(annotation.owner), source_work) or not proof_report_source_work_charge(sview_len(annotation.name), source_work):
+                if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(2, source_work) or not proof_report_source_work_charge(sview_len(annotation.owner), source_work) or not proof_report_source_work_charge(sview_len(annotation.name), source_work):
                     proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source annotation snapshot exceeded its validated work bound", "annotation-snapshot-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     return false
                 report.source.source_annotations.push(annotation)
             report.source.source_annotation_args.clear()
             for argument in file.annotation_args |report, source_work|:
-                if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(argument), source_work):
+                if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(2, source_work) or not proof_report_source_work_charge(sview_len(argument), source_work):
                     proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source decorator argument snapshot exceeded its validated work bound", "annotation-argument-snapshot-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     return false
                 report.source.source_annotation_args.push(argument)
@@ -184,7 +277,7 @@ extend ElisaProof:
             previous_hole_offset: mutable u32 = 0
             first_hole: mutable bool = true
             for hole in file.assert_hole_positions |report|:
-                if not proof_report_source_work_charge(1, source_work):
+                if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(2, source_work):
                     proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source assertion-hole snapshot exceeded its validated work bound", "assert-hole-snapshot-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     return false
                 report.source_syntax.assert_hole_positions_offset_ordered <- false if not first_hole and hole.offset <= previous_hole_offset

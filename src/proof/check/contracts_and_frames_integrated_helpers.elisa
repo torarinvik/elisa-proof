@@ -5,6 +5,73 @@ extend ElisaProof:
             return false if proof_expr_has_call(expression) and proof_expr_has_fresh_call_result(expression, functions, 0)
             return proof_contract_calls_are_pure_depth(expression, functions, 0)
 
+        # Indexed-call default admission shares the stricter per-function meter. Charge call
+        # detection directly, then reserve the freshness classifier and purity traversal before
+        # running their legacy AST walks. The fallback call scan in the freshness classifier uses
+        # this same counter, so opaque forms cannot restart an unbounded local scan.
+        def proof_contract_calls_are_pure_with_source_work(expression: Ast::Expr, functions: mutable ProofFunctionTable&, has_call: bool, work: mutable usize&) -> bool:
+            return false if work > PROOF_LINEAR_SAFETY_WORK_LIMIT
+            if has_call:
+                freshness_shape_exhausted: mutable bool = false
+                freshness_shape: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(expression, &work, &freshness_shape_exhausted)
+                if not freshness_shape.complete or freshness_shape_exhausted:
+                    work <- PROOF_LINEAR_SAFETY_WORK_LIMIT + 1
+                    return false
+                if work >= PROOF_LINEAR_SAFETY_WORK_LIMIT or freshness_shape.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - work:
+                    work <- PROOF_LINEAR_SAFETY_WORK_LIMIT + 1
+                    return false
+                # The classifier below makes its own AST pass after the cost walk. Reserve
+                # that traversal before entering it so indexed defaults cannot reuse this
+                # per-function allowance for unmetered freshness work.
+                work <- work + freshness_shape.cost
+                fresh_result: bool = proof_expr_has_fresh_call_result_with_fallback_work(expression, functions, 0, &work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+                return false if work > PROOF_LINEAR_SAFETY_WORK_LIMIT or fresh_result
+            purity_shape_exhausted: mutable bool = false
+            purity_shape: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(expression, &work, &purity_shape_exhausted)
+            if not purity_shape.complete or purity_shape_exhausted:
+                work <- PROOF_LINEAR_SAFETY_WORK_LIMIT + 1
+                return false
+            if work >= PROOF_LINEAR_SAFETY_WORK_LIMIT or purity_shape.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - work:
+                work <- PROOF_LINEAR_SAFETY_WORK_LIMIT + 1
+                return false
+            # The shape walk above measures one more legacy purity traversal; charge that
+            # traversal before running it so the shared allowance covers both passes.
+            work <- work + purity_shape.cost
+            pure: bool = proof_contract_calls_are_pure_depth(expression, functions, 0)
+            if not pure and work == PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                # The traversal may have needed a further call lookup after the final reserved
+                # source unit. Treat that boundary as exhaustion so callers cannot restart it.
+                work <- PROOF_LINEAR_SAFETY_WORK_LIMIT + 1
+            pure
+
+        # The quantified-call preparer shares the larger file-level source budget. Keep each
+        # legacy purity traversal inside that same meter rather than invoking the smaller
+        # indexed-default budget or restarting local AST walks for each nested quantifier.
+        def proof_contract_calls_are_pure_with_source_work_limit(expression: Ast::Expr, functions: mutable ProofFunctionTable&, work: mutable usize&, limit: usize) -> bool:
+            return false if limit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or work > limit
+            has_call: bool = proof_expr_has_call_with_work(expression, work, limit)
+            return false if work > limit
+            if has_call:
+                if not proof_replay_summary_expr_repeat_charge_with_limit(expression, 1, work, limit):
+                    work <- limit + 1
+                    return false
+                fresh_result: bool = proof_expr_has_fresh_call_result_with_fallback_work(expression, functions, 0, work, limit)
+                return false if work > limit or fresh_result
+                if not proof_replay_summary_expr_repeat_charge_with_limit(expression, 1, work, limit):
+                    work <- limit + 1
+                    return false
+                pure: bool = proof_contract_calls_are_pure_depth(expression, functions, 0)
+                if not pure and work == limit:
+                    work <- limit + 1
+                return pure and work <= limit
+            if not proof_replay_summary_expr_repeat_charge_with_limit(expression, 1, work, limit):
+                work <- limit + 1
+                return false
+            pure: bool = proof_contract_calls_are_pure_depth(expression, functions, 0)
+            if not pure and work == limit:
+                work <- limit + 1
+            pure and work <= limit
+
         # A pure call can still allocate a fresh aggregate. The kernel has structural equality,
         # so retain call terms only when the resolved return summary proves a scalar result.
         # Unknown, duplicated, external, or malformed call targets fail closed.

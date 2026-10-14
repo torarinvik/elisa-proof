@@ -1,0 +1,86 @@
+extend ElisaProof:
+    private:
+        const PROOF_RESOURCE_ALTERNATIVE_SCOPE_LIMIT: usize = 32768
+
+        struct ProofResourceAlternativeMoves:
+            moved: mutable darray[bool]
+            scopes: mutable darray[usize]
+
+        def proof_resource_alternative_move_mask[@r](parent: ProofResourceState&, report: mutable ProofReport& @r) -> ProofResourceAlternativeMoves:
+            moved_any: mutable darray[bool] = []
+            for _ in 0..<parent.bindings.binding_moved.count |parent, report, moved_any|:
+                return ProofResourceAlternativeMoves{moved: [], scopes: []} if not proof_source_index_work_charge(report, 1)
+                moved_any.push(false)
+            return ProofResourceAlternativeMoves{moved: moved_any, scopes: []}
+
+        # Serialize an arm under a scope root, retaining it for explicit same-state replay.
+        def proof_resource_close_alternative_child[@parent, @child, @mask, @r](parent: mutable ProofResourceState& @parent, child: mutable ProofResourceState& @child, report: mutable ProofReport& @r, alternatives: mutable ProofResourceAlternativeMoves& @mask) -> void:
+            if parent.bindings.binding_names.count != parent.bindings.binding_moved.count or child.bindings.binding_names.count != child.bindings.binding_moved.count or child.bindings.binding_moved.count < parent.bindings.binding_moved.count or alternatives.moved.count != parent.bindings.binding_moved.count:
+                report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return
+            before: usize = parent.evidence.trace_events.count
+            proof_resource_close_child(parent, child, report, false)
+            return if report.analysis_1.kernel.budget_exhausted
+            if parent.evidence.trace_events.count != before + 1:
+                report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return
+            scope_root: usize = parent.evidence.trace_events[parent.evidence.trace_events.count - 1]
+            if scope_root >= report.analysis_1.kernel.nodes.count or report.analysis_1.kernel.nodes[scope_root].kind != "resource-scope":
+                report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return
+            alternatives.scopes.push(scope_root)
+            parent.evidence.trace_events <- parent.evidence.trace_events.truncate(before)
+            return if not proof_source_index_work_charge(report, parent.bindings.binding_moved.count)
+            for index in 0..<parent.bindings.binding_moved.count |index, parent, child, alternatives|:
+                return if index >= alternatives.moved.count or index >= child.bindings.binding_moved.count
+                alternatives.moved[index] <- true if child.bindings.binding_moved[index] and not parent.bindings.binding_moved[index]
+
+        # Wrap all arms in one replay node, then apply their conservative moved-slot union.
+        def proof_resource_merge_alternative_moves[@parent, @mask, @r](parent: mutable ProofResourceState& @parent, alternatives: mutable ProofResourceAlternativeMoves& @mask, report: mutable ProofReport& @r) -> void:
+            return if report.analysis_1.kernel.budget_exhausted
+            if parent.bindings.binding_names.count != parent.bindings.binding_moved.count or alternatives.moved.count != parent.bindings.binding_moved.count or alternatives.scopes.count == 0 or alternatives.scopes.count > PROOF_RESOURCE_ALTERNATIVE_SCOPE_LIMIT:
+                report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return
+            return if:
+                not proof_source_index_work_charge(report, parent.bindings.binding_moved.count)
+                not proof_source_index_work_charge(report, parent.bindings.binding_moved.count)
+                not proof_source_index_work_charge(report, alternatives.scopes.count)
+            joins: mutable usize = 0
+            for index in 0..<parent.bindings.binding_moved.count |index, parent, alternatives, joins|:
+                return if index >= alternatives.moved.count
+                if alternatives.moved[index] and not parent.bindings.binding_moved[index] and index >= PROOF_RESOURCE_JOIN_MOVE_SLOT_LIMIT:
+                    proof_kernel_budget_note(report, "")
+                    return
+                joins <- joins + 1 if alternatives.moved[index] and not parent.bindings.binding_moved[index]
+            if not proof_resource_kernel_capacity(report, 1 + joins, alternatives.scopes.count, ""):
+                proof_kernel_budget_note(report, "")
+                return
+            start: usize = report.analysis_1.kernel.children.count
+            for scope_root in alternatives.scopes |scope_root, report|:
+                if scope_root >= report.analysis_1.kernel.nodes.count or report.analysis_1.kernel.nodes[scope_root].kind != "resource-scope":
+                    report.analysis_1.kernel.children <- report.analysis_1.kernel.children.truncate(start)
+                    report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return
+                report.analysis_1.kernel.children.push(scope_root)
+            alternatives_root: usize = proof_kernel_add_node(&report.analysis_1.kernel.nodes, "resource-alternatives", "", 0, 0, 0, start, alternatives.scopes.count, 0, "", "")
+            if alternatives_root >= report.analysis_1.kernel.nodes.count:
+                report.analysis_1.kernel.children <- report.analysis_1.kernel.children.truncate(start)
+                proof_kernel_budget_note(report, "")
+                return
+            parent.evidence.trace_events.push(alternatives_root)
+            for index in 0..<parent.bindings.binding_moved.count |index, parent, alternatives, report|:
+                if alternatives.moved[index] and not parent.bindings.binding_moved[index]:
+                    return if index >= parent.bindings.binding_names.count
+                    parent.bindings.binding_moved[index] <- true
+                    join_root: usize = proof_kernel_add_node(&report.analysis_1.kernel.nodes, "resource-join-move", "", 0, 0, index, 0, 0, 0, parent.bindings.binding_names[index], "")
+                    if join_root >= report.analysis_1.kernel.nodes.count:
+                        proof_kernel_budget_note(report, "")
+                        return
+                    parent.evidence.trace_events.push(join_root)
+
+        def proof_resource_close_if_children[@parent, @yes, @no, @r](parent: mutable ProofResourceState& @parent, yes: mutable ProofResourceState& @yes, no: mutable ProofResourceState& @no, report: mutable ProofReport& @r) -> void:
+            alternatives: mutable ProofResourceAlternativeMoves = proof_resource_alternative_move_mask(parent, report)
+            return if alternatives.moved.count != parent.bindings.binding_moved.count
+            proof_resource_close_alternative_child(parent, yes, report, &alternatives)
+            proof_resource_close_alternative_child(parent, no, report, &alternatives)
+            proof_resource_merge_alternative_moves(parent, &alternatives, report)

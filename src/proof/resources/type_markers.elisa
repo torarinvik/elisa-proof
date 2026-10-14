@@ -1,9 +1,8 @@
 extend ElisaProof:
     private:
-        # This path receives the parser's name-only generic snapshot, without binder lines. Use
-        # the source metadata's prebuilt name index instead of rescanning every generic for every
-        # marker. Any same-spelled generic anywhere in the file still suppresses alias resolution;
-        # that is deliberately conservative until marker queries carry their lexical owner.
+        # This compatibility lookup receives only the parser's name-only generic snapshot, so it
+        # cannot distinguish owners. Owner-aware marker queries use the paired line/name index
+        # below and disable caller-generic checks while resolving an alias's own RHS.
         def proof_resource_marker_generic_name_matches_with_work(name: sview, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&) -> (complete: bool, matches: bool):
             return (false, false) if not generic_names_complete or not generic_index.generics.generic_param_index_valid
             if generic_index.generics.generic_param_names.count == 0:
@@ -54,38 +53,53 @@ extend ElisaProof:
                 probes <- probes + 1
             return (false, false)
 
-        def proof_resource_type_mentions_owner_generic_with_work(expression: Ast::Expr, declaration_line: u32, generic_lines: darray[u32]&, generic_names: darray[sview]&, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&, depth: usize) -> bool:
+        # Exact owner lookups use the parser's independent (line, declaration offset, binder)
+        # index. Keep the old line lookup for callers that genuinely lack declaration identity.
+        # Offset zero is a valid AST position, so presence is carried by owner_offset_valid.
+        def proof_resource_marker_generic_name_matches_at_owner_with_work(name: sview, declaration_line: u32, owner_offset: u32, owner_offset_valid: bool, exact_metadata_complete: bool, lines: darray[u32]&, names: darray[sview]&, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&) -> (complete: bool, matches: bool):
+            if owner_offset_valid:
+                return (false, false) if not exact_metadata_complete
+                return proof_source_generic_owner_param_present_in_index_with_work(name, declaration_line, owner_offset, generic_index, source_work)
+            proof_resource_marker_generic_name_matches_at_line_with_work(name, declaration_line, lines, names, generic_index, generic_names_complete, source_work)
+
+        def proof_resource_type_mentions_owner_generic_with_owner_work_depth(expression: Ast::Expr, declaration_line: u32, owner_offset: u32, owner_offset_valid: bool, exact_metadata_complete: bool, generic_lines: darray[u32]&, generic_names: darray[sview]&, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&, depth: usize) -> bool:
             return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
             match expression:
                 Ast::Expr.Ident(name, _):
-                    lookup: (complete: bool, matches: bool) = proof_resource_marker_generic_name_matches_at_line_with_work(name, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work)
+                    lookup: (complete: bool, matches: bool) = proof_resource_marker_generic_name_matches_at_owner_with_work(name, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work)
                     return true if not lookup.complete
                     return lookup.matches
                 Ast::Expr.Scope(base, name, _):
-                    lookup: (complete: bool, matches: bool) = proof_resource_marker_generic_name_matches_at_line_with_work(name, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work)
+                    lookup: (complete: bool, matches: bool) = proof_resource_marker_generic_name_matches_at_owner_with_work(name, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work)
                     return true if not lookup.complete or lookup.matches
-                    return proof_resource_type_mentions_owner_generic_with_work(base, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
+                    return proof_resource_type_mentions_owner_generic_with_owner_work_depth(base, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
-                    return proof_resource_type_mentions_owner_generic_with_work(inner, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
+                    return proof_resource_type_mentions_owner_generic_with_owner_work_depth(inner, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
                 Ast::Expr.Refinement(base, predicate, _):
-                    return true if proof_resource_type_mentions_owner_generic_with_work(base, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
-                    return proof_resource_type_mentions_owner_generic_with_work(predicate, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
+                    return true if proof_resource_type_mentions_owner_generic_with_owner_work_depth(base, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
+                    return proof_resource_type_mentions_owner_generic_with_owner_work_depth(predicate, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
                 Ast::Expr.Index(head, argument, _) | Ast::Expr.Binary(head, _, argument, _):
-                    return true if proof_resource_type_mentions_owner_generic_with_work(head, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
-                    return proof_resource_type_mentions_owner_generic_with_work(argument, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
+                    return true if proof_resource_type_mentions_owner_generic_with_owner_work_depth(head, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
+                    return proof_resource_type_mentions_owner_generic_with_owner_work_depth(argument, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
                 Ast::Expr.IndexN(head, arguments, _):
-                    return true if proof_resource_type_mentions_owner_generic_with_work(head, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
-                    for argument in arguments |argument, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth|:
-                        return true if proof_resource_type_mentions_owner_generic_with_work(argument, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
+                    return true if proof_resource_type_mentions_owner_generic_with_owner_work_depth(head, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
+                    for argument in arguments |argument, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth|:
+                        return true if proof_resource_type_mentions_owner_generic_with_owner_work_depth(argument, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
                     return false
                 Ast::Expr.Tuple(elements, _) | Ast::Expr.Array(elements, _) | Ast::Expr.SetLit(elements, _):
-                    for element in elements |element, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth|:
-                        return true if proof_resource_type_mentions_owner_generic_with_work(element, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
+                    for element in elements |element, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth|:
+                        return true if proof_resource_type_mentions_owner_generic_with_owner_work_depth(element, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth + 1)
                     return false
                 Ast::Expr.Absent:
                     return true
                 _:
                     return true
+
+        def proof_resource_type_mentions_owner_generic_with_work(expression: Ast::Expr, declaration_line: u32, generic_lines: darray[u32]&, generic_names: darray[sview]&, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&, depth: usize) -> bool:
+            proof_resource_type_mentions_owner_generic_with_owner_work_depth(expression, declaration_line, 0, false, false, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth)
+
+        def proof_resource_type_mentions_owner_generic_at_owner_with_work(expression: Ast::Expr, declaration_line: u32, owner_offset: u32, exact_metadata_complete: bool, generic_lines: darray[u32]&, generic_names: darray[sview]&, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&, depth: usize) -> bool:
+            proof_resource_type_mentions_owner_generic_with_owner_work_depth(expression, declaration_line, owner_offset, true, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work, depth)
 
         # An unknown marker is semantic uncertainty, not proof-work exhaustion. Callers must
         # check `complete` before using the flags to authorize a resource transition.
@@ -96,26 +110,27 @@ extend ElisaProof:
             source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
             return (true, false, false, false)
 
-        def proof_resource_marker_type_name_with_work(index: ProofSourceEffectIndex&, wanted: sview, source_work: mutable usize&, depth: usize) -> (complete: bool, declarations: usize, aliases: usize, target: Ast::Expr, nested_scope: bool):
+        def proof_resource_marker_type_name_with_work(index: ProofSourceEffectIndex&, wanted: sview, source_work: mutable usize&, depth: usize) -> (complete: bool, declarations: usize, aliases: usize, target: Ast::Expr, nested_scope: bool, has_formals: bool):
             empty: Ast::Expr = Ast::Expr.Absent
-            return (false, 0, 0, empty, false) if:
+            return (false, 0, 0, empty, false, false) if:
                 depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
                 not index.markers.resource_marker_type_index_valid
             count: usize = index.markers.resource_marker_type_names.count
-            return (false, 0, 0, empty, false) if count != index.markers.resource_marker_type_targets.count or count != index.markers.resource_marker_type_is_alias.count or count != index.markers.resource_marker_type_nested_scope.count
+            return (false, 0, 0, empty, false, false) if count != index.markers.resource_marker_type_targets.count or count != index.markers.resource_marker_type_is_alias.count or count != index.markers.resource_marker_type_has_formals.count or count != index.markers.resource_marker_type_nested_scope.count
             lookup: (complete: bool, count: usize, row: usize) = proof_source_conversion_name_lookup_work(wanted, index.markers.resource_marker_type_names, index.markers.resource_marker_type_index_hashes, index.markers.resource_marker_type_index_values, index.markers.resource_marker_type_index_counts, source_work)
-            return (false, 0, 0, empty, false) if not lookup.complete
-            return (true, 0, 0, empty, false) if lookup.count == 0
+            return (false, 0, 0, empty, false, false) if not lookup.complete
+            return (true, 0, 0, empty, false, false) if lookup.count == 0
             # The caller rejects every duplicate name; do not depend on which declaration
             # happened to be placed first in the hash bucket.
-            return (true, lookup.count, 2, Ast::Expr.Invalid, false) if lookup.count > 1
-            return (false, 0, 0, empty, false) if lookup.row >= count
+            return (true, lookup.count, 2, Ast::Expr.Invalid, false, false) if lookup.count > 1
+            return (false, 0, 0, empty, false, false) if lookup.row >= count
             aliases: usize = 1 if index.markers.resource_marker_type_is_alias[lookup.row] else 0
             target: Ast::Expr = index.markers.resource_marker_type_targets[lookup.row] if aliases == 1 else empty
+            has_formals: bool = index.markers.resource_marker_type_has_formals[lookup.row]
             nested_scope: bool = index.markers.resource_marker_type_nested_scope[lookup.row]
-            return (true, 1, aliases, target, nested_scope)
+            return (true, 1, aliases, target, nested_scope, has_formals)
 
-        def proof_resource_type_marker_summary_with_work_depth(expression: Ast::Expr, declarations: darray[Ast::Decl]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, declaration_line: u32, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&, depth: usize) -> (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool):
+        def proof_resource_type_marker_summary_with_owner_work_depth(expression: Ast::Expr, declarations: darray[Ast::Decl]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, declaration_line: u32, owner_offset: u32, owner_offset_valid: bool, exact_metadata_complete: bool, check_caller_generics: bool, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&, depth: usize) -> (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool):
             unknown: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = (true, false, false, false)
             empty: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = (false, false, false, true)
             return proof_resource_marker_exhausted(source_work) if:
@@ -123,7 +138,7 @@ extend ElisaProof:
                 not proof_type_audit_work_charge(1, source_work)
             match expression:
                 Ast::Expr.Unary(operator, operand, _):
-                    nested: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_with_work_depth(operand, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work, depth + 1)
+                    nested: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_with_owner_work_depth(operand, declarations, generic_lines, generic_names, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, check_caller_generics, generic_index, generic_names_complete, source_work, depth + 1)
                     # An incomplete nested result may conservatively indicate reference risk,
                     # but it cannot establish mutable access for a producer.
                     return unknown if not nested.complete
@@ -132,40 +147,42 @@ extend ElisaProof:
                     mutable_reference: bool = nested.mutable_reference or operator == TokenKind.Lmut or (operator == TokenKind.Ampersand and is_mutable) or (operator == TokenKind.Mutable and nested.reference)
                     return (reference, mutable_reference, is_mutable, nested.complete)
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_type_marker_summary_with_work_depth(inner, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work, depth + 1)
+                    return proof_resource_type_marker_summary_with_owner_work_depth(inner, declarations, generic_lines, generic_names, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, check_caller_generics, generic_index, generic_names_complete, source_work, depth + 1)
                 Ast::Expr.Refinement(base, _, _):
-                    return proof_resource_type_marker_summary_with_work_depth(base, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work, depth + 1)
+                    return proof_resource_type_marker_summary_with_owner_work_depth(base, declarations, generic_lines, generic_names, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, check_caller_generics, generic_index, generic_names_complete, source_work, depth + 1)
                 Ast::Expr.Index(head, _, _) | Ast::Expr.IndexN(head, _, _):
                     match head:
                         Ast::Expr.Ident(name, _):
-                            generic_shadow: (complete: bool, matches: bool) = proof_resource_marker_generic_name_matches_at_line_with_work(name, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work)
-                            return proof_resource_marker_exhausted(source_work) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                            return proof_resource_marker_incomplete(source_work) if not generic_shadow.complete or generic_shadow.matches
-                            lookup: (complete: bool, declarations: usize, aliases: usize, target: Ast::Expr, nested_scope: bool) = proof_resource_marker_type_name_with_work(generic_index, name, source_work, 0)
+                            if check_caller_generics:
+                                generic_shadow: (complete: bool, matches: bool) = proof_resource_marker_generic_name_matches_at_owner_with_work(name, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work)
+                                return proof_resource_marker_exhausted(source_work) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                return proof_resource_marker_incomplete(source_work) if not generic_shadow.complete or generic_shadow.matches
+                            lookup: (complete: bool, declarations: usize, aliases: usize, target: Ast::Expr, nested_scope: bool, has_formals: bool) = proof_resource_marker_type_name_with_work(generic_index, name, source_work, 0)
                             return proof_resource_marker_exhausted(source_work) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                             return proof_resource_marker_incomplete(source_work) if not lookup.complete
-                            if lookup.nested_scope or lookup.declarations > 1 or lookup.aliases > 1 or lookup.aliases == 1:
-                                return proof_resource_marker_incomplete(source_work)
-                            if lookup.declarations == 0 and not proof_resource_marker_builtin_collection_type_name(name):
-                                return proof_resource_marker_incomplete(source_work)
+                            return proof_resource_marker_incomplete(source_work) if lookup.nested_scope or lookup.declarations > 1 or lookup.aliases > 1 or lookup.aliases == 1
+                            return proof_resource_marker_incomplete(source_work) if lookup.declarations == 0 and not proof_resource_marker_builtin_collection_type_name(name)
                             return empty
                         _:
                             return proof_resource_marker_incomplete(source_work)
                 Ast::Expr.Ident(name, _):
-                    generic_shadow: (complete: bool, matches: bool) = proof_resource_marker_generic_name_matches_at_line_with_work(name, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work)
-                    return proof_resource_marker_exhausted(source_work) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                    return proof_resource_marker_incomplete(source_work) if not generic_shadow.complete or generic_shadow.matches
+                    if check_caller_generics:
+                        generic_shadow: (complete: bool, matches: bool) = proof_resource_marker_generic_name_matches_at_owner_with_work(name, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, generic_lines, generic_names, generic_index, generic_names_complete, source_work)
+                        return proof_resource_marker_exhausted(source_work) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        return proof_resource_marker_incomplete(source_work) if not generic_shadow.complete or generic_shadow.matches
                     # Stage1 resolves its exact builtin table before user aliases. Share that
                     # table so this classifier neither misses marker and opaque-handle builtins
                     # nor treats unsupported scalar spellings as builtins.
                     return empty if proof_stage1_annotation_builtin_type_name(name)
-                    lookup: (complete: bool, declarations: usize, aliases: usize, target: Ast::Expr, nested_scope: bool) = proof_resource_marker_type_name_with_work(generic_index, name, source_work, 0)
+                    lookup: (complete: bool, declarations: usize, aliases: usize, target: Ast::Expr, nested_scope: bool, has_formals: bool) = proof_resource_marker_type_name_with_work(generic_index, name, source_work, 0)
                     return proof_resource_marker_exhausted(source_work) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     return proof_resource_marker_incomplete(source_work) if not lookup.complete
                     if lookup.declarations == 1 and lookup.aliases == 1:
-                        if lookup.nested_scope:
+                        if lookup.has_formals or lookup.nested_scope:
                             return proof_resource_marker_incomplete(source_work)
-                        return proof_resource_type_marker_summary_with_work_depth(lookup.target, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work, depth + 1)
+                        # A root alias RHS resolves in the alias declaration's scope, so a
+                        # caller function's generic binders must not shadow names in its target.
+                        return proof_resource_type_marker_summary_with_owner_work_depth(lookup.target, declarations, generic_lines, generic_names, declaration_line, owner_offset, owner_offset_valid, exact_metadata_complete, false, generic_index, generic_names_complete, source_work, depth + 1)
                     if lookup.declarations > 1 or lookup.aliases > 1:
                         return proof_resource_marker_incomplete(source_work)
                     return empty if lookup.declarations == 1
@@ -181,10 +198,13 @@ extend ElisaProof:
         def proof_resource_type_marker_summary_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&) -> (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool):
             empty_lines: darray[u32] = []
             empty_names: darray[sview] = []
-            return proof_resource_type_marker_summary_with_work_depth(expression, declarations, empty_lines, empty_names, 0, generic_index, generic_names_complete, source_work, 0)
+            return proof_resource_type_marker_summary_with_owner_work_depth(expression, declarations, empty_lines, empty_names, 0, 0, false, false, true, generic_index, generic_names_complete, source_work, 0)
 
         def proof_resource_type_marker_summary_for_owner_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, declaration_line: u32, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&) -> (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool):
-            return proof_resource_type_marker_summary_with_work_depth(expression, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work, 0)
+            proof_resource_type_marker_summary_with_owner_work_depth(expression, declarations, generic_lines, generic_names, declaration_line, 0, false, false, true, generic_index, generic_names_complete, source_work, 0)
+
+        def proof_resource_type_marker_summary_for_owner_at_offset_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, declaration_line: u32, owner_offset: u32, exact_metadata_complete: bool, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&) -> (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool):
+            proof_resource_type_marker_summary_with_owner_work_depth(expression, declarations, generic_lines, generic_names, declaration_line, owner_offset, true, exact_metadata_complete, true, generic_index, generic_names_complete, source_work, 0)
 
         # Scalar classification stays limited to bare primitive spellings and parentheses.
         def proof_resource_type_is_scalar_depth(expression: Ast::Expr, depth: usize) -> bool:

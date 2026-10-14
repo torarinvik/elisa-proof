@@ -1,0 +1,112 @@
+extend ElisaProof:
+    private:
+        struct ProofLocalRegionAnnotationIndex:
+            hashes: mutable darray[u32] = []
+            heads: mutable darray[usize] = []
+            tails: mutable darray[usize] = []
+            next_rows: mutable darray[usize] = []
+            annotation_count: mutable usize = 0
+            key_is_region: mutable bool = false
+            valid: mutable bool = false
+
+        def proof_local_region_annotation_key_hash(line: u32, name: sview) -> u32:
+            proof_expr_shape_mix(proof_name_hash(name), line.i64())
+
+        # Region annotations are queried repeatedly by `(line, name)` during function collection
+        # and by `(line, region)` while collecting local pins. Retain duplicate rows in source
+        # order: region parameters consume every match, parameter/return regions preserve
+        # last-wins, and each pin emits its matching bindings in their original order.
+        def proof_local_region_annotation_index_build(annotations: darray[Ast::EnumAnnotation]&, index: mutable ProofLocalRegionAnnotationIndex&, source_work: mutable usize&, key_is_region: bool) -> bool:
+            index.hashes.clear()
+            index.heads.clear()
+            index.tails.clear()
+            index.next_rows.clear()
+            index.annotation_count <- annotations.count
+            index.key_is_region <- key_is_region
+            index.valid <- false
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if annotations.count == 0:
+                index.valid <- true
+                return true
+            capacity: usize = proof_name_index_capacity(annotations.count)
+            return false if capacity == 0
+            return false if:
+                not proof_report_source_work_charge(capacity, source_work)
+                not proof_report_source_work_charge(capacity, source_work)
+                not proof_report_source_work_charge(capacity, source_work)
+                not proof_report_source_work_charge(annotations.count, source_work)
+            index.hashes.resize(capacity)
+            index.heads.resize(capacity)
+            index.tails.resize(capacity)
+            index.next_rows.resize(annotations.count)
+            for slot in 0..<capacity |slot, index, annotations|:
+                index.hashes[slot] <- 0
+                index.heads[slot] <- annotations.count
+                index.tails[slot] <- annotations.count
+            for row in 0..<annotations.count |row, annotations, index, capacity, source_work, key_is_region|:
+                annotation: Ast::EnumAnnotation = annotations[row]
+                return false if:
+                    not proof_report_source_work_charge(1, source_work)
+                    not proof_report_source_work_charge(sview_len(annotation.name), source_work)
+                    not proof_report_source_work_charge(sview_len(annotation.region), source_work)
+                index.next_rows[row] <- annotations.count
+                key: sview = annotation.region if key_is_region else annotation.name
+                continue if key_is_region and annotation.name == "__region_pin"
+                hash: u32 = proof_local_region_annotation_key_hash(annotation.line, key)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, row, key, key_is_region, annotations, index, capacity, source_work, placed|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    head: usize = index.heads[slot]
+                    if head == annotations.count:
+                        index.hashes[slot] <- hash
+                        index.heads[slot] <- row
+                        index.tails[slot] <- row
+                        placed <- true
+                        break
+                    return false if head >= annotations.count or index.tails[slot] >= annotations.count
+                    if index.hashes[slot] == hash:
+                        first: Ast::EnumAnnotation = annotations[head]
+                        first_key: sview = first.region if key_is_region else first.name
+                        return false if not proof_report_source_work_charge(sview_len(first_key), source_work) or not proof_report_source_work_charge(sview_len(key), source_work)
+                        if first.line == annotation.line and first_key == key:
+                            tail: usize = index.tails[slot]
+                            index.next_rows[tail] <- row
+                            index.tails[slot] <- row
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            cluster: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(index.heads, annotations.count, source_work)
+            index.valid <- cluster.complete and cluster.bounded and source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return index.valid
+
+        def proof_local_region_annotation_lookup(line: u32, key: sview, annotations: darray[Ast::EnumAnnotation]&, index: ProofLocalRegionAnnotationIndex&, source_work: mutable usize&, key_is_region: bool) -> (complete: bool, head: usize, tail: usize):
+            empty: usize = index.annotation_count
+            return (false, empty, empty) if not index.valid or index.key_is_region != key_is_region or index.heads.count != index.hashes.count or index.tails.count != index.hashes.count or index.next_rows.count != index.annotation_count or annotations.count != index.annotation_count
+            return (true, empty, empty) if index.annotation_count == 0 and index.hashes.count == 0
+            capacity: usize = index.hashes.count
+            expected_capacity: usize = proof_name_index_capacity(index.annotation_count)
+            return (false, empty, empty) if capacity == 0 or capacity != expected_capacity
+            return (false, empty, empty) if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(key), source_work)
+            wanted_hash: u32 = proof_local_region_annotation_key_hash(line, key)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, line, key, key_is_region, annotations, index, capacity, source_work|:
+                return (false, empty, empty) if not proof_report_source_work_charge(1, source_work)
+                head: usize = index.heads[slot]
+                if head == index.annotation_count:
+                    return (false, empty, empty) if index.tails[slot] != index.annotation_count
+                    return (true, empty, empty)
+                return (false, empty, empty) if head > index.annotation_count or index.tails[slot] >= index.annotation_count
+                if index.hashes[slot] == wanted_hash:
+                    annotation: Ast::EnumAnnotation = annotations[head]
+                    annotation_key: sview = annotation.region if key_is_region else annotation.name
+                    return (false, empty, empty) if not proof_report_source_work_charge(sview_len(annotation_key), source_work)
+                    if annotation.line == line and annotation_key == key:
+                        return (true, head, index.tails[slot])
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, empty, empty)

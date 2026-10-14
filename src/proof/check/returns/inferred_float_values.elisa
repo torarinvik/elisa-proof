@@ -1,0 +1,149 @@
+# Type recovery for parser-level inferred assignments.
+extend ElisaProof:
+    private:
+        def proof_inferred_constant_name_may_be_float(declarations: darray[Ast::Decl]&, name: sview, functions: ProofFunctionTable&, source_work: mutable usize&, matches: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or name == ""
+            for declaration in declarations |name, functions, source_work, depth|:
+                return true if not proof_report_source_work_charge(1, &source_work)
+                match declaration:
+                    Ast::Decl.Const(constant_name, type_expression, _, _, _):
+                        return true if not proof_report_source_work_charge(sview_len(constant_name) + sview_len(name), &source_work)
+                        continue if constant_name != name
+                        matches <- matches + 1
+                        return true if matches > 1
+                        return true if type_expression is Ast::Expr.Absent or type_expression is Ast::Expr.Invalid
+                        is_float: bool = proof_type_may_contain_float(type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, &source_work)
+                        return true if is_float
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        return true if proof_inferred_constant_name_may_be_float(body, name, functions, &source_work, &matches, depth + 1)
+                    _:
+                        pass
+            return false
+
+        def proof_inferred_external_return_may_contain_float(type_name: sview, expression: Ast::Expr, functions: ProofFunctionTable&, report: mutable ProofReport&) -> bool:
+            return true if type_name == ""
+            type_expression: Ast::Expr = Ast::Expr.Ident(type_name, Ast::expr_pos(expression))
+            source_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
+            has_float: bool = proof_type_may_contain_float(type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, &source_work)
+            report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+            return true if has_float
+            scalar_kind: i64 = proof_scalar_type_kind_index(type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, 0, &report.source_types.source_effect_index.work.implicit_effect_work)
+            return scalar_kind != 1
+
+        # Generic call type arguments are stored on the callee's IndexN node, separate
+        # from runtime arguments. Inspect them as types so `identity[f64](integer)` cannot
+        # hide a floating result behind a generic return parameter.
+        def proof_inferred_generic_callee_may_contain_float(expression: Ast::Expr, functions: ProofFunctionTable&, report: mutable ProofReport&, depth: usize) -> bool:
+            return true if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            source_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
+            if not proof_report_source_work_charge(1, &source_work):
+                report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                return true
+            match expression:
+                Ast::Expr.IndexN(object, type_arguments, _):
+                    has_float_argument: mutable bool = false
+                    for type_argument in type_arguments |functions, source_work, has_float_argument|:
+                        if not proof_report_source_work_charge(1, &source_work):
+                            report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                            return true
+                        has_float_argument <- proof_type_may_contain_float(type_argument, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, &source_work) or has_float_argument
+                    report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                    return true if has_float_argument
+                    return proof_inferred_generic_callee_may_contain_float(object, functions, report, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Paren(object, _):
+                    report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                    return proof_inferred_generic_callee_may_contain_float(object, functions, report, depth + 1)
+                _:
+                    report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                    return false
+
+        # Inferred locals arrive as `Assign` and have no declared type to inspect. Recover
+        # float-ness from literals, known constants, and resolved call result types.
+        def proof_inferred_value_may_contain_float(expression: Ast::Expr, names: darray[sview]&, functions: ProofFunctionTable&, report: mutable ProofReport&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            expression_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
+            if not proof_report_source_work_charge(1, &expression_work):
+                report.source_types.source_effect_index.work.implicit_effect_work <- expression_work
+                return true
+            report.source_types.source_effect_index.work.implicit_effect_work <- expression_work
+            match expression:
+                Ast::Expr.FloatLit(_, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    local_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
+                    for local_name in names |name|:
+                        if not proof_report_source_work_charge(1 + sview_len(local_name) + sview_len(name), &local_work):
+                            report.source_types.source_effect_index.work.implicit_effect_work <- local_work
+                            return true
+                        if local_name == name:
+                            report.source_types.source_effect_index.work.implicit_effect_work <- local_work
+                            return false
+                    report.source_types.source_effect_index.work.implicit_effect_work <- local_work
+                    source_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
+                    constant_matches: mutable usize = 0
+                    constant_float: bool = proof_inferred_constant_name_may_be_float(report.source.source_declarations, name, functions, &source_work, &constant_matches, 0) or constant_matches != 1
+                    report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                    return constant_float
+                Ast::Expr.Scope(_, name, _):
+                    source_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
+                    constant_matches: mutable usize = 0
+                    constant_float: bool = proof_inferred_constant_name_may_be_float(report.source.source_declarations, name, functions, &source_work, &constant_matches, 0) or constant_matches != 1
+                    report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                    return constant_float
+                Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _):
+                    return proof_inferred_value_may_contain_float(inner, names, functions, report, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_inferred_value_may_contain_float(base, names, functions, report, depth + 1) or proof_inferred_value_may_contain_float(predicate, names, functions, report, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_inferred_value_may_contain_float(left, names, functions, report, depth + 1) or proof_inferred_value_may_contain_float(right, names, functions, report, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_inferred_value_may_contain_float(condition, names, functions, report, depth + 1) or proof_inferred_value_may_contain_float(then_expression, names, functions, report, depth + 1) or proof_inferred_value_may_contain_float(else_expression, names, functions, report, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    target: sview = proof_cast_target_name(callee)
+                    return true if target in {"f16", "f32", "f64", "float"}
+                    called: sview = proof_callable_name(callee)
+                    return true if called in {"f16", "f32", "f64", "float"}
+                    return true if proof_inferred_generic_callee_may_contain_float(callee, functions, report, depth + 1)
+                    # A generic callee can return its type parameter, so its declared
+                    # return spelling alone does not reveal the instantiated type.
+                    # Inspect the actual arguments before considering that signature.
+                    for argument in arguments |names, functions, report, depth|:
+                        return true if proof_inferred_value_may_contain_float(argument, names, functions, report, depth + 1)
+                    return false if target in {"i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"}
+                    source_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
+                    returned: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type_with_work(report.source.source_declarations, called, &source_work, 0)
+                    report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                    return true if returned.count > 1
+                    if returned.count == 1:
+                        return true if returned.type_expression is Ast::Expr.Absent or returned.type_expression is Ast::Expr.Invalid
+                        source_returns_float: bool = proof_type_may_contain_float(returned.type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, &source_work)
+                        report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                        return true if source_returns_float
+                        # An unresolved generic return (for example `T`) is not evidence
+                        # that the instantiated result belongs to the integer fragment.
+                        source_return_kind: i64 = proof_scalar_type_kind_index(returned.type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, 0, &report.source_types.source_effect_index.work.implicit_effect_work)
+                        return source_return_kind != 1
+                    imported: (complete: bool, index: usize) = proof_extern_signature_index_with_work(functions, called, &source_work)
+                    report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                    if not imported.complete:
+                        return true
+                    if imported.index < functions.externs.extern_signatures.count:
+                        return_type_name: sview = functions.externs.extern_signatures[imported.index].return_type_name
+                        return proof_inferred_external_return_may_contain_float(return_type_name, expression, functions, report)
+                    # A newly introduced local from a call whose result type is not
+                    # authenticated must not enter the integer proof fragment.
+                    return true
+                Ast::Expr.Index(object, _, _) | Ast::Expr.Field(object, _, _):
+                    return proof_inferred_value_may_contain_float(object, names, functions, report, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |functions, report, depth|:
+                        return true if proof_inferred_value_may_contain_float(element, names, functions, report, depth + 1)
+                    return false
+                Ast::Expr.Block(_, _, _, _) | Ast::Expr.DictLit(_, _) | Ast::Expr.Construct(_, _, _) | Ast::Expr.RecordUpdate(_, _, _) | Ast::Expr.Comprehension(_, _, _, _, _) | Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    # These forms may carry a float through inferred aggregate typing or a
+                    # local block binding; stay in the IEEE-safe fragment conservatively.
+                    return true
+                _:
+                    return false

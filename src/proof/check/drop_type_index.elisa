@@ -1,7 +1,7 @@
 # Bounded source-derived destructor/type index construction.
 extend ElisaProof:
     private:
-        def proof_source_drop_generic_index_lookup(name: sview, declaration_line: u32, lines: darray[u32]&, names: darray[sview]&, source_valid: bool, generic_index: ProofSourceEffectIndex&, source_work: mutable usize&) -> (complete: bool, count: usize):
+        def proof_source_drop_generic_index_lookup(name: sview, declaration_line: u32, owner_offset: u32, owner_offset_valid: bool, lines: darray[u32]&, names: darray[sview]&, source_valid: bool, generic_index: ProofSourceEffectIndex&, source_work: mutable usize&) -> (complete: bool, count: usize):
             return (false, 0) if not source_valid or lines.count != names.count
             if declaration_line == 0:
                 return (false, 0) if not generic_index.generics.generic_param_index_valid
@@ -13,6 +13,9 @@ extend ElisaProof:
                 return (false, 0) if generic_index.generics.generic_param_encoded_line_present
                 lookup: (complete: bool, count: usize, row: usize) = proof_source_conversion_name_lookup_work(name, generic_index.generics.generic_param_names, generic_index.generics.generic_param_index_hashes, generic_index.generics.generic_param_index_values, generic_index.generics.generic_param_index_counts, source_work)
                 return (lookup.complete, lookup.count)
+            if owner_offset_valid:
+                exact: (complete: bool, present: bool) = proof_source_generic_owner_param_present_in_index_with_work(name, declaration_line, owner_offset, generic_index, source_work)
+                return (exact.complete, 1 if exact.present else 0)
             count: usize = lines.count
             hashes_count: usize = generic_index.generics.generic_param_line_index_hashes.count
             return (false, 0) if hashes_count != generic_index.generics.generic_param_line_index_values.count or hashes_count != generic_index.generics.generic_param_line_index_counts.count
@@ -33,7 +36,7 @@ extend ElisaProof:
                     current_name: sview = names[current]
                     return (false, 0) if not proof_report_source_work_charge(sview_len(current_name), source_work)
                     if lines[current] == declaration_line and current_name == name:
-                        return (false, 0) if generic_index.generics.generic_param_line_index_counts[slot] == 0
+                        return (false, 0) if generic_index.generics.generic_param_line_index_counts[slot] != 1
                         return (true, generic_index.generics.generic_param_line_index_counts[slot])
                 slot <- (slot + 1) % hashes_count
                 probes <- probes + 1
@@ -55,7 +58,7 @@ extend ElisaProof:
                         return false if:
                             not proof_report_source_work_charge(sview_len(name), source_work)
                             not proof_replay_summary_expr_charge_with_work(target, source_work)
-                        has_formals: (complete: bool, found: bool) = proof_source_conversion_alias_has_formals(name, position.line, formals, formal_hashes, formal_values, formal_counts, source_work)
+                        has_formals: (complete: bool, found: bool) = proof_source_conversion_alias_has_formals(name, position.line, position.offset, formals, formal_hashes, formal_values, formal_counts, source_work)
                         return false if not has_formals.complete
                         conversion_target: mutable Ast::Expr = Ast::Expr.Invalid
                         drop_target: mutable Ast::Expr = Ast::Expr.Invalid
@@ -107,6 +110,11 @@ extend ElisaProof:
                         return false if not proof_source_drop_index_collect(body, declared_types, root_declared_types, drop_hook_seed_types, alias_names, alias_targets, drop_alias_targets, callable_names, callable_return_types, callable_lines, callable_owners, field_conversion_names, field_conversion_custom_cast_present, declaration_count, formals, formal_hashes, formal_values, formal_counts, source_alias_index, seen_opaque_externs, annotations, root_alias_safe, module_registration_visible, source_work, module_name, depth + 1)
                     Ast::Decl.Scoped(body, _):
                         return false if not proof_source_drop_index_collect(body, declared_types, root_declared_types, drop_hook_seed_types, alias_names, alias_targets, drop_alias_targets, callable_names, callable_return_types, callable_lines, callable_owners, field_conversion_names, field_conversion_custom_cast_present, declaration_count, formals, formal_hashes, formal_values, formal_counts, source_alias_index, seen_opaque_externs, annotations, root_alias_safe, false, source_work, owner, depth + 1)
+                    Ast::Decl.Import(_, _):
+                        # Imported declarations are not present in this source-derived index.
+                        # An import may expose a custom __cast__ hook, so builtin conversion
+                        # classification must fail closed until import resolution is recorded.
+                        field_conversion_custom_cast_present <- true
                     _:
                         pass
             return true
@@ -214,14 +222,14 @@ extend ElisaProof:
             return proof_source_drop_index_hook_index_build(hook_names, hashes, values, occupied, source_work) if required_capacity > capacity
             return proof_source_drop_index_hook_insert(hook_names.count - 1, hook_names, hashes, values, occupied, source_work)
 
-        def proof_source_drop_index_type_may_drop(type_expression: Ast::Expr, declared_types: darray[sview]&, declared_hashes: darray[u32]&, declared_values: darray[usize]&, declared_counts: darray[usize]&, root_declared_types: darray[sview]&, root_hashes: darray[u32]&, root_values: darray[usize]&, root_counts: darray[usize]&, root_alias_safe: bool, drop_hook_types: darray[sview]&, drop_hook_hashes: darray[u32]&, drop_hook_values: darray[usize]&, drop_hook_occupied: darray[bool]&, alias_names: darray[sview]&, drop_alias_targets: darray[Ast::Expr]&, alias_index_hashes: darray[u32]&, alias_index_values: darray[usize]&, alias_index_counts: darray[usize]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, generic_valid: bool, generic_index: ProofSourceEffectIndex&, declaration_line: u32, source_work: mutable usize&, depth: usize) -> bool:
+        def proof_source_drop_index_type_may_drop(type_expression: Ast::Expr, declared_types: darray[sview]&, declared_hashes: darray[u32]&, declared_values: darray[usize]&, declared_counts: darray[usize]&, root_declared_types: darray[sview]&, root_hashes: darray[u32]&, root_values: darray[usize]&, root_counts: darray[usize]&, root_alias_safe: bool, drop_hook_types: darray[sview]&, drop_hook_hashes: darray[u32]&, drop_hook_values: darray[usize]&, drop_hook_occupied: darray[bool]&, alias_names: darray[sview]&, drop_alias_targets: darray[Ast::Expr]&, alias_index_hashes: darray[u32]&, alias_index_values: darray[usize]&, alias_index_counts: darray[usize]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, generic_valid: bool, generic_index: ProofSourceEffectIndex&, declaration_line: u32, owner_offset: u32, owner_offset_valid: bool, source_work: mutable usize&, depth: usize) -> bool:
             return true if depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
             if not proof_report_source_work_charge(1, source_work):
                 source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
                 return true
             match type_expression:
                 Ast::Expr.Ident(name, _):
-                    generic: (complete: bool, count: usize) = proof_source_drop_generic_index_lookup(name, declaration_line, generic_lines, generic_names, generic_valid, generic_index, source_work)
+                    generic: (complete: bool, count: usize) = proof_source_drop_generic_index_lookup(name, declaration_line, owner_offset, owner_offset_valid, generic_lines, generic_names, generic_valid, generic_index, source_work)
                     return true if not generic.complete or generic.count > 0
                     return false if name == "void" or proof_source_operator_guard_primitive(name)
                     hook: (complete: bool, present: bool) = proof_source_drop_index_hook_lookup(name, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, source_work)
@@ -237,28 +245,28 @@ extend ElisaProof:
                         return false
                     alias: (count: usize, target: Ast::Expr) = proof_source_drop_index_alias_target(name, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, source_work)
                     return true if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or alias.count > 1
-                    return proof_source_drop_index_type_may_drop(alias.target, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, 0, source_work, depth + 1) if alias.count == 1
+                    return proof_source_drop_index_type_may_drop(alias.target, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, 0, 0, false, source_work, depth + 1) if alias.count == 1
                     return true
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
-                    return proof_source_drop_index_type_may_drop(inner, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, declaration_line, source_work, depth + 1)
+                    return proof_source_drop_index_type_may_drop(inner, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, declaration_line, owner_offset, owner_offset_valid, source_work, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
                     return false if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
-                    return proof_source_drop_index_type_may_drop(inner, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, declaration_line, source_work, depth + 1)
+                    return proof_source_drop_index_type_may_drop(inner, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, declaration_line, owner_offset, owner_offset_valid, source_work, depth + 1)
                 Ast::Expr.Index(head, element, _):
                     head_name: sview = proof_ident_name(head)
                     return false if head_name == "view"
-                    return proof_source_drop_index_type_may_drop(element, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, declaration_line, source_work, depth + 1) if head_name == "darray"
+                    return proof_source_drop_index_type_may_drop(element, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, declaration_line, owner_offset, owner_offset_valid, source_work, depth + 1) if head_name == "darray"
                     return true
                 Ast::Expr.IndexN(head, arguments, _):
                     head_name: sview = proof_ident_name(head)
                     return false if head_name == "view"
-                    return proof_source_drop_index_type_may_drop(arguments[0], declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, declaration_line, source_work, depth + 1) if:
+                    return proof_source_drop_index_type_may_drop(arguments[0], declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, declaration_line, owner_offset, owner_offset_valid, source_work, depth + 1) if:
                         head_name == "array" and arguments.count == 2
                         head_name == "darray" and arguments.count == 1
                     return true
                 Ast::Expr.Tuple(elements, _) | Ast::Expr.Array(elements, _):
                     for element in elements |declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, declaration_line, source_work, depth|:
-                        return true if proof_source_drop_index_type_may_drop(element, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, declaration_line, source_work, depth + 1)
+                        return true if proof_source_drop_index_type_may_drop(element, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, declaration_line, owner_offset, owner_offset_valid, source_work, depth + 1)
                     return false
                 _:
                     return true
@@ -270,7 +278,7 @@ extend ElisaProof:
                 existing_hook: (complete: bool, present: bool) = proof_source_drop_index_hook_lookup(alias_names[index], drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, source_work)
                 return false if not existing_hook.complete
                 continue if existing_hook.present
-                if proof_source_drop_index_type_may_drop(drop_alias_targets[index], declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, 0, source_work, 0):
+                if proof_source_drop_index_type_may_drop(drop_alias_targets[index], declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, 0, 0, false, source_work, 0):
                     return false if:
                         source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         not proof_source_drop_index_hook_add_unique(drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names[index], source_work)
@@ -288,7 +296,7 @@ extend ElisaProof:
                         continue if existing_hook.present
                         for member in members |declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, source_work, changed, name, position|:
                             return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(member.name), source_work)
-                            if proof_source_drop_index_type_may_drop(member.type_expression, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, position.line, source_work, 0):
+                            if proof_source_drop_index_type_may_drop(member.type_expression, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, position.line, position.offset, true, source_work, 0):
                                 return false if:
                                     source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                                     not proof_source_drop_index_hook_add_unique(drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, name, source_work)
@@ -302,7 +310,7 @@ extend ElisaProof:
                             return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(variant.name), source_work)
                             for field in variant.fields |declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, source_work, changed, name, position|:
                                 return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(field.name), source_work)
-                                if proof_source_drop_index_type_may_drop(field.type_expression, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, position.line, source_work, 0):
+                                if proof_source_drop_index_type_may_drop(field.type_expression, declared_types, declared_hashes, declared_values, declared_counts, root_declared_types, root_hashes, root_values, root_counts, root_alias_safe, drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, alias_names, drop_alias_targets, alias_index_hashes, alias_index_values, alias_index_counts, generic_lines, generic_names, generic_valid, generic_index, position.line, position.offset, true, source_work, 0):
                                     return false if:
                                         source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                                         not proof_source_drop_index_hook_add_unique(drop_hook_types, drop_hook_hashes, drop_hook_values, drop_hook_occupied, name, source_work)

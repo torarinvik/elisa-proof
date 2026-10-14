@@ -12,41 +12,75 @@ extend ElisaProof:
                 _:
                     return ""
 
-        def proof_qualified_constant_type(declarations: darray[Ast::Decl]&, expression: Ast::Expr, scope: darray[sview]&, depth: usize) -> (count: usize, type_expression: Ast::Expr):
-            return (2, Ast::Expr.Absent) if depth >= PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+        def proof_qualified_constant_source_charge(amount: usize, source_work: mutable usize&) -> bool:
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            source_work <- source_work + amount
+            true
+
+        def proof_qualified_constant_type_with_work(declarations: darray[Ast::Decl]&, expression: Ast::Expr, scope: darray[sview]&, depth: usize, source_work: mutable usize&) -> (complete: bool, count: usize, type_expression: Ast::Expr):
+            return (true, 2, Ast::Expr.Absent) if depth >= PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
             count: mutable usize = 0
             selected: mutable Ast::Expr = Ast::Expr.Absent
-            for declaration in declarations |expression, scope, depth, count, selected|:
+            for declaration in declarations |expression, scope, depth, count, selected, source_work|:
+                return (false, 2, Ast::Expr.Absent) if not proof_qualified_constant_source_charge(1, source_work)
                 match declaration:
                     Ast::Decl.Const(name, declared_type, _, mutable_constant, position):
+                        # Constructing the fully qualified reference walks the active scope;
+                        # equality below separately charges both expression trees and text.
+                        return (false, 2, Ast::Expr.Absent) if not proof_qualified_constant_source_charge(scope.count + 1, source_work) or not proof_qualified_constant_source_charge(sview_len(name), source_work)
                         reference: Ast::Expr = proof_global_constant_reference(scope, name, position)
-                        if scope.count > 0 and proof_expr_equal(expression, reference):
+                        equal: bool = proof_replay_summary_expr_proof_equal_with_limit(expression, reference, &source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if scope.count > 0
+                        if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT and not equal:
+                            source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                            return (false, 2, Ast::Expr.Absent)
+                        if scope.count > 0 and equal:
                             count <- count + 1
                             selected <- Ast::Expr.Absent if mutable_constant else declared_type
                     Ast::Decl.Module(name, body, _):
+                        # Module-name splitting and copying the accumulated scope are both
+                        # proportional to these sizes.
+                        return (false, 2, Ast::Expr.Absent) if not proof_qualified_constant_source_charge(sview_len(name), source_work) or not proof_qualified_constant_source_charge(scope.count, source_work)
                         nested_scope: mutable darray[sview] = proof_global_constant_scope_with_module(scope, name)
-                        nested: (count: usize, type_expression: Ast::Expr) = proof_qualified_constant_type(body, expression, &nested_scope, depth + 1)
+                        nested: (complete: bool, count: usize, type_expression: Ast::Expr) = proof_qualified_constant_type_with_work(body, expression, &nested_scope, depth + 1, source_work)
+                        return (false, 2, Ast::Expr.Absent) if not nested.complete
                         count <- count + nested.count
                         selected <- nested.type_expression if nested.count == 1
                     Ast::Decl.Scoped(body, _):
-                        nested: (count: usize, type_expression: Ast::Expr) = proof_qualified_constant_type(body, expression, scope, depth + 1)
+                        nested: (complete: bool, count: usize, type_expression: Ast::Expr) = proof_qualified_constant_type_with_work(body, expression, scope, depth + 1, source_work)
+                        return (false, 2, Ast::Expr.Absent) if not nested.complete
                         count <- count + nested.count
                         selected <- nested.type_expression if nested.count == 1
                     _:
                         pass
-            return (count, selected)
+            return (true, count, selected)
 
         def proof_add_qualified_constant_witness(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void:
+            source_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
+            if not proof_replay_summary_expr_repeat_charge_with_limit(expression, 1, &source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                return
+            report.source_types.source_effect_index.work.implicit_effect_work <- source_work
             root: sview = proof_qualified_constant_root(expression, 0)
             owner_index: usize = proof_function_index(functions, owner)
             return if root == "" or owner_index >= functions.parameters.metadata.param_starts.count or owner_index >= functions.parameters.metadata.param_counts.count
             start: usize = functions.parameters.metadata.param_starts[owner_index]
             count: usize = functions.parameters.metadata.param_counts[owner_index]
             return if start > functions.parameters.metadata.all_params.count or count > functions.parameters.metadata.all_params.count - start
-            for index in 0..<count |functions, start, root|:
-                return if functions.parameters.metadata.all_params[start + index] == root
+            for index in 0..<count |functions, start, root, source_work|:
+                if not proof_qualified_constant_source_charge(1, source_work) or not proof_qualified_constant_source_charge(sview_len(functions.parameters.metadata.all_params[start + index]), source_work):
+                    report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                    return
+                if functions.parameters.metadata.all_params[start + index] == root:
+                    report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                    return
             root_scope: darray[sview] = []
-            declared: (count: usize, type_expression: Ast::Expr) = proof_qualified_constant_type(report.source.source_declarations, expression, root_scope, 0)
+            declared: (complete: bool, count: usize, type_expression: Ast::Expr) = proof_qualified_constant_type_with_work(report.source.source_declarations, expression, root_scope, 0, &source_work)
+            report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+            return if not declared.complete
             return if declared.count != 1
             declared_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(declared.type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
             return if declared_markers.reference

@@ -59,9 +59,8 @@ extend ElisaProof:
                 return (false, false, 0, missing) if value > index.owners.count
                 row: usize = value - 1
                 if index.owner_index_hashes[slot] == wanted_hash:
-                    owner: ProofSourceKernelPostconditionOwnerContext = index.owners[row]
-                    return (false, false, 0, missing) if not proof_source_kernel_charge_work(sview_len(owner.name) + sview_len(name) + 2, source_work)
-                    return (true, true, slot, row) if owner.line == line and owner.offset == offset and owner.name == name
+                    return (false, false, 0, missing) if not proof_source_kernel_charge_work(sview_len(index.owners[row].name) + sview_len(name) + 2, source_work)
+                    return (true, true, slot, row) if index.owners[row].line == line and index.owners[row].offset == offset and index.owners[row].name == name
                 slot <- (slot + 1) % capacity
                 probes <- probes + 1
             return (false, false, 0, missing)
@@ -94,6 +93,14 @@ extend ElisaProof:
                 hash <- proof_expr_shape_mix(hash, proof_name_hash(segment).i64())
             return (true, hash)
 
+        # Qualified nested module names replace the current path outright. Bare names are
+        # relative and cause `proof_global_constant_scope_with_module` to extend a copy of it.
+        def proof_source_kernel_postcondition_module_name_is_qualified(module_name: sview) -> bool:
+            length: usize = sview_len(module_name)
+            for index in 0..<length:
+                return true if sview_at(module_name, index) == 58 and index + 1 < length and sview_at(module_name, index + 1) == 58
+            false
+
         def proof_source_kernel_postcondition_module_scope_index_slot(index: ProofSourceKernelPostconditionContextIndex&, path: darray[sview]&, wanted_hash: u32, source_work: mutable usize&) -> (complete: bool, found: bool, slot: usize, row: usize):
             missing: usize = index.module_scopes.count
             capacity: usize = index.module_scope_index_values.count
@@ -109,8 +116,9 @@ extend ElisaProof:
                 return (false, false, 0, missing) if value > index.module_scopes.count
                 row: usize = value - 1
                 if index.module_scope_index_hashes[slot] == wanted_hash:
-                    scope: ProofSourceKernelPostconditionModuleScope = index.module_scopes[row]
-                    if proof_source_kernel_type_path_equal(scope.path, path, source_work):
+                    # Compare the path in place. Copying the full scope row here would also
+                    # copy its accumulated constant arrays on every repeated module lookup.
+                    if proof_source_kernel_type_path_equal(index.module_scopes[row].path, path, source_work):
                         return (true, true, slot, row)
                     return (false, false, 0, missing) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 slot <- (slot + 1) % capacity
@@ -174,6 +182,16 @@ extend ElisaProof:
                         index.owner_index_values[owner_slot.slot] <- index.owners.count
                     Ast::Decl.Module(module_name, nested, _):
                         return false if not proof_source_kernel_charge_work(1 + sview_len(module_name), source_work)
+                        # Qualification inspection is a separate scan from scope construction.
+                        return false if not proof_source_kernel_charge_work(sview_len(module_name), source_work)
+                        qualified: bool = proof_source_kernel_postcondition_module_name_is_qualified(module_name)
+                        # Relative names copy the current path with `result.extend(current)`;
+                        # qualified names replace it and need no parent-path element debit.
+                        # Reserve a second parent/name-width pass for possible geometric buffer
+                        # growth while extending the newly built path.
+                        return false if not qualified and not proof_source_kernel_charge_work(module_path.count, source_work)
+                        return false if not qualified and not proof_source_kernel_charge_work(module_path.count, source_work)
+                        return false if not qualified and not proof_source_kernel_charge_work(sview_len(module_name), source_work)
                         parent_path: darray[sview] = module_path
                         module_path <- proof_global_constant_scope_with_module(module_path, module_name)
                         nested_hash: (complete: bool, hash: u32) = proof_source_kernel_postcondition_module_scope_hash(module_path, source_work)
@@ -198,8 +216,7 @@ extend ElisaProof:
                                 Ast::Expr.Absent: false
                                 _: true
                             if has_type:
-                                scope: ProofSourceKernelPostconditionModuleScope = index.module_scopes[module_scope_index]
-                                return false if scope.constant_names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+                                return false if index.module_scopes[module_scope_index].constant_names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
                                 # The type-spelling projection below performs a second recursive
                                 # walk after the cost walk; reserve both passes before projecting.
                                 return false if not proof_replay_summary_expr_repeat_charge_with_limit(constant_type, 1, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
@@ -211,6 +228,11 @@ extend ElisaProof:
                                 index.module_scopes[module_scope_index].constant_source_types.push(constant_type)
                     Ast::Decl.Module(module_name, nested, _):
                         return false if not proof_source_kernel_charge_work(1 + sview_len(module_name), source_work)
+                        return false if not proof_source_kernel_charge_work(sview_len(module_name), source_work)
+                        qualified: bool = proof_source_kernel_postcondition_module_name_is_qualified(module_name)
+                        return false if not qualified and not proof_source_kernel_charge_work(module_path.count, source_work)
+                        return false if not qualified and not proof_source_kernel_charge_work(module_path.count, source_work)
+                        return false if not qualified and not proof_source_kernel_charge_work(sview_len(module_name), source_work)
                         parent_path: darray[sview] = module_path
                         module_path <- proof_global_constant_scope_with_module(module_path, module_name)
                         nested_hash: (complete: bool, hash: u32) = proof_source_kernel_postcondition_module_scope_hash(module_path, source_work)
@@ -233,6 +255,7 @@ extend ElisaProof:
             capacity: usize = proof_name_index_capacity(PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT)
             return (false, empty) if capacity == 0
             return (false, empty) if not proof_source_kernel_charge_work(capacity * 6, source_work)
+            return (false, empty) if not proof_source_kernel_charge_work(capacity, source_work) or not proof_source_kernel_charge_work(capacity, source_work) or not proof_source_kernel_charge_work(capacity, source_work)
             index: mutable ProofSourceKernelPostconditionContextIndex = empty
             index.owner_index_hashes.resize(capacity)
             index.owner_index_values.resize(capacity)
@@ -258,18 +281,16 @@ extend ElisaProof:
                     index.line_summaries[line_slot.row].generic_row_count <- index.line_summaries[line_slot.row].generic_row_count + 1
             for owner_index in 0..<index.owners.count |owner_index, index, source_work|:
                 return (false, empty) if not proof_source_kernel_charge_work(1, source_work)
-                owner: mutable ProofSourceKernelPostconditionOwnerContext = index.owners[owner_index]
-                line_slot: (complete: bool, found: bool, slot: usize, row: usize) = proof_source_kernel_postcondition_line_index_slot(index, owner.line, &source_work)
+                line_slot: (complete: bool, found: bool, slot: usize, row: usize) = proof_source_kernel_postcondition_line_index_slot(index, index.owners[owner_index].line, &source_work)
                 return (false, empty) if not line_slot.complete or not line_slot.found
                 summary: ProofSourceKernelPostconditionLineSummary = index.line_summaries[line_slot.row]
-                owner.same_line_functions <- summary.function_count
-                owner.generic_metadata_ambiguous <- summary.generic_row_count != 0 and summary.function_count != 1
-                index.owners[owner_index] <- owner
+                index.owners[owner_index].same_line_functions <- summary.function_count
+                index.owners[owner_index].generic_metadata_ambiguous <- summary.generic_row_count != 0 and summary.function_count != 1
             return (false, empty) if index.module_scopes.count != 0 and not proof_source_kernel_postcondition_constants_collect(declarations, &index, &module_path, 0, PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT, &source_work, 0)
             index.complete <- source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return (index.complete, index)
 
-        def proof_source_kernel_postcondition_environment_from_index(index: ProofSourceKernelPostconditionContextIndex&, owner_name: sview, owner_line: u32, owner_offset: usize, declarations: darray[Ast::Decl]&, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], generic_param_lines: darray[u32]&, generic_param_names: darray[sview]&, generic_params_valid: bool, source_work: mutable usize&, scoped_function_index: mutable ProofSourceKernelScopedFunctionIndex&) -> (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) can[Memory.Allocate, Abort.Panic]:
+        def proof_source_kernel_postcondition_environment_from_index(index: ProofSourceKernelPostconditionContextIndex&, owner_name: sview, owner_line: u32, owner_offset: usize, declarations: darray[Ast::Decl]&, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, generic_param_index: ProofSourceKernelGenericParamIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], generic_param_lines: darray[u32]&, generic_param_names: darray[sview]&, generic_params_valid: bool, source_work: mutable usize&, scoped_function_index: mutable ProofSourceKernelScopedFunctionIndex&) -> (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) can[Memory.Allocate, Abort.Panic]:
             empty: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: []}
             return (false, empty) if:
                 not index.complete or not generic_params_valid or generic_param_lines.count != generic_param_names.count
@@ -278,22 +299,22 @@ extend ElisaProof:
             return (false, empty) if not key.complete
             owner_slot: (complete: bool, found: bool, slot: usize, row: usize) = proof_source_kernel_postcondition_owner_index_slot(index, owner_name, owner_line, owner_offset, key.hash, &source_work)
             return (false, empty) if not owner_slot.complete or not owner_slot.found
-            owner: ProofSourceKernelPostconditionOwnerContext = index.owners[owner_slot.row]
-            return (false, empty) if owner.generic_metadata_ambiguous
+            owner_row: usize = owner_slot.row
+            return (false, empty) if index.owners[owner_row].generic_metadata_ambiguous
             names: mutable darray[sview] = []
             types: mutable darray[sview] = []
             source_types: mutable darray[Ast::Expr] = []
-            if owner.module_scope_index != PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT:
-                return (false, empty) if owner.module_scope_index >= index.module_scopes.count
-                scope: ProofSourceKernelPostconditionModuleScope = index.module_scopes[owner.module_scope_index]
-                return (false, empty) if scope.constant_names.count != scope.constant_types.count or scope.constant_names.count != scope.constant_source_types.count
-                for constant_index in 0..<scope.constant_names.count |constant_index, scope, names, types, source_types, source_work|:
+            module_scope_row: usize = index.owners[owner_row].module_scope_index
+            if module_scope_row != PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT:
+                return (false, empty) if module_scope_row >= index.module_scopes.count
+                return (false, empty) if index.module_scopes[module_scope_row].constant_names.count != index.module_scopes[module_scope_row].constant_types.count or index.module_scopes[module_scope_row].constant_names.count != index.module_scopes[module_scope_row].constant_source_types.count
+                for constant_index in 0..<index.module_scopes[module_scope_row].constant_names.count |constant_index, index, module_scope_row, names, types, source_types, source_work|:
                     return (false, empty) if names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
-                    return (false, empty) if not proof_source_kernel_charge_work(1 + sview_len(scope.constant_names[constant_index]) + sview_len(scope.constant_types[constant_index]), source_work)
-                    names.push(scope.constant_names[constant_index])
-                    types.push(scope.constant_types[constant_index])
-                    source_types.push(scope.constant_source_types[constant_index])
-            for parameter in owner.parameters |owner, names, types, source_types, source_work|:
+                    return (false, empty) if not proof_source_kernel_charge_work(1 + sview_len(index.module_scopes[module_scope_row].constant_names[constant_index]) + sview_len(index.module_scopes[module_scope_row].constant_types[constant_index]), source_work)
+                    names.push(index.module_scopes[module_scope_row].constant_names[constant_index])
+                    types.push(index.module_scopes[module_scope_row].constant_types[constant_index])
+                    source_types.push(index.module_scopes[module_scope_row].constant_source_types[constant_index])
+            for parameter in index.owners[owner_row].parameters |parameter, index, owner_row, names, types, source_types, source_work|:
                 return (false, empty) if names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
                 # Charge both AST cost measurement and the recursive type-spelling projection.
                 return (false, empty) if not proof_replay_summary_expr_repeat_charge_with_limit(parameter.type_expression, 1, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
@@ -301,11 +322,11 @@ extend ElisaProof:
                 return (false, empty) if:
                     not proof_source_kernel_charge_work(sview_len(parameter.name), source_work)
                     not proof_source_kernel_charge_work(sview_len(parameter_type_name), source_work)
-                    owner.return_type is declared_return_type and parameter.name == "result"
+                    index.owners[owner_row].return_type is declared_return_type and parameter.name == "result"
                 names.push(parameter.name)
                 types.push(parameter_type_name)
                 source_types.push(parameter.type_expression)
-            if owner.return_type is declared_return_type:
+            if index.owners[owner_row].return_type is declared_return_type:
                 return (false, empty) if names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
                 return (false, empty) if not proof_replay_summary_expr_repeat_charge_with_limit(declared_return_type, 1, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 result_type_name: sview = proof_source_type_spelling(declared_return_type, 0)
@@ -313,8 +334,8 @@ extend ElisaProof:
                 names.push("result")
                 types.push(result_type_name)
                 source_types.push(declared_return_type)
-            workspace: mutable ProofSourceKernelFormationWorkspace = ProofSourceKernelFormationWorkspace{nodes: [], children: [], visible_name_slots: [], type_index: type_index, generic_param_lines: generic_param_lines, generic_param_names: generic_param_names, generic_params_valid: generic_params_valid, owner_declaration_line: owner.line, tuple_label_index: tuple_label_index, validation_workspace: ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new(), typing_workspace: ElisaProofKernelReplay::proof_kernel_replay_typing_workspace_new(), scoped_function_index: proof_source_kernel_scoped_function_index_new(), typing_work_used: 0, source_work_used: source_work, source_work_exhaustion_reported: false}
-            formed: (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) = proof_source_kernel_type_environment(names, types, source_types, owner.module_path, global_bindings, &workspace, declarations, scoped_function_index)
+            workspace: mutable ProofSourceKernelFormationWorkspace = ProofSourceKernelFormationWorkspace{nodes: [], children: [], visible_name_slots: [], type_index: type_index, generic_param_index: generic_param_index, owner_declaration_line: index.owners[owner_row].line, owner_declaration_offset: index.owners[owner_row].offset, owner_context_epoch: 0, tuple_label_index: tuple_label_index, validation_workspace: ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new(), typing_workspace: ElisaProofKernelReplay::proof_kernel_replay_typing_workspace_new(), scoped_function_index: proof_source_kernel_scoped_function_index_new(), typing_work_used: 0, source_work_used: source_work, source_work_exhaustion_reported: false}
+            formed: (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) = proof_source_kernel_type_environment(names, types, source_types, index.owners[owner_row].module_path, global_bindings, &workspace, declarations, scoped_function_index)
             source_work <- workspace.source_work_used
             return (formed.known and source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, formed.environment)
 
@@ -322,5 +343,7 @@ extend ElisaProof:
         def proof_source_kernel_postcondition_environment(owner_name: sview, owner_line: u32, owner_offset: usize, declarations: darray[Ast::Decl]&, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], generic_param_lines: darray[u32]&, generic_param_names: darray[sview]&, generic_params_valid: bool, source_work: mutable usize&) -> (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) can[Memory.Allocate, Abort.Panic]:
             index_result: (complete: bool, index: ProofSourceKernelPostconditionContextIndex) = proof_source_kernel_postcondition_context_index_build(declarations, generic_param_lines, generic_param_names, generic_params_valid, &source_work)
             return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: []}) if not index_result.complete
+            generic_param_index: ProofSourceKernelGenericParamIndex = proof_source_kernel_generic_param_index_build(generic_param_lines, generic_param_names, generic_params_valid, source_work)
+            return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: []}) if not generic_param_index.valid
             scoped_function_index: mutable ProofSourceKernelScopedFunctionIndex = proof_source_kernel_scoped_function_index_new()
-            proof_source_kernel_postcondition_environment_from_index(index_result.index, owner_name, owner_line, owner_offset, declarations, type_index, tuple_label_index, global_bindings, generic_param_lines, generic_param_names, generic_params_valid, &source_work, &scoped_function_index)
+            proof_source_kernel_postcondition_environment_from_index(index_result.index, owner_name, owner_line, owner_offset, declarations, type_index, tuple_label_index, generic_param_index, global_bindings, generic_param_lines, generic_param_names, generic_params_valid, &source_work, &scoped_function_index)

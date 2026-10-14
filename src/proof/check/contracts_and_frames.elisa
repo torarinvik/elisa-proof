@@ -11,27 +11,31 @@ extend ElisaProof:
         # `status.usize()`. The compiler reserves these primitive selectors, so unlike an
         # ordinary method call they are total value conversions, not user-dispatched effects.
         # Keep this list aligned with the frontend's numeric-cast selector set.
-        def proof_runtime_fact_is_stable(expression: Ast::Expr, source_expression: Ast::Expr, operator_mask: usize, report: mutable ProofReport&) -> bool:
+        def proof_runtime_fact_is_stable(expression: Ast::Expr, source_expression: Ast::Expr, operator_mask: usize, report: mutable ProofReport&, name: sview, line: u32) -> bool:
+            return false if not proof_return_expression_scan_charge(expression, report, name, line)
             return false if proof_expr_has_old(expression)
             # Ownership transfer changes the place an assertion reads. The move checker
             # invalidates facts after evaluating it, so never publish the moved expression as
             # a reusable runtime boundary fact.
-            return false if proof_expr_has_move(expression)
+            return false if not proof_return_expression_scan_charge(expression, report, name, line) or proof_expr_has_move(expression)
             # The erased kernel treats aggregate equality structurally, while source aggregate
             # construction may produce fresh runtime identity. Keep such terms out of facts
             # that survive the runtime assertion or guard that evaluated them.
-            return false if proof_block_expression_has_fresh_value(expression, 0)
+            return false if not proof_return_expression_scan_charge(expression, report, name, line) or proof_block_expression_has_fresh_value(expression, 0)
             # Runtime assertions become reusable proof facts. Do not publish a proposition whose
             # source operator may dispatch to an Elisa protocol implementation: the independent
             # kernel only knows primitive operator semantics, and a false source assertion could
             # otherwise manufacture an inconsistent fact before the ordinary goal guard runs.
             return false if:
+                not proof_return_expression_scan_charge(expression, report, name, line)
                 proof_source_expression_has_overloaded_operator(expression, operator_mask, 0)
+                not proof_return_expression_scan_charge(source_expression, report, name, line)
+                not proof_return_expression_scan_charge(source_expression, report, name, line)
                 proof_expr_has_call(source_expression) and proof_fact_expression_has_fresh_runtime_value(report, source_expression)
             # Substitution can introduce calls from earlier local values. Validate those with
             # the same source-bound resolver: it checks result shape, effect and verification
             # status, module identity, and local callable shadowing without table fallback scans.
-            return false if proof_expr_has_call(expression) and proof_fact_expression_has_fresh_runtime_value(report, expression)
+            return false if not proof_return_expression_scan_charge(expression, report, name, line) or not proof_return_expression_scan_charge(expression, report, name, line) or (proof_expr_has_call(expression) and proof_fact_expression_has_fresh_runtime_value(report, expression))
             return true
 
         # Rewrite only exact equalities already published by a verified call summary. This is
@@ -123,22 +127,34 @@ extend ElisaProof:
         # This is syntax admission, not purity or truth: the verified-function
         # gate below and independent quantifier replay still check both.
         def proof_logical_contract_supported(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&) -> bool:
-            return proof_logical_contract_supported_depth(expression, annotations, functions, 0)
+            work: mutable usize = 0
+            return proof_logical_contract_supported_with_source_work(expression, annotations, functions, &work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, "")
 
-        def proof_logical_contract_supported_depth(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&, depth: usize) -> bool:
+        # Quantified-call preparation supplies its shared source-work counter and can pass the
+        # root block's already-resolved marker. Other callers get the same fail-closed behavior
+        # with a local bound through the wrapper above.
+        def proof_logical_contract_supported_with_source_work(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&, work: mutable usize&, limit: usize, root_quantifier_kind: sview) -> bool:
+            return proof_logical_contract_supported_depth_with_source_work(expression, annotations, functions, 0, work, limit, root_quantifier_kind)
+
+        def proof_logical_contract_supported_depth_with_source_work(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&, depth: usize, work: mutable usize&, limit: usize, root_quantifier_kind: sview) -> bool:
             return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
             # Preserve the existing call-free collection/block fragment. The
             # annotation-aware extension is needed only for rejected syntax.
-            return true if proof_expr_supported(expression)
+            supported: bool = proof_expr_supported_with_work_limit(expression, work, limit)
+            return false if work > limit
+            return true if supported
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_logical_contract_supported_depth(inner, annotations, functions, depth + 1)
+                    return proof_logical_contract_supported_depth_with_source_work(inner, annotations, functions, depth + 1, work, limit, root_quantifier_kind)
                 Ast::Expr.Unary(_, operand, _):
-                    return proof_logical_contract_supported_depth(operand, annotations, functions, depth + 1)
+                    return proof_logical_contract_supported_depth_with_source_work(operand, annotations, functions, depth + 1, work, limit, "")
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_logical_contract_supported_depth(left, annotations, functions, depth + 1) and proof_logical_contract_supported_depth(right, annotations, functions, depth + 1)
+                    return proof_logical_contract_supported_depth_with_source_work(left, annotations, functions, depth + 1, work, limit, "") and proof_logical_contract_supported_depth_with_source_work(right, annotations, functions, depth + 1, work, limit, "")
                 Ast::Expr.Block(statements, value, captures, _):
-                    return proof_expr_supported(expression) if proof_quantifier_kind(expression, annotations) == ""
+                    quantifier_kind: mutable sview = root_quantifier_kind
+                    if quantifier_kind == "":
+                        quantifier_kind <- proof_quantifier_kind_with_work_limit(expression, annotations, work, limit, 0)
+                    return false if work > limit or quantifier_kind == ""
                     return false if captures.count != 0 or statements.count != 1
                     match statements[0]:
                         Ast::Stmt.VarDecl(binder, binder_type, iterable, _):
@@ -150,12 +166,15 @@ extend ElisaProof:
                                     return false if operator != TokenKind.RangeLt and operator != TokenKind.RangeLe and operator != TokenKind.RangeGt
                                 _:
                                     return false
-                            return false if proof_expr_has_call(iterable) or not proof_expr_supported(iterable)
-                            return proof_logical_contract_supported_depth(value, annotations, functions, depth + 1)
+                            has_call: bool = proof_expr_has_call_with_work(iterable, work, limit)
+                            return false if work > limit or has_call
+                            iterable_supported: bool = proof_expr_supported_with_work_limit(iterable, work, limit)
+                            return false if work > limit or not iterable_supported
+                            return proof_logical_contract_supported_depth_with_source_work(value, annotations, functions, depth + 1, work, limit, "")
                         _:
                             return false
                 _:
-                    return proof_expr_supported(expression)
+                    return false
 
         def proof_check_logical_contract_calls(body: darray[Ast::Stmt]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, caller_names: darray[sview]&) -> void:
             for statement in body |functions, report, name, annotations, caller_names|:

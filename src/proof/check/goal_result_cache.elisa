@@ -560,21 +560,24 @@ extend ElisaProof:
             proof_goal_cache_store(report, key.hash, facts, goal, operator_mask, float_mode, proven) if proven or not finished
             proven
 
-        # `proof_goal` with each of its decisions answered through the cache above: the same
-        # plain-facts attempt first and the full facts as the fallback, under the operator mask
-        # `proof_goal_with_limits` reads from the annotations.
-        def proof_goal_reported(report: mutable ProofReport&, facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
-            operator_mask: usize = proof_source_primitive_operator_mask(annotations)
-            return proof_goal_reported_with_operator_mask(report, facts, goal, annotations, operator_mask)
-
         # Callers that check many goals over the same source annotations can derive the mask
         # once and account for that traversal at their aggregate boundary.
         def proof_goal_reported_with_operator_mask(report: mutable ProofReport&, facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize) -> bool can[Global.Read, Global.Write]:
             plain: mutable darray[Ast::Expr] = []
-            for fact in facts |plain|:
-                plain.push(fact) if not proof_goal_fact_is_disjunction(fact)
-            if plain.count < facts.count:
-                cheap: mutable bool = false
-                return true if (proof_goal_cached(report, plain, goal, annotations, operator_mask, &cheap) can Global{Read,Write})
-            exhausted: mutable bool = false
-            return (proof_goal_cached(report, facts, goal, annotations, operator_mask, &exhausted) can Global{Read,Write})
+            solver_work: mutable usize = 0
+            tactic_work: mutable usize = 0
+            pruning_work: mutable usize = 0
+            pruning_exhausted: mutable bool = false
+            pruning_complete: mutable bool = true
+            for fact in facts |plain, pruning_work, pruning_exhausted|:
+                disjunction: (complete: bool, is_disjunction: bool) = proof_goal_fact_is_disjunction_with_work(fact, &pruning_work, &pruning_exhausted)
+                if not disjunction.complete or pruning_exhausted:
+                    pruning_complete <- false
+                    break
+                plain.push(fact) if not disjunction.is_disjunction
+            return false if not proof_goal_tactic_preflight_charge(&tactic_work, pruning_work)
+            if pruning_complete and plain.count < facts.count:
+                plain_proven: bool = (proof_goal_cached_with_shared_work(report, plain, goal, annotations, operator_mask, &solver_work, &tactic_work) can Global{Read,Write})
+                return true if plain_proven
+                return false if solver_work >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or tactic_work >= PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+            return (proof_goal_cached_with_shared_work(report, facts, goal, annotations, operator_mask, &solver_work, &tactic_work) can Global{Read,Write})

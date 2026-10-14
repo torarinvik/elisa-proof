@@ -1,0 +1,266 @@
+# Metered unit resolution over the current fact set.
+extend ElisaProof:
+    private:
+        struct ProofDisjunctiveFactIndex:
+            capacity: usize = 0
+            entries: mutable usize = 0
+            slot_hashes: mutable darray[u32] = []
+            slot_rows: mutable darray[usize] = []
+            slot_tails: mutable darray[usize] = []
+            slot_occupied: mutable darray[bool] = []
+            row_hashes: mutable darray[u32] = []
+            row_next: mutable darray[usize] = []
+
+        def proof_disjunctive_fact_work_charge(amount: usize, work: mutable usize&) -> bool:
+            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + amount
+            return true
+
+        # Shape hashes are only a prefilter. Reserve the bounded AST walk and the hash walk;
+        # exact matches still pass through `proof_expr_equal` in the index lookup.
+        def proof_disjunctive_fact_hash(expression: Ast::Expr, work: mutable usize&) -> (complete: bool, hash: u32):
+            return (false, 0) if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(expression, &cost, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, 0)
+            remaining: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            return (false, 0) if cost > remaining / 2
+            reserved: usize = cost * 2 if cost > 0 else 1
+            if not proof_disjunctive_fact_work_charge(reserved, &work):
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, 0)
+            return (true, proof_expr_shape_hash(expression, 0))
+
+        def proof_disjunctive_fact_index_prepare(index: mutable ProofDisjunctiveFactIndex&, capacity: usize, work: mutable usize&) -> bool:
+            return false if capacity < 8 or capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+            storage_work: usize = capacity * 4
+            if not proof_disjunctive_fact_work_charge(storage_work, &work):
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            index.capacity <- capacity
+            index.entries <- 0
+            index.slot_hashes.clear()
+            index.slot_rows.clear()
+            index.slot_tails.clear()
+            index.slot_occupied.clear()
+            index.row_next.clear()
+            index.slot_hashes.resize(capacity)
+            index.slot_rows.resize(capacity)
+            index.slot_tails.resize(capacity)
+            index.slot_occupied.resize(capacity)
+            for slot in 0..<capacity |slot, index|:
+                index.slot_occupied[slot] <- false
+                index.slot_rows[slot] <- 0
+                index.slot_tails[slot] <- 0
+                index.slot_hashes[slot] <- 0
+            return true
+
+        # Insert a row while keeping the first source row for every exact expression.
+        # Distinct expressions with the same shape hash occupy separate probe slots.
+        def proof_disjunctive_fact_index_place(index: mutable ProofDisjunctiveFactIndex&, facts: darray[Ast::Expr]&, row: usize, work: mutable usize&) -> bool:
+            return false if index.capacity == 0 or row >= facts.count or row >= index.row_hashes.count or row >= index.row_next.count
+            hash: u32 = index.row_hashes[row]
+            slot: mutable usize = (hash.i64() % index.capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < index.capacity |probes, slot, hash, index, facts, row, work|:
+                if not proof_disjunctive_fact_work_charge(1, &work):
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return false
+                if not index.slot_occupied[slot]:
+                    index.slot_hashes[slot] <- hash
+                    index.slot_rows[slot] <- row
+                    index.slot_tails[slot] <- row
+                    index.slot_occupied[slot] <- true
+                    index.entries <- index.entries + 1
+                    return true
+                if index.slot_hashes[slot] == hash:
+                    current: usize = index.slot_rows[slot]
+                    return false if current >= facts.count or current >= index.row_hashes.count
+                    equal: bool = proof_replay_summary_expr_proof_equal_with_limit(facts[row], facts[current], work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return false if not equal and work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    if equal:
+                        tail: usize = index.slot_tails[slot]
+                        return false if tail >= index.row_next.count or index.row_next[tail] != tail
+                        index.row_next[tail] <- row
+                        index.slot_tails[slot] <- row
+                        return true
+                slot <- (slot + 1) % index.capacity
+                probes <- probes + 1
+            return false
+
+        def proof_disjunctive_fact_index_rebuild(index: mutable ProofDisjunctiveFactIndex&, facts: darray[Ast::Expr]&, new_capacity: usize, work: mutable usize&) -> bool:
+            return false if index.row_hashes.count != facts.count
+            return false if not proof_disjunctive_fact_index_prepare(index, new_capacity, &work)
+            for row in 0..<index.row_hashes.count |row, index, facts, work|:
+                return false if not proof_disjunctive_fact_work_charge(1, &work)
+                index.row_next.push(row)
+                return false if not proof_disjunctive_fact_index_place(index, facts, row, &work)
+            return true
+
+        def proof_disjunctive_fact_index_add_row(index: mutable ProofDisjunctiveFactIndex&, facts: darray[Ast::Expr]&, row: usize, hash: u32, work: mutable usize&) -> bool:
+            return false if index.row_hashes.count != row or row + 1 != facts.count or index.capacity == 0
+            return false if not proof_disjunctive_fact_work_charge(2, &work)
+            index.row_hashes.push(hash)
+            index.row_next.push(row)
+            if index.entries >= index.capacity / 2:
+                return false if index.capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8
+                return false if not proof_disjunctive_fact_index_rebuild(index, facts, index.capacity * 2, &work)
+                return true
+            proof_disjunctive_fact_index_place(index, facts, row, &work)
+
+        def proof_disjunctive_fact_index_find(index: ProofDisjunctiveFactIndex&, facts: darray[Ast::Expr]&, expression: Ast::Expr, hash: u32, excluded_row: usize, max_row: usize, work: mutable usize&) -> (complete: bool, found: bool, row: usize):
+            return (false, false, 0) if index.capacity == 0 or index.slot_hashes.count != index.capacity or index.slot_rows.count != index.capacity or index.slot_tails.count != index.capacity or index.slot_occupied.count != index.capacity or index.row_hashes.count != facts.count or index.row_next.count != facts.count
+            slot: mutable usize = (hash.i64() % index.capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < index.capacity |probes, slot, hash, index, facts, expression, work|:
+                if not proof_disjunctive_fact_work_charge(1, &work):
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return (false, false, 0)
+                if not index.slot_occupied[slot]:
+                    return (true, false, 0)
+                if index.slot_hashes[slot] == hash:
+                    row: usize = index.slot_rows[slot]
+                    return (false, false, 0) if row >= facts.count or row >= index.row_hashes.count
+                    equal: bool = proof_replay_summary_expr_proof_equal_with_limit(expression, facts[row], work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return (false, false, 0) if not equal and work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    if equal:
+                        while row < max_row |row, max_row, excluded_row, index, facts, work|:
+                            return (false, false, 0) if row >= facts.count or row >= index.row_next.count
+                            return (false, false, 0) if not proof_disjunctive_fact_work_charge(1, &work)
+                            return (true, true, row) if row != excluded_row
+                            next: usize = index.row_next[row]
+                            break if next == row
+                            return (false, false, 0) if next >= index.row_next.count
+                            row <- next
+                        return (true, false, 0)
+                slot <- (slot + 1) % index.capacity
+                probes <- probes + 1
+            return (true, false, 0)
+
+        def proof_disjunctive_fact_index_build(index: mutable ProofDisjunctiveFactIndex&, facts: darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            count: usize = facts.count
+            return false if count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+            capacity: usize = 8 if count < 4 else count * 2
+            return false if not proof_disjunctive_fact_index_prepare(index, capacity, &work)
+            for row in 0..<count |row, index, facts, work|:
+                hashed: (complete: bool, hash: u32) = proof_disjunctive_fact_hash(facts[row], &work)
+                return false if not hashed.complete or not proof_disjunctive_fact_work_charge(2, &work)
+                index.row_hashes.push(hashed.hash)
+                index.row_next.push(row)
+                return false if not proof_disjunctive_fact_index_place(index, facts, row, &work)
+            return true
+
+        def proof_disjunctive_fact_index_refutes(index: ProofDisjunctiveFactIndex&, facts: darray[Ast::Expr]&, original_count: usize, excluded_row: usize, side: Ast::Expr, work: mutable usize&) -> (complete: bool, found: bool, row: usize):
+            first_found: mutable bool = false
+            first_row: mutable usize = facts.count
+            match side:
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    hashed: (complete: bool, hash: u32) = proof_disjunctive_fact_hash(inner, &work)
+                    return (false, false, 0) if not hashed.complete
+                    found: (complete: bool, found: bool, row: usize) = proof_disjunctive_fact_index_find(index, facts, inner, hashed.hash, excluded_row, original_count, &work)
+                    return (false, false, 0) if not found.complete
+                    first_found <- found.found
+                    first_row <- found.row if first_found
+                _:
+                    pass
+            negated_side: Ast::Expr = Ast::Expr.Unary(TokenKind.Not, side, Ast::expr_pos(side))
+            negated_hash: (complete: bool, hash: u32) = proof_disjunctive_fact_hash(negated_side, &work)
+            return (false, false, 0) if not negated_hash.complete
+            second: (complete: bool, found: bool, row: usize) = proof_disjunctive_fact_index_find(index, facts, negated_side, negated_hash.hash, excluded_row, original_count, &work)
+            return (false, false, 0) if not second.complete
+            if second.found and (not first_found or second.row < first_row):
+                return (true, true, second.row)
+            return (true, true, first_row) if first_found
+            return (true, false, 0)
+
+        def proof_disjunctive_fact_resolution_report_exhaustion(report: mutable ProofReport&, line: u32, name: sview, work: mutable usize&) -> void:
+            was_exhausted: bool = report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+            report.source_types.source_effect_index.work.implicit_effect_work <- work
+            report.proof_obligation(false)
+            if not was_exhausted:
+                proof_add_budget_finding(report, "resource-analysis-budget", line, name, "disjunctive fact resolution exceeded its bounded shared source-work budget", "disjunctive-fact-resolution-work", work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+
+        def proof_disjunctive_fact_resolution_publish(facts: mutable darray[Ast::Expr]&, original: darray[Ast::Expr]&, index: mutable ProofDisjunctiveFactIndex&, outer: usize, inner: usize, derived: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, source_work: mutable usize&) -> bool:
+            return false if outer >= original.count or inner >= original.count or inner == outer
+            hashed: (complete: bool, hash: u32) = proof_disjunctive_fact_hash(derived, &source_work)
+            return false if not hashed.complete
+            duplicate: (complete: bool, found: bool, row: usize) = proof_disjunctive_fact_index_find(index, facts, derived, hashed.hash, facts.count, facts.count, &source_work)
+            return false if not duplicate.complete
+            return true if duplicate.found
+            return false if not proof_replay_summary_expr_repeat_charge_with_work(derived, 4, &source_work)
+            premises: darray[Ast::Expr] = [original[outer], original[inner]]
+            return false if not proof_disjunctive_fact_work_charge(premises.count, &source_work)
+            for premise in premises |premise, source_work|:
+                return false if not proof_replay_summary_expr_repeat_charge_with_work(premise, 4, &source_work)
+            return false if not proof_disjunctive_fact_work_charge(1, &source_work)
+            facts_before: usize = facts.count
+            proof_add_derived_fact_from(facts, report, derived, premises, "unit-resolution", line, name)
+            return false if facts.count > facts_before and not proof_disjunctive_fact_index_add_row(&index, facts, facts_before, hashed.hash, &source_work)
+            return true
+
+        # Resolve each top-level disjunction against the earliest complementary original fact.
+        # The original row order and the exact two-premise trace are preserved; hash collisions
+        # only add metered exact comparisons.
+        def proof_resolve_disjunctive_facts(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, name: sview) -> void:
+            source_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
+            if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_disjunctive_fact_resolution_report_exhaustion(report, line, name, &source_work)
+                return
+            has_disjunction: mutable bool = false
+            for fact in facts |fact, has_disjunction, source_work|:
+                if not proof_disjunctive_fact_work_charge(1, &source_work):
+                    proof_disjunctive_fact_resolution_report_exhaustion(report, line, name, &source_work)
+                    return
+                match fact:
+                    Ast::Expr.Binary(_, TokenKind.Or, _, _):
+                        has_disjunction <- true
+                    _:
+                        pass
+            if not has_disjunction:
+                report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                return
+            if not proof_disjunctive_fact_work_charge(facts.count, &source_work):
+                proof_disjunctive_fact_resolution_report_exhaustion(report, line, name, &source_work)
+                return
+            original: darray[Ast::Expr] = proof_copy_exprs(facts)
+            index: mutable ProofDisjunctiveFactIndex = ProofDisjunctiveFactIndex{}
+            if not proof_disjunctive_fact_index_build(&index, facts, &source_work):
+                proof_disjunctive_fact_resolution_report_exhaustion(report, line, name, &source_work)
+                return
+            for outer in 0..<original.count |facts, report, original, index, line, name, source_work|:
+                if not proof_disjunctive_fact_work_charge(1, &source_work):
+                    proof_disjunctive_fact_resolution_report_exhaustion(report, line, name, &source_work)
+                    return
+                match original[outer]:
+                    Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                        left_refuter: (complete: bool, found: bool, row: usize) = proof_disjunctive_fact_index_refutes(index, facts, original.count, outer, left, &source_work)
+                        if not left_refuter.complete:
+                            proof_disjunctive_fact_resolution_report_exhaustion(report, line, name, &source_work)
+                            return
+                        right_refuter: (complete: bool, found: bool, row: usize) = proof_disjunctive_fact_index_refutes(index, facts, original.count, outer, right, &source_work)
+                        if not right_refuter.complete:
+                            proof_disjunctive_fact_resolution_report_exhaustion(report, line, name, &source_work)
+                            return
+                        continue if not left_refuter.found and not right_refuter.found
+                        publish_complete: mutable bool = true
+                        if left_refuter.found and right_refuter.found:
+                            if left_refuter.row == right_refuter.row:
+                                publish_complete <- proof_disjunctive_fact_resolution_publish(facts, original, &index, outer, left_refuter.row, right, report, line, name, &source_work)
+                            elif left_refuter.row < right_refuter.row:
+                                publish_complete <- proof_disjunctive_fact_resolution_publish(facts, original, &index, outer, left_refuter.row, right, report, line, name, &source_work)
+                                publish_complete <- proof_disjunctive_fact_resolution_publish(facts, original, &index, outer, right_refuter.row, left, report, line, name, &source_work) if publish_complete
+                            else:
+                                publish_complete <- proof_disjunctive_fact_resolution_publish(facts, original, &index, outer, right_refuter.row, left, report, line, name, &source_work)
+                                publish_complete <- proof_disjunctive_fact_resolution_publish(facts, original, &index, outer, left_refuter.row, right, report, line, name, &source_work) if publish_complete
+                        elif left_refuter.found:
+                            publish_complete <- proof_disjunctive_fact_resolution_publish(facts, original, &index, outer, left_refuter.row, right, report, line, name, &source_work)
+                        else:
+                            publish_complete <- proof_disjunctive_fact_resolution_publish(facts, original, &index, outer, right_refuter.row, left, report, line, name, &source_work)
+                        if not publish_complete:
+                            proof_disjunctive_fact_resolution_report_exhaustion(report, line, name, &source_work)
+                            return
+                    _:
+                        pass
+            report.source_types.source_effect_index.work.implicit_effect_work <- source_work

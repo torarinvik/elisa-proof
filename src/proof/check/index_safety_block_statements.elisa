@@ -1,0 +1,217 @@
+extend ElisaProof:
+    private:
+        # A block can write through an assignment even when its expression contains no call,
+        # move, or overloaded operator. Detect that case in nested operands before facts cross
+        # an evaluation boundary; unfamiliar statement forms fail closed.
+        def proof_index_safety_expression_has_block_write_with_work(expression: Ast::Expr, report: mutable ProofReport&, name: sview, line: u32, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_index_safety_take_source_work(report, name, line, 1)
+            match expression:
+                Ast::Expr.Block(statements, value, _, _):
+                    return true if proof_index_safety_statements_have_block_write_with_work(statements, report, name, line, depth + 1)
+                    proof_index_safety_expression_has_block_write_with_work(value, report, name, line, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    proof_index_safety_expression_has_block_write_with_work(inner, report, name, line, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    proof_index_safety_expression_has_block_write_with_work(left, report, name, line, depth + 1) or proof_index_safety_expression_has_block_write_with_work(right, report, name, line, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return true if proof_index_safety_expression_has_block_write_with_work(object, report, name, line, depth + 1)
+                    return true if proof_index_safety_expression_has_block_write_with_work(low, report, name, line, depth + 1)
+                    proof_index_safety_expression_has_block_write_with_work(high, report, name, line, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_index_safety_expression_has_block_write_with_work(callee, report, name, line, depth + 1)
+                    for argument in arguments |report, name, line, depth|:
+                        return true if proof_index_safety_expression_has_block_write_with_work(argument, report, name, line, depth + 1)
+                    return false
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    return true
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    proof_index_safety_expression_has_block_write_with_work(object, report, name, line, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_index_safety_expression_has_block_write_with_work(object, report, name, line, depth + 1)
+                    for argument in arguments |report, name, line, depth|:
+                        return true if proof_index_safety_expression_has_block_write_with_work(argument, report, name, line, depth + 1)
+                    return false
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |report, name, line, depth|:
+                        return true if proof_index_safety_expression_has_block_write_with_work(element, report, name, line, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |report, name, line, depth|:
+                        return true if proof_index_safety_expression_has_block_write_with_work(entry.key, report, name, line, depth + 1)
+                        return true if proof_index_safety_expression_has_block_write_with_work(entry.value, report, name, line, depth + 1)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |report, name, line, depth|:
+                        return true if proof_index_safety_expression_has_block_write_with_work(field.value, report, name, line, depth + 1)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_index_safety_expression_has_block_write_with_work(base, report, name, line, depth + 1)
+                    for field in fields |report, name, line, depth|:
+                        return true if proof_index_safety_expression_has_block_write_with_work(field.value, report, name, line, depth + 1)
+                    return false
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return true if proof_index_safety_expression_has_block_write_with_work(condition, report, name, line, depth + 1)
+                    return true if proof_index_safety_expression_has_block_write_with_work(then_value, report, name, line, depth + 1)
+                    proof_index_safety_expression_has_block_write_with_work(else_value, report, name, line, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return true if proof_index_safety_expression_has_block_write_with_work(iterable, report, name, line, depth + 1)
+                    return true if proof_index_safety_expression_has_block_write_with_work(condition, report, name, line, depth + 1)
+                    proof_index_safety_expression_has_block_write_with_work(body, report, name, line, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return true if proof_index_safety_expression_has_block_write_with_work(base, report, name, line, depth + 1)
+                    proof_index_safety_expression_has_block_write_with_work(predicate, report, name, line, depth + 1)
+                Ast::Expr.GetElse(value, recovery, _):
+                    return true if proof_index_safety_expression_has_block_write_with_work(value, report, name, line, depth + 1)
+                    proof_index_safety_statements_have_block_write_with_work(recovery, report, name, line, depth + 1)
+                Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _):
+                    return true
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    return false
+                _:
+                    return true
+
+        def proof_index_safety_statements_have_block_write_with_work(statements: darray[Ast::Stmt]&, report: mutable ProofReport&, name: sview, line: u32, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for statement in statements |report, name, line, depth|:
+                return true if not proof_index_safety_take_source_work(report, name, line, 1)
+                match statement:
+                    Ast::Stmt.Assign(_, _, _, _):
+                        return true
+                    Ast::Stmt.Expr(value, _) | Ast::Stmt.VarDecl(_, _, value, _):
+                        return true if proof_index_safety_expression_has_block_write_with_work(value, report, name, line, depth + 1)
+                    Ast::Stmt.Return(value, _):
+                        if value is returned:
+                            return true if proof_index_safety_expression_has_block_write_with_work(returned, report, name, line, depth + 1)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_index_safety_expression_has_block_write_with_work(condition, report, name, line, depth + 1)
+                        return true if proof_index_safety_statements_have_block_write_with_work(then_body, report, name, line, depth + 1)
+                        return true if proof_index_safety_statements_have_block_write_with_work(else_body, report, name, line, depth + 1)
+                    Ast::Stmt.While(condition, body, _) | Ast::Stmt.For(_, _, condition, body, _):
+                        return true if proof_index_safety_expression_has_block_write_with_work(condition, report, name, line, depth + 1)
+                        return true if proof_index_safety_statements_have_block_write_with_work(body, report, name, line, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return true if proof_index_safety_expression_has_block_write_with_work(scrutinee, report, name, line, depth + 1)
+                        for arm in arms |report, name, line, depth|:
+                            return true if proof_index_safety_expression_has_block_write_with_work(arm.guard, report, name, line, depth + 1)
+                            return true if proof_index_safety_statements_have_block_write_with_work(arm.body, report, name, line, depth + 1)
+                    Ast::Stmt.Contract(_, value, _):
+                        return true if proof_index_safety_expression_has_block_write_with_work(value, report, name, line, depth + 1)
+                    Ast::Stmt.Block(_, _, _, body, _):
+                        return true if proof_index_safety_statements_have_block_write_with_work(body, report, name, line, depth + 1)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    Ast::Stmt.Invalid:
+                        return true
+                    _:
+                        return true
+            return false
+
+        # Value blocks contain executable statements. Inspect each statement in source order,
+        # carrying facts only while the earlier statements cannot mutate or shadow them.
+        def proof_index_safety_block_statements(statements: darray[Ast::Stmt]&, facts: mutable darray[Ast::Expr]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, line: u32, functions: mutable ProofFunctionTable&, depth: usize) -> void can[Global.Read, Global.Write]:
+            if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT:
+                proof_index_safety_report_work_exhausted(report, name, line)
+                facts.clear()
+                return
+            if not proof_index_safety_take_source_work(report, name, line, 1):
+                facts.clear()
+                return
+            for statement in statements |facts, fixed_names, fixed_extents, report, name, annotations, line, functions, depth|:
+                if not proof_index_safety_take_source_work(report, name, line, 1):
+                    facts.clear()
+                    return
+                match statement:
+                    Ast::Stmt.Expr(expression, position):
+                        (proof_check_index_safety_value(expression, facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions) can Global{Read,Write})
+                        facts.clear() if facts.count > 0 and proof_index_safety_expression_may_invalidate_facts(expression, functions, report, name, position.line)
+                    Ast::Stmt.VarDecl(local_name, _, initializer, position):
+                        (proof_check_index_safety_value(initializer, facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions) can Global{Read,Write})
+                        shadowed_fact: mutable bool = false
+                        for fact in facts |report, name, position, local_name, shadowed_fact|:
+                            # The cost preflight walks the fact once; the following legacy
+                            # mention predicate walks it again. Reserve both traversals.
+                            if not proof_index_safety_preflight_expr_work(fact, 2, report, name, position.line):
+                                facts.clear()
+                                return
+                            shadowed_fact <- true if proof_expr_mentions_name(fact, local_name)
+                        if facts.count > 0 and (shadowed_fact or proof_index_safety_expression_may_invalidate_facts(initializer, functions, report, name, position.line)):
+                            facts.clear()
+                    Ast::Stmt.Assign(target, _, value, position):
+                        operands: darray[Ast::Expr] = [target, value]
+                        _ = proof_check_index_safety_sequence(operands, facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions)
+                        facts.clear()
+                    Ast::Stmt.Return(value, position):
+                        if value is returned:
+                            (proof_check_index_safety_value(returned, facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions) can Global{Read,Write})
+                        facts.clear()
+                    Ast::Stmt.If(condition, then_body, else_body, position):
+                        condition_terms: darray[Ast::Expr] = [condition]
+                        branch_facts: darray[Ast::Expr] = proof_check_index_safety_sequence(condition_terms, facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions)
+                        if not proof_index_safety_take_source_work(report, name, position.line, branch_facts.count):
+                            facts.clear()
+                            return
+                        then_facts: mutable darray[Ast::Expr] = proof_copy_exprs(branch_facts)
+                        if not proof_index_safety_take_source_work(report, name, position.line, branch_facts.count):
+                            facts.clear()
+                            return
+                        else_facts: mutable darray[Ast::Expr] = proof_copy_exprs(branch_facts)
+                        condition_supported: bool = proof_index_safety_expr_supported_with_work(condition, report, name, position.line)
+                        condition_stable: bool = condition_supported and not proof_index_safety_expression_may_invalidate_facts(condition, functions, report, name, position.line)
+                        if condition_stable:
+                            proof_index_safety_add_branch_condition_facts(then_facts, report, functions, condition, name, position.line)
+                            proof_index_safety_add_branch_condition_facts(else_facts, report, functions, proof_branch_negation(condition, position), name, position.line)
+                        else:
+                            then_facts.clear()
+                            else_facts.clear()
+                        proof_index_safety_block_statements(then_body, then_facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions, depth + 1)
+                        proof_index_safety_block_statements(else_body, else_facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions, depth + 1)
+                        facts.clear()
+                    Ast::Stmt.While(condition, body, position):
+                        # These statements execute again after the body may mutate state. No
+                        # loop-invariant facts are available in this value-block walk, so do
+                        # not carry pre-loop facts into later condition evaluations.
+                        loop_entry_facts: mutable darray[Ast::Expr] = []
+                        condition_terms: darray[Ast::Expr] = [condition]
+                        body_base: darray[Ast::Expr] = proof_check_index_safety_sequence(condition_terms, loop_entry_facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions)
+                        if not proof_index_safety_take_source_work(report, name, position.line, body_base.count):
+                            facts.clear()
+                            return
+                        body_facts: mutable darray[Ast::Expr] = proof_copy_exprs(body_base)
+                        condition_supported: bool = proof_index_safety_expr_supported_with_work(condition, report, name, position.line)
+                        condition_stable: bool = condition_supported and not proof_index_safety_expression_may_invalidate_facts(condition, functions, report, name, position.line)
+                        proof_index_safety_add_branch_condition_facts(body_facts, report, functions, condition, name, position.line) if condition_stable
+                        body_facts.clear() if not condition_stable
+                        proof_index_safety_block_statements(body, body_facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions, depth + 1)
+                        facts.clear()
+                    Ast::Stmt.For(_, _, iterable, body, position):
+                        (proof_check_index_safety_value(iterable, facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions) can Global{Read,Write})
+                        empty_facts: mutable darray[Ast::Expr] = []
+                        proof_index_safety_block_statements(body, empty_facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions, depth + 1)
+                        facts.clear()
+                    Ast::Stmt.Match(scrutinee, arms, position):
+                        (proof_check_index_safety_value(scrutinee, facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions) can Global{Read,Write})
+                        for arm in arms |facts, fixed_names, fixed_extents, report, name, annotations, position, functions, depth|:
+                            empty_facts: mutable darray[Ast::Expr] = []
+                            (proof_check_index_safety_value(arm.guard, empty_facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions) can Global{Read,Write})
+                            proof_index_safety_block_statements(arm.body, empty_facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions, depth + 1)
+                        facts.clear()
+                    Ast::Stmt.Contract(_, expression, position):
+                        (proof_check_index_safety_value(expression, facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions) can Global{Read,Write})
+                        facts.clear()
+                    Ast::Stmt.Block(_, _, _, body, position):
+                        if not proof_index_safety_take_source_work(report, name, position.line, facts.count):
+                            facts.clear()
+                            return
+                        nested_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                        proof_index_safety_block_statements(body, nested_facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions, depth + 1)
+                        facts.clear()
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        facts.clear()
+                    Ast::Stmt.Invalid:
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "expression-unsupported", line, name, "index-safety value block contains an invalid statement")
+                        facts.clear()
+                    _:
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "expression-unsupported", line, name, "index-safety value block contains an unsupported statement")
+                        facts.clear()

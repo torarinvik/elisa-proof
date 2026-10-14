@@ -91,36 +91,36 @@ extend ElisaProof:
         # Extract only a top-level statement value recovery. This deliberately does not walk the
         # recovery body: the main proof-state checker must do that with an isolated state so a
         # failure branch cannot leak bindings or facts into the successful path.
-        def proof_statement_getelse_recovery(statement: Ast::Stmt) -> (known: bool, recovery: darray[Ast::Stmt], line: u32):
+        def proof_statement_getelse_recovery(statement: Ast::Stmt) -> (known: bool, guarded: Ast::Expr, recovery: darray[Ast::Stmt], line: u32):
             match statement:
                 Ast::Stmt.Return(value, _):
                     if value is returned:
                         match returned:
-                            Ast::Expr.GetElse(_, recovery, position):
-                                return (true, recovery, position.line)
+                            Ast::Expr.GetElse(guarded, recovery, position):
+                                return (true, guarded, recovery, position.line)
                             _:
                                 pass
                 Ast::Stmt.Expr(expression, _):
                     match expression:
-                        Ast::Expr.GetElse(_, recovery, position):
-                            return (true, recovery, position.line)
+                        Ast::Expr.GetElse(guarded, recovery, position):
+                            return (true, guarded, recovery, position.line)
                         _:
                             pass
                 Ast::Stmt.VarDecl(_, _, initializer, _):
                     match initializer:
-                        Ast::Expr.GetElse(_, recovery, position):
-                            return (true, recovery, position.line)
+                        Ast::Expr.GetElse(guarded, recovery, position):
+                            return (true, guarded, recovery, position.line)
                         _:
                             pass
                 Ast::Stmt.Assign(_, _, initializer, _):
                     match initializer:
-                        Ast::Expr.GetElse(_, recovery, position):
-                            return (true, recovery, position.line)
+                        Ast::Expr.GetElse(guarded, recovery, position):
+                            return (true, guarded, recovery, position.line)
                         _:
                             pass
                 _:
                     pass
-            return (false, [], 0)
+            return (false, Ast::Expr.Invalid, [], 0)
 
         # A runtime index is a memory-safety obligation, not merely an expression the arithmetic
         # prover may ignore. This first heap slice handles directly tracked collection-like
@@ -174,6 +174,41 @@ extend ElisaProof:
         # not prove that the returned position is safe. Admit the call only when its verified
         # executable summary contains an exact, call-free result equation; the caller's ordinary
         # arithmetic facts then prove the bounds for that returned expression.
+        # Shared index checks account contract substitution in the same per-function budget as
+        # their fact scans and snapshots; other callers retain the local substitution meter.
+        def proof_index_call_summary_substitute[@r](expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]& @r, local_work: mutable usize&, report: mutable ProofReport&, owner: sview, line: u32, share_index_search_work: bool) -> Ast::Expr @r:
+            if share_index_search_work:
+                substituted: Ast::Expr = proof_substitute_with_work_limit(expression, names, values, &report.analysis_1.budgets.index_safety_source_work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+                if report.analysis_1.budgets.index_safety_source_work > PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                    proof_index_safety_report_work_exhausted(report, owner, line)
+                    return Ast::Expr.Invalid
+                return substituted
+            proof_substitute_with_work(expression, names, values, &local_work)
+
+        def proof_index_call_candidate_supported(expression: Ast::Expr, report: mutable ProofReport&, owner: sview, line: u32, share_index_search_work: bool) -> bool:
+            return proof_expr_supported(expression) if not share_index_search_work
+            supported: bool = proof_expr_supported_with_work_limit(expression, &report.analysis_1.budgets.index_safety_source_work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+            if report.analysis_1.budgets.index_safety_source_work > PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                proof_index_safety_report_work_exhausted(report, owner, line)
+                return false
+            supported
+
+        def proof_index_call_candidate_call_free(expression: Ast::Expr, report: mutable ProofReport&, owner: sview, line: u32, share_index_search_work: bool) -> bool:
+            return not proof_expr_has_call(expression) if not share_index_search_work
+            has_call: bool = proof_expr_has_call_with_work(expression, &report.analysis_1.budgets.index_safety_source_work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+            if report.analysis_1.budgets.index_safety_source_work > PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                proof_index_safety_report_work_exhausted(report, owner, line)
+                return false
+            not has_call
+
+        def proof_index_call_candidate_move_free(expression: Ast::Expr, report: mutable ProofReport&, owner: sview, line: u32, share_index_search_work: bool) -> bool:
+            return not proof_expr_has_move(expression) if not share_index_search_work
+            has_move: bool = proof_expr_has_move_with_work(expression, &report.analysis_1.budgets.index_safety_source_work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+            if report.analysis_1.budgets.index_safety_source_work > PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                proof_index_safety_report_work_exhausted(report, owner, line)
+                return false
+            not has_move
+
         def proof_index_call_result(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, summary_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, share_index_search_work: bool) -> (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) can[Global.Read, Global.Write]:
             match expression:
                 Ast::Expr.Paren(inner, _):
@@ -181,13 +216,23 @@ extend ElisaProof:
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     function_name: sview = proof_callable_name(callee)
                     function_index: usize = proof_function_index_for_callee(functions, callee)
+                    parameter_count: usize = functions.parameters.metadata.param_counts[function_index] if function_index < functions.parameters.metadata.param_counts.count else 0
                     return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if:
                         function_name == "" or function_index >= functions.lookup.names.count
                         function_index >= functions.summaries.pure.count or not functions.summaries.pure[function_index]
                         function_index >= functions.summaries.verified.count or not functions.summaries.verified[function_index]
-                        function_index >= functions.parameters.metadata.param_counts.count or arguments.count > functions.parameters.metadata.param_counts[function_index]
-                    parameter_names: mutable darray[sview] = []
+                        function_index >= functions.parameters.metadata.param_counts.count or function_index >= functions.parameters.metadata.param_starts.count or arguments.count > parameter_count
                     parameter_start: usize = functions.parameters.metadata.param_starts[function_index]
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if:
+                        parameter_start > functions.parameters.metadata.all_params.count or parameter_count > functions.parameters.metadata.all_params.count - parameter_start
+                        parameter_start > functions.parameters.metadata.all_has_defaults.count or parameter_count > functions.parameters.metadata.all_has_defaults.count - parameter_start
+                        parameter_start > functions.parameters.metadata.all_defaults.count or parameter_count > functions.parameters.metadata.all_defaults.count - parameter_start
+                    if share_index_search_work:
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if:
+                            not proof_index_safety_take_source_work(report, owner, position.line, parameter_count)
+                            not proof_index_safety_take_source_work(report, owner, position.line, parameter_count)
+                            not proof_index_safety_take_source_work(report, owner, position.line, parameter_count)
+                    parameter_names: mutable darray[sview] = []
                     for parameter_index in 0..<functions.parameters.metadata.param_counts[function_index] |parameter_names, functions, parameter_start|:
                         parameter_names.push(functions.parameters.metadata.all_params[parameter_start + parameter_index])
                     default_flags: mutable darray[bool] = []
@@ -196,15 +241,25 @@ extend ElisaProof:
                         default_flags.push(functions.parameters.metadata.all_has_defaults[parameter_start + parameter_index])
                         default_values.push(functions.parameters.metadata.all_defaults[parameter_start + parameter_index])
                     mapped_arguments: mutable darray[Ast::Expr] = []
-                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if not proof_map_runtime_call_arguments(parameter_names, default_flags, default_values, arguments, argument_names, &mapped_arguments, functions)
+                    mapped_arguments_known: bool = false
+                    if share_index_search_work:
+                        mapped_arguments_known <- proof_map_runtime_call_arguments_with_work(parameter_names, default_flags, default_values, arguments, argument_names, &mapped_arguments, functions, &report.analysis_1.budgets.index_safety_source_work, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                        if not mapped_arguments_known and report.analysis_1.budgets.index_safety_source_work > PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                            proof_index_safety_report_work_exhausted(report, owner, position.line)
+                            return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "")
+                    else:
+                        mapped_arguments_known <- proof_map_runtime_call_arguments(parameter_names, default_flags, default_values, arguments, argument_names, &mapped_arguments, functions)
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if not mapped_arguments_known
                     requires_start: usize = functions.contracts.obligations.requires_starts[function_index] if function_index < functions.contracts.obligations.requires_starts.count else functions.contracts.obligations.all_requires.count
                     requires_count: usize = functions.contracts.obligations.requires_counts[function_index] if function_index < functions.contracts.obligations.requires_counts.count else 0
                     return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if requires_start > functions.contracts.obligations.all_requires.count or requires_count > functions.contracts.obligations.all_requires.count - requires_start
                     substitution_work: mutable usize = 0
                     require_goal_ids: mutable darray[usize] = []
                     for requires_index in 0..<requires_count |requires_index, functions, requires_start, parameter_names, mapped_arguments, facts, annotations, report, position, owner, require_goal_ids|:
-                        required: Ast::Expr = proof_substitute_with_work(functions.contracts.obligations.all_requires[requires_start + requires_index], parameter_names, mapped_arguments, &substitution_work)
-                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if proof_expr_is_invalid(required) or proof_expr_has_old(required)
+                        required: Ast::Expr = proof_index_call_summary_substitute(functions.contracts.obligations.all_requires[requires_start + requires_index], parameter_names, mapped_arguments, &substitution_work, report, owner, position.line, share_index_search_work)
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if proof_expr_is_invalid(required)
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if share_index_search_work and not proof_index_safety_preflight_expr_work(required, 2, report, owner, position.line)
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if proof_expr_has_old(required)
                         return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if share_index_search_work and not proof_index_safety_preflight_fact_work(facts, PROOF_INDEX_SAFETY_REQUIRES_FACT_PASSES, report, owner, position.line)
                         required_proven: mutable bool = false
                         if share_index_search_work:
@@ -219,16 +274,34 @@ extend ElisaProof:
                     result_name: darray[sview] = ["result"]
                     result_value: darray[Ast::Expr] = [expression]
                     for ensures_index in 0..<ensures_count |ensures_index, functions, ensures_start, parameter_names, mapped_arguments, result_name, result_value, expression|:
-                        ensured: Ast::Expr = proof_substitute_with_work(functions.contracts.obligations.all_ensures[ensures_start + ensures_index], parameter_names, mapped_arguments, &substitution_work)
-                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if proof_expr_is_invalid(ensured) or proof_expr_has_old(ensured)
-                        instantiated: Ast::Expr = proof_substitute_with_work(ensured, result_name, result_value, &substitution_work)
+                        ensured: Ast::Expr = proof_index_call_summary_substitute(functions.contracts.obligations.all_ensures[ensures_start + ensures_index], parameter_names, mapped_arguments, &substitution_work, report, owner, position.line, share_index_search_work)
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if proof_expr_is_invalid(ensured)
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if share_index_search_work and not proof_index_safety_preflight_expr_work(ensured, 2, report, owner, position.line)
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if proof_expr_has_old(ensured)
+                        instantiated: Ast::Expr = proof_index_call_summary_substitute(ensured, result_name, result_value, &substitution_work, report, owner, position.line, share_index_search_work)
                         return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if proof_expr_is_invalid(instantiated)
                         match instantiated:
                             Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
-                                candidate: Ast::Expr = right if proof_expr_equal(left, expression) else (left if proof_expr_equal(right, expression) else Ast::Expr.Invalid)
-                                if not proof_expr_is_invalid(candidate) and proof_expr_supported(candidate) and not proof_expr_has_call(candidate) and not proof_expr_has_move(candidate):
-                                    proof_add_function_summary_fact(summary_facts, report, functions, instantiated, position.line, owner, function_name, parameter_names, mapped_arguments, expression, require_goal_ids, ensures_index, false, Ast::Expr.Absent, functions.lookup.lines[function_index] if function_index < functions.lookup.lines.count else 0, position)
-                                    return (true, candidate, instantiated, function_name)
+                                candidate: mutable Ast::Expr = Ast::Expr.Invalid
+                                if share_index_search_work:
+                                    left_match: (complete: bool, equal: bool) = proof_index_call_expr_equal_with_work(left, expression, report, owner, position.line)
+                                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if not left_match.complete
+                                    if left_match.equal:
+                                        candidate <- right
+                                    else:
+                                        right_match: (complete: bool, equal: bool) = proof_index_call_expr_equal_with_work(right, expression, report, owner, position.line)
+                                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if not right_match.complete
+                                        candidate <- left if right_match.equal
+                                else:
+                                    candidate <- right if proof_expr_equal(left, expression) else (left if proof_expr_equal(right, expression) else Ast::Expr.Invalid)
+                                continue if proof_expr_is_invalid(candidate)
+                                continue if not proof_index_call_candidate_supported(candidate, report, owner, position.line, share_index_search_work)
+                                continue if not proof_index_call_candidate_call_free(candidate, report, owner, position.line, share_index_search_work)
+                                continue if not proof_index_call_candidate_move_free(candidate, report, owner, position.line, share_index_search_work)
+                                if share_index_search_work and not proof_index_call_summary_fact_preflight(instantiated, parameter_names, mapped_arguments, expression, require_goal_ids, false, Ast::Expr.Absent, report, owner, position.line):
+                                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "")
+                                proof_add_function_summary_fact(summary_facts, report, functions, instantiated, position.line, owner, function_name, parameter_names, mapped_arguments, expression, require_goal_ids, ensures_index, false, Ast::Expr.Absent, functions.lookup.lines[function_index] if function_index < functions.lookup.lines.count else 0, position)
+                                return (true, candidate, instantiated, function_name)
                             _:
                                 pass
                     return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "")
@@ -260,6 +333,7 @@ extend ElisaProof:
         def proof_check_index_access(object: Ast::Expr, index: Ast::Expr, position: Ast::Pos, facts: mutable darray[Ast::Expr]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, functions: mutable ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
             return if proof_is_type_cast_index(object)
             checked_index: mutable Ast::Expr = index
+            return if not proof_index_safety_take_source_work(report, name, position.line, facts.count)
             checked_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
             unsigned_conversion: (known: bool, receiver: Ast::Expr) = proof_index_unsigned_conversion(index, functions)
             if unsigned_conversion.known:
@@ -367,6 +441,7 @@ extend ElisaProof:
             dimension: mutable usize = 0
             for index in arguments |facts, fixed_dimensions, report, name, annotations, position, dimension, functions|:
                 checked_index: mutable Ast::Expr = index
+                return if not proof_index_safety_take_source_work(report, name, position.line, facts.count)
                 checked_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
                 if proof_expr_has_call(index):
                     resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = (proof_index_call_result(index, facts, functions, annotations, &checked_facts, report, name, true) can Global{Read,Write})
@@ -405,8 +480,10 @@ extend ElisaProof:
                 proof_add_finding(report, "checked-index-unsupported", line, name, "checked index expression is outside the replayable kernel fragment")
                 return
             empty_checked_facts: darray[Ast::Expr] = []
+            attempt_count: usize = report.results.goal_attempts.count
             proof_add_goal_attempt(report, empty_checked_facts, expression, line, name, "checked-index", true)
-            report.proof_obligation(true)
+            attempt_proven: bool = report.results.goal_attempts.count > attempt_count and report.results.goal_attempts[report.results.goal_attempts.count - 1].producer_proven
+            report.proof_obligation(attempt_proven)
 
         # A control-recovery get (`get collection[index] else return/raise/break/continue`)
         # provides the same runtime no-load guarantee as the value-fallback form, but its
@@ -418,8 +495,10 @@ extend ElisaProof:
                 proof_add_finding(report, "checked-get-unsupported", line, name, "checked get expression is outside the replayable kernel fragment")
                 return
             empty_checked_facts: darray[Ast::Expr] = []
+            attempt_count: usize = report.results.goal_attempts.count
             proof_add_goal_attempt(report, empty_checked_facts, expression, line, name, "checked-get", true)
-            report.proof_obligation(true)
+            attempt_proven: bool = report.results.goal_attempts.count > attempt_count and report.results.goal_attempts[report.results.goal_attempts.count - 1].producer_proven
+            report.proof_obligation(attempt_proven)
 
         # Slices use an exclusive high endpoint (`object[low:high]`). Open endpoints are
         # already represented by Ast::Expr.Absent and inherit the implicit safe bounds 0 and
@@ -429,6 +508,7 @@ extend ElisaProof:
         def proof_check_slice_access(object: Ast::Expr, low: Ast::Expr, high: Ast::Expr, position: Ast::Pos, facts: mutable darray[Ast::Expr]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, functions: mutable ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
             checked_low: mutable Ast::Expr = low
             checked_high: mutable Ast::Expr = high
+            return if not proof_index_safety_take_source_work(report, name, position.line, facts.count)
             checked_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
             if proof_expr_has_call(low):
                 resolved_low: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = (proof_index_call_result(low, facts, functions, annotations, &checked_facts, report, name, true) can Global{Read,Write})

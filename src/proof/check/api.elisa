@@ -31,10 +31,7 @@ extend ElisaProof:
             report.source.source_annotation_args.clear()
             proof_source_analysis_indexes_reset(report)
             report.source.source_declarations.clear()
-            report.source_types.source_generic_param_lines.clear()
-            report.source_types.source_generic_param_names.clear()
-            report.source_types.source_generic_params_valid <- false
-            report.source_types.source_metadata_work_used <- 0
+            proof_source_generic_metadata_reset(report)
             report.source_contracts.source_signature_contract_lines.clear()
             report.source_contracts.source_signature_contract_kinds.clear()
             report.source_contracts.source_signature_contracts.clear()
@@ -219,15 +216,18 @@ extend ElisaProof:
             if internal_name.found:
                 proof_add_finding(report, "proof-internal-name", internal_name.line, internal_name.name, "source identifier collides with a proof-system internal name")
                 return false
+            kernel_type_source_work: mutable usize = 0
+            generic_line_index_ready: bool = proof_source_conversion_generic_line_index_build(report, &kernel_type_source_work)
+            kernel_generic_param_index: mutable ProofSourceKernelGenericParamIndex = proof_source_kernel_generic_param_index_from_source(report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, report.source_types.source_generic_params_valid, report.source_types.source_effect_index.generics)
+            kernel_generic_param_index.valid <- kernel_generic_param_index.valid and generic_line_index_ready
             region r(PROOF_SOURCE_KERNEL_WORKSPACE_ARENA_BYTES):
                 kernel_global_bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding] = []
-                kernel_type_source_work: mutable usize = 0
-                base_context: (known: bool, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) = proof_source_kernel_base_context(file.top_decls, file.enum_annotations, file.generic_param_lines, file.generic_param_names, file.generic_param_lines.count == file.generic_param_names.count and report.source_types.source_generic_params_valid, &kernel_type_source_work)
+                base_context: (known: bool, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, generic_param_index: ProofSourceKernelGenericParamIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) = proof_source_kernel_base_context(file.top_decls, file.enum_annotations, kernel_generic_param_index, &kernel_type_source_work)
                 kernel_type_index_known: mutable bool = base_context.known
                 kernel_type_index: mutable ProofSourceKernelTypeIndex = base_context.type_index
                 tuple_label_index: ProofSourceKernelTupleLabelIndex = base_context.tuple_label_index
                 kernel_global_bindings.extend(base_context.global_bindings)
-                kernel_workspace: mutable ProofSourceKernelFormationWorkspace = ProofSourceKernelFormationWorkspace{nodes: [], children: [], visible_name_slots: [], type_index: kernel_type_index, generic_param_lines: file.generic_param_lines, generic_param_names: file.generic_param_names, generic_params_valid: file.generic_param_lines.count == file.generic_param_names.count and report.source_types.source_generic_params_valid, owner_declaration_line: 0, tuple_label_index: tuple_label_index, validation_workspace: ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new(), typing_workspace: ElisaProofKernelReplay::proof_kernel_replay_typing_workspace_new(), scoped_function_index: proof_source_kernel_scoped_function_index_new(), typing_work_used: 0, source_work_used: kernel_type_source_work, source_work_exhaustion_reported: false}
+                kernel_workspace: mutable ProofSourceKernelFormationWorkspace = ProofSourceKernelFormationWorkspace{nodes: [], children: [], visible_name_slots: [], type_index: kernel_type_index, generic_param_index: base_context.generic_param_index, owner_declaration_line: 0, owner_declaration_offset: 0, owner_context_epoch: 0, tuple_label_index: tuple_label_index, validation_workspace: ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new(), typing_workspace: ElisaProofKernelReplay::proof_kernel_replay_typing_workspace_new(), scoped_function_index: proof_source_kernel_scoped_function_index_new(), typing_work_used: 0, source_work_used: kernel_type_source_work, source_work_exhaustion_reported: false}
                 kernel_bindings_known: mutable bool = false
                 if kernel_type_index_known:
                     kernel_bindings_known <- true
@@ -271,6 +271,9 @@ extend ElisaProof:
                 return
             lemmas: mutable ProofLemmaTable = proof_empty_lemmas()
             functions: mutable ProofFunctionTable = proof_empty_functions()
+            # The source index marks unresolved imports as possible custom cast dispatch.
+            # Preserve that fail-closed evidence in the shared conversion classifier below.
+            functions.externs.custom_cast_hook_present <- report.source_types.source_effect_index.conversions.field_conversion_custom_cast_present
             lemma_marker_build: (index: ProofLemmaAnnotationIndex, complete: bool, reason: sview, observed: usize, limit: usize) = proof_lemma_annotation_index(file, &name_index_work)
             if not lemma_marker_build.complete:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "lemma-annotation index could not be built within its validated bounds", lemma_marker_build.reason, lemma_marker_build.observed, lemma_marker_build.limit)
@@ -305,10 +308,7 @@ extend ElisaProof:
             if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "local binding metadata collection exceeded its validated work bound", "local-binding-metadata-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
-            declaration_path: mutable darray[usize] = []
-            proof_collect_functions(file, file.top_decls, lemmas, &functions, report.source_types.source_effect_index, report.source_types.source_generic_params_valid, &declaration_path, "", 0, &name_index_work)
-            if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
-                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function collection could not classify lemma names within its validated work bound", "lemma-name-lookup-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            if not proof_collect_functions_with_region_index(file, lemmas, &functions, report.source_types.source_effect_index, report.source_types.source_generic_params_valid, &report, &name_index_work):
                 return
             function_index_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_function_index(&functions, &name_index_work)
             if not function_index_status.complete:
@@ -580,11 +580,9 @@ extend ElisaProof:
                     return false
                 match diagnostic.kind:
                     Semantic::DiagnosticKind.ExpressionAnalysisDepthExceeded:
-                        # The compiler has proved that part of this AST was not semantically
-                        # checked. Do not run the proof core over that unexamined subtree: it
-                        # can neither establish a valid source judgment nor produce a trustworthy
-                        # proof. Keep the rejection explicit and let CLI reporting preserve the
-                        # compiler diagnostic; certificate replay on the empty report stays clean.
+                        # The compiler proved part of this AST was not checked. Keep rejection
+                        # explicit, preserve the diagnostic for CLI reporting, and replay no
+                        # certificates from the reset empty report.
                         proof_reset_report(report)
                         proof_add_finding(report, "semantic-analysis-depth", diagnostic.line, "", "compiler semantic analysis reached its safe expression-depth limit; proof checking was skipped")
                         return false

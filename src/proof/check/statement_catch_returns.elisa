@@ -1,0 +1,110 @@
+extend ElisaProof:
+    private:
+        # Check a restricted expression-position catch at a return boundary. A fallible call has
+        # two semantically different post-states: the success arm may consume the callee's
+        # verified result summary, while error arms may consume only the call's checked frame
+        # boundary (and retain facts only for a verified pure callee). Never share the success
+        # summary with an error arm, because the callee's `ensure` describes successful returns.
+        def proof_check_catch_return(guarded: Ast::Expr, arms: darray[Ast::MatchArm], names: darray[sview]&, values: darray[Ast::Expr]&, facts: darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos) -> void can[Global.Read, Global.Write]:
+            success_names: mutable darray[sview] = proof_copy_names(names)
+            success_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+            success_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+            error_names: mutable darray[sview] = proof_copy_names(names)
+            error_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+            error_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+            success_call: mutable Ast::Expr = proof_substitute(guarded, success_names, success_values)
+            error_call: mutable Ast::Expr = proof_substitute(guarded, error_names, error_values)
+            success_applied: mutable bool = false
+            error_applied: mutable bool = false
+            match success_call:
+                Ast::Expr.Call(_, _, _, _):
+                    (proof_check_frame_call_children(success_call, success_facts, success_names, success_values, frame_parameters, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    success_call <- proof_substitute(success_call, success_names, success_values)
+                    success_applied <- (proof_apply_function(success_call, success_call, &success_facts, functions, success_names, success_values, frame_parameters, changes, preserves, report, name, annotations) can Global{Read,Write})
+                    proof_check_opaque_call_frame(success_call, guarded, success_facts, success_names, frame_parameters, changes, preserves, functions, report, name) if not success_applied
+                    if not success_applied:
+                        success_aliases: darray[sview] = proof_opaque_call_extra_alias_roots(guarded, functions, success_names)
+                        proof_forget_values_after_call_with_aliases(success_names, success_values, success_facts, frame_parameters, report, name, success_values.count, success_values.count, position, success_aliases)
+                        (proof_clear_facts_after_call_with_aliases(success_facts, success_names, frame_parameters, report, name, success_aliases) can Global{Read,Write})
+                _:
+                    success_applied <- false
+            match error_call:
+                Ast::Expr.Call(_, _, _, _):
+                    (proof_check_frame_call_children(error_call, error_facts, error_names, error_values, frame_parameters, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    error_call <- proof_substitute(error_call, error_names, error_values)
+                    error_applied <- (proof_apply_function(error_call, Ast::Expr.Invalid, &error_facts, functions, error_names, error_values, frame_parameters, changes, preserves, report, name, annotations) can Global{Read,Write})
+                    proof_check_opaque_call_frame(error_call, guarded, error_facts, error_names, frame_parameters, changes, preserves, functions, report, name) if not error_applied
+                _:
+                    error_applied <- false
+            error_function_name: sview = proof_callable_name(error_call)
+            error_function_index: usize = proof_function_index(functions, error_function_name)
+            error_is_pure: bool = error_applied and error_function_index < functions.summaries.pure.count and functions.summaries.pure[error_function_index]
+            if error_is_pure:
+                error_facts.clear()
+                error_facts.extend(facts)
+                error_names <- proof_copy_names(names)
+                error_values <- proof_copy_exprs(values)
+            else:
+                error_aliases: darray[sview] = proof_opaque_call_extra_alias_roots(guarded, functions, error_names)
+                (proof_clear_facts_after_call_with_aliases(error_facts, error_names, frame_parameters, report, name, error_aliases) can Global{Read,Write})
+                proof_forget_values_after_call_with_aliases(error_names, error_values, error_facts, frame_parameters, report, name, error_values.count, error_values.count, position, error_aliases)
+            result_names: darray[sview] = ["result"]
+            for arm_index in 0..<arms.count |arm_index, arms, success_names, success_values, success_facts, error_names, error_values, error_facts, success_call, ensures, frame_parameters, old_values, report, name, annotations, position|:
+                if not proof_return_analysis_budget_available(facts, names, values, report, name, position.line):
+                    report.proof_obligation(false)
+                    return
+                report.analysis_1.budgets.return_steps <- report.analysis_1.budgets.return_steps + 1
+                arm: Ast::MatchArm = arms[arm_index]
+                arm_names: mutable darray[sview] = proof_copy_names(success_names) if arm_index == 0 else proof_copy_names(error_names)
+                arm_values: mutable darray[Ast::Expr] = proof_copy_exprs(success_values) if arm_index == 0 else proof_copy_exprs(error_values)
+                arm_facts: mutable darray[Ast::Expr] = proof_copy_exprs(success_facts) if arm_index == 0 else proof_copy_exprs(error_facts)
+                binding_source: Ast::Expr = success_call if arm_index == 0 else Ast::Expr.Invalid
+                pattern_supported: bool = proof_bind_pattern(arm.pattern, position, binding_source, &arm_names, &arm_values)
+                if not pattern_supported:
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "pattern-unsupported", position.line, name, "catch pattern bindings are not modeled for proof-state substitution")
+                    arm_facts.clear()
+                arm_value: (known: bool, value: Ast::Expr) = proof_catch_arm_value(arm)
+                if not arm_value.known:
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "catch-arm-unsupported", position.line, name, "catch value arms must contain exactly one expression")
+                arm_value_has_call: bool = arm_value.known and proof_frame_expression_has_call_with_work(arm_value.value, report, name, position.line)
+                if pattern_supported and arm_value.known:
+                    returned_value: mutable Ast::Expr = proof_substitute(arm_value.value, arm_names, arm_values)
+                    arm_call_applied: mutable bool = false
+                    match arm_value.value:
+                        Ast::Expr.Call(_, _, _, _):
+                            (proof_check_frame_call_children(arm_value.value, arm_facts, arm_names, arm_values, frame_parameters, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                            returned_value <- proof_substitute(arm_value.value, arm_names, arm_values)
+                            arm_call_applied <- (proof_apply_function(returned_value, returned_value, &arm_facts, functions, arm_names, arm_values, frame_parameters, changes, preserves, report, name, annotations) can Global{Read,Write})
+                            proof_check_opaque_call_frame(returned_value, arm_value.value, arm_facts, arm_names, frame_parameters, changes, preserves, functions, report, name) if not arm_call_applied
+                            returned_value <- Ast::Expr.Invalid if not arm_call_applied
+                        _:
+                            (proof_check_frame_calls_in_expression(arm_value.value, arm_facts, arm_names, arm_values, frame_parameters, changes, preserves, functions, report, name, annotations) can Global{Read,Write}) if arm_value_has_call
+                            returned_value <- proof_substitute(arm_value.value, arm_names, arm_values) if arm_value_has_call
+                    returned_value_has_call: mutable bool = proof_frame_expression_has_call_with_work(returned_value, report, name, position.line)
+                    if returned_value_has_call:
+                        if not proof_return_pure_call_rewrite_reserve(returned_value, arm_facts, report, name, position.line):
+                            report.proof_obligation(false)
+                            return
+                        returned_value <- proof_rewrite_pure_call_summaries(returned_value, arm_facts, functions, 0)
+                    returned_value_has_call <- proof_frame_expression_has_call_with_work(returned_value, report, name, position.line) if returned_value_has_call
+                    if returned_value_has_call and not arm_call_applied:
+                        arm_aliases: darray[sview] = proof_opaque_call_extra_alias_roots(arm_value.value, functions, arm_names)
+                        proof_forget_values_after_call_with_aliases(arm_names, arm_values, arm_facts, frame_parameters, report, name, arm_values.count, arm_values.count, position, arm_aliases)
+                        (proof_clear_facts_after_call_with_aliases(arm_facts, arm_names, frame_parameters, report, name, arm_aliases) can Global{Read,Write})
+                    result_values: darray[Ast::Expr] = [returned_value]
+                    for ensure in ensures |ensure, arm_values, old_values, frame_parameters, result_names, result_values, arm_facts, report, name, annotations, position|:
+                        current_goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, arm_values, old_values)
+                        goal: mutable Ast::Expr = proof_substitute(current_goal, result_names, result_values)
+                        goal_has_call: mutable bool = proof_frame_expression_has_call_with_work(goal, report, name, position.line)
+                        if goal_has_call:
+                            if not proof_return_pure_call_rewrite_reserve(goal, arm_facts, report, name, position.line):
+                                report.proof_obligation(false)
+                                return
+                            goal <- proof_rewrite_pure_call_summaries(goal, arm_facts, functions, 0)
+                        goal_has_call <- proof_frame_expression_has_call_with_work(goal, report, name, position.line) if goal_has_call
+                        witness_complete: bool = not goal_has_call or proof_add_pure_call_witnesses(goal, arm_facts, functions, report, position.line, name, 0)
+                        proven: bool = witness_complete and (proof_certify_goal(arm_facts, goal, report, position.line, name, annotations) can Global{Read,Write})
+                        report.proof_obligation(proven)
+                        proof_add_goal_failure(report, "ensure-unproven", position.line, name, "catch arm value does not establish ensure", arm_facts, goal) if not proven
