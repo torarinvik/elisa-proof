@@ -145,13 +145,10 @@ bound_lookup = function_body(interval_index, "proof_kernel_replay_interval_bound
 assert bound_lookup.index("if bound.term_root == root:") < bound_lookup.index("proof_kernel_replay_interval_expr_index_build(")
 assert "                        return bound" in bound_lookup
 assert bound_lookup.index("for bound in bounds") < bound_lookup.index("proof_kernel_replay_interval_expr_index_build(")
-assert "lookup_start_work: usize = work_used" in bound_lookup
-assert "observed_lookup_work: usize = work_used - lookup_start_work" in bound_lookup
-assert "minimum_scan_work: usize = bounds.count * 2" in bound_lookup
-assert "child_scan_work <- minimum_scan_work if minimum_scan_work > observed_lookup_work" in bound_lookup
-assert "continuation_reserve <- remaining_work if child_scan_work > remaining_work / continuation_children" in bound_lookup
-assert "continuation_reserve <- child_scan_work * continuation_children if child_scan_work <= remaining_work / continuation_children" in bound_lookup
-assert bound_lookup.index("continuation_reserve <- remaining_work") < bound_lookup.index("proof_kernel_replay_interval_expr_index_build(")
+assert "continuation_reserve: usize = 0" in bound_lookup
+assert "setup_allowance: mutable usize = remaining_at_entry / 2" in interval_index
+assert "setup_allowance <- available_for_setup if setup_allowance > available_for_setup" in interval_index
+assert "work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT" in bound_lookup
 assert "skip_expression_scan <- true if cached_state == 4" in bound_lookup
 assert "skip_expression_scan <- index.lookup_complete" in bound_lookup
 assert "if not skip_expression_scan and not index.build_attempted:" in bound_lookup

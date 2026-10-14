@@ -25280,9 +25280,11 @@ Static review of tactic replay found that effect freedom alone cannot authorize 
 IEEE equality is not substitutive in general (notably for NaN). Rewrite replay rejects float
 literal encodings in its equality witness and substitution operands, and requires both operands to
 pass the fact-backed integer-term checker. These operand checks cover float-typed identifiers and
-overloaded expressions even when no float literal occurs in the arena. The containing goal may
-still include unrelated opaque float atoms. Implication and hypothesis paths retain their
-opaque-float behavior. Source guards cover both restrictions. Elisa parsing, build, and runtime
+overloaded expressions even when no float literal occurs in the arena. The two operands must also
+have matching signedness and width witnesses; equality may allow integer promotion across distinct
+sorts, but substituting across that boundary can change overload resolution. The containing goal
+may still include unrelated opaque float atoms. Implication and hypothesis paths retain their
+opaque-float behavior. Source guards cover these restrictions. Elisa parsing, build, and runtime
 regression remain unverified.
 
 
@@ -25293,3 +25295,14 @@ family; production replay enters through the work-metered module. Removed the de
 and include, moving its shared term record and limit into the metered module. This reduces duplicate
 trusted code and prevents future callers from bypassing work accounting. `git diff --check` and
 source-length inspection pass; no compiler, build, or runtime tests were run.
+
+
+### 23.27.1442 Preserve interval-index usefulness while reserving continuation work (2026-10-14)
+
+The interval-index adjustment passes no explicit continuation reserve, allowing the builder's
+existing half-remaining setup ceiling to apply. This restores eligible index construction; later
+sibling and recursive lookups continue charging the same hard meter and refuse on exhaustion. The
+old per-child heuristic was removed because it did not bound the full continuation. The ordered
+fallback remains intact. Focused interval/bound/difference-budget, typed-transition, source-authority,
+source-admission, width, quantifier, source-length, and diff checks pass. No current source-matched
+Stage1 is available for runtime qualification, and performance impact is not yet measured.

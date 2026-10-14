@@ -39,8 +39,8 @@ assert "sview_len(detail) > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT / 4" in s
 assert "action == \"rewrite\"" in step
 assert step.count("proof_kernel_replay_term_sort(nodes, children, environment, typing_index.index, argument") == 1
 assert "argument_sort_cache <- proof_kernel_replay_term_sort(nodes, children, environment, typing_index.index, argument" in step
-assert "proof_kernel_replay_sort_equal(argument_sort, secondary_sort" in step
-assert 'argument_sort.family != "integer" and argument_sort.family != "character" and argument_sort.family != "boolean" and argument_sort.family != "string"' in step
+assert "proof_kernel_replay_sort_equal(argument_sort_cache, secondary_sort" in step
+assert 'argument_sort_cache.family != "integer" and argument_sort_cache.family != "character" and argument_sort_cache.family != "boolean" and argument_sort_cache.family != "string"' in step
 
 branch_step = body(branch_report, "proof_kernel_replay_tactic_branch_report_with_work")
 assert "proof_kernel_replay_goal_search_charge_product(step_work, sview_len(action), 4)" in branch_step
