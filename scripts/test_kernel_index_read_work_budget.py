@@ -206,6 +206,10 @@ assert "cached_row == bounds.count + 1 and index.complete" in indexed_find
 assert "index.matched_rows[root] <- bounds.count + 1 if index.complete" in indexed_find
 assert "if index.states.count == nodes.count and index.states[root] == 2:" in indexed_find
 assert "prechecked: (found: bool, row: usize, scanned_rows: usize) = proof_kernel_replay_interval_expr_ordered_precheck" in indexed_find
+assert indexed_find.index("proof_kernel_replay_interval_expr_ordered_precheck") < indexed_find.index("proof_kernel_replay_interval_expr_hash_node(nodes, children, root")
+assert "break if rows >= PROOF_KERNEL_REPLAY_INTERVAL_EXPR_PRECHECK_ROWS" in ordered_precheck
+assert "not proof_kernel_replay_goal_search_charge(work)" in ordered_precheck
+assert "proof_kernel_replay_goal_search_expr_equal(nodes, children, bound.term_root, root, work)" in ordered_precheck
 assert ordered_precheck.index("index.hashes[bound.term_root] != index.hashes[root]") < ordered_precheck.index("proof_kernel_replay_goal_search_expr_equal(nodes, children, bound.term_root, root, work)")
 assert "index.states[bound.term_root] != 2" in ordered_precheck
 
