@@ -241,6 +241,8 @@ assert 'return false if reject_float and node.kind == "ident" and not proof_kern
 assert "proof_kernel_replay_tactic_effect_free_with_work(nodes, children, before_goal, before_facts, 0, step_work, true)" in rewrite_transition
 assert "proof_kernel_replay_tactic_effect_free_with_work(nodes, children, argument, before_facts, 0, step_work, true)" in rewrite_transition
 assert "proof_kernel_replay_tactic_effect_free_with_work(nodes, children, secondary, before_facts, 0, step_work, true)" in rewrite_transition
+assert "proof_kernel_replay_denial_integer_term_with_work(nodes, children, argument, before_facts, step_work, 0)" in rewrite_transition
+assert "proof_kernel_replay_denial_integer_term_with_work(nodes, children, secondary, before_facts, step_work, 0)" in rewrite_transition
 
 # Proof-text export is an artifact boundary. Keep its `proof` / `qed` marker tied directly
 # to replay plus selected-goal and premise source admission, rather than relying on a
