@@ -82,12 +82,14 @@ extend ElisaProof:
         # term. This versions the field without recursively substituting the receiver into itself.
         # Nested places, compound writes, calls and ownership transfers are deliberately opaque;
         # they poison the receiver's post-state instead of preserving a stale pre-state field.
-        def proof_track_mutable_parameter_field_write(target: Ast::Expr, operator: TokenKind, initializer: Ast::Expr, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, frame_parameters: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, owner: sview, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos) -> bool can[Global.Read, Global.Write]:
+        def proof_track_mutable_parameter_field_write(target: Ast::Expr, operator: TokenKind, initializer: Ast::Expr, initializer_has_call: bool, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, frame_parameters: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, owner: sview, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos) -> bool can[Global.Read, Global.Write]:
             place: (known: bool, place: ProofFramePlace) = proof_frame_place(target)
             return false if not place.known or place.place.depth == 0
             parameter_write: bool = proof_current_parameter(names, frame_parameters, place.place.root) and proof_mutable_reference_parameter(owner, place.place.root, functions)
             local_write: bool = proof_unaliased_local_record_field(target, names, frame_parameters, report, owner)
             return false if not parameter_write and not local_write
+            initializer_has_move: bool = proof_frame_expression_has_move_with_work(initializer, report, owner, position.line)
+            initializer_supported: bool = proof_frame_expression_rechecks_with_work(initializer, report, owner, position.line, 1) and proof_expr_supported(initializer)
             proof_check_direct_frame_write(target, names, frame_parameters, changes, preserves, report, owner, position.line)
             root_slot: mutable usize = names.count
             while root_slot > 0 |root_slot, names, place|:
@@ -101,7 +103,7 @@ extend ElisaProof:
                     field_name <- field
                 _:
                     pass
-            if direct_field and (operator == TokenKind.LArrow or operator == TokenKind.Assign) and not proof_expr_has_call(initializer) and not proof_expr_has_move(initializer) and proof_expr_supported(initializer) and root_slot < values.count:
+            if direct_field and (operator == TokenKind.LArrow or operator == TokenKind.Assign) and not initializer_has_call and not initializer_has_move and initializer_supported and root_slot < values.count:
                 field_value: Ast::Expr = proof_substitute(initializer, names, values)
                 match field_value:
                     Ast::Expr.Invalid:
@@ -111,7 +113,7 @@ extend ElisaProof:
                         values[root_slot] <- Ast::Expr.RecordUpdate(values[root_slot], updates, position)
                 proof_clear_facts_for_mutated_root(facts, place.place.root, report, owner)
                 return true
-            if proof_expr_has_call(initializer):
+            if initializer_has_call:
                 (proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, owner, annotations) can Global{Read,Write})
                 proof_forget_values_after_call_with_aliases(names, values, facts, frame_parameters, report, owner, values.count, values.count, position, proof_opaque_call_extra_alias_roots(initializer, functions, names))
             values[root_slot] <- Ast::Expr.Invalid if root_slot < values.count
@@ -138,6 +140,7 @@ extend ElisaProof:
                         no_moves: darray[sview] = []
                         (proof_check_return_contracts(Ast::Stmt.Expr(initializer, position), no_moves, names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, flow) can Global{Read,Write})
                         return true
+                    initializer_has_call: bool = proof_frame_expression_has_call_with_work(initializer, report, name, position.line)
                     value: mutable Ast::Expr = proof_substitute(initializer, names, values)
                     prior_value_count: usize = values.count
                     shadowed: mutable bool = false
@@ -189,8 +192,8 @@ extend ElisaProof:
                                 value <- Ast::Expr.Invalid if call_applied and opaque_boolean and not proof_contract_calls_are_pure(value, functions)
                                 value <- Ast::Expr.Invalid if not call_applied
                         _:
-                            (proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) can Global{Read,Write}) if proof_expr_has_call(initializer)
-                            value <- proof_substitute(initializer, names, values) if proof_expr_has_call(initializer)
+                            (proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) can Global{Read,Write}) if initializer_has_call
+                            value <- proof_substitute(initializer, names, values) if initializer_has_call
                     if initializer_has_unmodeled_operator:
                         # Nested calls may have added summaries while walking the expression;
                         # the unsupported operator invalidates those post-state claims too.
@@ -235,7 +238,7 @@ extend ElisaProof:
                     # directly against the callee's postcondition. A reordered or incomplete
                     # label mapping stays opaque below.
                     call_tuple: bool = call_applied and tuple_local and tuple_labels_match and proof_contract_calls_are_pure(value, functions)
-                    value <- Ast::Expr.Ident(local_name, position) if (aggregate_local or (tuple_local and not tuple_labels_match)) and proof_expr_has_call(initializer) and not call_tuple
+                    value <- Ast::Expr.Ident(local_name, position) if (aggregate_local or (tuple_local and not tuple_labels_match)) and initializer_has_call and not call_tuple
                     # A fixed-array local has the count its type states. It keeps its own symbol,
                     # as a call-initialized container does, so `fields.count` stays a place
                     # rather than `zeroed.count`, and that count enters as a type bound below.
@@ -243,19 +246,19 @@ extend ElisaProof:
                     value <- Ast::Expr.Ident(local_name, position) if local_extent >= 0
                     names <- names.push(local_name)
                     values <- values.push(value)
-                    values[prior_value_count] <- value if proof_expr_has_call(initializer) and prior_value_count < values.count
+                    values[prior_value_count] <- value if initializer_has_call and prior_value_count < values.count
                     unsigned_width: i64 = proof_unsigned_type_width_index_with_work(type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, 0, &report.source_types.source_effect_index.work.implicit_effect_work)
                     signed_width: i64 = proof_signed_type_width_index_with_work(type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, 0, &report.source_types.source_effect_index.work.implicit_effect_work)
                     proof_add_type_bound_fact(facts, report, proof_signed_type_marker(Ast::Expr.Ident(local_name, position), signed_width, position), position.line, name) if signed_width > 0
                     if unsigned_width < 0:
                         values[prior_value_count] <- Ast::Expr.Invalid
                         proof_add_finding(report, "contract-expression-unsupported", position.line, name, "local numeric type alias cannot be resolved uniquely")
-                    if proof_expr_has_call(initializer) and not conversion_only:
+                    if initializer_has_call and not conversion_only:
                         # The new local contains the call result, so retain its binding, but
                         # forget every pre-existing binding that the call may have mutated.
                         proof_forget_values_after_call_with_aliases(names, values, facts, frame_parameters, report, name, prior_value_count, values.count, position, proof_opaque_call_extra_alias_roots(initializer, functions, names))
                     proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if shadowed
-                    (proof_clear_facts_after_call_with_aliases(facts, names, frame_parameters, report, name, proof_opaque_call_extra_alias_roots(initializer, functions, names)) can Global{Read,Write}) if not shadowed and proof_expr_has_call(initializer) and not call_applied and not conversion_only
+                    (proof_clear_facts_after_call_with_aliases(facts, names, frame_parameters, report, name, proof_opaque_call_extra_alias_roots(initializer, functions, names)) can Global{Read,Write}) if not shadowed and initializer_has_call and not call_applied and not conversion_only
                     # The type range of the new binding, stated after the purges so a call cannot clear it.
                     proof_add_signed_range_facts(facts, report, Ast::Expr.Ident(local_name, position), signed_width, position.line, name, position) if signed_width > 0
                     (proof_bind_unsigned_symbol(names, values, facts, report, functions, name, prior_value_count, unsigned_width, value, position, annotations) can Global{Read,Write}) if unsigned_width > 0
@@ -285,7 +288,7 @@ extend ElisaProof:
                     # A successful signed call initializes one captured source
                     # scalar. Reuse its exact-site summary under that local name,
                     # rather than substituting repeatable call text downstream.
-                    if signed_width > 0 and call_applied and not shadowed and proof_expr_has_call(initializer) and not conversion_only:
+                    if signed_width > 0 and call_applied and not shadowed and initializer_has_call and not conversion_only:
                         match initializer:
                             Ast::Expr.Call(callee, _, _, _):
                                 returned = proof_source_function_return_type(report.source.source_declarations, proof_callable_name(callee), 0)
@@ -401,6 +404,7 @@ extend ElisaProof:
                         inferred_type: Ast::Expr = proof_source_inferred_tuple_type(initializer, report.source.source_declarations, names, 0)
                         if proof_scalar_tuple_type(inferred_type, functions, report):
                             return (proof_check_return_declarations(Ast::Stmt.VarDecl(inferred_name, inferred_type, initializer, position), names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, flow) can Global{Read,Write})
+                    initializer_has_call: bool = proof_frame_expression_has_call_with_work(initializer, report, name, position.line)
                     initializer_has_unmodeled_operator: bool = proof_invalidate_for_unmodeled_operator(initializer, names, values, facts, frame_parameters, report, name, position)
                     target_name: sview = proof_ident_name(target)
                     if target_name != "":
@@ -430,10 +434,10 @@ extend ElisaProof:
                                 (proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) can Global{Read,Write}) if operator != TokenKind.LArrow and operator != TokenKind.Assign
                                 value <- proof_substitute(initializer, names, values) if operator != TokenKind.LArrow and operator != TokenKind.Assign
                             _:
-                                (proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) can Global{Read,Write}) if proof_expr_has_call(initializer)
-                                value <- proof_substitute(initializer, names, values) if proof_expr_has_call(initializer)
+                                (proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) can Global{Read,Write}) if initializer_has_call
+                                value <- proof_substitute(initializer, names, values) if initializer_has_call
                         values[target_slot] <- value if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and target_slot < values.count
-                        if proof_expr_has_call(initializer):
+                        if initializer_has_call:
                             if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and target_slot < values.count:
                                 # Preserve the assigned result, but do not let the call's
                                 # possible mutation of another binding survive this point.
@@ -459,7 +463,7 @@ extend ElisaProof:
                         # an externally visible root, so all facts must be discarded. Calls
                         # still clear facts when no checked summary was applied.
                         proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_current_parameter(names, frame_parameters, target_name) and not proof_mutable_reference_parameter(name, target_name, functions)
-                        (proof_clear_facts_after_call_with_aliases(facts, names, frame_parameters, report, name, proof_opaque_call_extra_alias_roots(initializer, functions, names)) can Global{Read,Write}) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_expr_has_call(initializer) and not call_applied
+                        (proof_clear_facts_after_call_with_aliases(facts, names, frame_parameters, report, name, proof_opaque_call_extra_alias_roots(initializer, functions, names)) can Global{Read,Write}) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and initializer_has_call and not call_applied
                         # `r <- v` through a reference local stores into its referent, not into
                         # `r`'s symbolic slot. The referent is not tracked, so havoc everything.
                         if any reference_local in report.aliases.reference_local_names where reference_local == target_name:
@@ -470,7 +474,7 @@ extend ElisaProof:
                             else:
                                 proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                     else:
-                        field_write_tracked: bool = (proof_track_mutable_parameter_field_write(target, operator, initializer, names, values, facts, frame_parameters, changes, preserves, functions, report, name, annotations, position) can Global{Read,Write})
+                        field_write_tracked: bool = (proof_track_mutable_parameter_field_write(target, operator, initializer, initializer_has_call, names, values, facts, frame_parameters, changes, preserves, functions, report, name, annotations, position) can Global{Read,Write})
                         if not field_write_tracked:
                             # A mutable scalar reference's exact zero element is one primitive
                             # storage cell. Version that pointee in the same substitution state
