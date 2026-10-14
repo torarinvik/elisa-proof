@@ -1,40 +1,6 @@
 # Replay source-backed scalar witnesses for qualified const-enum member terms.
 extend ElisaProof:
     private:
-        def proof_replay_type_bound_enum_generic_shadowed_with_work(report: mutable ProofReport&, declaration_line: u32, wanted: sview, work: mutable usize&) -> bool:
-            return true if:
-                not report.source_types.source_generic_params_valid or report.source_types.source_generic_param_lines.count != report.source_types.source_generic_param_names.count
-                not proof_replay_source_generic_param_line_index_build(report, work) or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-            index: ProofSourceEffectIndex& = report.source_types.source_effect_index
-            count: usize = report.source_types.source_generic_param_lines.count
-            hashes_count: usize = index.generics.generic_param_line_index_hashes.count
-            return true if:
-                hashes_count != index.generics.generic_param_line_index_values.count or hashes_count != index.generics.generic_param_line_index_counts.count
-                count == 0 and hashes_count != 0
-            return false if count == 0
-            expected_capacity: usize = proof_name_index_capacity(count)
-            return true if:
-                expected_capacity == 0 or hashes_count != expected_capacity or not index.generics.generic_param_line_index_valid
-                not proof_replay_type_bound_local_work_charge(1, work)
-                not proof_replay_type_bound_local_work_charge(sview_len(wanted), work)
-            wanted_hash: u32 = proof_replay_generic_param_key_hash(declaration_line, wanted)
-            slot: mutable usize = (wanted_hash.i64() % hashes_count.i64()).usize()
-            probes: mutable usize = 0
-            while probes < hashes_count and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, wanted, declaration_line, report, index, count, hashes_count, work|:
-                return true if not proof_replay_type_bound_local_work_charge(1, work)
-                current: usize = index.generics.generic_param_line_index_values[slot]
-                return false if current == count
-                return true if current > count or index.generics.generic_param_line_index_counts[slot] == 0
-                if index.generics.generic_param_line_index_hashes[slot] == wanted_hash:
-                    return true if current >= report.source_types.source_generic_param_names.count or current >= report.source_types.source_generic_param_lines.count
-                    current_name: sview = report.source_types.source_generic_param_names[current]
-                    return true if not proof_replay_type_bound_local_text_compare_charge(current_name, wanted, work)
-                    if report.source_types.source_generic_param_lines[current] == declaration_line and current_name == wanted:
-                        return true
-                slot <- (slot + 1) % hashes_count
-                probes <- probes + 1
-            return true
-
         def proof_replay_type_bound_enum_root_name_with_work(expression: Ast::Expr, work: mutable usize&, depth: usize) -> (complete: bool, name: sview):
             return (false, "") if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_replay_type_bound_local_work_charge(1, work)
             match expression:
@@ -74,9 +40,63 @@ extend ElisaProof:
                     cursor <- cursor + 2
             return cursor == owner_length
 
-        def proof_replay_type_bound_enum_named_type_at_owner_with_work(declarations: darray[Ast::Decl]&, current_owner: sview, wanted_owner: darray[sview]&, wanted_name: sview, aliases: mutable usize&, nominal_types: mutable usize&, alias_target: mutable Ast::Expr&, alias_line: mutable u32&, alias_offset: mutable usize&, found_owner: mutable sview&, depth: usize, work: mutable usize&) -> bool:
+        def proof_replay_type_bound_enum_index_ensure(report: ProofReport&, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
+            report_identity: uintptr = (&report).cast[uintptr]
+            source_identity: uintptr = report.source.source_file_identity
+            if cache.enum_index_attempted and (cache.enum_index_report_identity != report_identity or cache.enum_index_source_identity != source_identity):
+                cache.enum_index_attempted <- false
+                cache.enum_index <- ProofEnumIndex{names: [], name_hashes: [], const_enums: [], declarations: [], root_level: [], owners: [], bucket_heads: [], next_indices: [], complete: false}
+            if not cache.enum_index_attempted:
+                cache.enum_index_attempted <- true
+                cache.enum_index_report_identity <- report_identity
+                cache.enum_index_source_identity <- source_identity
+                cache.enum_index <- proof_build_enum_index(report.source.source_declarations, work)
+            count: usize = cache.enum_index.names.count
+            return false if:
+                not cache.enum_index.complete
+                cache.enum_index.name_hashes.count != count or cache.enum_index.const_enums.count != count or cache.enum_index.declarations.count != count
+                cache.enum_index.root_level.count != count or cache.enum_index.owners.count != count or cache.enum_index.next_indices.count != count
+                cache.enum_index.bucket_heads.count != proof_index_capacity(count)
+            true
+
+        def proof_replay_type_bound_enum_named_enum_census_with_work(report: ProofReport&, name: sview, resolution_scope: darray[sview]&, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> (complete: bool, exact_count: usize, root_count: usize, all_count: usize, all_owner: sview):
+            exact_count: mutable usize = 0
+            root_count: mutable usize = 0
+            all_count: mutable usize = 0
+            all_owner: mutable sview = ""
+            return (false, exact_count, root_count, all_count, all_owner) if name == "" or not proof_replay_type_bound_enum_index_ensure(report, work, cache)
+            index: ProofEnumIndex& = cache.enum_index
+            count: usize = index.names.count
+            capacity: usize = index.bucket_heads.count
+            return (true, exact_count, root_count, all_count, all_owner) if capacity == 0
+            return (false, exact_count, root_count, all_count, all_owner) if:
+                not proof_replay_type_bound_local_work_charge(sview_len(name), work)
+                work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            hash: u32 = proof_name_hash(name)
+            slot: usize = (hash.i64() % capacity.i64()).usize()
+            entry: mutable usize = index.bucket_heads[slot]
+            steps: mutable usize = 0
+            while entry < count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, index, hash, name, count, resolution_scope, exact_count, root_count, all_count, all_owner, work|:
+                return (false, exact_count, root_count, all_count, all_owner) if:
+                    not proof_replay_type_bound_local_work_charge(1, work)
+                    entry >= index.name_hashes.count or entry >= index.owners.count or entry >= index.root_level.count or entry >= index.next_indices.count
+                if index.name_hashes[entry] == hash:
+                    return (false, exact_count, root_count, all_count, all_owner) if not proof_replay_type_bound_local_text_compare_charge(index.names[entry], name, work)
+                    if index.names[entry] == name:
+                        exact: bool = proof_replay_type_bound_enum_owner_matches_segments_with_work(index.owners[entry], resolution_scope, work)
+                        return (false, exact_count, root_count, all_count, all_owner) if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                        exact_count <- exact_count + 1 if exact
+                        root_count <- root_count + 1 if index.root_level[entry]
+                        all_count <- all_count + 1
+                        all_owner <- index.owners[entry] if all_count == 1
+                entry <- index.next_indices[entry]
+                steps <- steps + 1
+            return (false, exact_count, root_count, all_count, all_owner) if entry != count
+            (true, exact_count, root_count, all_count, all_owner)
+
+        def proof_replay_type_bound_enum_named_type_at_owner_with_work(report: ProofReport&, declarations: darray[Ast::Decl]&, current_owner: sview, wanted_owner: darray[sview]&, wanted_name: sview, aliases: mutable usize&, nominal_types: mutable usize&, alias_target: mutable Ast::Expr&, alias_line: mutable u32&, alias_offset: mutable usize&, found_owner: mutable sview&, depth: usize, work: mutable usize&) -> bool:
             return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in declarations |current_owner, wanted_owner, wanted_name, aliases, nominal_types, alias_target, alias_line, alias_offset, found_owner, depth, work|:
+            for declaration in declarations |report, current_owner, wanted_owner, wanted_name, aliases, nominal_types, alias_target, alias_line, alias_offset, found_owner, depth, work|:
                 return false if not proof_replay_type_bound_local_work_charge(1, work)
                 match declaration:
                     Ast::Decl.Alias(name, target, position):
@@ -94,31 +114,31 @@ extend ElisaProof:
                             if name == wanted_name:
                                 nominal_types <- nominal_types + 1
                                 found_owner <- current_owner if aliases + nominal_types == 1
+                    Ast::Decl.Extern(name, _, arity, _, callable, return_type_name, _, position):
+                        if proof_replay_type_bound_enum_owner_matches_segments_with_work(current_owner, wanted_owner, work):
+                            return false if not proof_replay_type_bound_local_text_compare_charge(name, wanted_name, work)
+                            if name == wanted_name:
+                                opaque: (complete: bool, opaque_alias: bool, policy: i64) = proof_replay_type_bound_call_opaque_extern_alias_with_work(report, name, arity, callable, return_type_name, position.offset.usize(), work)
+                                return false if not opaque.complete
+                                if opaque.opaque_alias:
+                                    aliases <- aliases + 1
+                                    return false if aliases > 1
+                                    alias_target <- Ast::Expr.Invalid
+                                    alias_line <- position.line
+                                    alias_offset <- position.offset.usize()
+                                    found_owner <- current_owner
                     Ast::Decl.Module(module_name, nested, _):
                         return false if:
                             not proof_replay_type_bound_local_work_charge(sview_len(module_name), work)
-                            not proof_replay_type_bound_enum_named_type_at_owner_with_work(nested, module_name, wanted_owner, wanted_name, aliases, nominal_types, alias_target, alias_line, alias_offset, found_owner, depth + 1, work)
+                            not proof_replay_type_bound_enum_named_type_at_owner_with_work(report, nested, module_name, wanted_owner, wanted_name, aliases, nominal_types, alias_target, alias_line, alias_offset, found_owner, depth + 1, work)
                     Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_type_bound_enum_named_type_at_owner_with_work(nested, current_owner, wanted_owner, wanted_name, aliases, nominal_types, alias_target, alias_line, alias_offset, found_owner, depth + 1, work)
+                        return false if not proof_replay_type_bound_enum_named_type_at_owner_with_work(report, nested, current_owner, wanted_owner, wanted_name, aliases, nominal_types, alias_target, alias_line, alias_offset, found_owner, depth + 1, work)
                     Ast::Decl.Invalid:
                         return false
                     _:
                         pass
                 return false if aliases > 1 or nominal_types > 1
             return true
-
-        def proof_replay_type_bound_enum_alias_has_formals_with_work(report: ProofReport&, alias_name: sview, alias_line: u32, work: mutable usize&) -> (complete: bool, has_formals: bool):
-            matches: mutable usize = 0
-            for annotation in report.source.source_annotations |alias_name, alias_line, matches, work|:
-                return (false, false) if:
-                    not proof_replay_type_bound_local_work_charge(1, work)
-                    not proof_replay_type_bound_local_text_compare_charge(annotation.owner, "__alias_owner", work)
-                continue if annotation.owner != "__alias_owner"
-                return (false, false) if not proof_replay_type_bound_local_text_compare_charge(annotation.name, alias_name, work)
-                if annotation.name == alias_name and annotation.line == alias_line:
-                    matches <- matches + 1
-                    return (false, false) if matches > 1
-            return (true, matches == 1)
 
         def proof_replay_type_bound_enum_path_add_owner_with_work(owner: darray[sview]&, name: sview, path: mutable darray[sview]&, work: mutable usize&) -> bool:
             return false if:
@@ -142,16 +162,18 @@ extend ElisaProof:
                 return (false, false, Ast::Expr.Invalid, 0, 0, "") if not visibility.complete
                 return (true, false, Ast::Expr.Absent, 0, 0, "") if not visibility.safe
             return (false, false, Ast::Expr.Invalid, 0, 0, "") if:
-                not proof_replay_type_bound_enum_named_type_at_owner_with_work(report.source.source_declarations, "", empty_owner, root_name, &aliases, &nominal_types, &target, &line, &offset, &owner, 0, work)
-                aliases > 1 or nominal_types > 1 or (aliases > 0 and nominal_types > 0)
-            return (true, false, Ast::Expr.Absent, 0, 0, "") if aliases == 0 or nominal_types != 0
+                not proof_replay_type_bound_enum_named_type_at_owner_with_work(report, report.source.source_declarations, "", empty_owner, root_name, &aliases, &nominal_types, &target, &line, &offset, &owner, 0, work)
+                aliases > 1
+            # The enum-owner resolver has already ruled out enum declarations. At this
+            # rank it looks for aliases; struct declarations do not preempt that lookup.
+            return (true, false, Ast::Expr.Absent, 0, 0, "") if aliases == 0
             return (true, true, target, line, offset, owner)
 
-        def proof_replay_type_bound_enum_module_alias_owner_with_work(report: ProofReport&, caller_module: sview, segments: darray[sview]&, work: mutable usize&) -> (complete: bool, owner: darray[sview]):
+        def proof_replay_type_bound_enum_module_alias_owner_with_index_work(aliases: ProofModuleAliasIndex&, caller_module: sview, segments: darray[sview]&, work: mutable usize&) -> (complete: bool, owner: darray[sview]):
             return (false, []) if segments.count < 2
-            aliases: mutable ProofModuleAliasIndex = ProofModuleAliasIndex{names: [], targets: [], scopes: [], lines: [], offsets: [], alias_lookup_hashes: [], alias_lookup_values: [], alias_lookup_ambiguous: [], global_alias_lookup_hashes: [], global_alias_lookup_values: [], function_lookup_hashes: [], function_lookup_values: [], function_lookup_ambiguous: [], function_lookup_complete: false, complete: false}
-            built: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_module_alias_index(report.source.source_annotations, &aliases, work)
-            return (false, []) if not built.complete
+            return (false, []) if:
+                not aliases.complete
+                aliases.names.count != aliases.targets.count or aliases.names.count != aliases.scopes.count or aliases.names.count != aliases.lines.count or aliases.names.count != aliases.offsets.count
             lexical: (complete: bool, matched: bool, valid: bool, target: sview, scope: sview) = proof_module_alias_target(aliases, caller_module, segments[0], work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT)
             return (false, []) if not lexical.complete
             backend: (complete: bool, matched: bool, valid: bool, row: usize) = proof_module_alias_lookup_global(aliases, segments[0], work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT)
@@ -168,41 +190,90 @@ extend ElisaProof:
                 target_path: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(owner, compatible.target, work)
                 return (false, []) if not target_path.complete
                 owner.extend(target_path.scope)
+            elif backend.matched:
+                return (false, []) if not backend.valid or backend.row >= aliases.targets.count or backend.row >= aliases.scopes.count
+                compatible: (complete: bool, compatible: bool, target: sview) = proof_module_alias_targets_compatible(aliases, aliases.scopes[backend.row], aliases.targets[backend.row], work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT)
+                return (false, []) if not compatible.complete or not compatible.compatible
+                target_path: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(owner, compatible.target, work)
+                return (false, []) if not target_path.complete
+                owner.extend(target_path.scope)
             else:
-                return (false, []) if backend.matched
                 owner.push(segments[0])
             for index in 1..<segments.count - 1 |index, segments, owner, work|:
                 return (false, []) if not proof_replay_type_bound_local_work_charge(sview_len(segments[index]), work)
                 owner.push(segments[index])
             return (true, owner)
 
-        def proof_replay_type_bound_enum_alias_path_with_work(report: ProofReport&, alias_name: sview, alias_owner: sview, alias_target: Ast::Expr, alias_line: u32, alias_offset: usize, caller_module: sview, active_offsets: mutable darray[usize]&, path: mutable darray[sview]&, work: mutable usize&, depth: usize) -> bool:
+        # Source-bound replay already retains the exact bounded module-alias index built from
+        # parser annotations. Reuse it for each enum witness instead of rebuilding the tables;
+        # compatibility reports keep the bounded rebuild path because their source is mutable.
+        def proof_replay_type_bound_enum_module_alias_owner_with_work(report: ProofReport&, caller_module: sview, segments: darray[sview]&, work: mutable usize&) -> (complete: bool, owner: darray[sview]):
+            snapshot: ProofFactCallShapeSnapshot& = report.analysis_2.fact_call_shapes
+            if report.source.source_analysis_bound and snapshot.status.initialized and snapshot.status.complete and snapshot.status.source_identity == report.source.source_file_identity and snapshot.functions.module_aliases.complete:
+                return proof_replay_type_bound_enum_module_alias_owner_with_index_work(snapshot.functions.module_aliases, caller_module, segments, work)
+            aliases: mutable ProofModuleAliasIndex = ProofModuleAliasIndex{names: [], targets: [], scopes: [], lines: [], offsets: [], alias_lookup_hashes: [], alias_lookup_values: [], alias_lookup_ambiguous: [], global_alias_lookup_hashes: [], global_alias_lookup_values: [], function_lookup_hashes: [], function_lookup_values: [], function_lookup_ambiguous: [], function_lookup_complete: false, complete: false}
+            built: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_module_alias_index(report.source.source_annotations, &aliases, work)
+            return (false, []) if not built.complete
+            proof_replay_type_bound_enum_module_alias_owner_with_index_work(aliases, caller_module, segments, work)
+
+        def proof_replay_type_bound_enum_alias_path_with_work(report: ProofReport&, alias_name: sview, alias_owner: sview, alias_target: Ast::Expr, alias_line: u32, alias_offset: usize, caller_module: sview, active_offsets: mutable darray[usize]&, path: mutable darray[sview]&, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&, depth: usize) -> bool:
+            empty_scope: darray[sview] = []
+            owner_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(empty_scope, alias_owner, work)
+            return false if not owner_scope.complete
+            proof_replay_type_bound_enum_alias_path_at_scope_with_work(report, alias_name, owner_scope.scope, alias_owner, alias_target, alias_line, alias_offset, caller_module, active_offsets, path, work, cache, depth)
+
+        def proof_replay_type_bound_enum_alias_path_at_scope_with_work(report: ProofReport&, alias_name: sview, alias_owner_scope: darray[sview]&, alias_owner_module: sview, alias_target: Ast::Expr, alias_line: u32, alias_offset: usize, caller_module: sview, active_offsets: mutable darray[usize]&, path: mutable darray[sview]&, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&, depth: usize) -> bool:
             return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             for active in active_offsets |active, alias_offset, work|:
                 return false if:
                     not proof_replay_type_bound_local_work_charge(1, work)
                     active == alias_offset
-            formals: (complete: bool, has_formals: bool) = proof_replay_type_bound_enum_alias_has_formals_with_work(report, alias_name, alias_line, work)
+            formals: (complete: bool, has_formals: bool) = proof_replay_type_bound_enum_alias_has_formals_with_work(report, alias_name, alias_line, work, cache)
             return false if not formals.complete or formals.has_formals
-            empty_scope: darray[sview] = []
-            owner_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(empty_scope, alias_owner, work)
-            return false if not owner_scope.complete
             mark: usize = active_offsets.count
             active_offsets.push(alias_offset)
-            resolved: bool = proof_replay_type_bound_enum_type_path_with_work(report, alias_target, owner_scope.scope, alias_owner, false, active_offsets, path, work, depth + 1)
+            resolved: bool = proof_replay_type_bound_enum_type_path_with_work(report, alias_target, alias_owner_scope, alias_owner_module, false, active_offsets, path, work, cache, depth + 1)
             active_offsets.resize(mark)
             return resolved
 
-        def proof_replay_type_bound_enum_type_path_with_work(report: ProofReport&, expression: Ast::Expr, resolution_scope: darray[sview]&, resolution_module: sview, caller_expression: bool, active_offsets: mutable darray[usize]&, path: mutable darray[sview]&, work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_type_bound_enum_type_path_with_work(report: ProofReport&, expression: Ast::Expr, resolution_scope: darray[sview]&, resolution_module: sview, caller_expression: bool, active_offsets: mutable darray[usize]&, path: mutable darray[sview]&, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&, depth: usize) -> bool:
             return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_replay_type_bound_local_work_charge(1, work)
             match expression:
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
-                    return proof_replay_type_bound_enum_type_path_with_work(report, inner, resolution_scope, resolution_module, caller_expression, active_offsets, path, work, depth + 1)
+                    return proof_replay_type_bound_enum_type_path_with_work(report, inner, resolution_scope, resolution_module, caller_expression, active_offsets, path, work, cache, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
-                    return proof_replay_type_bound_enum_type_path_with_work(report, inner, resolution_scope, resolution_module, caller_expression, active_offsets, path, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return proof_replay_type_bound_enum_type_path_with_work(report, inner, resolution_scope, resolution_module, caller_expression, active_offsets, path, work, cache, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                     return false
                 Ast::Expr.Ident(name, _):
                     return false if name == "" or proof_scalar_primitive_type_name(name)
+                    enums: (complete: bool, exact_count: usize, root_count: usize, all_count: usize, all_owner: sview) = proof_replay_type_bound_enum_named_enum_census_with_work(report, name, resolution_scope, work, cache)
+                    return false if not enums.complete or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                    return proof_replay_type_bound_enum_path_add_owner_with_work(resolution_scope, name, path, work) if enums.exact_count == 1
+                    # Stage1 treats an ambiguous enum rank as a failed enum lookup,
+                    # then attempts alias lookup from its first rank. Keep lower enum
+                    # ranks blocked after ambiguity while allowing that alias fallback.
+                    if enums.exact_count == 0:
+                        imported: (complete: bool, count: usize, owner: sview) = proof_replay_type_bound_enum_imported_census_with_work(report, name, work, cache)
+                        return false if not imported.complete or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                        if imported.count == 1:
+                            imported_owner: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work([], imported.owner, work)
+                            return false if not imported_owner.complete
+                            return proof_replay_type_bound_enum_path_add_owner_with_work(imported_owner.scope, name, path, work)
+                        if imported.count == 0:
+                            if resolution_scope.count > 0:
+                                if enums.root_count == 1:
+                                    root_scope: darray[sview] = []
+                                    return proof_replay_type_bound_enum_path_add_owner_with_work(root_scope, name, path, work)
+                                if enums.root_count == 0 and enums.all_count == 1:
+                                    global_scope: darray[sview] = []
+                                    global_owner: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(global_scope, enums.all_owner, work) if enums.all_owner != "" else (true, global_scope)
+                                    return false if not global_owner.complete
+                                    return proof_replay_type_bound_enum_path_add_owner_with_work(global_owner.scope, name, path, work)
+                            elif enums.all_count == 1:
+                                global_scope: darray[sview] = []
+                                global_owner: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(global_scope, enums.all_owner, work) if enums.all_owner != "" else (true, global_scope)
+                                return false if not global_owner.complete
+                                return proof_replay_type_bound_enum_path_add_owner_with_work(global_owner.scope, name, path, work)
                     local_aliases: mutable usize = 0
                     local_nominals: mutable usize = 0
                     alias_target: mutable Ast::Expr = Ast::Expr.Absent
@@ -210,22 +281,57 @@ extend ElisaProof:
                     alias_offset: mutable usize = 0
                     alias_owner: mutable sview = ""
                     return false if:
-                        not proof_replay_type_bound_enum_named_type_at_owner_with_work(report.source.source_declarations, "", resolution_scope, name, &local_aliases, &local_nominals, &alias_target, &alias_line, &alias_offset, &alias_owner, 0, work)
-                        local_aliases > 1 or local_nominals > 1 or (local_aliases > 0 and local_nominals > 0)
-                    if local_aliases == 1:
-                        return proof_replay_type_bound_enum_alias_path_with_work(report, name, alias_owner, alias_target, alias_line, alias_offset, resolution_module, active_offsets, path, work, depth + 1)
-                    if local_nominals == 1:
-                        return proof_replay_type_bound_enum_path_add_owner_with_work(resolution_scope, name, path, work)
+                        not proof_replay_type_bound_enum_named_type_at_owner_with_work(report, report.source.source_declarations, "", resolution_scope, name, &local_aliases, &local_nominals, &alias_target, &alias_line, &alias_offset, &alias_owner, 0, work)
+                    # Stage1 checks aliases before concrete declarations in a module,
+                    # but concrete declarations before aliases at root scope.
+                    if resolution_scope.count > 0:
+                        return false if local_aliases > 1
+                        if local_aliases == 1:
+                            return proof_replay_type_bound_enum_alias_path_with_work(report, name, alias_owner, alias_target, alias_line, alias_offset, resolution_module, active_offsets, path, work, cache, depth + 1)
+                        imported_alias: (complete: bool, count: usize, target: Ast::Expr, line: u32, offset: usize, owner: sview) = proof_replay_type_bound_enum_imported_alias_with_work(report, name, work)
+                        return false if not imported_alias.complete or imported_alias.count > 1
+                        if imported_alias.count == 1:
+                            return proof_replay_type_bound_enum_alias_path_with_work(report, name, imported_alias.owner, imported_alias.target, imported_alias.line, imported_alias.offset, resolution_module, active_offsets, path, work, cache, depth + 1)
+                    else:
+                        return false if local_aliases > 1
+                        if local_aliases == 1:
+                            return proof_replay_type_bound_enum_alias_path_with_work(report, name, alias_owner, alias_target, alias_line, alias_offset, resolution_module, active_offsets, path, work, cache, depth + 1)
+                        imported_alias: (complete: bool, count: usize, target: Ast::Expr, line: u32, offset: usize, owner: sview) = proof_replay_type_bound_enum_imported_alias_with_work(report, name, work)
+                        return false if not imported_alias.complete or imported_alias.count > 1
+                        if imported_alias.count == 1:
+                            return proof_replay_type_bound_enum_alias_path_with_work(report, name, imported_alias.owner, imported_alias.target, imported_alias.line, imported_alias.offset, resolution_module, active_offsets, path, work, cache, depth + 1)
                     return false if not caller_expression
                     root: (complete: bool, matched: bool, target: Ast::Expr, line: u32, offset: usize, owner: sview) = proof_replay_type_bound_enum_root_alias_with_work(report, resolution_module, name, work)
-                    return false if not root.complete or not root.matched
-                    return proof_replay_type_bound_enum_alias_path_with_work(report, name, root.owner, root.target, root.line, root.offset, resolution_module, active_offsets, path, work, depth + 1)
-                Ast::Expr.Scope(_, _, _):
+                    return false if not root.complete
+                    if root.matched:
+                        return proof_replay_type_bound_enum_alias_path_with_work(report, name, root.owner, root.target, root.line, root.offset, resolution_module, active_offsets, path, work, cache, depth + 1)
+                    global_alias_count: mutable usize = 0
+                    concrete_count: mutable usize = 0
+                    global_alias_target: mutable Ast::Expr = Ast::Expr.Absent
+                    global_alias_line: mutable u32 = 0
+                    global_alias_offset: mutable usize = 0
+                    global_alias_owner: mutable darray[sview] = []
+                    empty_scope: mutable darray[sview] = []
+                    opaque_classified: mutable bool = false
+                    opaque_policy: mutable i64 = 0
+                    global_complete: bool = proof_replay_type_bound_global_alias_lookup_with_work(report, report.source.source_declarations, report.source.source_annotations, &empty_scope, name, &global_alias_count, &concrete_count, &global_alias_target, &global_alias_line, &global_alias_offset, &global_alias_owner, &opaque_classified, &opaque_policy, work, 0)
+                    return false if not global_complete or global_alias_count > 1
+                    if global_alias_count == 0:
+                        return false if local_nominals > 1
+                        return proof_replay_type_bound_enum_path_add_owner_with_work(resolution_scope, name, path, work) if local_nominals == 1
+                        return false
+                    return false if global_alias_owner.count == 0
+                    formals: (complete: bool, has_formals: bool) = proof_replay_type_bound_enum_alias_has_formals_with_work(report, name, global_alias_line, work, cache)
+                    return false if not formals.complete or formals.has_formals
+                    alias_module: sview = global_alias_owner[global_alias_owner.count - 1]
+                    return proof_replay_type_bound_enum_alias_path_at_scope_with_work(report, name, global_alias_owner, alias_module, global_alias_target, global_alias_line, global_alias_offset, resolution_module, active_offsets, path, work, cache, depth + 1)
+                Ast::Expr.Scope(head, _, _):
                     segments: mutable darray[sview] = []
                     return false if not proof_qualified_path_segments(expression, &segments, 0) or segments.count < 2
                     qualified_owner: (complete: bool, owner: darray[sview]) = proof_replay_type_bound_enum_module_alias_owner_with_work(report, resolution_module, segments, work)
                     return false if not qualified_owner.complete
                     final_name: sview = segments[segments.count - 1]
+                    resolved_type_owner: mutable darray[sview] = qualified_owner.owner
                     aliases: mutable usize = 0
                     nominal_types: mutable usize = 0
                     alias_target: mutable Ast::Expr = Ast::Expr.Absent
@@ -233,12 +339,66 @@ extend ElisaProof:
                     alias_offset: mutable usize = 0
                     alias_owner: mutable sview = ""
                     return false if:
-                        not proof_replay_type_bound_enum_named_type_at_owner_with_work(report.source.source_declarations, "", qualified_owner.owner, final_name, &aliases, &nominal_types, &alias_target, &alias_line, &alias_offset, &alias_owner, 0, work)
-                        aliases > 1 or nominal_types > 1 or (aliases > 0 and nominal_types > 0)
+                        not proof_replay_type_bound_enum_named_type_at_owner_with_work(report, report.source.source_declarations, "", qualified_owner.owner, final_name, &aliases, &nominal_types, &alias_target, &alias_line, &alias_offset, &alias_owner, 0, work)
+                        aliases > 1
+                    simple_module_head: bool = match head:
+                        Ast::Expr.Ident(_, _): true
+                        _: false
+                    if aliases == 0 and simple_module_head:
+                        imported_alias: (complete: bool, count: usize, target: Ast::Expr, line: u32, offset: usize, owner: sview) = proof_replay_type_bound_enum_imported_alias_with_work(report, final_name, work)
+                        return false if not imported_alias.complete or imported_alias.count > 1
+                        if imported_alias.count == 1:
+                            aliases <- 1
+                            alias_target <- imported_alias.target
+                            alias_line <- imported_alias.line
+                            alias_offset <- imported_alias.offset
+                            alias_owner <- imported_alias.owner
+                            nominal_types <- 0
+                            resolved_type_owner.clear()
+                    if aliases == 0 and simple_module_head:
+                        empty_owner: darray[sview] = []
+                        root_aliases: mutable usize = 0
+                        root_nominals: mutable usize = 0
+                        root_target: mutable Ast::Expr = Ast::Expr.Absent
+                        root_line: mutable u32 = 0
+                        root_offset: mutable usize = 0
+                        root_owner: mutable sview = ""
+                        return false if:
+                            not proof_replay_type_bound_enum_named_type_at_owner_with_work(report, report.source.source_declarations, "", empty_owner, final_name, &root_aliases, &root_nominals, &root_target, &root_line, &root_offset, &root_owner, 0, work)
+                            root_aliases > 1
+                        if root_aliases == 1:
+                            aliases <- 1
+                            nominal_types <- 0
+                            alias_target <- root_target
+                            alias_line <- root_line
+                            alias_offset <- root_offset
+                            alias_owner <- root_owner
+                            resolved_type_owner.clear()
+                        elif nominal_types == 0 and root_nominals == 1:
+                            nominal_types <- 1
+                            resolved_type_owner.clear()
+                    if aliases == 0 and simple_module_head:
+                        global_alias_count: mutable usize = 0
+                        concrete_count: mutable usize = 0
+                        global_alias_target: mutable Ast::Expr = Ast::Expr.Absent
+                        global_alias_line: mutable u32 = 0
+                        global_alias_offset: mutable usize = 0
+                        global_alias_owner: mutable darray[sview] = []
+                        opaque_classified: mutable bool = false
+                        opaque_policy: mutable i64 = 0
+                        empty_scope: mutable darray[sview] = []
+                        global_complete: bool = proof_replay_type_bound_global_alias_lookup_with_work(report, report.source.source_declarations, report.source.source_annotations, &empty_scope, final_name, &global_alias_count, &concrete_count, &global_alias_target, &global_alias_line, &global_alias_offset, &global_alias_owner, &opaque_classified, &opaque_policy, work, 0)
+                        return false if not global_complete or global_alias_count > 1
+                        if global_alias_count == 1:
+                            return false if global_alias_owner.count == 0
+                            formals: (complete: bool, has_formals: bool) = proof_replay_type_bound_enum_alias_has_formals_with_work(report, final_name, global_alias_line, work, cache)
+                            return false if not formals.complete or formals.has_formals
+                            alias_module: sview = global_alias_owner[global_alias_owner.count - 1]
+                            return proof_replay_type_bound_enum_alias_path_at_scope_with_work(report, final_name, global_alias_owner, alias_module, global_alias_target, global_alias_line, global_alias_offset, resolution_module, active_offsets, path, work, cache, depth + 1)
                     if aliases == 1:
-                        return proof_replay_type_bound_enum_alias_path_with_work(report, final_name, alias_owner, alias_target, alias_line, alias_offset, resolution_module, active_offsets, path, work, depth + 1)
+                        return proof_replay_type_bound_enum_alias_path_with_work(report, final_name, alias_owner, alias_target, alias_line, alias_offset, resolution_module, active_offsets, path, work, cache, depth + 1)
                     if nominal_types == 1:
-                        return proof_replay_type_bound_enum_path_add_owner_with_work(qualified_owner.owner, final_name, path, work)
+                        return proof_replay_type_bound_enum_path_add_owner_with_work(resolved_type_owner, final_name, path, work)
                     return false
                 _:
                     return false
@@ -295,14 +455,14 @@ extend ElisaProof:
                 return (2, 2, 2, false, Ast::Expr.Invalid) if types > 1 or const_types > 1 or members > 1
             return (types, const_types, members, fieldless, backing)
 
-        def proof_replay_type_bound_const_enum_field_scalar_with_work(report: ProofReport&, enum_type: Ast::Expr, member_name: sview, caller_module: sview, work: mutable usize&) -> bool:
+        def proof_replay_type_bound_const_enum_field_scalar_with_work(report: ProofReport&, enum_type: Ast::Expr, member_name: sview, caller_module: sview, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
             return false if member_name == "" or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
             path: mutable darray[sview] = []
             empty_scope: darray[sview] = []
             caller_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(empty_scope, caller_module, work)
             return false if not caller_scope.complete
             active_offsets: mutable darray[usize] = []
-            return false if not proof_replay_type_bound_enum_type_path_with_work(report, enum_type, caller_scope.scope, caller_module, true, &active_offsets, &path, work, 0) or path.count == 0
+            return false if not proof_replay_type_bound_enum_type_path_with_work(report, enum_type, caller_scope.scope, caller_module, true, &active_offsets, &path, work, cache, 0) or path.count == 0
             current_scope: darray[sview] = []
             member: (types: usize, const_types: usize, members: usize, fieldless: bool, backing: Ast::Expr) = proof_replay_type_bound_enum_member_at_path_with_work(report.source.source_declarations, path, current_scope, member_name, 0, work)
             return false if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT or member.types != 1 or member.const_types != 1 or member.members != 1 or not member.fieldless

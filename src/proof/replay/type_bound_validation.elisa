@@ -95,11 +95,11 @@ extend ElisaProof:
                     Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
 
-        def proof_replay_type_bound_find_owner(declarations: darray[Ast::Decl]&, name: sview, owner_line: u32, matches: mutable usize&, parameters: mutable darray[Ast::ParamDecl]&, body: mutable darray[Ast::Stmt]&, position: mutable Ast::Pos&, work: mutable usize&, depth: usize) -> void:
+        def proof_replay_type_bound_find_owner(declarations: darray[Ast::Decl]&, name: sview, owner_line: u32, owner_offset: usize, owner_offset_known: bool, current_scope: darray[sview]&, current_module: sview, found_scope: mutable darray[sview]&, found_module: mutable sview&, matches: mutable usize&, parameters: mutable darray[Ast::ParamDecl]&, body: mutable darray[Ast::Stmt]&, position: mutable Ast::Pos&, work: mutable usize&, depth: usize) -> void:
             if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
                 matches <- 2
                 return
-            for declaration in declarations |name, owner_line, matches, parameters, body, position, work, depth|:
+            for declaration in declarations |name, owner_line, owner_offset, owner_offset_known, current_scope, current_module, found_scope, found_module, matches, parameters, body, position, work, depth|:
                 return if matches >= 2
                 if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
                     matches <- 2
@@ -110,15 +110,31 @@ extend ElisaProof:
                         if not proof_replay_type_bound_local_text_compare_charge(candidate, name, work):
                             matches <- 2
                             return
-                        if candidate == name and candidate_position.line == owner_line:
+                        if candidate == name and candidate_position.line == owner_line and (not owner_offset_known or candidate_position.offset.usize() == owner_offset):
                             return if candidate_parameters.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work or candidate_body.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work - candidate_parameters.count
                             work <- work + candidate_parameters.count + candidate_body.count
                             matches <- matches + 1
                             parameters <- candidate_parameters
                             body <- candidate_body
                             position <- candidate_position
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        proof_replay_type_bound_find_owner(nested, name, owner_line, matches, parameters, body, position, work, depth + 1)
+                            if not proof_replay_type_bound_local_work_charge(current_scope.count, work):
+                                matches <- 2
+                                return
+                            for segment in current_scope |segment, work, matches|:
+                                if not proof_replay_type_bound_local_work_charge(sview_len(segment), work):
+                                    matches <- 2
+                                    return
+                            found_scope.clear()
+                            found_scope.extend(current_scope)
+                            found_module <- current_module
+                    Ast::Decl.Module(module_name, nested, _):
+                        nested_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(current_scope, module_name, work)
+                        if nested_scope.complete:
+                            proof_replay_type_bound_find_owner(nested, name, owner_line, owner_offset, owner_offset_known, nested_scope.scope, module_name, found_scope, found_module, matches, parameters, body, position, work, depth + 1)
+                        else:
+                            matches <- 2
+                    Ast::Decl.Scoped(nested, _):
+                        proof_replay_type_bound_find_owner(nested, name, owner_line, owner_offset, owner_offset_known, current_scope, current_module, found_scope, found_module, matches, parameters, body, position, work, depth + 1)
                     Ast::Decl.Invalid:
                         matches <- 2
                     Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
@@ -149,7 +165,22 @@ extend ElisaProof:
                     Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
 
-        def proof_replay_type_bound_scalar_constant_fact_with_work(report: mutable ProofReport&, owner_parameters: darray[Ast::ParamDecl]&, owner_body: darray[Ast::Stmt]&, owner_line: u32, trace: ProofFactTrace, work: mutable usize&) -> bool:
+        # The replay context is set only after the certificate or attempt owner was
+        # authenticated against an exact parser span. Reuse that identity for local facts.
+        def proof_replay_type_bound_active_owner(report: ProofReport&, name: sview) -> (valid: bool, line: u32, offset: usize):
+            return (false, 0, 0) if not report.analysis_2.replay_owner_offset_valid or report.analysis_2.replay_owner_line == 0 or report.analysis_2.replay_owner_line == 4294967295
+            return (false, 0, 0) if report.analysis_2.trace_consumer_certificate_index > 0 and report.analysis_2.trace_consumer_attempt_index > 0
+            if report.analysis_2.trace_consumer_certificate_index > 0:
+                certificate_index: usize = report.analysis_2.trace_consumer_certificate_index - 1
+                return (false, 0, 0) if certificate_index >= report.analysis_1.certificates.count or report.analysis_1.certificates[certificate_index].name != name
+                return (true, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset)
+            if report.analysis_2.trace_consumer_attempt_index > 0:
+                attempt_index: usize = report.analysis_2.trace_consumer_attempt_index - 1
+                return (false, 0, 0) if attempt_index >= report.analysis_1.goal_attempts.count or report.analysis_1.goal_attempts[attempt_index].name != name
+                return (true, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset)
+            return (false, 0, 0)
+
+        def proof_replay_type_bound_scalar_constant_fact_with_work(report: mutable ProofReport&, owner_parameters: darray[Ast::ParamDecl]&, owner_body: darray[Ast::Stmt]&, owner_line: u32, owner_offset: usize, trace: ProofFactTrace, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
             return false if trace.kind != "type-bound" or trace.name == "" or trace.line == 0
             marker_name: mutable sview = ""
             marker_width: mutable i64 = 0
@@ -173,29 +204,21 @@ extend ElisaProof:
                 _:
                     return false
             return false if marker_name == ""
-            owner_line: mutable u32 = 0
+            resolved_owner_line: mutable u32 = owner_line
             owner_matches_by_name: mutable usize = 0
-            proof_replay_type_bound_unique_owner_line(report.source.source_declarations, trace.name, &owner_line, &owner_matches_by_name, work, 0)
-            return false if:
-                owner_matches_by_name != 1
-                report.analysis_2.replay_owner_line != 0 and report.analysis_2.replay_owner_line != 4294967295 and report.analysis_2.replay_owner_line != owner_line
+            return false if report.analysis_2.replay_owner_line != 0 and report.analysis_2.replay_owner_line != 4294967295 and report.analysis_2.replay_owner_line != resolved_owner_line
+            return false if report.analysis_2.replay_owner_offset_valid and report.analysis_2.replay_owner_offset != owner_offset
             owner_matches: mutable usize = 0
             owner_parameters: mutable darray[Ast::ParamDecl] = []
             owner_body: mutable darray[Ast::Stmt] = []
             owner_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
-            proof_replay_type_bound_find_owner(report.source.source_declarations, trace.name, owner_line, &owner_matches, &owner_parameters, &owner_body, &owner_position, work, 0)
+            root_scope: darray[sview] = []
+            owner_scope: mutable darray[sview] = []
+            module_name: mutable sview = ""
+            proof_replay_type_bound_find_owner(report.source.source_declarations, trace.name, resolved_owner_line, owner_offset, true, root_scope, "", &owner_scope, &module_name, &owner_matches, &owner_parameters, &owner_body, &owner_position, work, 0)
             return false if owner_matches != 1
             current_scope: mutable darray[sview] = []
-            module_name: mutable sview = ""
-            module_matches: mutable usize = 0
-            return false if report.source.source_declarations.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
-            work <- work + report.source.source_declarations.count
-            proof_replay_module_at_function_line(report.source.source_declarations, owner_line, "", &module_name, &module_matches, 0)
-            return false if module_matches != 1
-            if module_name != "":
-                normalized_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(current_scope, module_name, work)
-                return false if not normalized_scope.complete
-                current_scope <- normalized_scope.scope
+            current_scope.extend(owner_scope)
             wanted_scope: mutable darray[sview] = []
             constant_name: mutable sview = ""
             qualified: mutable bool = false
@@ -218,13 +241,13 @@ extend ElisaProof:
                     root: (complete: bool, name: sview) = proof_replay_type_bound_enum_root_name_with_work(enum_type, work, 0)
                     return false if:
                         not root.complete or root.name == ""
-                        proof_replay_type_bound_enum_generic_shadowed_with_work(report, owner_line, root.name, work)
+                        proof_replay_type_bound_enum_generic_identity_shadowed_with_work(report, owner_line, owner_position.offset.usize(), module_name, root.name, work, cache)
                     for parameter in owner_parameters |parameter, root, work|:
                         return false if:
                             not proof_replay_type_bound_local_text_compare_charge(parameter.name, root.name, work)
                             parameter.name == root.name
                     return false if proof_replay_source_body_declares_with_work(report.source.source_declarations, owner_body, root.name, work)
-                    return proof_replay_type_bound_const_enum_field_scalar_with_work(report, enum_type, member_name, module_name, work)
+                    return proof_replay_type_bound_const_enum_field_scalar_with_work(report, enum_type, member_name, module_name, work, cache)
                 _:
                     return false
             return false if constant_name == ""
@@ -248,11 +271,11 @@ extend ElisaProof:
             proof_replay_type_bound_scalar_constant_lookup(report, report.source.source_declarations, &wanted_scope, &lookup_scope, constant_name, marker_name, marker_width, &matches, &valid, work, 0)
             matches == 1 and valid
 
-        def proof_replay_type_bound_parameter_declaration(report: ProofReport&, trace: ProofFactTrace, declarations: darray[Ast::Decl]&, owner_line: u32, matches: mutable usize&, valid: mutable bool&, work: mutable usize&, depth: usize) -> void:
+        def proof_replay_type_bound_parameter_declaration(report: ProofReport&, trace: ProofFactTrace, declarations: darray[Ast::Decl]&, owner_line: u32, owner_offset: usize, matches: mutable usize&, valid: mutable bool&, work: mutable usize&, depth: usize) -> void:
             if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
                 matches <- 2
                 return
-            for declaration in declarations |report, trace, owner_line, matches, valid, work, depth|:
+            for declaration in declarations |report, trace, owner_line, owner_offset, matches, valid, work, depth|:
                 return if matches >= 2
                 if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
                     matches <- 2
@@ -263,7 +286,7 @@ extend ElisaProof:
                         if not proof_replay_type_bound_local_text_compare_charge(name, trace.name, work):
                             matches <- 2
                             return
-                        if name == trace.name and position.line == owner_line:
+                        if name == trace.name and position.line == owner_line and position.offset.usize() == owner_offset:
                             matches <- matches + 1
                             if trace.line == position.line:
                                 return if parameters.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
@@ -271,7 +294,7 @@ extend ElisaProof:
                                 for parameter in parameters |report, trace, valid, position, work|:
                                     valid <- true if proof_replay_type_bound_parameter_fact(report, parameter, trace.expression, position, work)
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        proof_replay_type_bound_parameter_declaration(report, trace, nested, owner_line, matches, valid, work, depth + 1)
+                    proof_replay_type_bound_parameter_declaration(report, trace, nested, owner_line, owner_offset, matches, valid, work, depth + 1)
                     Ast::Decl.Invalid:
                         matches <- 2
                     Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):

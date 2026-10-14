@@ -1,13 +1,16 @@
 # Validate local scalar and fixed-array type-bound facts against their exact source bindings.
 extend ElisaProof:
     private:
-        def proof_replay_type_bound_fixed_array_element(type_expression: Ast::Expr) -> Ast::Expr:
+        def proof_replay_type_bound_fixed_array_element_with_work(type_expression: Ast::Expr, work: mutable usize&, depth: usize) -> Ast::Expr:
+            return Ast::Expr.Invalid if depth >= PROOF_REPLAY_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT or not proof_replay_type_bound_local_work_charge(1, work)
             match type_expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Ampersand, inner, _) | Ast::Expr.Unary(TokenKind.Lmut, inner, _) | Ast::Expr.Unary(TokenKind.Mutable, inner, _):
+                    return proof_replay_type_bound_fixed_array_element_with_work(inner, work, depth + 1)
                 Ast::Expr.Index(element, _, _):
-                    return element if proof_replay_global_mutable_array_literal_extent(type_expression, 0) >= 0
-                    return Ast::Expr.Invalid
-                Ast::Expr.IndexN(Ast::Expr.Ident("array", _), arguments, _):
-                    return arguments[0] if arguments.count == 2 and proof_replay_global_mutable_array_literal_extent(type_expression, 0) >= 0
+                    return element
+                Ast::Expr.IndexN(Ast::Expr.Ident(base_name, _), arguments, _):
+                    return Ast::Expr.Invalid if not proof_replay_type_bound_local_text_compare_charge(base_name, "array", work)
+                    return arguments[0] if base_name == "array" and arguments.count == 2
                     return Ast::Expr.Invalid
                 _:
                     return Ast::Expr.Invalid
@@ -23,7 +26,7 @@ extend ElisaProof:
                     return proof_replay_type_bound_local_type_name_charge(element_name, work)
                 Ast::Expr.IndexN(Ast::Expr.Ident(base_name, _), _, _):
                     return false if not proof_replay_type_bound_local_text_compare_charge(base_name, "array", work)
-                    return proof_replay_type_bound_local_text_compare_charge(base_name, "array", work)
+                    return true
                 _:
                     pass
             return true
@@ -63,10 +66,14 @@ extend ElisaProof:
                         return false if not equality.complete
                         matches <- true if equality.equal
                         return false if not proof_replay_type_bound_local_array_extent_charge_with_work(local_type, work, 0)
-                        element: Ast::Expr = proof_replay_type_bound_fixed_array_element(local_type)
-                        element_name: sview = proof_ident_name(element)
-                        return false if not proof_replay_type_bound_local_type_name_charge(element_name, work)
-                        element_scalar: bool = element_name in {"i8", "i16", "i32", "i64", "isize", "int", "u8", "u16", "u32", "u64", "usize", "uintptr", "bool", "char"}
+                        element: Ast::Expr = proof_replay_type_bound_fixed_array_element_with_work(local_type, work, 0)
+                        element_shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_local_type_shape(report, element, work, 0)
+                        return false if not element_shape.complete and work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                        # Resolve the element in the owning function before treating an
+                        # Index.All producer marker as a builtin scalar fact. In particular,
+                        # a generic parameter named `i64` shadows the primitive spelling.
+                        # This also admits uniquely resolved aliases to scalar elements.
+                        element_scalar: bool = element_shape.complete and element_shape.scalar_kind == 1
                         if element_scalar:
                             # The producer records the complete builtin indexed protocol set as
                             # `Index.All` for a primitive element. Bind that aggregate marker to
@@ -81,7 +88,7 @@ extend ElisaProof:
                                 equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_operator, work)
                                 return false if not equality.complete
                                 matches <- true if equality.equal
-                            element_width: i64 = proof_replay_type_bound_local_unsigned_width(report, element, work, 0)
+                            element_width: i64 = element_shape.unsigned_width
                             expected_element: Ast::Expr = proof_scalar_element_marker(root, 1, position, element_width)
                             equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_element, work)
                             return false if not equality.complete
@@ -195,71 +202,6 @@ extend ElisaProof:
             work <- work + cost * passes * factor
             return true
 
-        # A one-pass alias lookup has the same unique/ambiguous result as proof_find_type_alias,
-        # while charging every declaration visit and every alias-name comparison to the caller.
-        def proof_replay_type_bound_local_alias_scan(declarations: darray[Ast::Decl]&, name: sview, matches: mutable usize&, target: mutable Ast::Expr&, work: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in declarations |name, matches, target, work, depth|:
-                return false if not proof_replay_type_bound_local_work_charge(1, work)
-                match declaration:
-                    Ast::Decl.Alias(alias_name, alias_target, _):
-                        return false if not proof_replay_type_bound_local_text_compare_charge(alias_name, name, work)
-                        if alias_name == name:
-                            matches <- matches + 1
-                            target <- alias_target if matches == 1
-                            return true if matches > 1
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_type_bound_local_alias_scan(nested, name, matches, target, work, depth + 1)
-                    Ast::Decl.Invalid:
-                        return false
-                    Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Law(_, _, _):
-                        pass
-                    _:
-                        return false
-            return true
-
-        # The fallback alias resolver below is file-wide. Never let an unrelated alias make a
-        # same-spelled nominal type appear scalar; until type lookup carries module paths, any
-        # aggregate declaration with that spelling makes the result ambiguous.
-        def proof_replay_type_bound_local_aggregate_name_scan(declarations: darray[Ast::Decl]&, name: sview, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in declarations |name, matches, work, depth|:
-                return false if not proof_replay_type_bound_local_work_charge(1, work)
-                match declaration:
-                    Ast::Decl.Struct(candidate, _, _, _, _, _, _):
-                        return false if not proof_replay_type_bound_local_text_compare_charge(candidate, name, work)
-                        matches <- matches + 1 if candidate == name
-                    Ast::Decl.Enum(candidate, _, _, _, _):
-                        return false if not proof_replay_type_bound_local_text_compare_charge(candidate, name, work)
-                        matches <- matches + 1 if candidate == name
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_type_bound_local_aggregate_name_scan(nested, name, matches, work, depth + 1)
-                    Ast::Decl.Invalid:
-                        return false
-                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
-                        pass
-                    _:
-                        return false
-            return true
-
-        def proof_replay_type_bound_local_const_enum_scan(declarations: darray[Ast::Decl]&, name: sview, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in declarations |name, matches, work, depth|:
-                return false if not proof_replay_type_bound_local_work_charge(1, work)
-                match declaration:
-                    Ast::Decl.Enum(enum_name, _, is_const, _, _):
-                        return false if not proof_replay_type_bound_local_text_compare_charge(enum_name, name, work)
-                        matches <- matches + 1 if is_const and enum_name == name
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_type_bound_local_const_enum_scan(nested, name, matches, work, depth + 1)
-                    Ast::Decl.Invalid:
-                        return false
-                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
-                        pass
-                    _:
-                        return false
-            return true
-
         def proof_replay_type_bound_local_generic_name_count_with_work(report: ProofReport&, name: sview, owner_line: u32, work: mutable usize&) -> (complete: bool, count: usize):
             return (false, 0) if:
                 owner_line == 0 or owner_line == 4294967295
@@ -267,34 +209,19 @@ extend ElisaProof:
                 report.source_types.source_generic_param_lines.count != report.source_types.source_generic_param_names.count
             proof_replay_source_generic_param_name_count_with_work(name, owner_line, report, work)
 
-        def proof_replay_type_bound_local_builtin_unshadowed(report: ProofReport&, name: sview, work: mutable usize&) -> bool:
+        # Reuse the scope-ranked resolver used by call-return facts for both bare and
+        # qualified local type names. This keeps import visibility, shadowing, aliases,
+        # generic binders, and opaque extern policy consistent across replay paths.
+        def proof_replay_type_bound_local_type_shape(report: ProofReport&, expression: Ast::Expr, work: mutable usize&, depth: usize) -> (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64):
             owner_line: u32 = report.analysis_2.replay_owner_line
-            generic: (complete: bool, count: usize) = proof_replay_type_bound_local_generic_name_count_with_work(report, name, owner_line, work)
-            return false if not generic.complete or generic.count > 0
-            aliases: mutable usize = 0
-            target: mutable Ast::Expr = Ast::Expr.Absent
-            return false if not proof_replay_type_bound_local_alias_scan(report.source.source_declarations, name, &aliases, &target, work, 0) or aliases != 0
-            aggregates: mutable usize = 0
-            return false if not proof_replay_type_bound_local_aggregate_name_scan(report.source.source_declarations, name, &aggregates, work, 0) or aggregates != 0
-            return true
-
-        # Local parameter and variable validators run with the owning function installed by
-        # replay. Recover that exact lexical module for qualified paths with a metered walk.
-        def proof_replay_type_bound_local_qualified_shape(report: ProofReport&, expression: Ast::Expr, work: mutable usize&, depth: usize) -> (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64):
-            owner_line: u32 = report.analysis_2.replay_owner_line
-            return (false, -1, -1, -1) if owner_line == 0 or owner_line == 4294967295
-            segments: mutable darray[sview] = []
-            return (false, -1, -1, -1) if:
-                not proof_replay_summary_expr_charge_with_work(expression, work)
-                not proof_replay_summary_expr_charge_with_work(expression, work)
-                not proof_qualified_path_segments(expression, &segments, 0) or segments.count < 2
-            for segment in segments |segment, report, owner_line, work|:
-                generic: (complete: bool, count: usize) = proof_replay_type_bound_local_generic_name_count_with_work(report, segment, owner_line, work)
-                return (false, -1, -1, -1) if not generic.complete or generic.count > 0
+            owner_offset: usize = report.analysis_2.replay_owner_offset
+            return (false, -1, -1, -1) if not report.analysis_2.replay_owner_offset_valid or owner_line == 0 or owner_line == 4294967295
             current_scope: mutable darray[sview] = []
             resolution_scope: mutable darray[sview] = []
             module_matches: mutable usize = 0
-            return (false, -1, -1, -1) if not proof_replay_type_bound_function_scope_lookup_with_work(report.source.source_declarations, &current_scope, owner_line, &resolution_scope, &module_matches, work, 0) or module_matches != 1
+            return (false, -1, -1, -1) if not proof_replay_type_bound_function_scope_lookup_with_work(report.source.source_declarations, &current_scope, owner_line, owner_offset, &resolution_scope, &module_matches, work, 0) or module_matches != 1
+            generic: (complete: bool, present: bool) = proof_replay_type_bound_call_type_has_generic_with_work(report, expression, owner_line, work, depth + 1)
+            return (false, -1, -1, -1) if not generic.complete or generic.present
             active_alias_offsets: mutable darray[usize] = []
             proof_replay_type_bound_call_type_shape_with_work(report, expression, resolution_scope, &active_alias_offsets, work, depth + 1)
 
@@ -306,22 +233,8 @@ extend ElisaProof:
                 Ast::Expr.Unary(operator, inner, _):
                     return 0 if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
                     return proof_replay_type_bound_local_unsigned_width(report, inner, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                Ast::Expr.Ident(name, _):
-                    return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
-                    if proof_scalar_primitive_type_name(name):
-                        primitive: i64 = proof_unsigned_primitive_width(expression)
-                        return primitive if proof_replay_type_bound_local_builtin_unshadowed(report, name, work)
-                        return -1
-                    aggregate_matches: mutable usize = 0
-                    return -1 if not proof_replay_type_bound_local_aggregate_name_scan(report.source.source_declarations, name, &aggregate_matches, work, 0) or aggregate_matches > 0
-                    matches: mutable usize = 0
-                    target: mutable Ast::Expr = Ast::Expr.Absent
-                    return -1 if:
-                        not proof_replay_type_bound_local_alias_scan(report.source.source_declarations, name, &matches, &target, work, 0)
-                        matches > 1
-                    return proof_replay_type_bound_local_unsigned_width(report, target, work, depth + 1) if matches == 1
-                Ast::Expr.Scope(_, _, _):
-                    shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_local_qualified_shape(report, expression, work, depth)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
+                    shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_local_type_shape(report, expression, work, depth)
                     return -1 if not shape.complete
                     return shape.unsigned_width
                 _:
@@ -336,22 +249,8 @@ extend ElisaProof:
                 Ast::Expr.Unary(operator, inner, _):
                     return 0 if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
                     return proof_replay_type_bound_local_signed_width(report, inner, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                Ast::Expr.Ident(name, _):
-                    return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
-                    if proof_scalar_primitive_type_name(name):
-                        primitive: i64 = proof_signed_primitive_width(expression)
-                        return primitive if proof_replay_type_bound_local_builtin_unshadowed(report, name, work)
-                        return -1
-                    aggregate_matches: mutable usize = 0
-                    return -1 if not proof_replay_type_bound_local_aggregate_name_scan(report.source.source_declarations, name, &aggregate_matches, work, 0) or aggregate_matches > 0
-                    matches: mutable usize = 0
-                    target: mutable Ast::Expr = Ast::Expr.Absent
-                    return -1 if:
-                        not proof_replay_type_bound_local_alias_scan(report.source.source_declarations, name, &matches, &target, work, 0)
-                        matches > 1
-                    return proof_replay_type_bound_local_signed_width(report, target, work, depth + 1) if matches == 1
-                Ast::Expr.Scope(_, _, _):
-                    shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_local_qualified_shape(report, expression, work, depth)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
+                    shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_local_type_shape(report, expression, work, depth)
                     return -1 if not shape.complete
                     return shape.signed_width
                 _:
@@ -366,30 +265,8 @@ extend ElisaProof:
                 Ast::Expr.Unary(operator, inner, _):
                     return 0 if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
                     return proof_replay_type_bound_local_scalar_kind(report, inner, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                Ast::Expr.Ident(name, _):
-                    return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
-                    if proof_scalar_primitive_type_name(name):
-                        return 1 if proof_replay_type_bound_local_builtin_unshadowed(report, name, work)
-                        return -1
-                    alias_matches: mutable usize = 0
-                    target: mutable Ast::Expr = Ast::Expr.Absent
-                    return -1 if:
-                        not proof_replay_type_bound_local_alias_scan(report.source.source_declarations, name, &alias_matches, &target, work, 0)
-                        alias_matches > 1
-                    if alias_matches == 1:
-                        aggregate_matches: mutable usize = 0
-                        return -1 if not proof_replay_type_bound_local_aggregate_name_scan(report.source.source_declarations, name, &aggregate_matches, work, 0) or aggregate_matches > 0
-                        return proof_replay_type_bound_local_scalar_kind(report, target, work, depth + 1)
-                    enum_matches: mutable usize = 0
-                    return -1 if:
-                        not proof_replay_type_bound_local_const_enum_scan(report.source.source_declarations, name, &enum_matches, work, 0)
-                        enum_matches > 1
-                    aggregate_matches: mutable usize = 0
-                    return -1 if not proof_replay_type_bound_local_aggregate_name_scan(report.source.source_declarations, name, &aggregate_matches, work, 0)
-                    return 1 if enum_matches == 1 and aggregate_matches == 1
-                    return -1 if aggregate_matches != 0
-                Ast::Expr.Scope(_, _, _):
-                    shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_local_qualified_shape(report, expression, work, depth)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
+                    shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_local_type_shape(report, expression, work, depth)
                     return -1 if not shape.complete
                     return shape.scalar_kind
                 _:
@@ -399,7 +276,9 @@ extend ElisaProof:
         def proof_replay_type_bound_parameter_fact(report: ProofReport&, parameter: Ast::ParamDecl, expression: Ast::Expr, position: Ast::Pos, work: mutable usize&) -> bool:
             return false if parameter.name == ""
             term: Ast::Expr = Ast::Expr.Ident(parameter.name, position)
-            unsigned_width: i64 = proof_replay_type_bound_local_unsigned_width(report, parameter.type_expression, work, 0)
+            parameter_shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_local_type_shape(report, parameter.type_expression, work, 0)
+            return false if not parameter_shape.complete
+            unsigned_width: i64 = parameter_shape.unsigned_width
             equal: mutable (complete: bool, equal: bool) = (true, false)
             if unsigned_width > 0:
                 equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, proof_unsigned_type_marker(parameter.name, unsigned_width, position), work)
@@ -414,7 +293,7 @@ extend ElisaProof:
                     equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, upper, work)
                     return false if not equal.complete
                     return true if equal.equal
-            signed_width: i64 = proof_replay_type_bound_local_signed_width(report, parameter.type_expression, work, 0)
+            signed_width: i64 = parameter_shape.signed_width
             if signed_width > 0:
                 equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, proof_signed_type_marker(term, signed_width, position), work)
                 return false if not equal.complete
@@ -431,12 +310,40 @@ extend ElisaProof:
                     equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, lower, work)
                     return false if not equal.complete
                     return true if equal.equal
-            scalar_kind: i64 = proof_replay_type_bound_local_scalar_kind(report, parameter.type_expression, work, 0)
+            scalar_kind: i64 = parameter_shape.scalar_kind
             if unsigned_width <= 0 and scalar_kind == 1:
                 equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, proof_scalar_type_marker(parameter.name, position), work)
                 return false if not equal.complete
                 return true if equal.equal
-            return false
+            # Parameter array markers are produced from the declared element type. Authenticate
+            # them against this exact parameter rather than accepting the producer's claim. Keep
+            # aliases and non-fixed containers closed until their resolved type identity is carried
+            # through this source-binding check.
+            return proof_replay_type_bound_parameter_array_fact(report, parameter, expression, position, work)
+
+        def proof_replay_type_bound_parameter_array_fact(report: ProofReport&, parameter: Ast::ParamDecl, expression: Ast::Expr, position: Ast::Pos, work: mutable usize&) -> bool:
+            return false if not proof_replay_type_bound_local_array_extent_charge_with_work(parameter.type_expression, work, 0)
+            extent: i64 = proof_replay_global_mutable_array_literal_extent(parameter.type_expression, 0)
+            return false if extent < 0
+            element: Ast::Expr = proof_replay_type_bound_fixed_array_element_with_work(parameter.type_expression, work, 0)
+            element_shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_local_type_shape(report, element, work, 0)
+            return false if not element_shape.complete or element_shape.scalar_kind != 1
+            root: Ast::Expr = Ast::Expr.Ident(parameter.name, position)
+            equal: (complete: bool, equal: bool) = proof_replay_type_bound_local_expr_equal_with_work(expression, proof_builtin_operator_marker(root, "Index.All", position), work)
+            return false if not equal.complete
+            return true if equal.equal
+            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+            for protocol in protocols |report, parameter, expression, position, root, protocols, work|:
+                expected_operator: Ast::Expr = proof_index_operator_marker(root, protocol, position, true)
+                equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_operator, work)
+                return false if not equal.complete
+                return true if equal.equal
+            element_width: i64 = element_shape.unsigned_width
+            return false if element_width < 0
+            expected_element: Ast::Expr = proof_scalar_element_marker(root, 1, position, element_width)
+            equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_element, work)
+            return false if not equal.complete
+            equal.equal
 
         def proof_replay_type_bound_local_scalar_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32) -> bool:
             work: mutable usize = 0
@@ -456,7 +363,9 @@ extend ElisaProof:
                         continue if parameter_match
                         term: Ast::Expr = Ast::Expr.Ident(local_name, position)
                         local_matches: mutable usize = 0
-                        unsigned_width: i64 = proof_replay_type_bound_local_unsigned_width(report, local_type, work, 0)
+                        local_shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_local_type_shape(report, local_type, work, 0)
+                        continue if not local_shape.complete
+                        unsigned_width: i64 = local_shape.unsigned_width
                         if unsigned_width > 0:
                             expected_unsigned: Ast::Expr = proof_unsigned_type_marker(local_name, unsigned_width, position)
                             local_matches <- local_matches + 1 if proof_replay_summary_expr_equal_with_work(expression, expected_unsigned, work)
@@ -465,7 +374,7 @@ extend ElisaProof:
                             if unsigned_width < PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH:
                                 upper: Ast::Expr = Ast::Expr.Binary(term, TokenKind.LtEq, Ast::Expr.IntLit(proof_unsigned_width_max(unsigned_width), position), position)
                                 local_matches <- local_matches + 1 if proof_replay_summary_expr_equal_with_work(expression, upper, work)
-                        signed_width: i64 = proof_replay_type_bound_local_signed_width(report, local_type, work, 0)
+                        signed_width: i64 = local_shape.signed_width
                         if signed_width > 0:
                             expected_signed: Ast::Expr = proof_signed_type_marker(term, signed_width, position)
                             local_matches <- local_matches + 1 if proof_replay_summary_expr_equal_with_work(expression, expected_signed, work)
@@ -477,7 +386,7 @@ extend ElisaProof:
                                 floor: Ast::Expr = Ast::Expr.Binary(magnitude, TokenKind.Minus, Ast::Expr.IntLit(1, position), position)
                                 lower: Ast::Expr = Ast::Expr.Binary(floor, TokenKind.LtEq, term, position)
                                 local_matches <- local_matches + 1 if proof_replay_summary_expr_equal_with_work(expression, lower, work)
-                        scalar_kind: i64 = proof_replay_type_bound_local_scalar_kind(report, local_type, work, 0)
+                        scalar_kind: i64 = local_shape.scalar_kind
                         local_matches <- local_matches + 1 if unsigned_width <= 0 and scalar_kind == 1 and proof_replay_summary_expr_equal_with_work(expression, proof_scalar_type_marker(local_name, position), work)
                         if local_matches != 0:
                             return false if:
@@ -527,10 +436,10 @@ extend ElisaProof:
                         return false if not equality.complete
                         local_matches <- local_matches + 1 if equality.equal
                         return false if not proof_replay_type_bound_local_array_extent_charge_with_work(local_type, work, 0)
-                        element: Ast::Expr = proof_replay_type_bound_fixed_array_element(local_type)
-                        element_name: sview = proof_ident_name(element)
-                        return false if not proof_replay_type_bound_local_type_name_charge(element_name, work)
-                        element_scalar: bool = element_name in {"i8", "i16", "i32", "i64", "isize", "int", "u8", "u16", "u32", "u64", "usize", "uintptr", "bool", "char"}
+                        element: Ast::Expr = proof_replay_type_bound_fixed_array_element_with_work(local_type, work, 0)
+                        element_shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_local_type_shape(report, element, work, 0)
+                        return false if not element_shape.complete and work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                        element_scalar: bool = element_shape.complete and element_shape.scalar_kind == 1
                         if element_scalar:
                             # Keep the certificate-facing source check aligned with the compact
                             # `Index.All` witness emitted for primitive array elements.
@@ -544,7 +453,7 @@ extend ElisaProof:
                                 equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_operator, work)
                                 return false if not equality.complete
                                 local_matches <- local_matches + 1 if equality.equal
-                            element_width: i64 = proof_replay_type_bound_local_unsigned_width(report, element, work, 0)
+                            element_width: i64 = element_shape.unsigned_width
                             expected_element: Ast::Expr = proof_scalar_element_marker(root, 1, position, element_width)
                             equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_element, work)
                             return false if not equality.complete

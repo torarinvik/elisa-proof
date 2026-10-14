@@ -17,6 +17,7 @@ extend ElisaProof:
                     return (false, false) if:
                         not proof_replay_type_bound_local_work_charge(1, work)
                         not proof_replay_type_bound_local_text_compare_charge(previous.name, "__using_alias", work)
+                        not proof_replay_type_bound_local_text_compare_charge(previous.module, annotation.module, work)
                         previous.name != "__using_alias" or previous.line != annotation.line or previous.offset != annotation.offset or previous.module != annotation.module or previous.owner == ""
                 return (false, false) if not proof_replay_type_bound_local_text_compare_charge(annotation.owner, "__from_member", work)
                 selective_owner: bool = annotation.owner == "__from_member"
@@ -51,7 +52,7 @@ extend ElisaProof:
                         # A valid selective `using` has a scoped __from_member partner.
                         # Missing pair metadata cannot be used to bypass the import guard.
                         return (true, true) if visible
-                relevant: bool = module_alias if module_alias_only else wildcard or selective_owner or module_alias
+                relevant: bool = module_alias if module_alias_only else wildcard or selective_owner
                 continue if not relevant
                 empty_scope: darray[sview] = []
                 imported_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(empty_scope, annotation.module, work)
@@ -80,145 +81,50 @@ extend ElisaProof:
                 return (true, true) if imported_name == wanted
             return (true, false)
 
-        def proof_replay_type_bound_caller_module_path_with_work(declarations: darray[Ast::Decl]&, caller_name: sview, caller_line: u32, current_scope: mutable darray[sview]&, found_scope: mutable darray[sview]&, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
-            for declaration in declarations |caller_name, caller_line, current_scope, found_scope, matches, work, depth|:
-                return false if not proof_replay_type_bound_local_work_charge(1, work)
+        def proof_replay_type_bound_caller_module_path_from_index_with_work(declarations: darray[Ast::Decl]&, index: ProofReplayDeterministicDeclarationIndex&, caller_row: usize, work: mutable usize&) -> (complete: bool, scope: darray[sview]):
+            return (false, []) if caller_row >= index.entries.count
+            entry: ProofReplayDeterministicDeclarationEntry = index.entries[caller_row]
+            return (false, []) if:
+                entry.declaration_path_count == 0 or entry.declaration_path_start > index.declaration_path.count
+                entry.declaration_path_count > index.declaration_path.count - entry.declaration_path_start
+                not proof_replay_type_bound_local_work_charge(entry.declaration_path_count, work)
+            current_declarations: mutable darray[Ast::Decl] = declarations
+            current_scope: mutable darray[sview] = []
+            for path_depth in 0..<entry.declaration_path_count |path_depth, entry, index, current_declarations, current_scope, work|:
+                path_offset: usize = entry.declaration_path_start + path_depth
+                declaration_index: usize = index.declaration_path[path_offset]
+                return (false, []) if declaration_index >= current_declarations.count
+                declaration: Ast::Decl = current_declarations[declaration_index]
+                if path_depth + 1 == entry.declaration_path_count:
+                    match declaration:
+                        Ast::Decl.Func(name, _, _, _, _, _, position):
+                            selected_position: mutable Ast::Pos = Ast::pos_at_line(0)
+                            match entry.declaration:
+                                Ast::Decl.Func(_, _, _, _, _, _, selected):
+                                    selected_position <- selected
+                                _:
+                                    pass
+                            return (false, []) if:
+                                selected_position.line == 0
+                                not proof_replay_type_bound_local_text_compare_charge(name, entry.name, work)
+                                name != entry.name
+                                position.line != selected_position.line or position.offset != selected_position.offset
+                            return (true, current_scope)
+                        _:
+                            return (false, [])
                 match declaration:
-                    Ast::Decl.Func(name, _, _, _, _, _, position):
-                        return false if not proof_replay_type_bound_local_text_compare_charge(name, caller_name, work)
-                        if name == caller_name and position.line == caller_line:
-                            matches <- matches + 1
-                            return false if matches > 1 or not proof_replay_type_bound_local_work_charge(current_scope.count, work)
-                            found_scope.extend(current_scope)
                     Ast::Decl.Module(module_name, nested, _):
                         nested_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(current_scope, module_name, work)
-                        return false if not nested_scope.complete
-                        saved_count: usize = current_scope.count
+                        return (false, []) if not nested_scope.complete
                         current_scope <- nested_scope.scope
-                        return false if not proof_replay_type_bound_caller_module_path_with_work(nested, caller_name, caller_line, current_scope, found_scope, matches, work, depth + 1)
-                        current_scope.resize(saved_count)
+                        current_declarations <- nested
                     Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_type_bound_caller_module_path_with_work(nested, caller_name, caller_line, current_scope, found_scope, matches, work, depth + 1)
-                    Ast::Decl.Invalid:
-                        return false
-                    Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
-                        pass
+                        current_declarations <- nested
                     _:
-                        return false
-            return true
-
-        def proof_replay_type_bound_call_type_lookup_with_work(declarations: darray[Ast::Decl]&, current_scope: mutable darray[sview]&, wanted_scope: darray[sview]&, wanted_name: sview, exact_scope: bool, best_depth: mutable usize&, matches: mutable usize&, kind: mutable i64&, target: mutable Ast::Expr&, is_const_enum: mutable bool&, alias_line: mutable u32&, alias_offset: mutable usize&, owner_scope: mutable darray[sview]&, work: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in declarations |current_scope, wanted_scope, wanted_name, exact_scope, best_depth, matches, kind, target, is_const_enum, alias_line, alias_offset, owner_scope, work, depth|:
-                return false if not proof_replay_type_bound_local_work_charge(1, work)
-                match declaration:
-                    Ast::Decl.Alias(name, alias_target, position):
-                        return false if not proof_replay_type_bound_local_text_compare_charge(name, wanted_name, work)
-                        if name == wanted_name:
-                            prefix: mutable bool = true
-                            if exact_scope:
-                                exact_match: (complete: bool, equal: bool) = proof_replay_type_bound_scope_equal_with_work(current_scope, wanted_scope, work)
-                                return false if not exact_match.complete
-                                prefix <- exact_match.equal
-                            else:
-                                prefix <- false if current_scope.count > wanted_scope.count
-                                for index in 0..<current_scope.count |index, current_scope, wanted_scope, prefix, work|:
-                                    return false if not proof_replay_type_bound_local_text_compare_charge(current_scope[index], wanted_scope[index], work)
-                                    prefix <- false if current_scope[index] != wanted_scope[index]
-                            if prefix:
-                                if current_scope.count > best_depth:
-                                    best_depth <- current_scope.count
-                                    matches <- 1
-                                    kind <- 1
-                                    target <- alias_target
-                                    alias_line <- position.line
-                                    alias_offset <- position.offset.usize()
-                                    is_const_enum <- false
-                                    return false if not proof_replay_type_bound_local_work_charge(current_scope.count, work)
-                                    owner_scope.clear()
-                                    owner_scope.extend(current_scope)
-                                elif current_scope.count == best_depth:
-                                    matches <- matches + 1
-                                    return false if matches > 1
-                    Ast::Decl.Struct(name, _, _, _, _, _, _):
-                        return false if not proof_replay_type_bound_local_text_compare_charge(name, wanted_name, work)
-                        if name == wanted_name:
-                            prefix: mutable bool = true
-                            if exact_scope:
-                                exact_match: (complete: bool, equal: bool) = proof_replay_type_bound_scope_equal_with_work(current_scope, wanted_scope, work)
-                                return false if not exact_match.complete
-                                prefix <- exact_match.equal
-                            else:
-                                prefix <- false if current_scope.count > wanted_scope.count
-                                for index in 0..<current_scope.count |index, current_scope, wanted_scope, prefix, work|:
-                                    return false if not proof_replay_type_bound_local_text_compare_charge(current_scope[index], wanted_scope[index], work)
-                                    prefix <- false if current_scope[index] != wanted_scope[index]
-                            if prefix:
-                                if current_scope.count > best_depth:
-                                    best_depth <- current_scope.count
-                                    matches <- 1
-                                    kind <- 2
-                                    is_const_enum <- false
-                                    return false if not proof_replay_type_bound_local_work_charge(current_scope.count, work)
-                                    owner_scope.clear()
-                                    owner_scope.extend(current_scope)
-                                elif current_scope.count == best_depth:
-                                    matches <- matches + 1
-                                    return false if matches > 1
-                    Ast::Decl.Enum(name, _, enum_is_const, _, _):
-                        return false if not proof_replay_type_bound_local_text_compare_charge(name, wanted_name, work)
-                        if name == wanted_name:
-                            prefix: mutable bool = true
-                            if exact_scope:
-                                exact_match: (complete: bool, equal: bool) = proof_replay_type_bound_scope_equal_with_work(current_scope, wanted_scope, work)
-                                return false if not exact_match.complete
-                                prefix <- exact_match.equal
-                            else:
-                                prefix <- false if current_scope.count > wanted_scope.count
-                                for index in 0..<current_scope.count |index, current_scope, wanted_scope, prefix, work|:
-                                    return false if not proof_replay_type_bound_local_text_compare_charge(current_scope[index], wanted_scope[index], work)
-                                    prefix <- false if current_scope[index] != wanted_scope[index]
-                            if prefix:
-                                if current_scope.count > best_depth:
-                                    best_depth <- current_scope.count
-                                    matches <- 1
-                                    kind <- 3
-                                    is_const_enum <- enum_is_const
-                                    return false if not proof_replay_type_bound_local_work_charge(current_scope.count, work)
-                                    owner_scope.clear()
-                                    owner_scope.extend(current_scope)
-                                elif current_scope.count == best_depth:
-                                    matches <- matches + 1
-                                    return false if matches > 1
-                    Ast::Decl.Module(module_name, nested, _):
-                        nested_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(current_scope, module_name, work)
-                        return false if not nested_scope.complete
-                        saved_count: usize = current_scope.count
-                        current_scope <- nested_scope.scope
-                        return false if not proof_replay_type_bound_call_type_lookup_with_work(nested, current_scope, wanted_scope, wanted_name, exact_scope, best_depth, matches, kind, target, is_const_enum, alias_line, alias_offset, owner_scope, work, depth + 1)
-                        current_scope.resize(saved_count)
-                    Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_type_bound_call_type_lookup_with_work(nested, current_scope, wanted_scope, wanted_name, exact_scope, best_depth, matches, kind, target, is_const_enum, alias_line, alias_offset, owner_scope, work, depth + 1)
-                    Ast::Decl.Invalid:
-                        return false
-                    Ast::Decl.Import(import_name, _):
-                        return false if not proof_replay_type_bound_local_text_compare_charge(import_name, wanted_name, work)
-                        if import_name == wanted_name and current_scope.count <= wanted_scope.count and not exact_scope:
-                            prefix: mutable bool = true
-                            for index in 0..<current_scope.count |index, current_scope, wanted_scope, prefix, work|:
-                                return false if not proof_replay_type_bound_local_text_compare_charge(current_scope[index], wanted_scope[index], work)
-                                prefix <- false if current_scope[index] != wanted_scope[index]
-                            return false if prefix
-                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Law(_, _, _):
-                        pass
-                    _:
-                        return false
-            return true
-
+                        return (false, [])
+            return (false, [])
         def proof_replay_type_bound_call_builtin_shape_with_work(report: ProofReport&, name: sview, resolution_scope: darray[sview]&, signed_width: i64, unsigned_width: i64, work: mutable usize&) -> (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64):
             return (true, signed_width, unsigned_width, 1)
-
         # Primitive spellings are few and fixed. Charge each attempted comparison with its
         # dispatch and both string lengths, matching proof_replay_type_bound_local_text_compare_charge.
         def proof_replay_type_bound_call_primitive_shape_with_work(report: ProofReport&, name: sview, resolution_scope: darray[sview]&, work: mutable usize&) -> (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64):
@@ -252,8 +158,14 @@ extend ElisaProof:
             return proof_replay_type_bound_call_builtin_shape_with_work(report, name, resolution_scope, 0, 0, work) if name == "char"
             return (true, 0, 0, 0)
 
-        def proof_replay_type_bound_call_named_shape_with_work(report: ProofReport&, name: sview, resolution_scope: darray[sview]&, exact_scope: bool, active_alias_offsets: mutable darray[usize]&, work: mutable usize&, depth: usize) -> (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64):
+        def proof_replay_type_bound_call_width_primitive(name: sview) -> bool:
+            return name in {"i8", "i16", "i32", "i64", "isize", "int", "u8", "u16", "u32", "u64", "usize", "uintptr", "bool", "char"}
+
+        def proof_replay_type_bound_call_named_shape_with_work(report: ProofReport&, name: sview, resolution_scope: darray[sview]&, exact_scope: bool, active_alias_offsets: mutable darray[usize]&, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&, depth: usize) -> (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64):
             return (false, -1, -1, -1) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_replay_type_bound_local_type_name_charge(name, work)
+            if not exact_scope and proof_replay_call_conversion_builtin_type_name(name):
+                return proof_replay_type_bound_call_primitive_shape_with_work(report, name, resolution_scope, work) if proof_replay_type_bound_call_width_primitive(name)
+                return (true, 0, 0, 0)
             best_depth: mutable usize = 0
             matches: mutable usize = 0
             kind: mutable i64 = 0
@@ -263,43 +175,73 @@ extend ElisaProof:
             alias_offset: mutable usize = 0
             alias_owner: mutable darray[sview] = []
             current_scope: mutable darray[sview] = []
-            complete: bool = proof_replay_type_bound_call_type_lookup_with_work(report.source.source_declarations, &current_scope, resolution_scope, name, exact_scope, &best_depth, &matches, &kind, &alias_target, &is_const_enum, &alias_line, &alias_offset, &alias_owner, work, 0)
+            opaque_classified: mutable bool = false
+            opaque_policy: mutable i64 = 0
+            complete: bool = proof_replay_type_bound_call_type_lookup_with_work(report, report.source.source_declarations, &current_scope, resolution_scope, name, exact_scope, &best_depth, &matches, &kind, &alias_target, &is_const_enum, &alias_line, &alias_offset, &alias_owner, &opaque_classified, &opaque_policy, work, 0)
             return (false, -1, -1, -1) if not complete or matches > 1
-            if not exact_scope and (matches == 0 or best_depth == 0):
+            # Rank 4/3 is an exact module alias/concrete type; rank 2/1 is a root
+            # concrete type/alias. Import metadata must still be checked after root fallback.
+            if not exact_scope and (matches == 0 or best_depth <= 2):
                 import_shadow: (complete: bool, shadowed: bool) = proof_replay_type_bound_import_name_shadowed_with_work(report.source.source_annotations, resolution_scope, name, false, work)
                 return (false, -1, -1, -1) if not import_shadow.complete or import_shadow.shadowed
             if matches == 0:
-                return (false, -1, -1, -1) if exact_scope
-                return proof_replay_type_bound_call_primitive_shape_with_work(report, name, resolution_scope, work)
+                if exact_scope:
+                    return proof_replay_type_bound_call_primitive_shape_with_work(report, name, resolution_scope, work) if proof_replay_call_conversion_builtin_type_name(name)
+                    return (false, -1, -1, -1)
+                global_alias_count: mutable usize = 0
+                concrete_count: mutable usize = 0
+                global_alias_target: mutable Ast::Expr = Ast::Expr.Absent
+                global_alias_line: mutable u32 = 0
+                global_alias_offset: mutable usize = 0
+                global_alias_owner: mutable darray[sview] = []
+                empty_scope: mutable darray[sview] = []
+                global_opaque_classified: mutable bool = false
+                global_opaque_policy: mutable i64 = 0
+                global_alias_complete: bool = proof_replay_type_bound_global_alias_lookup_with_work(report, report.source.source_declarations, report.source.source_annotations, &empty_scope, name, &global_alias_count, &concrete_count, &global_alias_target, &global_alias_line, &global_alias_offset, &global_alias_owner, &global_opaque_classified, &global_opaque_policy, work, 0)
+                return (false, -1, -1, -1) if not global_alias_complete or concrete_count > 0
+                if global_alias_count == 1 and not proof_replay_call_conversion_builtin_type_name(name):
+                    formals: (complete: bool, has_formals: bool) = proof_replay_type_bound_enum_alias_has_formals_with_work(report, name, global_alias_line, work, cache)
+                    return (false, -1, -1, -1) if not formals.complete or formals.has_formals
+                    kind <- 1
+                    matches <- 1
+                    alias_target <- global_alias_target
+                    alias_line <- global_alias_line
+                    alias_offset <- global_alias_offset
+                    owner_scope <- global_alias_owner
+                else:
+                    return proof_replay_type_bound_call_primitive_shape_with_work(report, name, resolution_scope, work)
             return (true, 0, 0, 0) if kind == 2 or kind == 3 and not is_const_enum
             return (true, 0, 0, 1) if kind == 3 and is_const_enum
             return (false, -1, -1, -1) if kind != 1 or alias_line == 0
-            formals: (complete: bool, has_formals: bool) = proof_replay_type_bound_enum_alias_has_formals_with_work(report, name, alias_line, work)
+            formals: (complete: bool, has_formals: bool) = proof_replay_type_bound_enum_alias_has_formals_with_work(report, name, alias_line, work, cache)
             return (false, -1, -1, -1) if not formals.complete or formals.has_formals
             for offset in active_alias_offsets |offset, alias_offset, work|:
                 return (false, -1, -1, -1) if not proof_replay_type_bound_local_work_charge(1, work) or offset == alias_offset
             mark: usize = active_alias_offsets.count
             active_alias_offsets.push(alias_offset)
-            resolved: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_call_type_shape_with_work(report, alias_target, alias_owner, active_alias_offsets, work, depth + 1)
+            resolved: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_call_type_shape_with_work(report, alias_target, alias_owner, active_alias_offsets, work, cache, depth + 1)
             active_alias_offsets.resize(mark)
             return resolved
 
-        def proof_replay_type_bound_call_type_shape_with_work(report: ProofReport&, expression: Ast::Expr, resolution_scope: darray[sview]&, active_alias_offsets: mutable darray[usize]&, work: mutable usize&, depth: usize) -> (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64):
+        def proof_replay_type_bound_call_type_shape_with_work(report: ProofReport&, expression: Ast::Expr, resolution_scope: darray[sview]&, active_alias_offsets: mutable darray[usize]&, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&, depth: usize) -> (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64):
             return (false, -1, -1, -1) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_replay_type_bound_local_work_charge(1, work)
             match expression:
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
-                    return proof_replay_type_bound_call_type_shape_with_work(report, inner, resolution_scope, active_alias_offsets, work, depth + 1)
+                    return proof_replay_type_bound_call_type_shape_with_work(report, inner, resolution_scope, active_alias_offsets, work, cache, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
                     if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail:
-                        inner_shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_call_type_shape_with_work(report, inner, resolution_scope, active_alias_offsets, work, depth + 1)
+                        inner_shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_call_type_shape_with_work(report, inner, resolution_scope, active_alias_offsets, work, cache, depth + 1)
                         return (false, -1, -1, -1) if not inner_shape.complete
                         return (true, 0, 0, 0) if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
                         return inner_shape
                     return (true, 0, 0, 0)
                 Ast::Expr.Ident(name, _):
-                    return proof_replay_type_bound_call_named_shape_with_work(report, name, resolution_scope, false, active_alias_offsets, work, depth + 1)
-                Ast::Expr.Scope(_, _, _):
+                    return proof_replay_type_bound_call_named_shape_with_work(report, name, resolution_scope, false, active_alias_offsets, work, cache, depth + 1)
+                Ast::Expr.Scope(head, _, _):
+                    simple_module_head: bool = proof_replay_type_bound_call_simple_module_head(head)
                     segments: mutable darray[sview] = []
+                    # Account for both the full AST cost census and the subsequent
+                    # qualified-path extraction walk.
                     return (false, -1, -1, -1) if:
                         not proof_replay_summary_expr_charge_with_work(expression, work)
                         not proof_replay_summary_expr_charge_with_work(expression, work)
@@ -312,13 +254,12 @@ extend ElisaProof:
                     resolved_scope: (complete: bool, found: bool, scope: darray[sview]) = proof_replay_type_bound_call_qualified_module_scope_with_work(report, wanted_scope, leaf_name, resolution_scope, work)
                     return (false, -1, -1, -1) if not resolved_scope.complete
                     if resolved_scope.found:
-                        return proof_replay_type_bound_call_named_shape_with_work(report, leaf_name, resolved_scope.scope, true, active_alias_offsets, work, depth + 1)
-                    # The module-path helper already checked alias precedence and raw root.
+                        return proof_replay_type_bound_call_named_shape_with_work(report, leaf_name, resolved_scope.scope, true, active_alias_offsets, work, cache, depth + 1)
+                    return proof_replay_type_bound_call_named_shape_with_work(report, leaf_name, resolved_scope.scope, false, active_alias_offsets, work, cache, depth + 1) if simple_module_head
                     return (false, -1, -1, -1)
                 _:
                     pass
             return (true, 0, 0, 0)
-
         # Generic parameters have no call-site substitution in this bounded witness. Follow
         # every type form that the scalar shape resolver treats as transparent and reject a
         # matching binder before a builtin spelling or alias can supply a width.
@@ -353,14 +294,14 @@ extend ElisaProof:
 
         def proof_replay_type_bound_call_type_shape(report: ProofReport&, expression: Ast::Expr, resolution_scope: darray[sview]&, work: mutable usize&) -> (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64):
             active_alias_offsets: mutable darray[usize] = []
-            proof_replay_type_bound_call_type_shape_with_work(report, expression, resolution_scope, &active_alias_offsets, work, 0)
-
-        def proof_replay_type_bound_find_callee_with_work(declarations: darray[Ast::Decl]&, wanted: sview, wanted_line: u32, wanted_module_path: darray[sview]&, current_module_path: mutable darray[sview]&, matches: mutable usize&, return_type: mutable Ast::Expr&, formal_names: mutable darray[sview]&, formal_defaults: mutable darray[bool]&, complete: mutable bool&, work: mutable usize&, depth: usize) -> void:
+            cache: mutable ProofReplayDeterministicCallReplayCache = ProofReplayDeterministicCallReplayCache{}
+            proof_replay_type_bound_call_type_shape_with_work(report, expression, resolution_scope, &active_alias_offsets, work, &cache, 0)
+        def proof_replay_type_bound_find_callee_with_work(declarations: darray[Ast::Decl]&, wanted: sview, wanted_line: u32, wanted_offset: usize, exact_owner: bool, wanted_module_path: darray[sview]&, current_module_path: mutable darray[sview]&, matches: mutable usize&, return_type: mutable Ast::Expr&, formal_names: mutable darray[sview]&, formal_defaults: mutable darray[bool]&, complete: mutable bool&, work: mutable usize&, depth: usize) -> void:
             complete_now: mutable bool = proof_replay_summary_bool_ref_value(complete)
             if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or not complete_now:
                 complete <- false
                 return
-            for declaration in declarations |wanted, wanted_line, wanted_module_path, current_module_path, matches, return_type, formal_names, formal_defaults, complete, complete_now, work, depth|:
+            for declaration in declarations |wanted, wanted_line, wanted_offset, exact_owner, wanted_module_path, current_module_path, matches, return_type, formal_names, formal_defaults, complete, complete_now, work, depth|:
                 complete_now <- proof_replay_summary_bool_ref_value(complete)
                 return if not complete_now or matches > 1
                 if not proof_replay_type_bound_local_work_charge(1, work):
@@ -378,7 +319,7 @@ extend ElisaProof:
                                     complete <- false
                                     return
                                 path_matches <- false if current_module_path[path_index] != wanted_module_path[path_index]
-                        if name == wanted and position.line == wanted_line and path_matches:
+                        if name == wanted and position.line == wanted_line and (not exact_owner or position.offset.usize() == wanted_offset) and path_matches:
                             matches <- matches + 1
                             return_type <- candidate_return_type
                             for parameter in candidate_parameters |parameter, formal_names, formal_defaults, work, complete|:
@@ -390,14 +331,13 @@ extend ElisaProof:
                     Ast::Decl.Extern(_, _, _, _, _, _, _, _):
                         pass
                     Ast::Decl.Module(module_name, nested, _):
-                        if not proof_replay_type_bound_local_text_compare_charge(module_name, wanted, work):
+                        nested_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(current_module_path, module_name, work)
+                        if not nested_scope.complete:
                             complete <- false
                             return
-                        current_module_path.push(module_name)
-                        proof_replay_type_bound_find_callee_with_work(nested, wanted, wanted_line, wanted_module_path, current_module_path, matches, return_type, formal_names, formal_defaults, complete, work, depth + 1)
-                        current_module_path <- current_module_path.truncate(current_module_path.count - 1)
+                        proof_replay_type_bound_find_callee_with_work(nested, wanted, wanted_line, wanted_offset, exact_owner, wanted_module_path, nested_scope.scope, matches, return_type, formal_names, formal_defaults, complete, work, depth + 1)
                     Ast::Decl.Scoped(nested, _):
-                        proof_replay_type_bound_find_callee_with_work(nested, wanted, wanted_line, wanted_module_path, current_module_path, matches, return_type, formal_names, formal_defaults, complete, work, depth + 1)
+                        proof_replay_type_bound_find_callee_with_work(nested, wanted, wanted_line, wanted_offset, exact_owner, wanted_module_path, current_module_path, matches, return_type, formal_names, formal_defaults, complete, work, depth + 1)
                     Ast::Decl.Import(_, _):
                         # Relevant same-name imports are rejected by scoped call resolution;
                         # unrelated imports do not invalidate this declaration census.
@@ -415,7 +355,6 @@ extend ElisaProof:
             work: mutable usize = 0
             cache: mutable ProofReplayDeterministicCallReplayCache = ProofReplayDeterministicCallReplayCache{}
             return proof_replay_type_bound_call_result_fact_with_work(report, caller_name, caller_line, parameters, body, expression, &work, &cache)
-
         def proof_replay_type_bound_call_result_fact_with_work(report: ProofReport&, caller_name: sview, caller_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
             marker: mutable sview = ""
             call: mutable Ast::Expr = Ast::Expr.Invalid
@@ -484,12 +423,20 @@ extend ElisaProof:
             if not qualified_callee:
                 prefix_cast: (complete: bool, collision: bool) = proof_replay_type_bound_bare_prefix_cast_type_collision_with_work(cache.declaration_index, call_name, call_arguments.count, work)
                 return false if not prefix_cast.complete or prefix_cast.collision
-            caller: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_line(cache.declaration_index, caller_name, caller_line, work)
+            caller: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.declaration_index, caller_name, caller_line, report.analysis_2.replay_owner_offset, work) if report.analysis_2.replay_owner_offset_valid and report.analysis_2.replay_owner_line == caller_line else proof_replay_summary_owner_function_at_line(cache.declaration_index, caller_name, caller_line, work)
             return false if not caller.complete or caller.matches != 1 or caller.row >= cache.declaration_index.entries.count
-            owner: sview = cache.declaration_index.entries[caller.row].owner
+            caller_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            match cache.declaration_index.entries[caller.row].declaration:
+                Ast::Decl.Func(_, _, _, _, _, _, position):
+                    caller_position <- position
+                _:
+                    return false
+            return false if caller_position.line != caller_line
             complete: mutable bool = true
             return false if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
             resolved_line: mutable (known: bool, line: u32, module_path: darray[sview]) = (false, 0, [])
+            resolved_callee_offset: mutable usize = 0
+            resolved_callee_exact: mutable bool = false
             if qualified_callee:
                 return false if not proof_replay_deterministic_call_alias_index_ensure(report.source.source_annotations, work, cache)
                 selected_declaration: mutable Ast::Decl = Ast::Decl.Invalid
@@ -508,24 +455,35 @@ extend ElisaProof:
                 selected_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work([], selected_owner, work)
                 return false if not selected_scope.complete or selected_position.line == 0
                 resolved_line <- (true, selected_position.line, selected_scope.scope)
+                resolved_callee_offset <- selected_position.offset.usize()
+                resolved_callee_exact <- true
             else:
                 # Match caller-module and parent lookup first. Only unresolved bare calls
                 # continue through the exact selective or wildcard import witnesses below.
-                caller_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work([], owner, work)
+                caller_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_caller_module_path_from_index_with_work(report.source.source_declarations, cache.declaration_index, caller.row, work)
                 return false if not caller_scope.complete
-                resolved_line <- resolve_callee_line_with_work_and_caller_policy(report.source.source_declarations, report.source.source_annotations, caller_name, caller_line, call_name, true, work)
+                # The unique source-index row above remains authoritative when the report
+                # replay-owner context is missing or belongs to a different trace owner.
+                # Reuse its declaration offset instead of a name-and-line caller census.
+                resolved_owner = resolve_callee_owner_at_offset_with_caller_policy_with_work(report.source.source_declarations, report.source.source_annotations, caller_name, caller_line, caller_position.offset, call_name, true, work)
+                resolved_line <- (resolved_owner.known, resolved_owner.line, resolved_owner.module_path)
+                resolved_callee_offset <- resolved_owner.offset.usize()
+                resolved_callee_exact <- resolved_owner.known
                 if not resolved_line.known:
-                    resolved_line <- proof_replay_type_bound_imported_callee_with_work(report, caller_scope.scope, call_name, call_arguments.count, call_argument_names, work, cache)
+                    imported_target = proof_replay_type_bound_imported_callee_with_work(report, caller_scope.scope, call_name, call_arguments.count, call_argument_names, work, cache)
+                    resolved_line <- (imported_target.known, imported_target.line, imported_target.module_path)
+                    resolved_callee_offset <- imported_target.offset.usize()
+                    resolved_callee_exact <- imported_target.known
                 return false if:
                     not resolved_line.known or not proof_replay_type_bound_no_callable_extern_name_with_work(cache.declaration_index, call_name, work)
-                    not proof_replay_type_bound_bare_target_emitter_safe_with_work(cache.declaration_index, call_name, resolved_line.line, call_arguments.count, call_argument_names, report.source.source_annotations, caller_scope.scope, resolved_line.module_path, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, work)
+                    not proof_replay_type_bound_bare_target_emitter_safe_with_work(cache.declaration_index, call_name, resolved_line.line, resolved_callee_offset, resolved_callee_exact, call_arguments.count, call_argument_names, report.source.source_annotations, caller_scope.scope, resolved_line.module_path, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, work)
             return false if not resolved_line.known
             callee_matches: mutable usize = 0
             return_type: mutable Ast::Expr = Ast::Expr.Invalid
             callee_formal_names: mutable darray[sview] = []
             callee_formal_defaults: mutable darray[bool] = []
             current_module_path: mutable darray[sview] = []
-            proof_replay_type_bound_find_callee_with_work(report.source.source_declarations, call_name, resolved_line.line, resolved_line.module_path, &current_module_path, &callee_matches, &return_type, &callee_formal_names, &callee_formal_defaults, &complete, work, 0)
+            proof_replay_type_bound_find_callee_with_work(report.source.source_declarations, call_name, resolved_line.line, resolved_callee_offset, resolved_callee_exact, resolved_line.module_path, &current_module_path, &callee_matches, &return_type, &callee_formal_names, &callee_formal_defaults, &complete, work, 0)
             # This witness establishes only the callee's declared result type. It makes no
             # claim about the call's purity, totality, or value; those require their own checks.
             return false if not complete or callee_matches != 1 or callee_formal_names.count != callee_formal_defaults.count or call_arguments.count > callee_formal_names.count
@@ -567,7 +525,8 @@ extend ElisaProof:
                 return false if:
                     not proof_replay_type_bound_local_work_charge(1, work)
                     not used_formals[index] and not callee_formal_defaults[index]
-            shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_call_type_shape(report, return_type, resolved_line.module_path, work)
+            active_alias_offsets: mutable darray[usize] = []
+            shape: (complete: bool, signed_width: i64, unsigned_width: i64, scalar_kind: i64) = proof_replay_type_bound_call_type_shape_with_work(report, return_type, resolved_line.module_path, &active_alias_offsets, work, cache, 0)
             return false if not shape.complete
             if marker == "__elisa_primitive_scalar_type":
                 return shape.signed_width > 0 or shape.unsigned_width > 0 or shape.scalar_kind == 1
