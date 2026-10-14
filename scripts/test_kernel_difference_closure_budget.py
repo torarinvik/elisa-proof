@@ -31,9 +31,8 @@ assert "proof_kernel_replay_difference_bound_closure_with_work(constraints, boun
 assert "proof_kernel_replay_close_bounds_through_differences" not in plain_closure
 assert "goal_work <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1" in plain_closure
 assert "return false" in plain_closure and "return true" in plain_closure
-legacy_adapter = body(guarded, "proof_kernel_replay_close_plain_bounds")
-assert "-> bool:" in legacy_adapter.splitlines()[0]
-assert "return proof_kernel_replay_close_plain_bounds_with_goal_work" in legacy_adapter
+guarded_source = guarded.read_text(encoding="utf-8")
+assert not re.search(r"\bdef\s+proof_kernel_replay_close_plain_bounds\b", guarded_source)
 collector = body(guarded, "proof_kernel_replay_collect_plain_differences")
 for required in (
     "proof_kernel_replay_primitive_comparison_with_work",
