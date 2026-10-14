@@ -38,7 +38,8 @@ assert "proof_pattern_source_builtin_import_shadowed" not in replay_formal_type
 replay_name_shadow = function_body(replay, "proof_replay_control_pattern_builtin_name_shadowed")
 assert "Ast::Decl.Alias" in replay_name_shadow and "Ast::Decl.Struct" in replay_name_shadow and "Ast::Decl.Enum" in replay_name_shadow
 assert "proof_replay_control_pattern_source_text_equal" in replay_name_shadow
-assert "owner_path[current_path.count]" in replay_name_shadow
+assert "nested_path.scope.count > owner_path.count" in replay_name_shadow
+assert "nested_path.scope[index], owner_path[index]" in replay_name_shadow
 assert "proof_replay_control_pattern_builtin_name_shadowed(nested, wanted, owner_path, current_path, work, depth + 1)" in replay_name_shadow
 replay_formal_declaration_refusal = replay_formal_type.index("return Ast::Expr.Absent if not declaration_shadow.complete or declaration_shadow.shadowed")
 assert replay_formal_declaration_refusal < replay_formal_type.index("proof_replay_control_pattern_builtin_import_shadowed")
@@ -81,7 +82,8 @@ assert declaration_refusal < formal_type.index("proof_pattern_source_builtin_imp
 name_shadow = function_body(producer, "proof_pattern_source_builtin_name_shadowed")
 assert "Ast::Decl.Alias" in name_shadow and "Ast::Decl.Struct" in name_shadow and "Ast::Decl.Enum" in name_shadow
 assert "proof_pattern_charge_source_type_work" in name_shadow
-assert "owner_path[current_path.count]" in name_shadow
+assert "nested_path.count > owner_path.count" in name_shadow
+assert "nested_path[index] != owner_path[index]" in name_shadow
 assert "proof_pattern_source_builtin_name_shadowed(nested, wanted, owner_path, current_path, work, depth + 1)" in name_shadow
 assert "function_module_path" in formal_type
 import_shadow = function_body(producer, "proof_pattern_source_builtin_import_shadowed")
