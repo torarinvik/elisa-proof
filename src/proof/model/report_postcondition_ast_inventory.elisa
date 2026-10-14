@@ -7,6 +7,7 @@ extend ElisaProof:
             slot_values: mutable darray[usize] = []
             hashes: mutable darray[u32] = []
             names: mutable darray[sview] = []
+            function_offsets: mutable darray[u32] = []
             # `lines` bind report events to a function; literal-shape rows use the contract line.
             lines: mutable darray[u32] = []
             source_indices: mutable darray[usize] = []
@@ -15,7 +16,7 @@ extend ElisaProof:
             expressions: mutable darray[Ast::Expr] = []
             valid: bool = false
 
-        def proof_source_postcondition_ast_inventory_collect(declarations: darray[Ast::Decl]&, inventory: mutable darray[(name: sview, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate]:
+        def proof_source_postcondition_ast_inventory_collect(declarations: darray[Ast::Decl]&, inventory: mutable darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate]:
             return false if depth >= PROOF_SOURCE_POSTCONDITION_AST_INDEX_DEPTH_LIMIT
             for declaration in declarations |inventory, source_work, depth|:
                 return false if not proof_report_source_postcondition_work_charge(1, source_work)
@@ -28,7 +29,7 @@ extend ElisaProof:
                                 Ast::Stmt.Contract(kind, expression, contract_position):
                                     if kind in {"ensure", "ensures"}:
                                         return false if not proof_report_source_postcondition_work_charge(sview_len(name), source_work)
-                                        inventory.push((name, position.line, source_index, contract_position.line, expression))
+                                        inventory.push((name, position.offset, position.line, source_index, contract_position.line, expression))
                                         source_index <- source_index + 1
                                 _:
                                     pass
@@ -40,17 +41,49 @@ extend ElisaProof:
                         pass
             return true
 
-        def proof_source_postcondition_ast_inventory_with_status(declarations: darray[Ast::Decl]&) -> (inventory: darray[(name: sview, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)], complete: bool, work_limited: bool) can[Memory.Allocate]:
-            inventory: mutable darray[(name: sview, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)] = []
+        def proof_source_signature_postcondition_ast_inventory_collect(declarations: darray[Ast::Decl]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_exprs: darray[Ast::Expr]&, inventory: mutable darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate]:
+            return false if depth >= PROOF_SOURCE_POSTCONDITION_AST_INDEX_DEPTH_LIMIT
+            return false if signature_lines.count != signature_kinds.count or signature_lines.count != signature_exprs.count
+            for declaration in declarations |signature_lines, signature_kinds, signature_exprs, inventory, source_work, depth|:
+                return false if not proof_report_source_postcondition_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        return false if not proof_report_source_postcondition_work_charge(body.count, source_work)
+                        source_index: mutable usize = proof_report_body_postcondition_count(body)
+                        contract_range: (complete: bool, start: usize, count: usize) = proof_structural_signature_contract_range_for_line(signature_lines, signature_kinds, signature_exprs, position.line, source_work)
+                        return false if not contract_range.complete or contract_range.start > signature_lines.count or contract_range.count > signature_lines.count - contract_range.start
+                        for offset in 0..<contract_range.count |offset, contract_range, signature_lines, signature_kinds, signature_exprs, source_index, name, position, inventory, source_work|:
+                            row: usize = contract_range.start + offset
+                            kind: sview = signature_kinds[row]
+                            return false if not proof_report_source_postcondition_work_charge(1, source_work) or not proof_report_source_postcondition_work_charge(sview_len(kind), source_work) or not proof_report_source_postcondition_work_charge(sview_len(name), source_work)
+                            return false if signature_lines[row] != position.line
+                            continue if kind != "ensure"
+                            expression: Ast::Expr = signature_exprs[row]
+                            contract_position: Ast::Pos = Ast::expr_pos(expression)
+                            inventory.push((name, position.offset, position.line, source_index, contract_position.line, expression))
+                            source_index <- source_index + 1
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_signature_postcondition_ast_inventory_collect(nested, signature_lines, signature_kinds, signature_exprs, inventory, source_work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_source_postcondition_ast_inventory_with_status(declarations: darray[Ast::Decl]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_exprs: darray[Ast::Expr]&) -> (inventory: darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)], complete: bool, work_limited: bool) can[Memory.Allocate]:
             source_work: mutable usize = 0
-            complete: mutable bool = proof_source_postcondition_ast_inventory_collect(declarations, inventory, source_work, 0)
+            proof_source_postcondition_ast_inventory_with_work(declarations, signature_lines, signature_kinds, signature_exprs, &source_work)
+
+        def proof_source_postcondition_ast_inventory_with_work(declarations: darray[Ast::Decl]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_exprs: darray[Ast::Expr]&, source_work: mutable usize&) -> (inventory: darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)], complete: bool, work_limited: bool) can[Memory.Allocate]:
+            inventory: mutable darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)] = []
+            complete: mutable bool = proof_structural_signature_contract_table_valid(signature_lines, signature_kinds, signature_exprs, source_work)
+            complete <- proof_source_postcondition_ast_inventory_collect(declarations, inventory, source_work, 0) if complete
+            complete <- proof_source_signature_postcondition_ast_inventory_collect(declarations, signature_lines, signature_kinds, signature_exprs, inventory, source_work, 0) if complete
             complete <- false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             work_limited: bool = source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             if not complete:
                 inventory.clear()
             (inventory, complete, work_limited)
 
-        def proof_source_postcondition_ast_index_create(inventory: darray[(name: sview, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)]&, source_work: mutable usize&) -> ProofSourcePostconditionAstIndex can[Memory.Allocate]:
+        def proof_source_postcondition_ast_index_create(inventory: darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)]&, source_work: mutable usize&) -> ProofSourcePostconditionAstIndex can[Memory.Allocate]:
             index: mutable ProofSourcePostconditionAstIndex = ProofSourcePostconditionAstIndex{valid: true}
             return index if inventory.count == 0
             return ProofSourcePostconditionAstIndex{} if inventory.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
@@ -66,7 +99,7 @@ extend ElisaProof:
                 index.slot_values[slot] <- capacity
             for row in inventory |row, index, capacity, source_work|:
                 return ProofSourcePostconditionAstIndex{} if not proof_report_source_postcondition_work_charge(1, source_work)
-                key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: row.name, line: row.line, source_index: row.source_index}
+                key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: row.name, function_offset: row.function_offset, line: row.line, source_index: row.source_index}
                 hashed: (complete: bool, hash: u32) = proof_report_source_postcondition_hash(key, source_work)
                 return ProofSourcePostconditionAstIndex{} if not hashed.complete
                 slot: mutable usize = (hashed.hash.i64() % capacity.i64()).usize()
@@ -77,6 +110,7 @@ extend ElisaProof:
                     if current == capacity:
                         row_index: usize = index.names.count
                         index.names.push(row.name)
+                        index.function_offsets.push(row.function_offset)
                         index.lines.push(row.line)
                         index.source_indices.push(row.source_index)
                         index.contract_lines.push(row.contract_line)
@@ -87,7 +121,7 @@ extend ElisaProof:
                         break
                     if index.hashes[slot] == hashed.hash:
                         return ProofSourcePostconditionAstIndex{} if not proof_report_source_postcondition_work_charge(sview_len(row.name), source_work)
-                        if index.names[current] == row.name and index.lines[current] == row.line and index.source_indices[current] == row.source_index:
+                        if index.names[current] == row.name and index.function_offsets[current] == row.function_offset and index.lines[current] == row.line and index.source_indices[current] == row.source_index:
                             index.counts[current] <- index.counts[current] + 1
                             break
                     slot <- (slot + 1) % capacity
@@ -95,26 +129,26 @@ extend ElisaProof:
                 return ProofSourcePostconditionAstIndex{} if probes >= capacity or probes > PROOF_NAME_INDEX_MAX_CLUSTER
             return index
 
-        def proof_source_postcondition_ast_index_find(index: ProofSourcePostconditionAstIndex, name: sview, line: u32, source_index: usize, source_work: mutable usize&) -> (complete: bool, found: bool, count: usize, contract_line: u32, expression: Ast::Expr):
+        def proof_source_postcondition_ast_index_find(index: ProofSourcePostconditionAstIndex, name: sview, function_offset: u32, line: u32, source_index: usize, source_work: mutable usize&) -> (complete: bool, found: bool, count: usize, contract_line: u32, expression: Ast::Expr):
             empty: Ast::Expr = Ast::Expr.Invalid
             capacity: usize = index.slot_values.count
             return (false, false, 0, 0, empty) if:
                 not index.valid
                 index.hashes.count != capacity
             return (true, false, 0, 0, empty) if capacity == 0
-            key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: name, line: line, source_index: source_index}
+            key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: name, function_offset: function_offset, line: line, source_index: source_index}
             hashed: (complete: bool, hash: u32) = proof_report_source_postcondition_hash(key, source_work)
             return (false, false, 0, 0, empty) if not hashed.complete
             slot: mutable usize = (hashed.hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
-            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hashed, name, line, source_index, index, capacity, source_work|:
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hashed, name, function_offset, line, source_index, index, capacity, source_work|:
                 return (false, false, 0, 0, empty) if not proof_report_source_postcondition_work_charge(1, source_work)
                 current: usize = index.slot_values[slot]
                 return (true, false, 0, 0, empty) if current == capacity
-                return (false, false, 0, 0, empty) if current >= index.names.count or current >= index.lines.count or current >= index.source_indices.count or current >= index.contract_lines.count or current >= index.counts.count or current >= index.expressions.count
+                return (false, false, 0, 0, empty) if current >= index.names.count or current >= index.function_offsets.count or current >= index.lines.count or current >= index.source_indices.count or current >= index.contract_lines.count or current >= index.counts.count or current >= index.expressions.count
                 if index.hashes[slot] == hashed.hash:
                     return (false, false, 0, 0, empty) if not proof_report_source_postcondition_work_charge(sview_len(name), source_work)
-                    if index.names[current] == name and index.lines[current] == line and index.source_indices[current] == source_index:
+                    if index.names[current] == name and index.function_offsets[current] == function_offset and index.lines[current] == line and index.source_indices[current] == source_index:
                         return (true, true, index.counts[current], index.contract_lines[current], index.expressions[current])
                 slot <- (slot + 1) % capacity
                 probes <- probes + 1

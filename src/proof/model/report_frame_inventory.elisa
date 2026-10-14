@@ -2,33 +2,30 @@
 # require source-context replay; this does not grant a kernel proof.
 extend ElisaProof:
     private:
-        def proof_report_frame_owner_count(declarations: darray[Ast::Decl]&, name: sview, line: u32, depth: usize, work: mutable usize&) -> usize:
-            return PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1 if depth >= 64
-            count: mutable usize = 0
-            for declaration in declarations |count, name, line, depth, work|:
-                return PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1 if:
-                    not proof_report_source_work_charge(1, work)
-                    not proof_report_source_work_charge(sview_len(name), work)
+        def proof_report_frame_owner_keys_collect(declarations: darray[Ast::Decl]&, keys: mutable darray[ProofSourcePostconditionKey]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate]:
+            return false if depth >= 64
+            for declaration in declarations |keys, source_work, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
                 match declaration:
-                    Ast::Decl.Func(candidate, _, _, _, _, _, position):
-                        return PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1 if not proof_report_source_work_charge(sview_len(candidate), work)
-                        count <- count + 1 if candidate == name and position.line == line
+                    Ast::Decl.Func(name, _, _, _, _, _, position):
+                        return false if:
+                            keys.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+                            not proof_report_source_work_charge(sview_len(name), source_work)
+                            not proof_report_source_work_charge(1, source_work)
+                        keys.push(ProofSourcePostconditionKey{name: name, function_offset: position.offset, line: position.line, source_index: 0})
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        found: usize = proof_report_frame_owner_count(&nested, name, line, depth + 1, work)
-                        return PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1 if found > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                        count <- count + found
+                        return false if not proof_report_frame_owner_keys_collect(nested, keys, source_work, depth + 1)
                     _:
                         pass
-            return count
+            return true
 
         def proof_report_frame_obligation_associated(report: ProofReport&, entry: ProofObligationEntry, source_work: mutable usize&) -> bool:
             return false if:
                 entry.attempts_count != 1 or entry.attempts_start >= report.results.goal_attempts.count
                 not proof_report_source_work_charge(sview_len(entry.source_name), source_work)
-                proof_report_frame_owner_count(&report.source.source_declarations, entry.source_name, entry.source_line, 0, source_work) != 1
             attempt = report.results.goal_attempts[entry.attempts_start]
             expected: sview = "frame-allow" if entry.source_kind == "allow" else "frame-preserve" if entry.source_kind == "preserve" else "frame-spec"
-            return false if attempt.name != entry.source_name or attempt.rule != expected or attempt.proven != entry.proven or attempt.has_certificate != entry.proven
+            return false if attempt.name != entry.source_name or attempt.rule != expected or attempt.owner_function_line != entry.owner_function_line or attempt.owner_function_offset != entry.owner_function_offset or attempt.producer_proven != entry.proven or attempt.has_certificate != entry.proven
             match attempt.goal:
                 Ast::Expr.BoolLit(value, _):
                     return value and attempt.facts_count == 0 and attempt.kernel_facts_count == 0

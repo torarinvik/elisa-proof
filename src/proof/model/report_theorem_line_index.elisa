@@ -4,13 +4,14 @@ extend ElisaProof:
             slot_values: mutable darray[usize] = []
             names: mutable darray[sview] = []
             lines: mutable darray[u32] = []
+            offsets: mutable darray[u32] = []
             hashes: mutable darray[u32] = []
             valid: bool = false
 
-        def proof_report_theorem_line_hash(name: sview, line: u32, work: mutable usize&) -> (complete: bool, hash: u32):
+        def proof_report_theorem_line_hash(name: sview, line: u32, offset: u32, work: mutable usize&) -> (complete: bool, hash: u32):
             name_hash: (complete: bool, hash: u32) = proof_report_declaration_name_hash(name, work)
             return (false, 0) if not name_hash.complete
-            (true, name_hash.hash ^ line)
+            (true, name_hash.hash ^ line ^ offset)
 
         # Build one collision-safe lookup for lemma source identities. Report declaration
         # validation visits declarations in source order, so a scan of every theorem row for
@@ -36,7 +37,7 @@ extend ElisaProof:
                 index.slot_values[slot] <- capacity
             for theorem in report.analysis_1.theorems.summaries |theorem, index, capacity, work|:
                 return (ProofTheoremLineIndex{}, false) if not proof_report_source_work_charge(1, work)
-                key: (complete: bool, hash: u32) = proof_report_theorem_line_hash(theorem.name, theorem.line, work)
+                key: (complete: bool, hash: u32) = proof_report_theorem_line_hash(theorem.name, theorem.line, theorem.source_offset, work)
                 return (ProofTheoremLineIndex{}, false) if not key.complete
                 slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
                 probes: mutable usize = 0
@@ -48,29 +49,34 @@ extend ElisaProof:
                         entry: usize = index.names.count
                         index.names.push(theorem.name)
                         index.lines.push(theorem.line)
+                        index.offsets.push(theorem.source_offset)
                         index.hashes.push(key.hash)
                         index.slot_values[slot] <- entry
                         placed <- true
                         break
-                    if current >= index.names.count or current >= index.lines.count or current >= index.hashes.count:
+                    if current >= index.names.count or current >= index.lines.count or current >= index.offsets.count or current >= index.hashes.count:
                         return (ProofTheoremLineIndex{}, false)
-                    if index.hashes[current] == key.hash and index.lines[current] == theorem.line:
+                    if index.hashes[current] == key.hash and index.lines[current] == theorem.line and index.offsets[current] == theorem.source_offset:
                         return (ProofTheoremLineIndex{}, false) if not proof_report_source_work_charge(sview_len(theorem.name), work)
                         if index.names[current] == theorem.name:
-                            placed <- true
-                            break
+                            # Each source declaration produces exactly one theorem summary.
+                            # Treat duplicate identities as malformed instead of allowing both
+                            # rows to inherit the same source-admitted goal range.
+                            return (ProofTheoremLineIndex{}, false)
                     slot <- (slot + 1) % capacity
                     probes <- probes + 1
-                return (ProofTheoremLineIndex{}, false) if not placed
+                if not placed:
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return (ProofTheoremLineIndex{}, false)
             (index, true)
 
-        def proof_report_theorem_line_index_contains(index: ProofTheoremLineIndex&, name: sview, line: u32, work: mutable usize&) -> (complete: bool, contains: bool):
+        def proof_report_theorem_line_index_contains(index: ProofTheoremLineIndex&, name: sview, line: u32, offset: u32, work: mutable usize&) -> (complete: bool, contains: bool):
             capacity: usize = index.slot_values.count
             return (false, false) if:
                 work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                not index.valid or index.names.count != index.lines.count or index.names.count != index.hashes.count
+                not index.valid or index.names.count != index.lines.count or index.names.count != index.offsets.count or index.names.count != index.hashes.count
             return (true, false) if capacity == 0
-            key: (complete: bool, hash: u32) = proof_report_theorem_line_hash(name, line, work)
+            key: (complete: bool, hash: u32) = proof_report_theorem_line_hash(name, line, offset, work)
             return (false, false) if not key.complete
             slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
@@ -79,7 +85,9 @@ extend ElisaProof:
                 current: usize = index.slot_values[slot]
                 return (true, false) if current == capacity
                 return (false, false) if current >= index.names.count
-                if index.hashes[current] == key.hash and index.lines[current] == line:
+                if current >= index.offsets.count:
+                    return (false, false)
+                if index.hashes[current] == key.hash and index.lines[current] == line and index.offsets[current] == offset:
                     return (false, false) if not proof_report_source_work_charge(sview_len(name), work)
                     return (true, true) if index.names[current] == name
                 slot <- (slot + 1) % capacity

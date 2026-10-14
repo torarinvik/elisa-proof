@@ -1,11 +1,12 @@
 """Admission accounting failures stay distinct from ordinary open proof goals."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 for name, expected_exit, expected_reason in (
         ("source_context_scope", 0, ""),
         ("tactic_repair_target", 1, ""),
