@@ -11085,15 +11085,6 @@ checks also pass. This hardens source/product qualification and cache invalidati
 produce a current Stage1 or admit the dirty Elisa proof sources. No Elisa compile, replay, or timing
 was run.
 
-### 23.27.1416 Enforce operator arity in arena node shapes (2026-10-14)
-
-Unary nodes already have a narrower operator whitelist, but binary nodes used the common operator
-set and therefore admitted unary-only `not`. Binary shape validation now excludes that operator at
-the arena boundary; arithmetic-safety walkers also keep explicit evaluation policies for each
-accepted binary operator. This makes malformed arity fail during admission instead of depending on
-the consuming replay path. Static diff and source-length checks pass; no runtime qualification was
-run.
-
 ### 23.27.137 Stage1 provenance schema and seed-chain qualification (2026-10-12)
 
 `stage1_provenance_validation.py` accepts only the protocol declared by the exact pinned compiler
@@ -25047,12 +25038,10 @@ Static diff and source-length checks pass; no runtime qualification was run.
 ### 23.27.1414 Fail closed on binary operators without an evaluation policy (2026-10-14)
 
 Arena shape validation checks that a binary node uses a known operator, but does not constrain
-operators by arity. Signed and unsigned safety walkers previously treated every operator outside
-their arithmetic sets as harmless after traversing both operands. They now enumerate the known
-non-arithmetic binary operators explicitly and reject any operator in neither set, including unary
-only `not` in a malformed binary node. This keeps the source operator table and the replay safety
-policy aligned as either evolves. Static diff and source-length checks pass; no runtime qualification
-was run.
+operators by arity. Binary arena shape now rejects unary-only `not`; signed and unsigned safety
+walkers also enumerate known non-arithmetic binary operators explicitly and reject any operator in
+neither set. This keeps the source operator table and replay safety policy aligned as either evolves.
+Static diff and source-length checks pass; no runtime qualification was run.
 
 ### 23.27.1415 Guard child indices before arithmetic replay dereferences (2026-10-14)
 
@@ -25102,3 +25091,12 @@ Difference-constraint goals, quantified-premise filtering, and quantified-predic
 also classified parser-erased quantifiers. They now use the shared budgeted lookup, and abandon the
 optimization if its annotation scan is incomplete or exhausts the solver budget. Static diff check
 passes; no tests or build were run.
+
+### 23.27.1421 Reuse budgeted quantifier classification in refusal diagnostics (2026-10-14)
+
+The post-hoc refusal gate scanned the parser annotation table twice with the raw quantifier helper,
+even though it already carried a shared diagnostic work budget. It now computes one
+work-metered quantifier classification and reuses it for the ambiguous-constant and quantifier
+diagnostic branches. Exhaustion returns an incomplete diagnostic rather than treating a partial
+scan as absence of a quantifier. Static diff review and `git diff --check` pass; no tests or build
+were run.
