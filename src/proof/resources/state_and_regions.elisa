@@ -196,6 +196,11 @@ extend ElisaProof:
 
         def proof_resource_close_child[@parent, @child, @r](parent: mutable ProofResourceState& @parent, child: ProofResourceState& @child, report: mutable ProofReport& @r, join_moves: bool) -> void:
             return if report.analysis_1.kernel.budget_exhausted
+            return if:
+                join_moves and not proof_source_index_work_charge(report, parent.bindings.binding_moved.count)
+                join_moves and not proof_source_index_work_charge(report, parent.bindings.binding_moved.count)
+                not proof_source_index_work_charge(report, child.evidence.trace_events.count)
+                not proof_source_index_work_charge(report, child.evidence.trace_events.count)
             join_count: mutable usize = 0
             if join_moves:
                 for index in 0..<parent.bindings.binding_moved.count |index, parent, child, join_count|:
@@ -267,7 +272,9 @@ extend ElisaProof:
         # validate the same region relation without consulting the AST or the producer tables.
         def proof_resource_set_binding_region(state: mutable ProofResourceState&, report: mutable ProofReport&, name: sview, region: sview) -> void:
             return if name == "" or region == ""
-            slot: usize = proof_resource_lookup(state, name)
+            binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, name, report)
+            return if not binding.complete
+            slot: usize = binding.slot
             return if slot >= state.bindings.binding_names.count
             state.bindings.binding_region[slot] <- region
             state.bindings.binding_region_live[slot] <- proof_resource_region_is_active(state, region)
@@ -283,7 +290,9 @@ extend ElisaProof:
         # region allocations, and region aliases without widening any unrelated event shape.
         def proof_resource_set_binding_borrowable(state: mutable ProofResourceState&, report: mutable ProofReport&, name: sview, borrowable: bool) -> void:
             return if name == "" or not borrowable
-            slot: usize = proof_resource_lookup(state, name)
+            binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, name, report)
+            return if not binding.complete
+            slot: usize = binding.slot
             return if slot >= state.bindings.binding_names.count or slot >= state.bindings.binding_borrowable.count
             state.bindings.binding_borrowable[slot] <- true
             return if state.evidence.trace_events.count == 0
@@ -308,9 +317,12 @@ extend ElisaProof:
             else:
                 proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "the binding's backing-region lifetime was not established; destruction has not been demonstrated")
 
-        def proof_resource_region_has_live_borrow(state: ProofResourceState&, region: sview) -> bool:
-            return true if any borrowed in state.regions.region_wide_borrows where borrowed == region
-            for slot in 0..<state.borrows.borrow_present.count |slot, state, region|:
+        def proof_resource_region_has_live_borrow(state: ProofResourceState&, report: mutable ProofReport&, region: sview) -> bool:
+            for borrowed in state.regions.region_wide_borrows |borrowed, region, report|:
+                return true if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(borrowed)) or not proof_source_index_work_charge(report, sview_len(region))
+                return true if borrowed == region
+            return true if not proof_source_index_work_charge(report, state.borrows.borrow_present.count)
+            for slot in 0..<state.borrows.borrow_present.count |slot, state, region, report|:
                 if state.borrows.borrow_present[slot]:
                     return true if slot >= state.bindings.binding_region.count or slot >= state.bindings.binding_moved.count or slot >= state.borrows.borrow_target_slots.count
                     if not state.bindings.binding_moved[slot] and state.bindings.binding_region[slot] == region:
@@ -320,7 +332,8 @@ extend ElisaProof:
                             state.bindings.binding_region[target_slot] == region and state.bindings.binding_region_live[target_slot]
             return false
 
-        def proof_resource_invalidate_region_bindings(state: mutable ProofResourceState&, region: sview) -> void:
+        def proof_resource_invalidate_region_bindings(state: mutable ProofResourceState&, report: mutable ProofReport&, region: sview) -> void:
+            return if not proof_source_index_work_charge(report, state.bindings.binding_region.count)
             for index in 0..<state.bindings.binding_region.count |index, state, region|:
                 if index < state.bindings.binding_region_live.count and state.bindings.binding_region[index] == region:
                     if state.bindings.binding_region_live[index] and index < state.bindings.binding_region_destroyed.count:
@@ -332,23 +345,23 @@ extend ElisaProof:
         # must be a real stack transition rather than the end of a synthetic child scope.
         def proof_resource_close_named_region[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, region: sview, position: Ast::Pos, function_name: sview) -> void:
             innermost: bool = region != "" and not proof_resource_region_is_external(state, region) and not proof_resource_region_is_protected(state, region) and state.regions.active_regions.count > 0 and string_view_eq(region, state.regions.active_regions[state.regions.active_regions.count - 1]) != 0
-            live_borrow: bool = innermost and proof_resource_region_has_live_borrow(state, region)
+            live_borrow: bool = innermost and proof_resource_region_has_live_borrow(state, report, region)
             valid: bool = innermost and not live_borrow
             proof_resource_add_failing_obligation(report, "region-destroy-unsupported", position, function_name, "destroy must name the innermost active tracked region") if not innermost
             proof_resource_add_failing_obligation(report, "region-destroy-live-borrow", position, function_name, "a region cannot be destroyed while a borrowed view or reference to it is still live") if live_borrow
             if valid:
                 state.regions.active_regions <- state.regions.active_regions.truncate(state.regions.active_regions.count - 1)
-                proof_resource_invalidate_region_bindings(state, region)
+                proof_resource_invalidate_region_bindings(state, report, region)
                 proof_resource_record_event(state, report, "resource-region-close", "", 0, region, "", PROOF_RESOURCE_EXPLICIT_REGION_DESTROY)
 
         def proof_resource_add_region_allocation[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, type_expression: Ast::Expr, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
-            marker_summary: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, state.context.generic_declaration_line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
+            marker_summary: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, state.context.generic_declaration_line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
             is_reference: bool = marker_summary.reference
             is_mutable_reference: bool = marker_summary.mutable_reference
-            writable: bool = is_mutable_reference or marker_summary.mutable
+            writable: bool = is_mutable_reference or marker_summary.is_mutable
             encoded_value: (known: bool, root: usize) = proof_resource_encode_value(operand, state, report)
             encoded: usize = encoded_value.root
-            operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state)
+            operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state, report)
             valid: mutable bool = encoded_value.known and marker_summary.complete
             valid <- proof_resource_region_is_active(state, region) if valid
             valid <- not operand_has_region if valid
@@ -368,7 +381,7 @@ extend ElisaProof:
         def proof_resource_add_region_discard[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
             encoded_value: (known: bool, root: usize) = proof_resource_encode_value(operand, state, report)
             encoded: usize = encoded_value.root
-            operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state)
+            operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state, report)
             valid: mutable bool = encoded_value.known
             valid <- proof_resource_region_is_active(state, region) if valid
             valid <- not operand_has_region if valid
@@ -380,7 +393,7 @@ extend ElisaProof:
         def proof_resource_add_region_return_alloc[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> usize:
             encoded_value: (known: bool, root: usize) = proof_resource_encode_value(operand, state, report)
             encoded: usize = encoded_value.root
-            operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state)
+            operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state, report)
             valid: mutable bool = encoded_value.known
             valid <- proof_resource_region_is_active(state, region) if valid
             valid <- not operand_has_region if valid
@@ -395,15 +408,16 @@ extend ElisaProof:
             return node_count
 
         def proof_resource_rebind_region_allocation[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, target: Ast::Expr, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void can[Global.Read, Global.Write]:
-            target_name: sview = proof_resource_direct_binding_name(target)
-            target_slot: usize = proof_resource_lookup(state, target_name)
+            target_name: sview = proof_resource_direct_binding_name(target, report)
+            target_binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, target_name, report)
+            target_slot: usize = target_binding.slot
             encoded_value: (known: bool, root: usize) = proof_resource_encode_value(operand, state, report)
             encoded: usize = encoded_value.root
-            operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state)
+            operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state, report)
             target_is_reference: bool = target_slot < state.bindings.binding_reference.count and state.bindings.binding_reference[target_slot]
             target_access: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(target, report)
             valid: mutable bool = encoded_value.known
-            valid <- target_name != "" and not proof_resource_is_discard_target(target) and not operand_has_region if valid
+            valid <- target_name != "" and not proof_resource_is_discard_target(target, report) and not operand_has_region if valid
             valid <- target_access.known if valid
             valid <- target_slot < state.bindings.binding_names.count if valid
             valid <- proof_resource_binding_is_writable(state, target_slot) if valid
@@ -426,17 +440,18 @@ extend ElisaProof:
                 proof_resource_record_event(state, report, "resource-region-rebind-alloc", "", encoded, target_name, region, 0)
 
         def proof_resource_add_region_binding[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, type_expression: Ast::Expr, source: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview, functions: ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
-            marker_summary: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, state.context.generic_declaration_line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
+            marker_summary: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, state.context.generic_declaration_line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
             is_reference: bool = marker_summary.reference
             is_mutable_reference: bool = marker_summary.mutable_reference
-            sview_conversion: (known: bool, receiver: Ast::Expr) = proof_resource_builtin_sview_conversion(source, functions)
+            sview_conversion: (known: bool, receiver: Ast::Expr) = proof_resource_builtin_sview_conversion(source, functions, report, 0)
             is_borrowed_sview: bool = proof_resource_type_may_contain_sview(type_expression, functions.type_indexes.type_audit_index, &report.source_types.source_effect_index.work.implicit_effect_work) or sview_conversion.known
-            writable: bool = is_mutable_reference or marker_summary.mutable
+            writable: bool = is_mutable_reference or marker_summary.is_mutable
             source_place_expression: mutable Ast::Expr = source
             source_place_expression <- sview_conversion.receiver if sview_conversion.known
             source_place: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(source_place_expression, report)
             encoded: usize = proof_resource_encode_access_place(source_place_expression, report)
-            source_slot: usize = proof_resource_lookup(state, source_place.place.root)
+            source_binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, source_place.place.root, report)
+            source_slot: usize = source_binding.slot
             source_is_reference: bool = source_slot < state.bindings.binding_reference.count and state.bindings.binding_reference[source_slot]
             source_is_mutable_reference: bool = source_slot < state.bindings.binding_mutable_reference.count and state.bindings.binding_mutable_reference[source_slot]
             source_region_owner: bool = source_slot < state.bindings.binding_region_owner.count and state.bindings.binding_region_owner[source_slot]
@@ -492,6 +507,7 @@ extend ElisaProof:
             # Local regions are implicitly released at function exit; record their close so
             # replay sees a balanced trace. Explicit `destroy r` already removed its entry.
             while state.regions.active_regions.count > 0 and not report.analysis_1.kernel.budget_exhausted |state, report, function_name, line|:
+                return if not proof_source_index_work_charge(report, 1)
                 region: cstr = state.regions.active_regions[state.regions.active_regions.count - 1]
                 state.regions.active_regions <- state.regions.active_regions.truncate(state.regions.active_regions.count - 1)
                 region_view: mutable sview = ""
@@ -499,7 +515,7 @@ extend ElisaProof:
                 trusted Unsafe{PointerArithmetic,RawExtern}:
                     region_view <- sview(region, 0, region.len)
                 if not proof_resource_region_is_external(state, region_view):
-                    proof_resource_invalidate_region_bindings(state, region_view)
+                    proof_resource_invalidate_region_bindings(state, report, region_view)
                     proof_resource_record_event(state, report, "resource-region-close", "", 0, region_view, "", 0)
             return if report.analysis_1.kernel.budget_exhausted
             if not proof_resource_kernel_capacity(report, 1, state.evidence.trace_events.count, function_name):
@@ -528,14 +544,15 @@ extend ElisaProof:
         # `x.count` on a binding whose declared type is a collection is that collection's element
         # count: a machine integer copied out of it, tied to no lifetime. Everything else about a
         # region-owned binding still is.
-        def proof_resource_expr_is_collection_extent(expression: Ast::Expr, state: ProofResourceState&) -> bool:
+        def proof_resource_expr_is_collection_extent(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&) -> bool:
             match expression:
                 Ast::Expr.Field(object, field_name, _):
                     return false if field_name != "count"
                     root: sview = proof_ident_name(object)
                     return false if root == ""
-                    slot: usize = proof_resource_lookup(state, root)
-                    return slot < state.bindings.binding_names.count and proof_resource_binding_is_extent_bearing(state, slot)
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, root, report)
+                    return binding.slot < state.bindings.binding_names.count and proof_resource_binding_is_extent_bearing(state, binding.slot) if binding.complete
+                    return false
                 _:
                     return false
 

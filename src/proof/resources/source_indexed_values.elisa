@@ -1,0 +1,70 @@
+extend ElisaProof:
+    private:
+        def proof_resource_encode_expression(expression: Ast::Expr, report: mutable ProofReport&) -> (known: bool, root: usize):
+            return proof_kernel_encode_expression_checked(expression, report, "")
+
+        def proof_resource_lookup_with_source_work(state: ProofResourceState&, name: sview, report: mutable ProofReport&) -> (complete: bool, slot: usize):
+            binding_count: usize = state.bindings.binding_names.count
+            return (false, binding_count) if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(name))
+            index: mutable usize = binding_count
+            while index > 0 |index, state, name, report, binding_count|:
+                index <- index - 1
+                candidate: sview = state.bindings.binding_names[index]
+                return (false, binding_count) if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(candidate))
+                return (true, index) if candidate == name
+            return (true, binding_count)
+
+        def proof_resource_static_name_present_with_source_work(name: sview, names: darray[sview]&, report: mutable ProofReport&) -> (complete: bool, present: bool):
+            return (true, false) if names.count == 0
+            return (false, false) if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(name))
+            for candidate in names |candidate, name, report|:
+                return (false, false) if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(candidate))
+                return (true, true) if candidate == name
+            return (true, false)
+
+        def proof_resource_qualify_static_value(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&, depth: usize) -> Ast::Expr:
+            return Ast::Expr.Invalid if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not proof_source_index_work_charge(report, 1)
+            match expression:
+                Ast::Expr.Ident(name, position):
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, name, report)
+                    return Ast::Expr.Invalid if not binding.complete
+                    static_constant: bool = false
+                    if state.statics.static_scope.count > 0 and binding.slot >= state.bindings.binding_names.count:
+                        static_match: (complete: bool, present: bool) = proof_resource_static_name_present_with_source_work(name, state.statics.static_names, report)
+                        return Ast::Expr.Invalid if not static_match.complete
+                        static_constant <- static_match.present
+                    if static_constant:
+                        qualifier: mutable Ast::Expr = Ast::Expr.Ident(state.statics.static_scope[0], position)
+                        for index in 1..<state.statics.static_scope.count |index, qualifier, state, position|:
+                            qualifier <- Ast::Expr.Scope(qualifier, state.statics.static_scope[index], position)
+                        return Ast::Expr.Scope(qualifier, name, position)
+                    root_constant: bool = false
+                    if binding.slot >= state.bindings.binding_names.count:
+                        root_match: (complete: bool, present: bool) = proof_resource_static_name_present_with_source_work(name, state.statics.static_root_names, report)
+                        return Ast::Expr.Invalid if not root_match.complete
+                        root_constant <- root_match.present
+                    return Ast::Expr.Scope(Ast::Expr.Absent, name, position) if root_constant
+                    return expression
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_resource_qualify_static_value(inner, state, report, depth + 1), position)
+                Ast::Expr.Unary(operator, operand, position):
+                    return Ast::Expr.Unary(operator, proof_resource_qualify_static_value(operand, state, report, depth + 1), position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    return Ast::Expr.Binary(proof_resource_qualify_static_value(left, state, report, depth + 1), operator, proof_resource_qualify_static_value(right, state, report, depth + 1), position)
+                _:
+                    return expression
+
+        # A value operand whose trace term replay checks for region lifetimes. A bare module
+        # constant names static storage, but replay sees only the trace and cannot tell that
+        # spelling from a local binding a forged trace omitted. Spell it with its module path,
+        # which no local can have. The name qualifies only when no binding in scope claims it --
+        # the same lookup the producer's own region judgement relies on -- and it is declared
+        # in the function's own module; anything else keeps its bare spelling and replay's
+        # binding rule. A root constant the module does not shadow is spelled from the root.
+        def proof_resource_encode_value(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&) -> (known: bool, root: usize):
+            qualified: Ast::Expr = proof_resource_qualify_static_value(expression, state, report, 0)
+            if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                report.proof_obligation(false)
+                proof_add_budget_finding(report, "resource-analysis-budget", Ast::expr_pos(expression).line, state.context.function_name, "resource static-value qualification exceeded its shared source-work budget", "resource-static-value-work", report.source_types.source_effect_index.work.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return (false, 0)
+            return proof_resource_encode_expression(qualified, report)

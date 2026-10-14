@@ -1,0 +1,139 @@
+extend ElisaProof:
+    private:
+        # This is deliberately a conservative taint walk. Once a region value enters a call,
+        # arithmetic expression, conditional, aggregate, lambda, or other opaque transformer,
+        # the proof system does not have a lifetime summary for that operation and must reject
+        # the boundary rather than treating the result as an ordinary value.
+        def proof_resource_expr_contains_region_value(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&) -> bool:
+            proof_resource_expr_contains_region_value_with_depth(expression, state, report, 0)
+
+        def proof_resource_expr_contains_region_value_with_depth(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&, depth: usize) -> bool:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return true
+            return true if not proof_source_index_work_charge(report, 1)
+            is_collection_extent: bool = proof_resource_expr_is_collection_extent(expression, state, report)
+            return true if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return false if is_collection_extent
+            match expression:
+                Ast::Expr.RegionNew(_, _, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, name, report)
+                    return true if not binding.complete
+                    slot: usize = binding.slot
+                    return slot < state.bindings.binding_names.count and proof_resource_binding_region(state, slot) != ""
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_expr_contains_region_value_with_depth(inner, state, report, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_resource_expr_contains_region_value_with_depth(operand, state, report, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_resource_expr_contains_region_value_with_depth(left, state, report, depth + 1) or proof_resource_expr_contains_region_value_with_depth(right, state, report, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_resource_expr_contains_region_value_with_depth(callee, state, report, depth + 1)
+                    for argument in arguments |argument, state, report, depth|:
+                        return true if proof_resource_expr_contains_region_value_with_depth(argument, state, report, depth + 1)
+                    return false
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
+                    return proof_resource_expr_contains_region_value_with_depth(lowered.call, state, report, depth + 1) if lowered.known
+                    return true
+                Ast::Expr.Field(object, _, _):
+                    return proof_resource_expr_contains_region_value_with_depth(object, state, report, depth + 1)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_resource_expr_contains_region_value_with_depth(base, state, report, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_resource_expr_contains_region_value_with_depth(object, state, report, depth + 1) or proof_resource_expr_contains_region_value_with_depth(index, state, report, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_resource_expr_contains_region_value_with_depth(object, state, report, depth + 1)
+                    for argument in arguments |argument, state, report, depth|:
+                        return true if proof_resource_expr_contains_region_value_with_depth(argument, state, report, depth + 1)
+                    return false
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_resource_expr_contains_region_value_with_depth(object, state, report, depth + 1) or proof_resource_expr_contains_region_value_with_depth(low, state, report, depth + 1) or proof_resource_expr_contains_region_value_with_depth(high, state, report, depth + 1)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |element, state, report, depth|:
+                        return true if proof_resource_expr_contains_region_value_with_depth(element, state, report, depth + 1)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |element, state, report, depth|:
+                        return true if proof_resource_expr_contains_region_value_with_depth(element, state, report, depth + 1)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |element, state, report, depth|:
+                        return true if proof_resource_expr_contains_region_value_with_depth(element, state, report, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |entry, state, report, depth|:
+                        return true if proof_resource_expr_contains_region_value_with_depth(entry.key, state, report, depth + 1) or proof_resource_expr_contains_region_value_with_depth(entry.value, state, report, depth + 1)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |field, state, report, depth|:
+                        return true if proof_resource_expr_contains_region_value_with_depth(field.value, state, report, depth + 1)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_resource_expr_contains_region_value_with_depth(base, state, report, depth + 1)
+                    for field in fields |field, state, report, depth|:
+                        return true if proof_resource_expr_contains_region_value_with_depth(field.value, state, report, depth + 1)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_resource_expr_contains_region_value_with_depth(condition, state, report, depth + 1) or proof_resource_expr_contains_region_value_with_depth(then_expr, state, report, depth + 1) or proof_resource_expr_contains_region_value_with_depth(else_expr, state, report, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_resource_expr_contains_region_value_with_depth(iterable, state, report, depth + 1) or proof_resource_expr_contains_region_value_with_depth(condition, state, report, depth + 1) or proof_resource_expr_contains_region_value_with_depth(body, state, report, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_resource_expr_contains_region_value_with_depth(base, state, report, depth + 1) or proof_resource_expr_contains_region_value_with_depth(predicate, state, report, depth + 1)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_resource_expr_contains_region_value_with_depth(scrutinee, state, report, depth + 1)
+                    for arm in arms |arm, state, report, depth|:
+                        return true if proof_resource_expr_contains_region_value_with_depth(arm.guard, state, report, depth + 1) or proof_resource_statements_use_region_value_with_depth(arm.body, state, report, depth + 1)
+                    return false
+                Ast::Expr.Catch(guarded, arms, _):
+                    return true if proof_resource_expr_contains_region_value_with_depth(guarded, state, report, depth + 1)
+                    for arm in arms |arm, state, report, depth|:
+                        return true if proof_resource_expr_contains_region_value_with_depth(arm.guard, state, report, depth + 1) or proof_resource_statements_use_region_value_with_depth(arm.body, state, report, depth + 1)
+                    return false
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return proof_resource_expr_contains_region_value_with_depth(guarded, state, report, depth + 1) or proof_resource_statements_use_region_value_with_depth(recovery, state, report, depth + 1)
+                Ast::Expr.Lambda(_, body, _):
+                    return proof_resource_statements_use_region_value_with_depth(body, state, report, depth + 1)
+                Ast::Expr.Block(statements, value, _, _):
+                    return proof_resource_statements_use_region_value_with_depth(statements, state, report, depth + 1) or proof_resource_expr_contains_region_value_with_depth(value, state, report, depth + 1)
+                _:
+                    return false
+
+        def proof_resource_statements_use_region_value(statements: darray[Ast::Stmt]&, state: ProofResourceState&, report: mutable ProofReport&) -> bool:
+            proof_resource_statements_use_region_value_with_depth(statements, state, report, 0)
+
+        def proof_resource_statements_use_region_value_with_depth(statements: darray[Ast::Stmt]&, state: ProofResourceState&, report: mutable ProofReport&, depth: usize) -> bool:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return true
+            return true if statements.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not proof_source_index_work_charge(report, statements.count)
+            for statement in statements |report, state, depth|:
+                return true if not proof_source_index_work_charge(report, 1)
+                match statement:
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        return true if proof_resource_expr_contains_region_value_with_depth(initializer, state, report, depth + 1)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        return true if proof_resource_expr_contains_region_value_with_depth(target, state, report, depth + 1) or proof_resource_expr_contains_region_value_with_depth(initializer, state, report, depth + 1)
+                    Ast::Stmt.Expr(expression, _):
+                        return true if proof_resource_expr_contains_region_value_with_depth(expression, state, report, depth + 1)
+                    Ast::Stmt.Return(value, _):
+                        return true if value is returned and proof_resource_expr_contains_region_value_with_depth(returned, state, report, depth + 1)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_resource_expr_contains_region_value_with_depth(condition, state, report, depth + 1) or proof_resource_statements_use_region_value_with_depth(then_body, state, report, depth + 1) or proof_resource_statements_use_region_value_with_depth(else_body, state, report, depth + 1)
+                    Ast::Stmt.While(condition, while_body, _):
+                        return true if proof_resource_expr_contains_region_value_with_depth(condition, state, report, depth + 1) or proof_resource_statements_use_region_value_with_depth(while_body, state, report, depth + 1)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        return true if proof_resource_expr_contains_region_value_with_depth(iterable, state, report, depth + 1) or proof_resource_statements_use_region_value_with_depth(for_body, state, report, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return true if proof_resource_expr_contains_region_value_with_depth(scrutinee, state, report, depth + 1)
+                        for arm in arms |arm, state, report, depth|:
+                            return true if proof_resource_expr_contains_region_value_with_depth(arm.guard, state, report, depth + 1) or proof_resource_statements_use_region_value_with_depth(arm.body, state, report, depth + 1)
+                    Ast::Stmt.Block(_, _, _, block_body, _):
+                        return true if proof_resource_statements_use_region_value_with_depth(block_body, state, report, depth + 1)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_resource_expr_contains_region_value_with_depth(expression, state, report, depth + 1)
+                    _:
+                        pass
+            return false

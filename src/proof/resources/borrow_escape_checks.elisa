@@ -9,7 +9,7 @@ extend ElisaProof:
         # sources) stays conservative until its lifetime relation is represented explicitly.
         def proof_resource_reference_return_parameter(parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, body: darray[Ast::Stmt]&, declarations: darray[Ast::Decl]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, declaration_line: u32, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&) -> usize:
             if return_type is declared_return_type:
-                return_markers: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(declared_return_type, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work)
+                return_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(declared_return_type, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work)
                 return parameters.count if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not return_markers.complete or not return_markers.reference
                 candidate: mutable usize = parameters.count
                 found: mutable bool = false
@@ -25,7 +25,8 @@ extend ElisaProof:
                                         for index in 0..<parameters.count |index, parameters, name, parameter_index, source_work|:
                                             return parameters.count if:
                                                 not proof_type_audit_work_charge(1, source_work)
-                                                not proof_type_audit_work_charge(sview_len(parameters[index].name) + sview_len(name), source_work)
+                                                not proof_type_audit_work_charge(sview_len(parameters[index].name), source_work)
+                                                not proof_type_audit_work_charge(sview_len(name), source_work)
                                             parameter_index <- index if parameters[index].name == name
                                         return parameters.count if parameter_index >= parameters.count
                                         if not found:
@@ -47,7 +48,9 @@ extend ElisaProof:
         def proof_resource_borrow_result_is_local(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&) -> bool:
             borrowed: (known: bool, place: ProofResourcePlace) = proof_resource_borrow_place(expression, report)
             return true if not borrowed.known
-            slot: usize = proof_resource_lookup(state, borrowed.place.root)
+            binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, borrowed.place.root, report)
+            return true if not binding.complete
+            slot: usize = binding.slot
             return true if slot >= state.bindings.binding_names.count
             return false if slot < state.bindings.binding_reference.count and state.bindings.binding_reference[slot] and not (slot < state.borrows.borrow_present.count and state.borrows.borrow_present[slot])
             return true
@@ -73,7 +76,9 @@ extend ElisaProof:
                 Ast::Expr.Move(operand, _):
                     return proof_resource_expr_returns_local_borrow_depth(operand, state, functions, report, depth + 1)
                 Ast::Expr.Ident(name, _):
-                    slot: usize = proof_resource_lookup(state, name)
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, name, report)
+                    return true if not binding.complete
+                    slot: usize = binding.slot
                     return slot < state.borrows.borrow_present.count and state.borrows.borrow_present[slot]
                 Ast::Expr.Paren(inner, _):
                     return proof_resource_expr_returns_local_borrow_depth(inner, state, functions, report, depth + 1)
@@ -83,7 +88,7 @@ extend ElisaProof:
                     # return provenance must stay opaque here: using the global's
                     # `return_references` bit could say "no local borrow" before the actual
                     # arguments are inspected.
-                    return true if proof_resource_callee_shadowed_by_local(callee, state)
+                    return true if proof_resource_callee_shadowed_by_local(callee, state, report, 0)
                     callee_index: usize = proof_function_index_for_callee(functions, callee)
                     if callee_index < functions.returns.return_references.count:
                         return false if not functions.returns.return_references[callee_index]
@@ -95,14 +100,14 @@ extend ElisaProof:
                         # mapping used by resource calls. Named calls are resolved through the
                         # shared mapping helper below; no default or omitted actual is guessed.
                         return true if:
-                            not proof_resource_map_call_arguments(functions, callee_index, arguments, argument_names, &mapped)
+                            not proof_resource_map_call_arguments(functions, callee_index, arguments, argument_names, &mapped, report)
                             source_parameter >= mapped.count
                         actual: Ast::Expr = mapped[source_parameter]
                         kind: sview = proof_resource_call_argument_kind(actual, functions, state, report)
-                        return proof_resource_expr_uses_local_borrow(actual, state) if kind == "reference"
+                        return proof_resource_expr_uses_local_borrow(actual, state, report) if kind == "reference"
                         return proof_resource_borrow_result_is_local(actual, state, report) if kind == "borrow"
                         return true
-                    return true if proof_resource_expr_uses_local_borrow(callee, state)
+                    return true if proof_resource_expr_uses_local_borrow(callee, state, report)
                     for argument in arguments |argument, state, functions, depth|:
                         return true if proof_resource_expr_returns_local_borrow_depth(argument, state, functions, report, depth + 1)
                     return false
@@ -223,114 +228,132 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_resource_is_discard_target(expression: Ast::Expr) -> bool:
+        def proof_resource_is_discard_target(expression: Ast::Expr, report: mutable ProofReport&) -> bool:
+            proof_resource_is_discard_target_with_depth(expression, report, 0)
+
+        def proof_resource_is_discard_target_with_depth(expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> bool:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return true
+            return true if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Ident(name, _):
                     return name == "_"
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_is_discard_target(inner)
+                    return proof_resource_is_discard_target_with_depth(inner, report, depth + 1)
                 _:
                     return false
 
         def proof_resource_expr_uses_borrowed_target(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&) -> bool:
+            proof_resource_expr_uses_borrowed_target_with_depth(expression, state, report, 0)
+
+        def proof_resource_expr_uses_borrowed_target_with_depth(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&, depth: usize) -> bool:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return true
+            return true if not proof_source_index_work_charge(report, 1)
             return true if proof_expr_has_call(expression) and not proof_expr_supported(expression)
             # A direct address-of is a resource-bearing value. Field/index places deliberately
             # stay outside the opaque-call rule when they are newly created; existing live field
             # borrows are still checked by the place overlap relation below.
-            return true if proof_resource_direct_borrow_root(expression) != ""
+            return true if proof_resource_direct_borrow_root(expression, report) != ""
             accessed: (known: bool, place: ProofResourcePlace) = proof_resource_place(expression, report)
             if accessed.known:
-                slot: usize = proof_resource_lookup(state, accessed.place.root)
+                binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, accessed.place.root, report)
+                return true if not binding.complete
+                slot: usize = binding.slot
                 return false if slot >= state.bindings.binding_names.count
                 return true if slot < state.borrows.borrow_present.count and state.borrows.borrow_present[slot]
-                return proof_resource_has_borrow_overlap_readonly(state, accessed.place, state.bindings.binding_names.count)
+                return proof_resource_has_borrow_overlap_readonly(state, report, accessed.place, state.bindings.binding_names.count)
             match expression:
                 Ast::Expr.Ident(name, _):
-                    slot: usize = proof_resource_lookup(state, name)
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, name, report)
+                    return true if not binding.complete
+                    slot: usize = binding.slot
                     return false if slot >= state.bindings.binding_names.count
                     return true if slot < state.borrows.borrow_present.count and state.borrows.borrow_present[slot]
                     return proof_resource_has_borrow_for(state, slot, state.bindings.binding_names.count)
                 Ast::Expr.Unary(_, operand, _):
-                    return proof_resource_expr_uses_borrowed_target(operand, state, report)
+                    return proof_resource_expr_uses_borrowed_target_with_depth(operand, state, report, depth + 1)
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_expr_uses_borrowed_target(inner, state, report)
+                    return proof_resource_expr_uses_borrowed_target_with_depth(inner, state, report, depth + 1)
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_resource_expr_uses_borrowed_target(left, state, report) or proof_resource_expr_uses_borrowed_target(right, state, report)
+                    return proof_resource_expr_uses_borrowed_target_with_depth(left, state, report, depth + 1) or proof_resource_expr_uses_borrowed_target_with_depth(right, state, report, depth + 1)
                 Ast::Expr.Field(object, _, _):
-                    return proof_resource_expr_uses_borrowed_target(object, state, report)
+                    return proof_resource_expr_uses_borrowed_target_with_depth(object, state, report, depth + 1)
                 Ast::Expr.Scope(base, _, _):
-                    return proof_resource_expr_uses_borrowed_target(base, state, report)
+                    return proof_resource_expr_uses_borrowed_target_with_depth(base, state, report, depth + 1)
                 Ast::Expr.Index(object, index, _):
-                    return proof_resource_expr_uses_borrowed_target(object, state, report) or proof_resource_expr_uses_borrowed_target(index, state, report)
+                    return proof_resource_expr_uses_borrowed_target_with_depth(object, state, report, depth + 1) or proof_resource_expr_uses_borrowed_target_with_depth(index, state, report, depth + 1)
                 Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_resource_expr_uses_borrowed_target(object, state, report)
-                    for argument in arguments |argument, state, report|:
-                        return true if proof_resource_expr_uses_borrowed_target(argument, state, report)
+                    return true if proof_resource_expr_uses_borrowed_target_with_depth(object, state, report, depth + 1)
+                    for argument in arguments |argument, state, report, depth|:
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(argument, state, report, depth + 1)
                     return false
                 Ast::Expr.Slice(object, low, high, _):
-                    return proof_resource_expr_uses_borrowed_target(object, state, report) or proof_resource_expr_uses_borrowed_target(low, state, report) or proof_resource_expr_uses_borrowed_target(high, state, report)
+                    return proof_resource_expr_uses_borrowed_target_with_depth(object, state, report, depth + 1) or proof_resource_expr_uses_borrowed_target_with_depth(low, state, report, depth + 1) or proof_resource_expr_uses_borrowed_target_with_depth(high, state, report, depth + 1)
                 Ast::Expr.Call(callee, arguments, _, _):
-                    return true if proof_resource_expr_uses_borrowed_target(callee, state, report)
-                    for argument in arguments |argument, state, report|:
-                        return true if proof_resource_expr_uses_borrowed_target(argument, state, report)
+                    return true if proof_resource_expr_uses_borrowed_target_with_depth(callee, state, report, depth + 1)
+                    for argument in arguments |argument, state, report, depth|:
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(argument, state, report, depth + 1)
                     return false
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
                     lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
-                    return proof_resource_expr_uses_borrowed_target(lowered.call, state, report) if lowered.known
+                    return proof_resource_expr_uses_borrowed_target_with_depth(lowered.call, state, report, depth + 1) if lowered.known
                     return true
                 Ast::Expr.RegionNew(operand, _, _):
-                    return proof_resource_expr_uses_borrowed_target(operand, state, report)
+                    return proof_resource_expr_uses_borrowed_target_with_depth(operand, state, report, depth + 1)
                 Ast::Expr.Array(elements, _):
-                    for element in elements |element, state, report|:
-                        return true if proof_resource_expr_uses_borrowed_target(element, state, report)
+                    for element in elements |element, state, report, depth|:
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(element, state, report, depth + 1)
                     return false
                 Ast::Expr.Tuple(elements, _):
-                    for element in elements |element, state, report|:
-                        return true if proof_resource_expr_uses_borrowed_target(element, state, report)
+                    for element in elements |element, state, report, depth|:
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(element, state, report, depth + 1)
                     return false
                 Ast::Expr.SetLit(elements, _):
-                    for element in elements |element, state, report|:
-                        return true if proof_resource_expr_uses_borrowed_target(element, state, report)
+                    for element in elements |element, state, report, depth|:
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(element, state, report, depth + 1)
                     return false
                 Ast::Expr.DictLit(entries, _):
-                    for entry in entries |entry, state, report|:
-                        return true if proof_resource_expr_uses_borrowed_target(entry.key, state, report) or proof_resource_expr_uses_borrowed_target(entry.value, state, report)
+                    for entry in entries |entry, state, report, depth|:
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(entry.key, state, report, depth + 1) or proof_resource_expr_uses_borrowed_target_with_depth(entry.value, state, report, depth + 1)
                     return false
                 Ast::Expr.Construct(_, fields, _):
-                    for field in fields |field, state, report|:
-                        return true if proof_resource_expr_uses_borrowed_target(field.value, state, report)
+                    for field in fields |field, state, report, depth|:
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(field.value, state, report, depth + 1)
                     return false
                 Ast::Expr.RecordUpdate(base, fields, _):
-                    return true if proof_resource_expr_uses_borrowed_target(base, state, report)
-                    for field in fields |field, state, report|:
-                        return true if proof_resource_expr_uses_borrowed_target(field.value, state, report)
+                    return true if proof_resource_expr_uses_borrowed_target_with_depth(base, state, report, depth + 1)
+                    for field in fields |field, state, report, depth|:
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(field.value, state, report, depth + 1)
                     return false
                 Ast::Expr.If(condition, then_expr, else_expr, _):
-                    return proof_resource_expr_uses_borrowed_target(condition, state, report) or proof_resource_expr_uses_borrowed_target(then_expr, state, report) or proof_resource_expr_uses_borrowed_target(else_expr, state, report)
+                    return proof_resource_expr_uses_borrowed_target_with_depth(condition, state, report, depth + 1) or proof_resource_expr_uses_borrowed_target_with_depth(then_expr, state, report, depth + 1) or proof_resource_expr_uses_borrowed_target_with_depth(else_expr, state, report, depth + 1)
                 Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    return proof_resource_expr_uses_borrowed_target(iterable, state, report) or proof_resource_expr_uses_borrowed_target(condition, state, report) or proof_resource_expr_uses_borrowed_target(body, state, report)
+                    return proof_resource_expr_uses_borrowed_target_with_depth(iterable, state, report, depth + 1) or proof_resource_expr_uses_borrowed_target_with_depth(condition, state, report, depth + 1) or proof_resource_expr_uses_borrowed_target_with_depth(body, state, report, depth + 1)
                 Ast::Expr.Refinement(base, predicate, _):
-                    return proof_resource_expr_uses_borrowed_target(base, state, report) or proof_resource_expr_uses_borrowed_target(predicate, state, report)
+                    return proof_resource_expr_uses_borrowed_target_with_depth(base, state, report, depth + 1) or proof_resource_expr_uses_borrowed_target_with_depth(predicate, state, report, depth + 1)
                 Ast::Expr.Match(scrutinee, arms, _):
-                    return true if proof_resource_expr_uses_borrowed_target(scrutinee, state, report)
-                    for arm in arms |arm, state, report|:
+                    return true if proof_resource_expr_uses_borrowed_target_with_depth(scrutinee, state, report, depth + 1)
+                    for arm in arms |arm, state, report, depth|:
                         return true if:
-                            proof_resource_expr_uses_borrowed_target(arm.guard, state, report)
-                            proof_resource_statements_use_borrowed_target(arm.body, state, report)
+                            proof_resource_expr_uses_borrowed_target_with_depth(arm.guard, state, report, depth + 1)
+                            proof_resource_statements_use_borrowed_target_depth(arm.body, state, report, depth + 1)
                     return false
                 Ast::Expr.Catch(guarded, arms, _):
-                    return true if proof_resource_expr_uses_borrowed_target(guarded, state, report)
-                    for arm in arms |arm, state, report|:
+                    return true if proof_resource_expr_uses_borrowed_target_with_depth(guarded, state, report, depth + 1)
+                    for arm in arms |arm, state, report, depth|:
                         return true if:
-                            proof_resource_expr_uses_borrowed_target(arm.guard, state, report)
-                            proof_resource_statements_use_borrowed_target(arm.body, state, report)
+                            proof_resource_expr_uses_borrowed_target_with_depth(arm.guard, state, report, depth + 1)
+                            proof_resource_statements_use_borrowed_target_depth(arm.body, state, report, depth + 1)
                     return false
                 Ast::Expr.GetElse(guarded, recovery, _):
-                    return proof_resource_expr_uses_borrowed_target(guarded, state, report) or proof_resource_statements_use_borrowed_target(recovery, state, report)
+                    return proof_resource_expr_uses_borrowed_target_with_depth(guarded, state, report, depth + 1) or proof_resource_statements_use_borrowed_target_depth(recovery, state, report, depth + 1)
                 Ast::Expr.Lambda(_, body, _):
-                    return proof_resource_statements_use_borrowed_target(body, state, report)
+                    return proof_resource_statements_use_borrowed_target_depth(body, state, report, depth + 1)
                 Ast::Expr.Block(statements, value, _, _):
-                    return proof_resource_statements_use_borrowed_target(statements, state, report) or proof_resource_expr_uses_borrowed_target(value, state, report)
+                    return proof_resource_statements_use_borrowed_target_depth(statements, state, report, depth + 1) or proof_resource_expr_uses_borrowed_target_with_depth(value, state, report, depth + 1)
                 _:
                     return false
 
@@ -338,33 +361,37 @@ extend ElisaProof:
             return proof_resource_statements_use_borrowed_target_depth(statements, state, report, 0)
 
         def proof_resource_statements_use_borrowed_target_depth(statements: darray[Ast::Stmt]&, state: ProofResourceState&, report: mutable ProofReport&, depth: usize) -> bool:
-            return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
-            for statement in statements:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return true
+            return true if statements.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not proof_source_index_work_charge(report, statements.count)
+            for statement in statements |depth, report|:
+                return true if not proof_source_index_work_charge(report, 1)
                 match statement:
                     Ast::Stmt.VarDecl(_, _, initializer, _):
                         borrowed: (known: bool, place: ProofResourcePlace) = proof_resource_borrow_place(initializer, report)
-                        return true if borrowed.known or proof_resource_expr_uses_borrowed_target(initializer, state, report)
+                        return true if borrowed.known or proof_resource_expr_uses_borrowed_target_with_depth(initializer, state, report, depth + 1)
                     Ast::Stmt.Assign(target, _, initializer, _):
                         borrowed: (known: bool, place: ProofResourcePlace) = proof_resource_borrow_place(initializer, report)
-                        return true if proof_resource_expr_uses_borrowed_target(target, state, report) or borrowed.known or proof_resource_expr_uses_borrowed_target(initializer, state, report)
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(target, state, report, depth + 1) or borrowed.known or proof_resource_expr_uses_borrowed_target_with_depth(initializer, state, report, depth + 1)
                     Ast::Stmt.Expr(expression, _):
-                        return true if proof_resource_expr_uses_borrowed_target(expression, state, report)
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(expression, state, report, depth + 1)
                     Ast::Stmt.Return(value, _):
-                        return true if value is returned and proof_resource_expr_uses_borrowed_target(returned, state, report)
+                        return true if value is returned and proof_resource_expr_uses_borrowed_target_with_depth(returned, state, report, depth + 1)
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_resource_expr_uses_borrowed_target(condition, state, report) or proof_resource_statements_use_borrowed_target_depth(then_body, state, report, depth + 1) or proof_resource_statements_use_borrowed_target_depth(else_body, state, report, depth + 1)
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(condition, state, report, depth + 1) or proof_resource_statements_use_borrowed_target_depth(then_body, state, report, depth + 1) or proof_resource_statements_use_borrowed_target_depth(else_body, state, report, depth + 1)
                     Ast::Stmt.While(condition, while_body, _):
-                        return true if proof_resource_expr_uses_borrowed_target(condition, state, report) or proof_resource_statements_use_borrowed_target_depth(while_body, state, report, depth + 1)
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(condition, state, report, depth + 1) or proof_resource_statements_use_borrowed_target_depth(while_body, state, report, depth + 1)
                     Ast::Stmt.For(_, _, iterable, for_body, _):
-                        return true if proof_resource_expr_uses_borrowed_target(iterable, state, report) or proof_resource_statements_use_borrowed_target_depth(for_body, state, report, depth + 1)
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(iterable, state, report, depth + 1) or proof_resource_statements_use_borrowed_target_depth(for_body, state, report, depth + 1)
                     Ast::Stmt.Match(scrutinee, arms, _):
-                        return true if proof_resource_expr_uses_borrowed_target(scrutinee, state, report)
-                        for arm in arms |arm, state, report|:
-                            return true if proof_resource_expr_uses_borrowed_target(arm.guard, state, report) or proof_resource_statements_use_borrowed_target_depth(arm.body, state, report, depth + 1)
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(scrutinee, state, report, depth + 1)
+                        for arm in arms |arm, state, report, depth|:
+                            return true if proof_resource_expr_uses_borrowed_target_with_depth(arm.guard, state, report, depth + 1) or proof_resource_statements_use_borrowed_target_depth(arm.body, state, report, depth + 1)
                     Ast::Stmt.Block(_, _, _, block_body, _):
                         return true if proof_resource_statements_use_borrowed_target_depth(block_body, state, report, depth + 1)
                     Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_resource_expr_uses_borrowed_target(expression, state, report)
+                        return true if proof_resource_expr_uses_borrowed_target_with_depth(expression, state, report, depth + 1)
                     _:
                         pass
             return false

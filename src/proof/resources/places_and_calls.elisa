@@ -1,53 +1,18 @@
 extend ElisaProof:
     private:
-        def proof_resource_encode_expression(expression: Ast::Expr, report: mutable ProofReport&) -> (known: bool, root: usize):
-            return proof_kernel_encode_expression_checked(expression, report, "")
-
-        def proof_resource_qualify_static_value(expression: Ast::Expr, state: ProofResourceState&, depth: usize) -> Ast::Expr:
-            return expression if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Ident(name, position):
-                    static_constant: bool = state.statics.static_scope.count > 0 and proof_resource_lookup(state, name) >= state.bindings.binding_names.count and any candidate in state.statics.static_names where candidate == name
-                    if static_constant:
-                        qualifier: mutable Ast::Expr = Ast::Expr.Ident(state.statics.static_scope[0], position)
-                        for index in 1..<state.statics.static_scope.count |index, qualifier, state, position|:
-                            qualifier <- Ast::Expr.Scope(qualifier, state.statics.static_scope[index], position)
-                        return Ast::Expr.Scope(qualifier, name, position)
-                    root_constant: bool = proof_resource_lookup(state, name) >= state.bindings.binding_names.count and any candidate in state.statics.static_root_names where candidate == name
-                    return Ast::Expr.Scope(Ast::Expr.Absent, name, position) if root_constant
-                    return expression
-                Ast::Expr.Paren(inner, position):
-                    return Ast::Expr.Paren(proof_resource_qualify_static_value(inner, state, depth + 1), position)
-                Ast::Expr.Unary(operator, operand, position):
-                    return Ast::Expr.Unary(operator, proof_resource_qualify_static_value(operand, state, depth + 1), position)
-                Ast::Expr.Binary(left, operator, right, position):
-                    return Ast::Expr.Binary(proof_resource_qualify_static_value(left, state, depth + 1), operator, proof_resource_qualify_static_value(right, state, depth + 1), position)
-                _:
-                    return expression
-
-        # A value operand whose trace term replay checks for region lifetimes. A bare module
-        # constant names static storage, but replay sees only the trace and cannot tell that
-        # spelling from a local binding a forged trace omitted. Spell it with its module path,
-        # which no local can have. The name qualifies only when no binding in scope claims it --
-        # the same lookup the producer's own region judgement relies on -- and it is declared
-        # in the function's own module; anything else keeps its bare spelling and replay's
-        # binding rule. A root constant the module does not shadow is spelled from the root.
-        def proof_resource_encode_value(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&) -> (known: bool, root: usize):
-            qualified: Ast::Expr = proof_resource_qualify_static_value(expression, state, 0)
-            return proof_resource_encode_expression(qualified, report)
-
-        def proof_resource_symbolic_index_supported(expression: Ast::Expr) -> bool:
+        def proof_resource_symbolic_index_supported(expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT or not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Ident(name, _):
                     return name != ""
                 Ast::Expr.IntLit(_, _):
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_symbolic_index_supported(inner)
+                    return proof_resource_symbolic_index_supported(inner, report, depth + 1)
                 Ast::Expr.Unary(operator, operand, _):
-                    return (operator == TokenKind.Plus or operator == TokenKind.Minus) and proof_resource_symbolic_index_supported(operand)
+                    return (operator == TokenKind.Plus or operator == TokenKind.Minus) and proof_resource_symbolic_index_supported(operand, report, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
-                    return (operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star) and proof_resource_symbolic_index_supported(left) and proof_resource_symbolic_index_supported(right)
+                    return (operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star) and proof_resource_symbolic_index_supported(left, report, depth + 1) and proof_resource_symbolic_index_supported(right, report, depth + 1)
                 _:
                     return false
 
@@ -133,18 +98,25 @@ extend ElisaProof:
         # same bounded expression depth as the independent kernel. Dynamic selectors are lowered
         # to a conservative whole-root place below.
         def proof_resource_place[@r](expression: Ast::Expr, report: mutable ProofReport& @r) -> (known: bool, place: ProofResourcePlace):
+            proof_resource_place_with_depth(expression, report, 0)
+
+        def proof_resource_place_with_depth[@r](expression: Ast::Expr, report: mutable ProofReport& @r, depth: usize) -> (known: bool, place: ProofResourcePlace):
             empty: ProofResourcePlace = proof_resource_empty_place()
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return (false, empty)
+            return (false, empty) if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Ident(root, _):
                     encoded: (known: bool, root: usize) = proof_resource_encode_expression(expression, report)
                     return (false, empty) if root == "" or not encoded.known
                     return (true, ProofResourcePlace{root: root, path_root: encoded.root, depth: 0, whole: true, exact: true})
                 Ast::Expr.Field(object, field, _):
-                    parent: (known: bool, place: ProofResourcePlace) = proof_resource_place(object, report)
+                    parent: (known: bool, place: ProofResourcePlace) = proof_resource_place_with_depth(object, report, depth + 1)
                     return proof_resource_place_add_field(report, parent.place, field) if parent.known
                     return (false, empty)
                 Ast::Expr.Index(object, index, _):
-                    parent: (known: bool, place: ProofResourcePlace) = proof_resource_place(object, report)
+                    parent: (known: bool, place: ProofResourcePlace) = proof_resource_place_with_depth(object, report, depth + 1)
                     return (false, empty) if not parent.known
                     match index:
                         Ast::Expr.IntLit(_, _):
@@ -152,13 +124,13 @@ extend ElisaProof:
                             return (false, empty) if not encoded.known
                             return proof_resource_place_add_index(report, parent.place, encoded.root)
                         _:
-                            if proof_resource_symbolic_index_supported(index):
+                            if proof_resource_symbolic_index_supported(index, report, 0):
                                 encoded: (known: bool, root: usize) = proof_resource_encode_expression(index, report)
                                 return (false, empty) if not encoded.known
                                 return proof_resource_place_add_index(report, parent.place, encoded.root)
                             return (false, empty)
                 Ast::Expr.IndexN(object, arguments, _):
-                    decoded: (known: bool, place: ProofResourcePlace) = proof_resource_place(object, report)
+                    decoded: (known: bool, place: ProofResourcePlace) = proof_resource_place_with_depth(object, report, depth + 1)
                     return (false, empty) if not decoded.known or arguments.count == 0
                     parent: mutable ProofResourcePlace = decoded.place
                     for argument in arguments |argument, report, parent|:
@@ -170,7 +142,7 @@ extend ElisaProof:
                                 return (false, empty) if not next.known
                                 parent <- next.place
                             _:
-                                if proof_resource_symbolic_index_supported(argument):
+                                if proof_resource_symbolic_index_supported(argument, report, 0):
                                     encoded: (known: bool, root: usize) = proof_resource_encode_expression(argument, report)
                                     return (false, empty) if not encoded.known
                                     next: (known: bool, place: ProofResourcePlace) = proof_resource_place_add_index(report, parent, encoded.root)
@@ -180,30 +152,37 @@ extend ElisaProof:
                                 return (false, empty)
                     return (true, parent)
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_place(inner, report)
+                    return proof_resource_place_with_depth(inner, report, depth + 1)
                 _:
                     return (false, empty)
 
         def proof_resource_borrow_place[@r](expression: Ast::Expr, report: mutable ProofReport& @r) -> (known: bool, place: ProofResourcePlace):
+            proof_resource_borrow_place_with_depth(expression, report, 0)
+
+        def proof_resource_borrow_place_with_depth[@r](expression: Ast::Expr, report: mutable ProofReport& @r, depth: usize) -> (known: bool, place: ProofResourcePlace):
             empty: ProofResourcePlace = proof_resource_empty_place()
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return (false, empty)
+            return (false, empty) if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Unary(operator, operand, _):
                     if operator == TokenKind.Ampersand:
-                        exact: (known: bool, place: ProofResourcePlace) = proof_resource_place(operand, report)
+                        exact: (known: bool, place: ProofResourcePlace) = proof_resource_place_with_depth(operand, report, depth + 1)
                         return exact if exact.known
                         # An unsupported dynamic selector cannot identify an element in the v1
                         # resource language, but its receiver root is still a sound capability identity.
                         # Widening to that whole root lets shared dynamic borrows participate in
                         # ordinary read reasoning while ensuring every write or mutable borrow
                         # of the root conflicts conservatively.
-                        root: sview = proof_resource_place_root(operand)
+                        root: sview = proof_resource_place_root(operand, report)
                         return (false, empty) if root == ""
                         encoded: (known: bool, root: usize) = proof_resource_encode_expression(Ast::Expr.Ident(root, proof_resource_default_position()), report)
                         return (false, empty) if not encoded.known
                         return (true, ProofResourcePlace{root: root, path_root: encoded.root, depth: 0, whole: true, exact: false})
                     return (false, empty)
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_borrow_place(inner, report)
+                    return proof_resource_borrow_place_with_depth(inner, report, depth + 1)
                 _:
                     return (false, empty)
 
@@ -249,7 +228,14 @@ extend ElisaProof:
         # Field/index roots and calls now have a stable root identity. Unsupported dynamic
         # selectors are intentionally widened to the whole root, retaining soundness without
         # pretending that two runtime indexes are disjoint.
-        def proof_resource_direct_borrow_root(expression: Ast::Expr) -> sview:
+        def proof_resource_direct_borrow_root(expression: Ast::Expr, report: mutable ProofReport&) -> sview:
+            proof_resource_direct_borrow_root_with_depth(expression, report, 0)
+
+        def proof_resource_direct_borrow_root_with_depth(expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> sview:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return ""
+            return "" if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Unary(operator, operand, _):
                     if operator == TokenKind.Ampersand:
@@ -265,34 +251,41 @@ extend ElisaProof:
                             _:
                                 pass
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_direct_borrow_root(inner)
+                    return proof_resource_direct_borrow_root_with_depth(inner, report, depth + 1)
                 _:
                     pass
             return ""
 
-        def proof_resource_place_root(expression: Ast::Expr) -> sview:
+        def proof_resource_place_root(expression: Ast::Expr, report: mutable ProofReport&) -> sview:
+            proof_resource_place_root_with_depth(expression, report, 0)
+
+        def proof_resource_place_root_with_depth(expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> sview:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return ""
+            return "" if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Ident(name, _):
                     return name
                 Ast::Expr.Field(object, _, _):
-                    return proof_resource_place_root(object)
+                    return proof_resource_place_root_with_depth(object, report, depth + 1)
                 Ast::Expr.Index(object, _, _):
-                    return proof_resource_place_root(object)
+                    return proof_resource_place_root_with_depth(object, report, depth + 1)
                 Ast::Expr.IndexN(object, _, _):
-                    return proof_resource_place_root(object)
+                    return proof_resource_place_root_with_depth(object, report, depth + 1)
                 Ast::Expr.Slice(object, _, _, _):
-                    return proof_resource_place_root(object)
+                    return proof_resource_place_root_with_depth(object, report, depth + 1)
                 Ast::Expr.Scope(base, _, _):
-                    return proof_resource_place_root(base)
+                    return proof_resource_place_root_with_depth(base, report, depth + 1)
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_place_root(inner)
+                    return proof_resource_place_root_with_depth(inner, report, depth + 1)
                 _:
                     return ""
 
         def proof_resource_access_place[@r](expression: Ast::Expr, report: mutable ProofReport& @r) -> (known: bool, place: ProofResourcePlace):
             decoded: (known: bool, place: ProofResourcePlace) = proof_resource_place(expression, report)
             return decoded if decoded.known
-            root: sview = proof_resource_place_root(expression)
+            root: sview = proof_resource_place_root(expression, report)
             if root != "":
                 encoded: (known: bool, root: usize) = proof_resource_encode_expression(Ast::Expr.Ident(root, proof_resource_default_position()), report)
                 return (false, proof_resource_empty_place()) if not encoded.known
@@ -302,39 +295,11 @@ extend ElisaProof:
         def proof_resource_encode_access_place[@r](expression: Ast::Expr, report: mutable ProofReport& @r) -> usize:
             decoded: (known: bool, place: ProofResourcePlace) = proof_resource_place(expression, report)
             return decoded.place.path_root if decoded.known
-            root: sview = proof_resource_place_root(expression)
+            root: sview = proof_resource_place_root(expression, report)
             if root != "":
                 encoded: (known: bool, root: usize) = proof_resource_encode_expression(Ast::Expr.Ident(root, proof_resource_default_position()), report)
                 return encoded.root if encoded.known
             return 0
-
-        def proof_resource_place_shape_known(expression: Ast::Expr) -> bool:
-            match expression:
-                Ast::Expr.Ident(root, _):
-                    return root != ""
-                Ast::Expr.Field(object, field, _):
-                    return field != "" and proof_resource_place_shape_known(object)
-                Ast::Expr.Index(object, index, _):
-                    return false if not proof_resource_place_shape_known(object)
-                    match index:
-                        Ast::Expr.IntLit(_, _):
-                            return true
-                        _:
-                            return proof_resource_symbolic_index_supported(index)
-                Ast::Expr.IndexN(object, arguments, _):
-                    return false if not proof_resource_place_shape_known(object) or arguments.count == 0
-                    for argument in arguments:
-                        match argument:
-                            Ast::Expr.IntLit(_, _):
-                                pass
-                            _:
-                                return false if not proof_resource_symbolic_index_supported(argument)
-                    return true
-                Ast::Expr.Paren(inner, _):
-                    return proof_resource_place_shape_known(inner)
-                _:
-                    return false
-
         def proof_resource_encode_borrow_place[@r](expression: Ast::Expr, report: mutable ProofReport& @r) -> usize:
             match expression:
                 Ast::Expr.Unary(operator, operand, _):
@@ -374,28 +339,32 @@ extend ElisaProof:
         # `as_sview` is a borrowing builtin only when no source declaration shadows its name.
         # Keep this check shared by region inference and event construction so a user method
         # cannot be interpreted as a compiler lifetime primitive in one pass but not the other.
-        def proof_resource_builtin_sview_conversion(expression: Ast::Expr, functions: ProofFunctionTable&) -> (known: bool, receiver: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+        def proof_resource_builtin_sview_conversion(expression: Ast::Expr, functions: ProofFunctionTable&, report: mutable ProofReport&, depth: usize) -> (known: bool, receiver: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return (false, Ast::Expr.Invalid)
             match expression:
                 Ast::Expr.Call(callee, arguments, _, _):
                     return (false, Ast::Expr.Invalid) if arguments.count != 0
-                    method: (known: bool, receiver: Ast::Expr, method: sview) = proof_resource_method_receiver(callee)
+                    method: (known: bool, receiver: Ast::Expr, method: sview) = proof_resource_method_receiver(callee, report)
                     valid: bool = method.known and method.method == "as_sview" and proof_resource_function_name_count(functions, method.method) == 0
                     return (valid, method.receiver if valid else Ast::Expr.Invalid)
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_builtin_sview_conversion(inner, functions)
+                    return proof_resource_builtin_sview_conversion(inner, functions, report, depth + 1)
                 _:
                     return (false, Ast::Expr.Invalid)
 
         # A collection builtin invoked as a method on a place: `values.push(x)`, `a.extend(b)`,
         # `a.clear()`, `a.resize(n)`, `a.pop()`. The receiver is returned so the call can be
         # recorded as what it is -- a write to that place.
-        def proof_resource_collection_builtin(callee: Ast::Expr, functions: ProofFunctionTable&) -> (known: bool, receiver: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
-            match proof_strip_parens(callee):
+        def proof_resource_collection_builtin(callee: Ast::Expr, functions: ProofFunctionTable&, report: mutable ProofReport&) -> (known: bool, receiver: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            stripped: Ast::Expr = proof_resource_strip_parens_with_work(callee, report, 0)
+            match stripped:
                 Ast::Expr.Field(receiver, method, _):
                     return (false, Ast::Expr.Invalid) if:
                         method != "push" and method != "extend" and method != "clear" and method != "resize" and method != "pop" and method != "truncate"
                         proof_resource_function_name_count(functions, method) != 0
-                        proof_resource_place_root(receiver) == ""
+                        proof_resource_place_root(receiver, report) == ""
                     return (true, receiver)
                 _:
                     return (false, Ast::Expr.Invalid)
@@ -403,10 +372,11 @@ extend ElisaProof:
         # Any call written as a method on a place. The receiver of one is not among the callee's
         # arguments, so no argument mapping can ever describe what the call does to it: either the
         # receiver's effect is modelled here by name, or it is not modelled at all.
-        def proof_resource_method_receiver(callee: Ast::Expr) -> (known: bool, receiver: Ast::Expr, method: sview) can[Memory.Allocate, Abort.Panic]:
-            match proof_strip_parens(callee):
+        def proof_resource_method_receiver(callee: Ast::Expr, report: mutable ProofReport&) -> (known: bool, receiver: Ast::Expr, method: sview) can[Memory.Allocate, Abort.Panic]:
+            stripped: Ast::Expr = proof_resource_strip_parens_with_work(callee, report, 0)
+            match stripped:
                 Ast::Expr.Field(receiver, method, _):
-                    return (false, Ast::Expr.Invalid, "") if method == "" or proof_resource_place_root(receiver) == ""
+                    return (false, Ast::Expr.Invalid, "") if method == "" or proof_resource_place_root(receiver, report) == ""
                     return (true, receiver, method)
                 _:
                     return (false, Ast::Expr.Invalid, "")
@@ -458,93 +428,121 @@ extend ElisaProof:
         # A resource summary is usable only after the callee's complete executable summary has
         # converged. In particular, a provisional recursive SCC must not consume one of its own
         # members' traces: doing so would turn a cyclic assumption into a certificate.
-        def proof_resource_summary_is_ready(functions: ProofFunctionTable&, report: ProofReport&, caller_index: usize, callee_index: usize) -> (known: bool, root: usize):
+        def proof_resource_summary_is_ready(functions: ProofFunctionTable&, report: mutable ProofReport&, caller_index: usize, callee_index: usize, caller_is_lemma: bool) -> (known: bool, root: usize):
             empty_root: usize = report.analysis_1.kernel.nodes.count
             return (false, empty_root) if:
-                callee_index >= functions.lookup.names.count or caller_index >= functions.lookup.names.count
+                callee_index >= functions.lookup.names.count
                 callee_index >= functions.summaries.verified.count or not functions.summaries.verified[callee_index]
+            return (false, empty_root) if caller_is_lemma and caller_index != functions.lookup.names.count
+            return (false, empty_root) if not caller_is_lemma and caller_index >= functions.lookup.names.count
             # Keep every later array access behind its own explicit bound. The source checker and
             # the independent replay kernel must see the same alignment facts; a compound `and`
             # guard is not a substitute for proving each indexed table has the requested slot.
             return (false, empty_root) if:
-                caller_index >= functions.summaries.recursive.count or callee_index >= functions.summaries.recursive.count
-                caller_index >= functions.summaries.recursive_component_ids.count or callee_index >= functions.summaries.recursive_component_ids.count
-            if functions.summaries.recursive[caller_index] and functions.summaries.recursive[callee_index]:
+                callee_index >= functions.summaries.recursive.count
+                callee_index >= functions.summaries.recursive_component_ids.count
+                (not caller_is_lemma) and (caller_index >= functions.summaries.recursive.count or caller_index >= functions.summaries.recursive_component_ids.count)
+            if not caller_is_lemma and functions.summaries.recursive[caller_index] and functions.summaries.recursive[callee_index]:
                 return (false, empty_root) if functions.summaries.recursive_component_ids[caller_index] == functions.summaries.recursive_component_ids[callee_index]
-            for index in 0..<report.analysis_1.kernel.nodes.count |index, report, functions, callee_index|:
+            callee_name: sview = functions.lookup.names[callee_index]
+            callee_owner: sview = proof_resource_function_owner(functions, callee_index)
+            for index in 0..<report.analysis_1.kernel.nodes.count |index, report, functions, callee_index, callee_name, callee_owner|:
+                return (false, empty_root) if not proof_source_index_work_charge(report, 1)
                 node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[index]
-                return (true, index) if node.kind == "resource-safety" and node.name == functions.lookup.names[callee_index] and node.operator == "resource-v2" and node.secondary_name == proof_resource_function_owner(functions, callee_index)
+                return (false, empty_root) if not proof_source_index_work_charge(report, sview_len(node.kind)) or not proof_source_index_work_charge(report, sview_len(node.name)) or not proof_source_index_work_charge(report, sview_len(callee_name)) or not proof_source_index_work_charge(report, sview_len(node.operator)) or not proof_source_index_work_charge(report, sview_len(node.secondary_name)) or not proof_source_index_work_charge(report, sview_len(callee_owner))
+                return (true, index) if node.kind == "resource-safety" and node.name == callee_name and node.operator == "resource-v2" and node.secondary_name == callee_owner
             return (false, empty_root)
 
         # Calls are resource-bearing when they pass either a borrow expression or a reference
         # binding. A field borrow is included even when it does not overlap an already-live local
         # borrow: the callee still receives a capability whose effects must be summarized.
         def proof_resource_expr_carries_resource(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&) -> bool:
+            proof_resource_expr_carries_resource_with_depth(expression, state, report, 0)
+
+        def proof_resource_expr_carries_resource_with_depth(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&, depth: usize) -> bool:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return true
             # The element count of a collection is a scalar copy. Passing one hands the callee no
             # capability over the collection, so a call is not resource-carrying on account of it
             # -- the region-value predicate already reads `x.count` this way. Treating it as a
             # resource made the call record a transition naming the collection as an actual, and
             # the kernel refuses that transition because the callee's formal is a by-value scalar.
+            return true if not proof_source_index_work_charge(report, 1)
             return false if:
-                proof_resource_expr_is_collection_extent(expression, state)
+                proof_resource_expr_is_collection_extent(expression, state, report)
                 proof_resource_is_scalar_reference_index_value(expression, state, report, state.context.function_name)
             borrowed: (known: bool, place: ProofResourcePlace) = proof_resource_borrow_place(expression, report)
             return true if borrowed.known
             match expression:
                 Ast::Expr.Ident(name, _):
-                    slot: usize = proof_resource_lookup(state, name)
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, name, report)
+                    return true if not binding.complete
+                    slot: usize = binding.slot
                     return true if:
                         slot < state.bindings.binding_names.count and (slot >= state.bindings.binding_type_marker_complete.count or not state.bindings.binding_type_marker_complete[slot])
                         slot < state.bindings.binding_reference.count and state.bindings.binding_reference[slot]
                     return proof_resource_binding_is_borrowable(state, slot)
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_expr_carries_resource(inner, state, report)
+                    return proof_resource_expr_carries_resource_with_depth(inner, state, report, depth + 1)
                 Ast::Expr.Field(object, _, _):
-                    return proof_resource_expr_carries_resource(object, state, report)
+                    return proof_resource_expr_carries_resource_with_depth(object, state, report, depth + 1)
                 Ast::Expr.Scope(base, _, _):
-                    return proof_resource_expr_carries_resource(base, state, report)
+                    return proof_resource_expr_carries_resource_with_depth(base, state, report, depth + 1)
                 Ast::Expr.Index(object, index, _):
-                    return proof_resource_expr_carries_resource(object, state, report) or proof_resource_expr_carries_resource(index, state, report)
+                    return proof_resource_expr_carries_resource_with_depth(object, state, report, depth + 1) or proof_resource_expr_carries_resource_with_depth(index, state, report, depth + 1)
                 Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_resource_expr_carries_resource(object, state, report)
-                    for argument in arguments |argument, state, report|:
-                        return true if proof_resource_expr_carries_resource(argument, state, report)
+                    return true if proof_resource_expr_carries_resource_with_depth(object, state, report, depth + 1)
+                    for argument in arguments |argument, state, report, depth|:
+                        return true if proof_resource_expr_carries_resource_with_depth(argument, state, report, depth + 1)
                     return false
                 Ast::Expr.Slice(object, low, high, _):
-                    return proof_resource_expr_carries_resource(object, state, report) or proof_resource_expr_carries_resource(low, state, report) or proof_resource_expr_carries_resource(high, state, report)
+                    return proof_resource_expr_carries_resource_with_depth(object, state, report, depth + 1) or proof_resource_expr_carries_resource_with_depth(low, state, report, depth + 1) or proof_resource_expr_carries_resource_with_depth(high, state, report, depth + 1)
                 Ast::Expr.Unary(operator, operand, _):
                     return true if operator == TokenKind.Ampersand
-                    return proof_resource_expr_carries_resource(operand, state, report)
+                    return proof_resource_expr_carries_resource_with_depth(operand, state, report, depth + 1)
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_resource_expr_carries_resource(left, state, report) or proof_resource_expr_carries_resource(right, state, report)
+                    return proof_resource_expr_carries_resource_with_depth(left, state, report, depth + 1) or proof_resource_expr_carries_resource_with_depth(right, state, report, depth + 1)
                 Ast::Expr.Call(callee, arguments, _, _):
-                    return true if proof_resource_expr_carries_resource(callee, state, report)
-                    for argument in arguments |argument, state, report|:
-                        return true if proof_resource_expr_carries_resource(argument, state, report)
+                    return true if proof_resource_expr_carries_resource_with_depth(callee, state, report, depth + 1)
+                    for argument in arguments |argument, state, report, depth|:
+                        return true if proof_resource_expr_carries_resource_with_depth(argument, state, report, depth + 1)
                     return false
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
                     lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
-                    return proof_resource_expr_carries_resource(lowered.call, state, report) if lowered.known
+                    return proof_resource_expr_carries_resource_with_depth(lowered.call, state, report, depth + 1) if lowered.known
                     # Ambiguous dispatch has no unique resource transition. Keep it resource-
                     # bearing so the caller cannot erase it as an ordinary value.
                     return true
                 _:
                     return false
 
+        def proof_resource_strip_parens_with_work(expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> Ast::Expr:
+            return Ast::Expr.Invalid if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT or not proof_source_index_work_charge(report, 1)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_strip_parens_with_work(inner, report, depth + 1)
+                _:
+                    return expression
+
         # Reading the sole primitive element of a typed scalar reference produces a scalar
         # value, not another capability. Keep that distinction only for the current formal
         # binding and literal zero; a shadowing local, a different index, or a non-scalar target
         # retains the ordinary conservative resource classification.
         def proof_resource_is_scalar_reference_index_value(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&, function_name: sview) -> bool:
-            match proof_strip_parens(expression):
+            stripped: Ast::Expr = proof_resource_strip_parens_with_work(expression, report, 0)
+            match stripped:
                 Ast::Expr.Index(object, index, _):
                     root: sview = proof_ident_name(object)
-                    match proof_strip_parens(index):
+                    stripped_index: Ast::Expr = proof_resource_strip_parens_with_work(index, report, 0)
+                    match stripped_index:
                         Ast::Expr.IntLit(offset, _):
                             return false if offset != 0
                         _:
                             return false
-                    slot: usize = proof_resource_lookup(state, root)
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, root, report)
+                    return false if not binding.complete
+                    slot: usize = binding.slot
                     return false if root == "" or slot >= state.context.formal_count or slot >= state.bindings.binding_reference.count or not state.bindings.binding_reference[slot]
                     source_parameter: (count: usize, type_expression: Ast::Expr) = proof_scalar_reference_parameter_type_in_declarations_with_work(report.source.source_declarations, function_name, root, 0, &report.source_types.source_effect_index.work.implicit_effect_work)
                     return false if source_parameter.count != 1 or report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT

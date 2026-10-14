@@ -2,30 +2,42 @@ extend ElisaProof:
     private:
         # Global function rows do not describe a bare function-valued local with the same
         # spelling. Resource callers use this before consulting parameter or return metadata.
-        def proof_resource_callee_shadowed_by_local(callee: Ast::Expr, state: ProofResourceState&) -> bool:
-            return proof_resource_callee_shadowed_by_local_depth(callee, state, 0)
-
-        def proof_resource_callee_shadowed_by_local_depth(callee: Ast::Expr, state: ProofResourceState&, depth: usize) -> bool:
+        def proof_resource_callee_shadowed_by_local(callee: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&, depth: usize) -> bool:
             return true if depth >= 64
             match callee:
                 Ast::Expr.Ident(local_callee, _):
-                    return proof_resource_lookup(state, local_callee) < state.bindings.binding_names.count
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, local_callee, report)
+                    return not binding.complete or binding.slot < state.bindings.binding_names.count
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_callee_shadowed_by_local_depth(inner, state, depth + 1)
+                    return proof_resource_callee_shadowed_by_local(inner, state, report, depth + 1)
                 _:
                     return false
 
-        def proof_resource_region_new_parts(expression: Ast::Expr) -> (known: bool, operand: Ast::Expr, region: sview):
+        def proof_resource_region_new_parts(expression: Ast::Expr, report: mutable ProofReport&) -> (known: bool, operand: Ast::Expr, region: sview):
+            proof_resource_region_new_parts_with_depth(expression, report, 0)
+
+        def proof_resource_region_new_parts_with_depth(expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> (known: bool, operand: Ast::Expr, region: sview):
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return (false, Ast::Expr.Invalid, "")
+            return (false, Ast::Expr.Invalid, "") if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.RegionNew(operand, region, _):
                     return (true, operand, region)
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_region_new_parts(inner)
+                    return proof_resource_region_new_parts_with_depth(inner, report, depth + 1)
                 _:
                     pass
             return (false, Ast::Expr.Invalid, "")
 
         def proof_resource_call_argument_kind(expression: Ast::Expr, functions: ProofFunctionTable&, state: ProofResourceState&, report: mutable ProofReport&) -> sview:
+            proof_resource_call_argument_kind_with_depth(expression, functions, state, report, 0)
+
+        def proof_resource_call_argument_kind_with_depth(expression: Ast::Expr, functions: ProofFunctionTable&, state: ProofResourceState&, report: mutable ProofReport&, depth: usize) -> sview:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return "opaque"
+            return "opaque" if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.RegionNew(_, _, _):
                     return "region-new"
@@ -33,18 +45,22 @@ extend ElisaProof:
                     if operator == TokenKind.Ampersand:
                         borrowed: (known: bool, place: ProofResourcePlace) = proof_resource_borrow_place(expression, report)
                         if borrowed.known:
-                            slot: usize = proof_resource_lookup(state, borrowed.place.root)
+                            binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, borrowed.place.root, report)
+                            return "borrow-opaque" if not binding.complete
+                            slot: usize = binding.slot
                             return "borrow-opaque" if slot < state.bindings.binding_names.count and (slot >= state.bindings.binding_type_marker_complete.count or not state.bindings.binding_type_marker_complete[slot])
                             return "borrow"
                         return "borrow-opaque"
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_call_argument_kind(inner, functions, state, report)
+                    return proof_resource_call_argument_kind_with_depth(inner, functions, state, report, depth + 1)
                 Ast::Expr.Ident(name, _):
-                    slot: usize = proof_resource_lookup(state, name)
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, name, report)
+                    return "opaque" if not binding.complete
+                    slot: usize = binding.slot
                     return "opaque" if slot < state.bindings.binding_names.count and (slot >= state.bindings.binding_type_marker_complete.count or not state.bindings.binding_type_marker_complete[slot])
                     return "reference" if slot < state.bindings.binding_reference.count and state.bindings.binding_reference[slot]
                 Ast::Expr.Call(callee, _, _, _):
-                    return "opaque" if proof_resource_callee_shadowed_by_local(callee, state)
+                    return "opaque" if proof_resource_callee_shadowed_by_local(callee, state, report, 0)
                     function_index: usize = proof_function_index_for_callee(functions, callee)
                     return "opaque" if function_index >= functions.returns.return_type_marker_complete.count or not functions.returns.return_type_marker_complete[function_index]
                     return "opaque" if function_index < functions.returns.return_sviews.count and functions.returns.return_sviews[function_index]
@@ -80,7 +96,8 @@ extend ElisaProof:
         # A source-authenticated scalar extern signature receives copies, including
         # scalar reads from borrowed records. This grants no native effect/return law.
         def proof_resource_extern_scalar_value_call(functions: ProofFunctionTable&, callee_name: sview, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, state: ProofResourceState&, report: mutable ProofReport&) -> bool:
-            return false if proof_resource_lookup(state, callee_name) < state.bindings.binding_names.count
+            callee_binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, callee_name, report)
+            return false if not callee_binding.complete or callee_binding.slot < state.bindings.binding_names.count
             index: usize = proof_extern_signature_index_for_report(functions, callee_name, report)
             return false if index >= functions.externs.extern_signatures.count
             signature: ProofExternSignature = functions.externs.extern_signatures[index]
@@ -113,29 +130,34 @@ extend ElisaProof:
                 return false if proof_resource_call_argument_kind(argument, functions, state, report) != "value" or proof_expr_has_move(argument)
             return true
 
-        def proof_resource_map_call_arguments(functions: ProofFunctionTable&, function_index: usize, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, mapped: mutable darray[Ast::Expr]&) -> bool:
+        def proof_resource_map_call_arguments(functions: ProofFunctionTable&, function_index: usize, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, mapped: mutable darray[Ast::Expr]&, report: mutable ProofReport&) -> bool:
             return false if function_index >= functions.parameters.metadata.param_counts.count or function_index >= functions.parameters.metadata.param_starts.count
             parameter_count: usize = functions.parameters.metadata.param_counts[function_index]
-            return false if arguments.count != parameter_count or (argument_names.count != 0 and argument_names.count != arguments.count)
+            param_start: usize = functions.parameters.metadata.param_starts[function_index]
+            return false if arguments.count != parameter_count or (argument_names.count != 0 and argument_names.count != arguments.count) or param_start > functions.parameters.metadata.all_params.count or parameter_count > functions.parameters.metadata.all_params.count - param_start
+            return false if not proof_source_index_work_charge(report, parameter_count) or not proof_source_index_work_charge(report, parameter_count)
             mapped.clear()
             for _ in 0..<parameter_count |mapped|:
                 mapped.push(Ast::Expr.Absent)
             used: mutable darray[bool] = []
             for _ in 0..<parameter_count |used|:
                 used.push(false)
-            param_start: usize = functions.parameters.metadata.param_starts[function_index]
-            for argument_index in 0..<arguments.count |argument_index, arguments, argument_names, mapped, used, functions, param_start, parameter_count|:
+            for argument_index in 0..<arguments.count |argument_index, arguments, argument_names, mapped, used, functions, param_start, parameter_count, report|:
+                return false if not proof_source_index_work_charge(report, 1)
                 parameter_index: mutable usize = argument_index
                 if argument_names.count == arguments.count and argument_names[argument_index] != "":
                     label: sview = argument_names[argument_index]
+                    return false if not proof_source_index_work_charge(report, sview_len(label))
                     parameter_index <- parameter_count
-                    for candidate in 0..<parameter_count |candidate, functions, param_start, label, parameter_index|:
+                    for candidate in 0..<parameter_count |candidate, functions, param_start, label, parameter_index, report|:
+                        return false if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(functions.parameters.metadata.all_params[param_start + candidate])) or not proof_source_index_work_charge(report, sview_len(label))
                         parameter_index <- candidate if functions.parameters.metadata.all_params[param_start + candidate] == label
                     return false if parameter_index >= parameter_count
                 return false if used[parameter_index]
                 mapped[parameter_index] <- arguments[argument_index]
                 used[parameter_index] <- true
-            for parameter_index in 0..<parameter_count |parameter_index, used|:
+            for parameter_index in 0..<parameter_count |parameter_index, used, report|:
+                return false if not proof_source_index_work_charge(report, 1)
                 return false if not used[parameter_index]
             return true
 
@@ -143,29 +165,34 @@ extend ElisaProof:
         # AST argument mapping because a root is a certificate index, not a source expression.
         # In particular, named calls must not accidentally attach one temporary's allocation to
         # another formal.
-        def proof_resource_map_call_allocation_roots(functions: ProofFunctionTable&, function_index: usize, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, source_roots: darray[usize]&, mapped_roots: mutable darray[usize]&) -> bool:
+        def proof_resource_map_call_allocation_roots(functions: ProofFunctionTable&, function_index: usize, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, source_roots: darray[usize]&, mapped_roots: mutable darray[usize]&, report: mutable ProofReport&) -> bool:
             return false if function_index >= functions.parameters.metadata.param_counts.count or function_index >= functions.parameters.metadata.param_starts.count
             parameter_count: usize = functions.parameters.metadata.param_counts[function_index]
-            return false if arguments.count != parameter_count or source_roots.count != arguments.count or (argument_names.count != 0 and argument_names.count != arguments.count)
+            param_start: usize = functions.parameters.metadata.param_starts[function_index]
+            return false if arguments.count != parameter_count or source_roots.count != arguments.count or (argument_names.count != 0 and argument_names.count != arguments.count) or param_start > functions.parameters.metadata.all_params.count or parameter_count > functions.parameters.metadata.all_params.count - param_start
+            return false if not proof_source_index_work_charge(report, parameter_count) or not proof_source_index_work_charge(report, parameter_count)
             mapped_roots.clear()
             for _ in 0..<parameter_count |mapped_roots|:
                 mapped_roots.push(0)
             used: mutable darray[bool] = []
             for _ in 0..<parameter_count |used|:
                 used.push(false)
-            param_start: usize = functions.parameters.metadata.param_starts[function_index]
-            for argument_index in 0..<arguments.count |argument_index, arguments, argument_names, source_roots, mapped_roots, used, functions, param_start, parameter_count|:
+            for argument_index in 0..<arguments.count |argument_index, arguments, argument_names, source_roots, mapped_roots, used, functions, param_start, parameter_count, report|:
+                return false if not proof_source_index_work_charge(report, 1)
                 parameter_index: mutable usize = argument_index
                 if argument_names.count == arguments.count and argument_names[argument_index] != "":
                     label: sview = argument_names[argument_index]
+                    return false if not proof_source_index_work_charge(report, sview_len(label))
                     parameter_index <- parameter_count
-                    for candidate in 0..<parameter_count |candidate, functions, param_start, label, parameter_index|:
+                    for candidate in 0..<parameter_count |candidate, functions, param_start, label, parameter_index, report|:
+                        return false if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(functions.parameters.metadata.all_params[param_start + candidate])) or not proof_source_index_work_charge(report, sview_len(label))
                         parameter_index <- candidate if functions.parameters.metadata.all_params[param_start + candidate] == label
                     return false if parameter_index >= parameter_count
                 return false if used[parameter_index]
                 mapped_roots[parameter_index] <- source_roots[argument_index]
                 used[parameter_index] <- true
-            for parameter_index in 0..<parameter_count |parameter_index, used|:
+            for parameter_index in 0..<parameter_count |parameter_index, used, report|:
+                return false if not proof_source_index_work_charge(report, 1)
                 return false if not used[parameter_index]
             return true
 
@@ -181,7 +208,9 @@ extend ElisaProof:
                 if proof_resource_expr_carries_resource(expression, state, report):
                     place: (known: bool, place: ProofResourcePlace) = proof_resource_place(expression, report)
                     return (false, empty, state.bindings.binding_names.count, false, false, false) if not place.known or place.place.root == ""
-                    slot: usize = proof_resource_lookup(state, place.place.root)
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, place.place.root, report)
+                    return (false, empty, state.bindings.binding_names.count, false, false, false) if not binding.complete
+                    slot: usize = binding.slot
                     return (false, empty, state.bindings.binding_names.count, false, false, false) if slot >= state.bindings.binding_names.count or proof_resource_binding_is_moved(state, slot)
                     writable: mutable bool = slot < state.bindings.binding_writable.count and state.bindings.binding_writable[slot]
                     writable <- true if slot < state.bindings.binding_mutable_reference.count and state.bindings.binding_mutable_reference[slot]
@@ -190,13 +219,17 @@ extend ElisaProof:
             if kind == "borrow":
                 borrowed: (known: bool, place: ProofResourcePlace) = proof_resource_borrow_place(expression, report)
                 return (false, empty, state.bindings.binding_names.count, false, false, false) if not borrowed.known
-                slot: usize = proof_resource_lookup(state, borrowed.place.root)
+                binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, borrowed.place.root, report)
+                return (false, empty, state.bindings.binding_names.count, false, false, false) if not binding.complete
+                slot: usize = binding.slot
                 return (false, empty, state.bindings.binding_names.count, false, false, false) if slot >= state.bindings.binding_names.count or proof_resource_binding_is_moved(state, slot)
                 writable: mutable bool = slot < state.bindings.binding_writable.count and state.bindings.binding_writable[slot]
                 writable <- true if slot < state.bindings.binding_mutable_reference.count and state.bindings.binding_mutable_reference[slot]
                 return (true, borrowed.place, slot, false, slot < state.bindings.binding_mutable_reference.count and state.bindings.binding_mutable_reference[slot], writable)
             place: (known: bool, place: ProofResourcePlace) = proof_resource_place(expression, report)
-            slot: usize = proof_resource_lookup(state, place.place.root)
+            binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, place.place.root, report)
+            return (false, empty, state.bindings.binding_names.count, false, false, false) if not binding.complete
+            slot: usize = binding.slot
             return (false, empty, state.bindings.binding_names.count, false, false, false) if not place.known or slot >= state.bindings.binding_names.count or slot >= state.bindings.binding_reference.count or not state.bindings.binding_reference[slot] or proof_resource_binding_is_moved(state, slot)
             target: mutable ProofResourcePlace = place.place
             target <- state.borrows.borrow_target_places[slot] if slot < state.borrows.borrow_present.count and state.borrows.borrow_present[slot] and slot < state.borrows.borrow_target_places.count and state.borrows.borrow_target_places[slot].root != ""
@@ -236,7 +269,7 @@ extend ElisaProof:
                 actual_kind: sview = proof_resource_call_argument_kind(mapped[parameter_index], functions, state, report)
                 actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool) = proof_resource_call_source_actual(mapped[parameter_index], functions, state, report)
                 formal_region: sview = proof_resource_function_parameter_region(functions, function_index, parameter_index)
-                actual_region: sview = proof_resource_expr_region(mapped[parameter_index], state)
+                actual_region: sview = proof_resource_expr_region(mapped[parameter_index], state, report, 0)
                 # A lifetime pinned to the caller's frame is satisfied by a place the caller holds
                 # outright, which has no region of its own; that case is checked by the frame
                 # pinning rule rather than by matching an active region here.
@@ -282,6 +315,7 @@ extend ElisaProof:
             has_place: mutable darray[bool] = []
             mutable_formal: mutable darray[bool] = []
             for parameter_index in 0..<mapped.count |parameter_index, mapped, report, callee, functions, state, places, has_place, mutable_formal|:
+                return false if not proof_source_index_work_charge(report, 1)
                 formal_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_resource_callee_parameter_node(report, callee, parameter_index)
                 return false if not formal_node.known
                 formal: ElisaProofKernelCore::ProofKernelNode = formal_node.node
@@ -292,7 +326,9 @@ extend ElisaProof:
                 has_place.push(is_reference_formal and actual_kind != "region-new" and actual.known and actual.place.root != "")
                 mutable_formal.push(formal.operator == "external-mutable")
             for left_index in 0..<places.count |left_index, places, has_place, mutable_formal, state, report|:
+                return false if not proof_source_index_work_charge(report, 1)
                 continue if not has_place[left_index]
+                return false if not proof_source_index_work_charge(report, places.count)
                 for right_index in 0..<places.count |right_index, left_index, places, has_place, mutable_formal, state, report|:
                     continue if right_index <= left_index or not has_place[right_index]
                     continue if not mutable_formal[left_index] and not mutable_formal[right_index]

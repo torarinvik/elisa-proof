@@ -1,9 +1,11 @@
 extend ElisaProof:
     private:
         def proof_resource_check_write[@s, @r](target: Ast::Expr, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, position: Ast::Pos, functions: ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
-            root: sview = proof_resource_place_root(target)
+            root: sview = proof_resource_place_root(target, report)
             return if root == ""
-            slot: usize = proof_resource_lookup(state, root)
+            binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, root, report)
+            return if not binding.complete
+            slot: usize = binding.slot
             return if slot >= state.bindings.binding_names.count
             region: sview = proof_resource_binding_region(state, slot)
             if region != "" and (not proof_resource_binding_region_is_live(state, slot) or not proof_resource_region_is_active(state, region)):
@@ -41,27 +43,33 @@ extend ElisaProof:
         # Return the tracked region carried by a direct value path. Calls and aggregate
         # transformations intentionally return no region here; their broader recursive check
         # below rejects a hidden region value instead of guessing its lifetime.
-        def proof_resource_expr_region(expression: Ast::Expr, state: ProofResourceState&) -> sview:
+        def proof_resource_expr_region(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&, depth: usize) -> sview:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return ""
+            return "" if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.RegionNew(_, region, _):
                     return region
                 Ast::Expr.Ident(name, _):
-                    slot: usize = proof_resource_lookup(state, name)
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, name, report)
+                    return "" if not binding.complete
+                    slot: usize = binding.slot
                     return proof_resource_binding_region(state, slot) if slot < state.bindings.binding_names.count and proof_resource_binding_region_is_live(state, slot)
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_expr_region(inner, state)
+                    return proof_resource_expr_region(inner, state, report, depth + 1)
                 Ast::Expr.Move(inner, _):
-                    return proof_resource_expr_region(inner, state)
+                    return proof_resource_expr_region(inner, state, report, depth + 1)
                 Ast::Expr.Field(object, _, _):
-                    return proof_resource_expr_region(object, state)
+                    return proof_resource_expr_region(object, state, report, depth + 1)
                 Ast::Expr.Scope(base, _, _):
-                    return proof_resource_expr_region(base, state)
+                    return proof_resource_expr_region(base, state, report, depth + 1)
                 Ast::Expr.Index(object, _, _):
-                    return proof_resource_expr_region(object, state)
+                    return proof_resource_expr_region(object, state, report, depth + 1)
                 Ast::Expr.IndexN(object, _, _):
-                    return proof_resource_expr_region(object, state)
+                    return proof_resource_expr_region(object, state, report, depth + 1)
                 Ast::Expr.Slice(object, _, _, _):
-                    return proof_resource_expr_region(object, state)
+                    return proof_resource_expr_region(object, state, report, depth + 1)
                 _:
                     return ""
             return ""
@@ -69,12 +77,19 @@ extend ElisaProof:
         # The first by-value region-call rule is deliberately narrow: a dynamic array whose
         # elements are scalar values. Containers of references and nested/opaque element types
         # need their own provenance model and stay unsupported.
-        def proof_resource_region_collection_type_tag(expression: Ast::Expr, functions: ProofFunctionTable&) -> sview:
+        def proof_resource_region_collection_type_tag(expression: Ast::Expr, report: mutable ProofReport&) -> sview:
+            proof_resource_region_collection_type_tag_with_depth(expression, report, 0)
+
+        def proof_resource_region_collection_type_tag_with_depth(expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> sview:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return ""
+            return "" if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_region_collection_type_tag(inner, functions)
+                    return proof_resource_region_collection_type_tag_with_depth(inner, report, depth + 1)
                 Ast::Expr.Unary(TokenKind.Mutable, inner, _):
-                    return proof_resource_region_collection_type_tag(inner, functions)
+                    return proof_resource_region_collection_type_tag_with_depth(inner, report, depth + 1)
                 Ast::Expr.Index(head, element, _):
                     element_name: sview = proof_ident_name(element)
                     return "__elisa_darray_i8" if proof_ident_name(head) == "darray" and element_name == "i8"
@@ -92,18 +107,18 @@ extend ElisaProof:
                     pass
             return ""
 
-        def proof_resource_region_collection_value_type(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
-            return proof_resource_region_collection_type_tag(expression, functions) != ""
+        def proof_resource_region_collection_value_type(expression: Ast::Expr, report: mutable ProofReport&) -> bool:
+            return proof_resource_region_collection_type_tag(expression, report) != ""
 
         # A call returning `T& @r` or `sview @r` carries the caller's concrete region only when
         # the callee has a verified resource summary and its explicit `@r` witness is mapped at
         # this call site. By-value sviews additionally need a matching return marker in that
         # summary; the source-level return annotation alone cannot manufacture provenance.
-        def proof_resource_call_result_region(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: ProofReport&) -> sview:
+        def proof_resource_call_result_region(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> sview:
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, _):
                     callee_name: sview = proof_callable_name(callee)
-                    return "" if proof_resource_callee_shadowed_by_local(callee, state)
+                    return "" if proof_resource_callee_shadowed_by_local(callee, state, report, 0)
                     function_index: usize = proof_function_index_for_callee(functions, callee)
                     is_reference_result: mutable bool = false
                     is_sview_result: mutable bool = false
@@ -113,7 +128,7 @@ extend ElisaProof:
                     if function_index < functions.returns.return_sviews.count:
                         is_sview_result <- functions.returns.return_sviews[function_index]
                     if function_index < functions.returns.return_types.count:
-                        is_region_value_result <- not is_reference_result and not is_sview_result and proof_resource_region_collection_value_type(functions.returns.return_types[function_index], functions)
+                        is_region_value_result <- not is_reference_result and not is_sview_result and proof_resource_region_collection_value_type(functions.returns.return_types[function_index], report)
                     return "" if function_index >= functions.returns.return_type_marker_complete.count or not functions.returns.return_type_marker_complete[function_index] or (not is_reference_result and not is_sview_result and not is_region_value_result)
                     return_region: sview = proof_resource_function_return_region(functions, function_index)
                     return "" if return_region == ""
@@ -125,9 +140,12 @@ extend ElisaProof:
                         formal_region_index >= region_count
                         function_index >= functions.summaries.verified.count or not functions.summaries.verified[function_index]
                     summary_root: mutable usize = report.analysis_1.kernel.nodes.count
-                    for candidate_root in 0..<report.analysis_1.kernel.nodes.count |candidate_root, report, callee_name, summary_root|:
+                    callee_owner: sview = proof_resource_function_owner(functions, function_index)
+                    for candidate_root in 0..<report.analysis_1.kernel.nodes.count |candidate_root, report, callee_name, callee_owner, summary_root|:
+                        return "" if not proof_source_index_work_charge(report, 1)
                         candidate: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[candidate_root]
-                        summary_root <- candidate_root if candidate.kind == "resource-safety" and candidate.name == callee_name and candidate.operator == "resource-v2" and candidate.secondary_name == proof_resource_function_owner(functions, function_index)
+                        return "" if not proof_source_index_work_charge(report, sview_len(candidate.kind)) or not proof_source_index_work_charge(report, sview_len(candidate.name)) or not proof_source_index_work_charge(report, sview_len(callee_name)) or not proof_source_index_work_charge(report, sview_len(candidate.operator)) or not proof_source_index_work_charge(report, sview_len(candidate.secondary_name)) or not proof_source_index_work_charge(report, sview_len(callee_owner))
+                        summary_root <- candidate_root if candidate.kind == "resource-safety" and candidate.name == callee_name and candidate.operator == "resource-v2" and candidate.secondary_name == callee_owner
                     return "" if summary_root >= report.analysis_1.kernel.nodes.count
                     if is_sview_result:
                         sview_markers: mutable darray[usize] = []
@@ -142,10 +160,10 @@ extend ElisaProof:
                             marker: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[marker_root]
                             return "" if marker.operator != "value-param" or marker.name != return_region or marker.right >= report.analysis_1.kernel.nodes.count
                     mapped: mutable darray[Ast::Expr] = []
-                    return "" if not proof_resource_map_call_arguments(functions, function_index, arguments, argument_names, &mapped)
+                    return "" if not proof_resource_map_call_arguments(functions, function_index, arguments, argument_names, &mapped, report)
                     formal_regions: mutable darray[sview] = []
                     actual_regions: mutable darray[sview] = []
-                    return "" if not proof_resource_collect_call_regions(state, functions, function_index, mapped, &formal_regions, &actual_regions)
+                    return "" if not proof_resource_collect_call_regions(state, functions, function_index, mapped, &formal_regions, &actual_regions, report)
                     return actual_regions[formal_region_index] if formal_region_index < actual_regions.count
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
                     # Static-effect calls are frontend rewrites, not source-level calls with a
@@ -159,11 +177,13 @@ extend ElisaProof:
         # Recover the formal whose checked return witness backs an sview. A direct return names
         # its resource-use witness; a call return names the formal established by kernel replay.
         # Conditional returns from different formals and opaque transformations remain refused.
-        def proof_resource_sview_return_formal(report: ProofReport&, callee_name: sview) -> sview:
+        def proof_resource_sview_return_formal(report: mutable ProofReport&, callee_name: sview) -> sview:
             summary_root: mutable usize = report.analysis_1.kernel.nodes.count
             summaries: mutable usize = 0
             for candidate_root in 0..<report.analysis_1.kernel.nodes.count |candidate_root, report, callee_name, summary_root, summaries|:
+                return "" if not proof_source_index_work_charge(report, 1)
                 candidate: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[candidate_root]
+                return "" if not proof_source_index_work_charge(report, sview_len(candidate.kind)) or not proof_source_index_work_charge(report, sview_len(candidate.name)) or not proof_source_index_work_charge(report, sview_len(callee_name)) or not proof_source_index_work_charge(report, sview_len(candidate.operator))
                 if candidate.kind == "resource-safety" and candidate.name == callee_name and candidate.operator == "resource-v2":
                     summary_root <- candidate_root
                     summaries <- summaries + 1
@@ -173,6 +193,7 @@ extend ElisaProof:
             returned_formal: mutable sview = ""
             found_return: mutable bool = false
             for marker_root in markers |marker_root, report, returned_formal, found_return|:
+                return "" if not proof_source_index_work_charge(report, 1)
                 marker: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[marker_root]
                 marker_formal: mutable sview = ""
                 if marker.operator == "sview":
@@ -195,11 +216,18 @@ extend ElisaProof:
         # borrow conflicts are checked by the caller-side producer and then independently again
         # by resource-call-result replay.
         def proof_resource_call_result_sview_source_actual(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool):
+            proof_resource_call_result_sview_source_actual_with_depth(expression, state, functions, report, 0)
+
+        def proof_resource_call_result_sview_source_actual_with_depth(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, depth: usize) -> (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool):
             empty: ProofResourcePlace = proof_resource_empty_place()
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return (false, empty, state.bindings.binding_names.count, false, false)
+            return (false, empty, state.bindings.binding_names.count, false, false) if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, _):
                     callee_name: sview = proof_callable_name(callee)
-                    return (false, empty, state.bindings.binding_names.count, false, false) if proof_resource_callee_shadowed_by_local(callee, state)
+                    return (false, empty, state.bindings.binding_names.count, false, false) if proof_resource_callee_shadowed_by_local(callee, state, report, 0)
                     function_index: usize = proof_function_index_for_callee(functions, callee)
                     return (false, empty, state.bindings.binding_names.count, false, false) if:
                         function_index >= functions.returns.return_type_marker_complete.count or not functions.returns.return_type_marker_complete[function_index]
@@ -218,12 +246,12 @@ extend ElisaProof:
                     return (false, empty, state.bindings.binding_names.count, false, false) if formal_index >= param_count
                     mapped: mutable darray[Ast::Expr] = []
                     return (false, empty, state.bindings.binding_names.count, false, false) if:
-                        not proof_resource_map_call_arguments(functions, function_index, arguments, argument_names, &mapped)
+                        not proof_resource_map_call_arguments(functions, function_index, arguments, argument_names, &mapped, report)
                         formal_index >= mapped.count
                     actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool) = proof_resource_call_source_actual(mapped[formal_index], functions, state, report)
                     return (actual.known and actual.place.root != "" and actual.place.whole, actual.place, actual.slot, actual.is_reference, actual.mutable_reference)
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_call_result_sview_source_actual(inner, state, functions, report)
+                    return proof_resource_call_result_sview_source_actual_with_depth(inner, state, functions, report, depth + 1)
                 _:
                     pass
             return (false, empty, state.bindings.binding_names.count, false, false)
@@ -234,11 +262,18 @@ extend ElisaProof:
         # fresh allocation. Any summary that returns a reference through an opaque expression is
         # deliberately rejected instead of minting an independent capability.
         def proof_resource_call_result_source_actual(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> (known: bool, aliases_source: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool):
+            proof_resource_call_result_source_actual_with_depth(expression, state, functions, report, 0)
+
+        def proof_resource_call_result_source_actual_with_depth(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, depth: usize) -> (known: bool, aliases_source: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool):
             empty: ProofResourcePlace = proof_resource_empty_place()
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return (false, false, empty, state.bindings.binding_names.count, false, false, false)
+            return (false, false, empty, state.bindings.binding_names.count, false, false, false) if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Call(callee, _, _, _):
                     callee_name: sview = proof_callable_name(callee)
-                    return (false, false, empty, state.bindings.binding_names.count, false, false, false) if proof_resource_callee_shadowed_by_local(callee, state)
+                    return (false, false, empty, state.bindings.binding_names.count, false, false, false) if proof_resource_callee_shadowed_by_local(callee, state, report, 0)
                     function_index: usize = proof_function_index_for_callee(functions, callee)
                     return (false, false, empty, state.bindings.binding_names.count, false, false, false) if:
                         function_index >= functions.returns.return_type_marker_complete.count or not functions.returns.return_type_marker_complete[function_index]
@@ -254,39 +289,48 @@ extend ElisaProof:
                     formal_actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool) = proof_resource_call_formal_actual(expression, summary_return.formal, state, functions, report)
                     return (formal_actual.known, formal_actual.place.root != "", formal_actual.place, formal_actual.slot, formal_actual.is_reference, formal_actual.mutable_reference, formal_actual.writable)
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_call_result_source_actual(inner, state, functions, report)
+                    return proof_resource_call_result_source_actual_with_depth(inner, state, functions, report, depth + 1)
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
                     lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
-                    return proof_resource_call_result_source_actual(lowered.call, state, functions, report) if lowered.known
+                    return proof_resource_call_result_source_actual_with_depth(lowered.call, state, functions, report, depth + 1) if lowered.known
                 _:
                     pass
             return (false, false, empty, state.bindings.binding_names.count, false, false, false)
 
-        def proof_resource_local_binding_region[@r](functions: ProofFunctionTable& @r, name: sview, line: u32) -> sview @r:
-            for index in 0..<functions.parameters.locals.local_region_binding_names.count |index, functions, name, line|:
+        def proof_resource_local_binding_region[@r](functions: ProofFunctionTable& @r, name: sview, line: u32, report: mutable ProofReport&) -> sview @r:
+            for index in 0..<functions.parameters.locals.local_region_binding_names.count |index, functions, name, line, report|:
+                return "" if not proof_source_index_work_charge(report, 1)
+                return "" if not proof_source_index_work_charge(report, sview_len(functions.parameters.locals.local_region_binding_names[index])) or not proof_source_index_work_charge(report, sview_len(name))
                 if index < functions.parameters.locals.local_region_binding_regions.count and index < functions.parameters.locals.local_region_binding_lines.count and functions.parameters.locals.local_region_binding_names[index] == name and functions.parameters.locals.local_region_binding_lines[index] == line:
                     return functions.parameters.locals.local_region_binding_regions[index]
             return ""
 
-        def proof_resource_is_loop_accumulator(functions: ProofFunctionTable&, name: sview, offset: u32) -> bool:
-            for index in 0..<functions.parameters.locals.loop_accumulator_names.count |index, functions, name, offset|:
+        def proof_resource_is_loop_accumulator(functions: ProofFunctionTable&, name: sview, offset: u32, report: mutable ProofReport&) -> bool:
+            for index in 0..<functions.parameters.locals.loop_accumulator_names.count |index, functions, name, offset, report|:
+                return false if not proof_source_index_work_charge(report, 1)
+                return false if not proof_source_index_work_charge(report, sview_len(functions.parameters.locals.loop_accumulator_names[index])) or not proof_source_index_work_charge(report, sview_len(name))
                 if index < functions.parameters.locals.loop_accumulator_offsets.count and functions.parameters.locals.loop_accumulator_offsets[index] == offset and functions.parameters.locals.loop_accumulator_names[index] == name:
                     return true
             return false
 
-        def proof_resource_is_mutable_local(functions: ProofFunctionTable&, name: sview, offset: u32) -> bool:
-            for index in 0..<functions.parameters.locals.mutable_local_names.count |index, functions, name, offset|:
+        def proof_resource_is_mutable_local(functions: ProofFunctionTable&, name: sview, offset: u32, report: mutable ProofReport&) -> bool:
+            for index in 0..<functions.parameters.locals.mutable_local_names.count |index, functions, name, offset, report|:
+                return false if not proof_source_index_work_charge(report, 1)
+                return false if not proof_source_index_work_charge(report, sview_len(functions.parameters.locals.mutable_local_names[index])) or not proof_source_index_work_charge(report, sview_len(name))
                 if index < functions.parameters.locals.mutable_local_offsets.count and functions.parameters.locals.mutable_local_offsets[index] == offset and functions.parameters.locals.mutable_local_names[index] == name:
                     return true
             return false
 
-        def proof_resource_expr_result_region(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: ProofReport&) -> sview:
-            direct: sview = proof_resource_expr_region(expression, state)
+        def proof_resource_expr_result_region(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, depth: usize) -> sview:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return ""
+            direct: sview = proof_resource_expr_region(expression, state, report, depth)
             return direct if direct != ""
             match expression:
                 Ast::Expr.Call(callee, _, _, _):
-                    sview_conversion: (known: bool, receiver: Ast::Expr) = proof_resource_builtin_sview_conversion(expression, functions)
-                    return proof_resource_expr_region(sview_conversion.receiver, state) if sview_conversion.known
+                    sview_conversion: (known: bool, receiver: Ast::Expr) = proof_resource_builtin_sview_conversion(expression, functions, report, 0)
+                    return proof_resource_expr_region(sview_conversion.receiver, state, report, depth + 1) if sview_conversion.known
                     result: sview = proof_resource_call_result_region(expression, state, functions, report)
                     return result
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
@@ -295,19 +339,19 @@ extend ElisaProof:
                     # witness until a later source pass materializes the direct call.
                     return ""
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_expr_result_region(inner, state, functions, report)
+                    return proof_resource_expr_result_region(inner, state, functions, report, depth + 1)
                 Ast::Expr.Move(inner, _):
-                    return proof_resource_expr_result_region(inner, state, functions, report)
+                    return proof_resource_expr_result_region(inner, state, functions, report, depth + 1)
                 Ast::Expr.Field(object, _, _):
-                    return proof_resource_expr_result_region(object, state, functions, report)
+                    return proof_resource_expr_result_region(object, state, functions, report, depth + 1)
                 Ast::Expr.Scope(base, _, _):
-                    return proof_resource_expr_result_region(base, state, functions, report)
+                    return proof_resource_expr_result_region(base, state, functions, report, depth + 1)
                 Ast::Expr.Index(object, _, _):
-                    return proof_resource_expr_result_region(object, state, functions, report)
+                    return proof_resource_expr_result_region(object, state, functions, report, depth + 1)
                 Ast::Expr.IndexN(object, _, _):
-                    return proof_resource_expr_result_region(object, state, functions, report)
+                    return proof_resource_expr_result_region(object, state, functions, report, depth + 1)
                 Ast::Expr.Slice(object, _, _, _):
-                    return proof_resource_expr_result_region(object, state, functions, report)
+                    return proof_resource_expr_result_region(object, state, functions, report, depth + 1)
                 _:
                     pass
             return ""
@@ -316,19 +360,23 @@ extend ElisaProof:
         # Do not confuse those consumed inputs with a region value produced by the call. Calls
         # whose result is itself region-tied remain visible here; unresolved calls are already
         # rejected by the call-summary/resource transition above.
-        def proof_resource_expr_contains_unresolved_region_value(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: ProofReport&) -> bool:
+        def proof_resource_expr_contains_unresolved_region_value(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, depth: usize) -> bool:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return true
+            return true if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Call(callee, _, _, _):
-                    return true if proof_resource_expr_result_region(expression, state, functions, report) != ""
-                    return proof_resource_expr_contains_region_value(callee, state)
+                    return true if proof_resource_expr_result_region(expression, state, functions, report, depth) != ""
+                    return proof_resource_expr_contains_region_value(callee, state, report)
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
                     lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
-                    return proof_resource_expr_contains_unresolved_region_value(lowered.call, state, functions, report) if lowered.known
+                    return proof_resource_expr_contains_unresolved_region_value(lowered.call, state, functions, report, depth + 1) if lowered.known
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_expr_contains_unresolved_region_value(inner, state, functions, report)
+                    return proof_resource_expr_contains_unresolved_region_value(inner, state, functions, report, depth + 1)
                 _:
-                    return proof_resource_expr_contains_region_value(expression, state)
+                    return proof_resource_expr_contains_region_value(expression, state, report)
 
         # What an expression *statement* discards. The statement evaluates the expression and
         # throws the result away, so the only region-relevant thing it can drop is that result.
@@ -339,16 +387,20 @@ extend ElisaProof:
         # callee path made a method call on any region-owned receiver unsupported, which is 88 of
         # the 116 `region-expression-unsupported` findings on the kernel's own source and every
         # such call in a region-polymorphic function.
-        def proof_resource_expr_statement_discards_region_value(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: ProofReport&) -> bool:
+        def proof_resource_expr_statement_discards_region_value(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, depth: usize) -> bool:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return true
+            return true if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Call(_, _, _, _):
-                    return proof_resource_expr_result_region(expression, state, functions, report) != ""
+                    return proof_resource_expr_result_region(expression, state, functions, report, depth) != ""
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
                     lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
-                    return proof_resource_expr_statement_discards_region_value(lowered.call, state, functions, report) if lowered.known
+                    return proof_resource_expr_statement_discards_region_value(lowered.call, state, functions, report, depth + 1) if lowered.known
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_expr_statement_discards_region_value(inner, state, functions, report)
+                    return proof_resource_expr_statement_discards_region_value(inner, state, functions, report, depth + 1)
                 Ast::Expr.Block(_, value, _, _):
                     # A block statement discards its own value and nothing else. `for x in xs
                     # |caps|:` parses as a block, so asking whether the block *mentions* a
@@ -356,52 +408,61 @@ extend ElisaProof:
                     # and reported every such loop as a region value thrown away. The body is
                     # checked as ordinary statements by the walk just above this test; what this
                     # boundary owes is the block's own value, which for a loop is absent.
-                    return proof_resource_expr_contains_region_value(value, state)
+                    return proof_resource_expr_contains_region_value(value, state, report)
                 _:
-                    return proof_resource_expr_contains_region_value(expression, state)
+                    return proof_resource_expr_contains_region_value(expression, state, report)
 
         # A region-polymorphic callee may return/use values tied to an EXTERNAL caller region. A
         # local region remains forbidden at return, so keep that distinction explicit instead of
         # weakening the general region-value predicate used at opaque boundaries.
-        def proof_resource_expr_contains_local_region_value(expression: Ast::Expr, state: ProofResourceState&) -> bool:
-            return false if proof_resource_expr_is_collection_extent(expression, state)
+        def proof_resource_expr_contains_local_region_value(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&) -> bool:
+            proof_resource_expr_contains_local_region_value_with_depth(expression, state, report, 0)
+
+        def proof_resource_expr_contains_local_region_value_with_depth(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&, depth: usize) -> bool:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return true
+            return true if not proof_source_index_work_charge(report, 1)
+            return false if proof_resource_expr_is_collection_extent(expression, state, report)
             match expression:
                 Ast::Expr.RegionNew(_, region, _):
                     return region != "" and not proof_resource_region_is_external(state, region)
                 Ast::Expr.Ident(name, _):
-                    slot: usize = proof_resource_lookup(state, name)
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, name, report)
+                    return true if not binding.complete
+                    slot: usize = binding.slot
                     region: sview = proof_resource_binding_region(state, slot)
                     return slot < state.bindings.binding_names.count and region != "" and not proof_resource_region_is_external(state, region)
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_expr_contains_local_region_value(inner, state)
+                    return proof_resource_expr_contains_local_region_value_with_depth(inner, state, report, depth + 1)
                 Ast::Expr.Unary(_, operand, _):
-                    return proof_resource_expr_contains_local_region_value(operand, state)
+                    return proof_resource_expr_contains_local_region_value_with_depth(operand, state, report, depth + 1)
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_resource_expr_contains_local_region_value(left, state) or proof_resource_expr_contains_local_region_value(right, state)
+                    return proof_resource_expr_contains_local_region_value_with_depth(left, state, report, depth + 1) or proof_resource_expr_contains_local_region_value_with_depth(right, state, report, depth + 1)
                 Ast::Expr.Call(callee, arguments, _, _):
-                    return true if proof_resource_expr_contains_local_region_value(callee, state)
-                    for argument in arguments |argument, state|:
-                        return true if proof_resource_expr_contains_local_region_value(argument, state)
+                    return true if proof_resource_expr_contains_local_region_value_with_depth(callee, state, report, depth + 1)
+                    for argument in arguments |argument, state, report, depth|:
+                        return true if proof_resource_expr_contains_local_region_value_with_depth(argument, state, report, depth + 1)
                     return false
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
                     lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
-                    return proof_resource_expr_contains_local_region_value(lowered.call, state) if lowered.known
+                    return proof_resource_expr_contains_local_region_value_with_depth(lowered.call, state, report, depth + 1) if lowered.known
                     return true
                 Ast::Expr.Field(object, _, _):
-                    return proof_resource_expr_contains_local_region_value(object, state)
+                    return proof_resource_expr_contains_local_region_value_with_depth(object, state, report, depth + 1)
                 Ast::Expr.Scope(base, _, _):
-                    return proof_resource_expr_contains_local_region_value(base, state)
+                    return proof_resource_expr_contains_local_region_value_with_depth(base, state, report, depth + 1)
                 Ast::Expr.Index(object, index, _):
-                    return proof_resource_expr_contains_local_region_value(object, state) or proof_resource_expr_contains_local_region_value(index, state)
+                    return proof_resource_expr_contains_local_region_value_with_depth(object, state, report, depth + 1) or proof_resource_expr_contains_local_region_value_with_depth(index, state, report, depth + 1)
                 Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_resource_expr_contains_local_region_value(object, state)
-                    for argument in arguments |argument, state|:
-                        return true if proof_resource_expr_contains_local_region_value(argument, state)
+                    return true if proof_resource_expr_contains_local_region_value_with_depth(object, state, report, depth + 1)
+                    for argument in arguments |argument, state, report, depth|:
+                        return true if proof_resource_expr_contains_local_region_value_with_depth(argument, state, report, depth + 1)
                     return false
                 Ast::Expr.Slice(object, low, high, _):
-                    return proof_resource_expr_contains_local_region_value(object, state) or proof_resource_expr_contains_local_region_value(low, state) or proof_resource_expr_contains_local_region_value(high, state)
+                    return proof_resource_expr_contains_local_region_value_with_depth(object, state, report, depth + 1) or proof_resource_expr_contains_local_region_value_with_depth(low, state, report, depth + 1) or proof_resource_expr_contains_local_region_value_with_depth(high, state, report, depth + 1)
                 Ast::Expr.Move(operand, _):
-                    return proof_resource_expr_contains_local_region_value(operand, state)
+                    return proof_resource_expr_contains_local_region_value_with_depth(operand, state, report, depth + 1)
                 _:
                     return false
 
@@ -409,143 +470,32 @@ extend ElisaProof:
         # lifetime of the returned value is therefore not the union of all input lifetimes. Use
         # the verified result summary for calls, while retaining the conservative recursive walk
         # for every other expression shape.
-        def proof_resource_expr_returns_local_region_value(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: ProofReport&) -> bool:
+        def proof_resource_expr_returns_local_region_value(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> bool:
+            proof_resource_expr_returns_local_region_value_with_depth(expression, state, functions, report, 0)
+
+        def proof_resource_expr_returns_local_region_value_with_depth(expression: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, depth: usize) -> bool:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return true
+            return true if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Call(_, _, _, _):
-                    returned_region: sview = proof_resource_expr_result_region(expression, state, functions, report)
+                    returned_region: sview = proof_resource_expr_result_region(expression, state, functions, report, 0)
                     return returned_region != "" and not proof_resource_region_is_external(state, returned_region)
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
                     lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
-                    return proof_resource_expr_returns_local_region_value(lowered.call, state, functions, report) if lowered.known
+                    return proof_resource_expr_returns_local_region_value_with_depth(lowered.call, state, functions, report, depth + 1) if lowered.known
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_expr_returns_local_region_value(inner, state, functions, report)
+                    return proof_resource_expr_returns_local_region_value_with_depth(inner, state, functions, report, depth + 1)
                 _:
-                    return proof_resource_expr_contains_local_region_value(expression, state)
-
-        # This is deliberately a conservative taint walk. Once a region value enters a call,
-        # arithmetic expression, conditional, aggregate, lambda, or other opaque transformer,
-        # the proof system does not have a lifetime summary for that operation and must reject
-        # the boundary rather than treating the result as an ordinary value.
-        def proof_resource_expr_contains_region_value(expression: Ast::Expr, state: ProofResourceState&) -> bool:
-            return false if proof_resource_expr_is_collection_extent(expression, state)
-            match expression:
-                Ast::Expr.RegionNew(_, _, _):
-                    return true
-                Ast::Expr.Ident(name, _):
-                    slot: usize = proof_resource_lookup(state, name)
-                    return slot < state.bindings.binding_names.count and proof_resource_binding_region(state, slot) != ""
-                Ast::Expr.Paren(inner, _):
-                    return proof_resource_expr_contains_region_value(inner, state)
-                Ast::Expr.Unary(_, operand, _):
-                    return proof_resource_expr_contains_region_value(operand, state)
-                Ast::Expr.Binary(left, _, right, _):
-                    return proof_resource_expr_contains_region_value(left, state) or proof_resource_expr_contains_region_value(right, state)
-                Ast::Expr.Call(callee, arguments, _, _):
-                    return true if proof_resource_expr_contains_region_value(callee, state)
-                    for argument in arguments |argument, state|:
-                        return true if proof_resource_expr_contains_region_value(argument, state)
-                    return false
-                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
-                    lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
-                    return proof_resource_expr_contains_region_value(lowered.call, state) if lowered.known
-                    return true
-                Ast::Expr.Field(object, _, _):
-                    return proof_resource_expr_contains_region_value(object, state)
-                Ast::Expr.Scope(base, _, _):
-                    return proof_resource_expr_contains_region_value(base, state)
-                Ast::Expr.Index(object, index, _):
-                    return proof_resource_expr_contains_region_value(object, state) or proof_resource_expr_contains_region_value(index, state)
-                Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_resource_expr_contains_region_value(object, state)
-                    for argument in arguments |argument, state|:
-                        return true if proof_resource_expr_contains_region_value(argument, state)
-                    return false
-                Ast::Expr.Slice(object, low, high, _):
-                    return proof_resource_expr_contains_region_value(object, state) or proof_resource_expr_contains_region_value(low, state) or proof_resource_expr_contains_region_value(high, state)
-                Ast::Expr.Array(elements, _):
-                    for element in elements |element, state|:
-                        return true if proof_resource_expr_contains_region_value(element, state)
-                    return false
-                Ast::Expr.Tuple(elements, _):
-                    for element in elements |element, state|:
-                        return true if proof_resource_expr_contains_region_value(element, state)
-                    return false
-                Ast::Expr.SetLit(elements, _):
-                    for element in elements |element, state|:
-                        return true if proof_resource_expr_contains_region_value(element, state)
-                    return false
-                Ast::Expr.DictLit(entries, _):
-                    for entry in entries |entry, state|:
-                        return true if proof_resource_expr_contains_region_value(entry.key, state) or proof_resource_expr_contains_region_value(entry.value, state)
-                    return false
-                Ast::Expr.Construct(_, fields, _):
-                    for field in fields |field, state|:
-                        return true if proof_resource_expr_contains_region_value(field.value, state)
-                    return false
-                Ast::Expr.RecordUpdate(base, fields, _):
-                    return true if proof_resource_expr_contains_region_value(base, state)
-                    for field in fields |field, state|:
-                        return true if proof_resource_expr_contains_region_value(field.value, state)
-                    return false
-                Ast::Expr.If(condition, then_expr, else_expr, _):
-                    return proof_resource_expr_contains_region_value(condition, state) or proof_resource_expr_contains_region_value(then_expr, state) or proof_resource_expr_contains_region_value(else_expr, state)
-                Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    return proof_resource_expr_contains_region_value(iterable, state) or proof_resource_expr_contains_region_value(condition, state) or proof_resource_expr_contains_region_value(body, state)
-                Ast::Expr.Refinement(base, predicate, _):
-                    return proof_resource_expr_contains_region_value(base, state) or proof_resource_expr_contains_region_value(predicate, state)
-                Ast::Expr.Match(scrutinee, arms, _):
-                    return true if proof_resource_expr_contains_region_value(scrutinee, state)
-                    for arm in arms |arm, state|:
-                        return true if proof_resource_expr_contains_region_value(arm.guard, state) or proof_resource_statements_use_region_value(arm.body, state)
-                    return false
-                Ast::Expr.Catch(guarded, arms, _):
-                    return true if proof_resource_expr_contains_region_value(guarded, state)
-                    for arm in arms |arm, state|:
-                        return true if proof_resource_expr_contains_region_value(arm.guard, state) or proof_resource_statements_use_region_value(arm.body, state)
-                    return false
-                Ast::Expr.GetElse(guarded, recovery, _):
-                    return proof_resource_expr_contains_region_value(guarded, state) or proof_resource_statements_use_region_value(recovery, state)
-                Ast::Expr.Lambda(_, body, _):
-                    return proof_resource_statements_use_region_value(body, state)
-                Ast::Expr.Block(statements, value, _, _):
-                    return proof_resource_statements_use_region_value(statements, state) or proof_resource_expr_contains_region_value(value, state)
-                _:
-                    return false
-
-        def proof_resource_statements_use_region_value(statements: darray[Ast::Stmt]&, state: ProofResourceState&) -> bool:
-            for statement in statements:
-                match statement:
-                    Ast::Stmt.VarDecl(_, _, initializer, _):
-                        return true if proof_resource_expr_contains_region_value(initializer, state)
-                    Ast::Stmt.Assign(target, _, initializer, _):
-                        return true if proof_resource_expr_contains_region_value(target, state) or proof_resource_expr_contains_region_value(initializer, state)
-                    Ast::Stmt.Expr(expression, _):
-                        return true if proof_resource_expr_contains_region_value(expression, state)
-                    Ast::Stmt.Return(value, _):
-                        return true if value is returned and proof_resource_expr_contains_region_value(returned, state)
-                    Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_resource_expr_contains_region_value(condition, state) or proof_resource_statements_use_region_value(then_body, state) or proof_resource_statements_use_region_value(else_body, state)
-                    Ast::Stmt.While(condition, while_body, _):
-                        return true if proof_resource_expr_contains_region_value(condition, state) or proof_resource_statements_use_region_value(while_body, state)
-                    Ast::Stmt.For(_, _, iterable, for_body, _):
-                        return true if proof_resource_expr_contains_region_value(iterable, state) or proof_resource_statements_use_region_value(for_body, state)
-                    Ast::Stmt.Match(scrutinee, arms, _):
-                        return true if proof_resource_expr_contains_region_value(scrutinee, state)
-                        for arm in arms |arm, state|:
-                            return true if proof_resource_expr_contains_region_value(arm.guard, state) or proof_resource_statements_use_region_value(arm.body, state)
-                    Ast::Stmt.Block(_, _, _, block_body, _):
-                        return true if proof_resource_statements_use_region_value(block_body, state)
-                    Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_resource_expr_contains_region_value(expression, state)
-                    _:
-                        pass
-            return false
+                    return proof_resource_expr_contains_local_region_value(expression, state, report)
 
         # A child region may expose a value to the enclosing resource state only when that
         # value is still owned by a region that remains active in the parent. Locals introduced
         # inside the region are dropped with the child and therefore need no join operation.
         def proof_resource_check_region_boundary[@r](parent: ProofResourceState&, child: ProofResourceState&, report: mutable ProofReport& @r, function_name: sview, position: Ast::Pos) -> void:
+            return if not proof_source_index_work_charge(report, child.bindings.binding_region.count)
             for index in 0..<child.bindings.binding_region.count |index, child, parent, report, function_name, position|:
                 region: sview = child.bindings.binding_region[index]
                 if index < parent.bindings.binding_region.count and region != parent.bindings.binding_region[index]:
@@ -556,31 +506,42 @@ extend ElisaProof:
                 if region != "" and index < parent.bindings.binding_names.count and (not proof_resource_binding_region_is_live(child, index) or not proof_resource_region_is_active(parent, region)):
                     proof_resource_add_failing_obligation(report, "region-store-escape", position, function_name, "a region-owned value outlives the lexical region that owns its storage")
 
-        def proof_resource_direct_binding_name(expression: Ast::Expr) -> sview:
+        def proof_resource_direct_binding_name(expression: Ast::Expr, report: mutable ProofReport&) -> sview:
+            proof_resource_direct_binding_name_with_depth(expression, report, 0)
+
+        def proof_resource_direct_binding_name_with_depth(expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> sview:
+            if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                proof_source_index_work_charge(report, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1)
+                return ""
+            return "" if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Ident(name, _):
                     return name
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_direct_binding_name(inner)
+                    return proof_resource_direct_binding_name_with_depth(inner, report, depth + 1)
                 _:
                     return ""
 
         def proof_resource_handle_region_assignment[@s, @r](target: Ast::Expr, initializer: Ast::Expr, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, position: Ast::Pos, functions: mutable ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
             match initializer:
                 Ast::Expr.RegionNew(operand, region, _):
-                    proof_resource_add_region_discard(state, report, operand, region, position, function_name) if proof_resource_is_discard_target(target)
-                    (proof_resource_rebind_region_allocation(state, report, target, operand, region, position, function_name) can Global{Read,Write}) if not proof_resource_is_discard_target(target)
+                    discard_target: bool = proof_resource_is_discard_target(target, report)
+                    proof_resource_add_region_discard(state, report, operand, region, position, function_name) if discard_target
+                    (proof_resource_rebind_region_allocation(state, report, target, operand, region, position, function_name) can Global{Read,Write}) if not discard_target
                     return
                 _:
                     pass
-            assigned_region: mutable sview = proof_resource_expr_result_region(initializer, state, functions, report)
-            scalar_target_slot: usize = proof_resource_lookup(state, proof_resource_direct_binding_name(target))
+            assigned_region: mutable sview = proof_resource_expr_result_region(initializer, state, functions, report, 0)
+            scalar_binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, proof_resource_direct_binding_name(target, report), report)
+            scalar_target_slot: usize = scalar_binding.slot
             assigned_region <- "" if proof_resource_binding_is_scalar(state, scalar_target_slot)
             if assigned_region != "":
-                target_name: sview = proof_resource_direct_binding_name(target)
-                target_slot: usize = proof_resource_lookup(state, target_name)
+                target_name: sview = proof_resource_direct_binding_name(target, report)
+                target_binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, target_name, report)
+                target_slot: usize = target_binding.slot
                 source_place: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(initializer, report)
-                source_slot: usize = proof_resource_lookup(state, source_place.place.root)
+                source_binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, source_place.place.root, report)
+                source_slot: usize = source_binding.slot
                 target_access: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(target, report)
                 encoded_source: usize = proof_resource_encode_access_place(initializer, report)
                 source_region_owner: bool = source_slot < state.bindings.binding_region_owner.count and state.bindings.binding_region_owner[source_slot]
@@ -596,5 +557,5 @@ extend ElisaProof:
                     # target; self-assignment is a no-op for ownership purposes.
                     proof_resource_mark_binding_moved(state, source_slot) if source_region_owner and source_slot != target_slot
                     proof_resource_record_event(state, report, "resource-region-assign", "", encoded_source, target_name, assigned_region, 0)
-            if assigned_region == "" and not proof_resource_binding_is_scalar(state, scalar_target_slot) and proof_resource_expr_contains_unresolved_region_value(initializer, state, functions, report):
+            if assigned_region == "" and not proof_resource_binding_is_scalar(state, scalar_target_slot) and proof_resource_expr_contains_unresolved_region_value(initializer, state, functions, report, 0):
                 proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "region value flows through an assignment without a lifetime summary")

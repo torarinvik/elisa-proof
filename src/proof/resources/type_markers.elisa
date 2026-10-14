@@ -28,7 +28,8 @@ extend ElisaProof:
             hashes_count: usize = generic_index.generics.generic_param_line_index_hashes.count
             return (false, false) if:
                 hashes_count != generic_index.generics.generic_param_line_index_values.count or hashes_count != generic_index.generics.generic_param_line_index_counts.count
-                not proof_type_audit_work_charge(1 + sview_len(name), source_work)
+                not proof_type_audit_work_charge(1, source_work)
+                not proof_type_audit_work_charge(sview_len(name), source_work)
             if count == 0:
                 return (false, false) if hashes_count != 0
                 return (true, false)
@@ -45,7 +46,7 @@ extend ElisaProof:
                 if generic_index.generics.generic_param_line_index_hashes[slot] == wanted_hash:
                     return (false, false) if current >= lines.count or current >= names.count
                     current_name: sview = names[current]
-                    return (false, false) if not proof_type_audit_work_charge(1 + sview_len(current_name), source_work)
+                    return (false, false) if not proof_type_audit_work_charge(1, source_work) or not proof_type_audit_work_charge(sview_len(current_name), source_work)
                     if lines[current] == declaration_line and current_name == name:
                         return (false, false) if generic_index.generics.generic_param_line_index_counts[slot] != 1
                         return (true, true)
@@ -88,10 +89,10 @@ extend ElisaProof:
 
         # An unknown marker is semantic uncertainty, not proof-work exhaustion. Callers must
         # check `complete` before using the flags to authorize a resource transition.
-        def proof_resource_marker_incomplete(source_work: mutable usize&) -> (reference: bool, mutable_reference: bool, mutable: bool, complete: bool):
+        def proof_resource_marker_incomplete(source_work: mutable usize&) -> (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool):
             return (true, false, false, false)
 
-        def proof_resource_marker_exhausted(source_work: mutable usize&) -> (reference: bool, mutable_reference: bool, mutable: bool, complete: bool):
+        def proof_resource_marker_exhausted(source_work: mutable usize&) -> (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool):
             source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
             return (true, false, false, false)
 
@@ -114,22 +115,22 @@ extend ElisaProof:
             nested_scope: bool = index.markers.resource_marker_type_nested_scope[lookup.row]
             return (true, 1, aliases, target, nested_scope)
 
-        def proof_resource_type_marker_summary_with_work_depth(expression: Ast::Expr, declarations: darray[Ast::Decl]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, declaration_line: u32, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&, depth: usize) -> (reference: bool, mutable_reference: bool, mutable: bool, complete: bool):
-            unknown: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = (true, false, false, false)
-            empty: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = (false, false, false, true)
+        def proof_resource_type_marker_summary_with_work_depth(expression: Ast::Expr, declarations: darray[Ast::Decl]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, declaration_line: u32, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&, depth: usize) -> (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool):
+            unknown: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = (true, false, false, false)
+            empty: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = (false, false, false, true)
             return proof_resource_marker_exhausted(source_work) if:
                 depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
                 not proof_type_audit_work_charge(1, source_work)
             match expression:
                 Ast::Expr.Unary(operator, operand, _):
-                    nested: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_with_work_depth(operand, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work, depth + 1)
+                    nested: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_with_work_depth(operand, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work, depth + 1)
                     # An incomplete nested result may conservatively indicate reference risk,
                     # but it cannot establish mutable access for a producer.
                     return unknown if not nested.complete
                     reference: bool = nested.reference or operator == TokenKind.Ampersand or operator == TokenKind.Lmut
-                    mutable: bool = nested.mutable or operator == TokenKind.Mutable
-                    mutable_reference: bool = nested.mutable_reference or operator == TokenKind.Lmut or (operator == TokenKind.Ampersand and mutable) or (operator == TokenKind.Mutable and nested.reference)
-                    return (reference, mutable_reference, mutable, nested.complete)
+                    is_mutable: bool = nested.is_mutable or operator == TokenKind.Mutable
+                    mutable_reference: bool = nested.mutable_reference or operator == TokenKind.Lmut or (operator == TokenKind.Ampersand and is_mutable) or (operator == TokenKind.Mutable and nested.reference)
+                    return (reference, mutable_reference, is_mutable, nested.complete)
                 Ast::Expr.Paren(inner, _):
                     return proof_resource_type_marker_summary_with_work_depth(inner, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work, depth + 1)
                 Ast::Expr.Refinement(base, _, _):
@@ -154,6 +155,10 @@ extend ElisaProof:
                     generic_shadow: (complete: bool, matches: bool) = proof_resource_marker_generic_name_matches_at_line_with_work(name, declaration_line, generic_lines, generic_names, generic_index, generic_names_complete, source_work)
                     return proof_resource_marker_exhausted(source_work) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     return proof_resource_marker_incomplete(source_work) if not generic_shadow.complete or generic_shadow.matches
+                    # Stage1 resolves its exact builtin table before user aliases. Share that
+                    # table so this classifier neither misses marker and opaque-handle builtins
+                    # nor treats unsupported scalar spellings as builtins.
+                    return empty if proof_stage1_annotation_builtin_type_name(name)
                     lookup: (complete: bool, declarations: usize, aliases: usize, target: Ast::Expr, nested_scope: bool) = proof_resource_marker_type_name_with_work(generic_index, name, source_work, 0)
                     return proof_resource_marker_exhausted(source_work) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     return proof_resource_marker_incomplete(source_work) if not lookup.complete
@@ -163,7 +168,7 @@ extend ElisaProof:
                         return proof_resource_type_marker_summary_with_work_depth(lookup.target, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work, depth + 1)
                     if lookup.declarations > 1 or lookup.aliases > 1:
                         return proof_resource_marker_incomplete(source_work)
-                    return empty if lookup.declarations == 1 or proof_builtin_scalar_type_name(name) or proof_resource_marker_builtin_collection_type_name(name) or name in {"sview", "cstr", "dstr", "str", "void", "never", "type"}
+                    return empty if lookup.declarations == 1
                     return proof_resource_marker_incomplete(source_work)
                 Ast::Expr.Scope(_, _, _):
                     return proof_resource_marker_incomplete(source_work)
@@ -173,12 +178,12 @@ extend ElisaProof:
         def proof_resource_marker_builtin_collection_type_name(name: sview) -> bool:
             return name in {"array", "darray", "view"}
 
-        def proof_resource_type_marker_summary_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&) -> (reference: bool, mutable_reference: bool, mutable: bool, complete: bool):
+        def proof_resource_type_marker_summary_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&) -> (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool):
             empty_lines: darray[u32] = []
             empty_names: darray[sview] = []
             return proof_resource_type_marker_summary_with_work_depth(expression, declarations, empty_lines, empty_names, 0, generic_index, generic_names_complete, source_work, 0)
 
-        def proof_resource_type_marker_summary_for_owner_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, declaration_line: u32, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&) -> (reference: bool, mutable_reference: bool, mutable: bool, complete: bool):
+        def proof_resource_type_marker_summary_for_owner_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, declaration_line: u32, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, source_work: mutable usize&) -> (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool):
             return proof_resource_type_marker_summary_with_work_depth(expression, declarations, generic_lines, generic_names, declaration_line, generic_index, generic_names_complete, source_work, 0)
 
         # Scalar classification stays limited to bare primitive spellings and parentheses.

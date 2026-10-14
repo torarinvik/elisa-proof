@@ -9,30 +9,33 @@ extend ElisaProof:
                 report.analysis_1.budgets.resource_steps <- report.analysis_1.budgets.resource_steps + 1
                 match statement:
                     Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
-                        shadowed: bool = proof_resource_lookup(state, local_name) < state.bindings.binding_names.count
-                        local_markers: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, state.context.generic_declaration_line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
+                        shadow_binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, local_name, report)
+                        shadowed: bool = not shadow_binding.complete or shadow_binding.slot < state.bindings.binding_names.count
+                        local_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, state.context.generic_declaration_line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
                         (proof_resource_check_var(local_name, type_expression, initializer, local_markers, state, report, function_name, position, functions) can Global{Read,Write})
-                        local_marker_slot: usize = proof_resource_lookup(state, local_name)
+                        local_binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, local_name, report)
+                        local_marker_slot: usize = local_binding.slot
                         state.bindings.binding_type_marker_complete[local_marker_slot] <- local_markers.complete if local_marker_slot < state.bindings.binding_type_marker_complete.count
                         if proof_resource_type_is_scalar(type_expression):
-                            scalar_slot: usize = proof_resource_lookup(state, local_name)
+                            scalar_slot: usize = local_marker_slot
                             state.bindings.binding_scalar[scalar_slot] <- true if scalar_slot < state.bindings.binding_scalar.count
                         borrowable: bool = not local_markers.reference and not proof_resource_type_is_scalar(type_expression)
-                        borrowable_slot: usize = proof_resource_lookup(state, local_name)
+                        borrowable_slot: usize = local_marker_slot
                         state.bindings.binding_borrowable[borrowable_slot] <- borrowable if borrowable_slot < state.bindings.binding_borrowable.count
                         proof_resource_set_binding_borrowable(state, report, local_name, borrowable)
                         if proof_resource_type_is_collection(type_expression):
-                            extent_slot: usize = proof_resource_lookup(state, local_name)
+                            extent_slot: usize = local_marker_slot
                             state.bindings.binding_extent[extent_slot] <- true if extent_slot < state.bindings.binding_extent.count
                         state.evidence.facts.clear() if shadowed or proof_resource_expr_has_call(initializer) or proof_resource_expr_has_move(initializer)
                     Ast::Stmt.Assign(target, operator, initializer, position):
-                        target_name: sview = proof_resource_direct_binding_name(target)
-                        target_slot: usize = proof_resource_lookup(state, target_name)
+                        target_name: sview = proof_resource_direct_binding_name(target, report)
+                        target_binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, target_name, report)
+                        target_slot: usize = target_binding.slot
                         # A first `name = value` declares `name` (inferred_bindings.elisa).
                         # A later `=` to such a local that cannot write it shadows it instead.
                         shadows_inferred: bool = operator == TokenKind.Assign and target_slot < state.bindings.binding_names.count and (any inferred in state.bindings.inferred_names where inferred == target_name) and not (target_slot < state.bindings.binding_writable.count and state.bindings.binding_writable[target_slot])
                         if operator == TokenKind.Assign and target_name != "" and (target_slot >= state.bindings.binding_names.count or shadows_inferred):
-                            inferred_type: Ast::Expr = proof_resource_inferred_binding_type(initializer, state, functions)
+                            inferred_type: Ast::Expr = proof_resource_inferred_binding_type(initializer, state, functions, report)
                             if not (inferred_type is Ast::Expr.Absent):
                                 declaration: darray[Ast::Stmt] = [Ast::Stmt.VarDecl(target_name, inferred_type, initializer, position)]
                                 (proof_resource_check_statements(declaration, state, report, function_name, functions) can Global{Read,Write})
@@ -41,7 +44,7 @@ extend ElisaProof:
                             # An untyped shadow stays untracked, as every first `=` binding was.
                             continue if shadows_inferred
                         target_is_scalar: bool = target_slot < state.bindings.binding_scalar.count and state.bindings.binding_scalar[target_slot]
-                        if not proof_resource_is_discard_target(target) and not target_is_scalar and proof_resource_expr_returns_local_borrow(initializer, state, functions, report):
+                        if not proof_resource_is_discard_target(target, report) and not target_is_scalar and proof_resource_expr_returns_local_borrow(initializer, state, functions, report):
                             proof_resource_add_failing_obligation(report, "borrow-escape", position, function_name, "a newly created borrow is assigned across a binding boundary")
                         (proof_resource_check_write(target, state, report, function_name, position, functions) can Global{Read,Write})
                         (proof_resource_check_expression(target, state, report, function_name, functions) can Global{Read,Write})
@@ -58,7 +61,7 @@ extend ElisaProof:
                                 proof_resource_add_region_discard(state, report, operand, region, position, function_name)
                             _:
                                 (proof_resource_check_expression(expression, state, report, function_name, functions) can Global{Read,Write})
-                                proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "a region-owned expression must be bound or explicitly rejected at this resource boundary") if proof_resource_expr_statement_discards_region_value(expression, state, functions, report)
+                                proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "a region-owned expression must be bound or explicitly rejected at this resource boundary") if proof_resource_expr_statement_discards_region_value(expression, state, functions, report, 0)
                         state.evidence.facts.clear() if proof_resource_expr_has_call(expression) or proof_resource_expr_has_move(expression)
                     Ast::Stmt.Return(value, position):
                         if value is returned:
@@ -72,13 +75,13 @@ extend ElisaProof:
                                 proof_resource_add_failing_obligation(report, "borrow-escape", position, function_name, "a borrow cannot escape this lexical proof resource state")
                             if not return_is_scalar and proof_resource_expr_returns_local_region_value(returned, state, functions, report):
                                 proof_resource_add_failing_obligation(report, "region-return-escape", position, function_name, "a region-owned value cannot escape the region that owns its storage")
-                            returned_region: sview = proof_resource_expr_result_region(returned, state, functions, report)
+                            returned_region: sview = proof_resource_expr_result_region(returned, state, functions, report, 0)
                             # The summary marker records where the value really lives; it must be the
                             # declared lifetime, including when a call permutes region parameters.
                             declared_return_region: sview = proof_resource_function_return_region(functions, return_function_index)
                             proof_resource_add_failing_obligation(report, "region-return-escape", position, function_name, "the returned value lives in a region other than the declared return region") if not return_is_scalar and returned_region != "" and declared_return_region != "" and returned_region != declared_return_region
                             return_mutable_reference: bool = return_function_index < functions.returns.return_mutable_references.count and functions.returns.return_mutable_references[return_function_index]
-                            return_is_region_collection: bool = return_function_index < functions.returns.return_types.count and proof_resource_region_collection_value_type(functions.returns.return_types[return_function_index], functions)
+                            return_is_region_collection: bool = return_function_index < functions.returns.return_types.count and proof_resource_region_collection_value_type(functions.returns.return_types[return_function_index], report)
                             # Check the returned expression before emitting its summary marker. The
                             # resulting resource-use/call transition (or the explicit allocation
                             # transition below) is then available as the marker's witness.
@@ -88,12 +91,12 @@ extend ElisaProof:
                                 return_marker_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
                                 opaque_return_call: bool = proof_resource_expr_has_opaque_call_result(returned, state, functions, return_marker_work, 0)
                                 report.source_types.source_effect_index.work.implicit_effect_work <- return_marker_work
-                                if proof_resource_expr_carries_resource(returned, state, report) or proof_resource_expr_contains_region_value(returned, state) or opaque_return_call:
+                                if proof_resource_expr_carries_resource(returned, state, report) or proof_resource_expr_contains_region_value(returned, state, report) or opaque_return_call:
                                     proof_resource_add_failing_obligation(report, "resource-type-marker-incomplete", position, function_name, "the resource checker cannot classify this resource-bearing return safely")
                             return_witness: mutable usize = report.analysis_1.kernel.nodes.count
                             # The node-count sentinel goes stale as later lookups add nodes, so presence is a flag.
                             return_witness_found: mutable bool = false
-                            unlinked_call: bool = proof_resource_sview_return_call_has_unlinked_provenance(returned, functions)
+                            unlinked_call: bool = proof_resource_sview_return_call_has_unlinked_provenance(returned, functions, report, 0)
                             unlinked_sview_call: bool = return_is_sview and unlinked_call
                             # A reference returned straight out of a verified call is backed by
                             # whatever the callee summary returns, applied to this call's arguments;
@@ -110,10 +113,10 @@ extend ElisaProof:
                                         # binding, produced by the returned expression itself; see
                                         # return_witnesses.elisa. `return nodes[index].left` uses
                                         # `nodes` and `index`, and only `nodes` backs the result.
-                                        return_witness <- proof_resource_exact_return_witness(state, report, return_events_before, proof_resource_return_root_name(returned, functions), returned_region, return_is_sview, return_mutable_reference)
+                                        return_witness <- proof_resource_exact_return_witness(state, report, return_events_before, proof_resource_return_root_name(returned, functions, report), returned_region, return_is_sview, return_mutable_reference)
                                         return_witness_found <- return_witness < report.analysis_1.kernel.nodes.count
                             else:
-                                callee_name: sview = proof_resource_sview_return_call_name(returned, functions)
+                                callee_name: sview = proof_resource_sview_return_call_name(returned, functions, report, 0)
                                 callee_return_formal: mutable sview = ""
                                 if unlinked_sview_call and callee_name != "":
                                     callee_return_formal <- proof_resource_sview_return_formal(report, callee_name)
@@ -129,6 +132,7 @@ extend ElisaProof:
                                 source_valid: mutable bool = actual.known and actual.place.whole and actual.slot < state.bindings.binding_names.count and actual.slot < state.bindings.binding_region.count and proof_resource_binding_region(state, actual.slot) == returned_region and (returned_region == "" or proof_resource_binding_region_is_live(state, actual.slot)) and not proof_resource_binding_is_moved(state, actual.slot)
                                 source_slot: mutable usize = actual.slot
                                 source_place: mutable ProofResourcePlace = actual.place
+                                return if not proof_source_index_work_charge(report, state.bindings.binding_names.count)
                                 for _ in 0..<state.bindings.binding_names.count |source_valid, source_slot, source_place, state|:
                                     continue if source_slot >= state.borrows.borrow_present.count or not state.borrows.borrow_present[source_slot]
                                     if source_slot >= state.borrows.borrow_target_slots.count or source_slot >= state.borrows.borrow_target_places.count:
@@ -186,8 +190,8 @@ extend ElisaProof:
                         (proof_resource_check_expression(condition, state, report, function_name, functions) can Global{Read,Write})
                         then_state: mutable ProofResourceState = proof_resource_empty()
                         else_state: mutable ProofResourceState = proof_resource_empty()
-                        proof_resource_copy_into(state, &then_state)
-                        proof_resource_copy_into(state, &else_state)
+                        proof_resource_copy_into(state, &then_state, report)
+                        proof_resource_copy_into(state, &else_state, report)
                         proof_resource_mark_scope_inherited(state, &then_state)
                         proof_resource_mark_scope_inherited(state, &else_state)
                         (proof_resource_check_statements(then_body, &then_state, report, function_name, functions) can Global{Read,Write})
@@ -198,7 +202,7 @@ extend ElisaProof:
                     Ast::Stmt.While(condition, while_body, _):
                         (proof_resource_check_expression(condition, state, report, function_name, functions) can Global{Read,Write})
                         while_state: mutable ProofResourceState = proof_resource_empty()
-                        proof_resource_copy_into(state, &while_state)
+                        proof_resource_copy_into(state, &while_state, report)
                         proof_resource_mark_scope_inherited(state, &while_state)
                         (proof_resource_check_statements(while_body, &while_state, report, function_name, functions) can Global{Read,Write})
                         proof_resource_close_child(state, while_state, report, true)
@@ -206,9 +210,9 @@ extend ElisaProof:
                     Ast::Stmt.For(_, variables, iterable, for_body, _):
                         (proof_resource_check_expression(iterable, state, report, function_name, functions) can Global{Read,Write})
                         for_state: mutable ProofResourceState = proof_resource_empty()
-                        proof_resource_copy_into(state, &for_state)
+                        proof_resource_copy_into(state, &for_state, report)
                         proof_resource_mark_scope_inherited(state, &for_state)
-                        iterable_is_range: bool = proof_resource_iterable_is_range(iterable)
+                        iterable_is_range: bool = proof_resource_iterable_is_range(iterable, report)
                         for variable in variables |variable, for_state, iterable_is_range|:
                             if variable != "" and iterable_is_range:
                                 # A range binder is a fresh scalar copy of each integer in the
@@ -221,10 +225,12 @@ extend ElisaProof:
                                 # mutable captures stay writable, while readonly captures keep
                                 # the readonly rule. Registering every capture as immutable made
                                 # legal writes to mutable accumulators look like prover gaps.
-                                outer_slot: usize = proof_resource_lookup(state, variable)
-                                capture_is_reference: bool = outer_slot < state.bindings.binding_reference.count and state.bindings.binding_reference[outer_slot]
-                                capture_is_mutable_reference: bool = outer_slot < state.bindings.binding_mutable_reference.count and state.bindings.binding_mutable_reference[outer_slot]
-                                capture_is_writable: bool = proof_resource_binding_is_writable(state, outer_slot) if outer_slot < state.bindings.binding_names.count else false
+                                outer_binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, variable, report)
+                                outer_slot: usize = outer_binding.slot
+                                proof_resource_add_failing_obligation(report, "region-capture-unsupported", position, function_name, "a loop capture could not be resolved within the source analysis budget") if not outer_binding.complete
+                                capture_is_reference: bool = outer_binding.complete and outer_slot < state.bindings.binding_reference.count and state.bindings.binding_reference[outer_slot]
+                                capture_is_mutable_reference: bool = outer_binding.complete and outer_slot < state.bindings.binding_mutable_reference.count and state.bindings.binding_mutable_reference[outer_slot]
+                                capture_is_writable: bool = proof_resource_binding_is_writable(state, outer_slot) if outer_binding.complete and outer_slot < state.bindings.binding_names.count else false
                                 capture_target: usize = outer_slot if capture_is_reference and outer_slot < state.bindings.binding_names.count else for_state.bindings.binding_names.count
                                 borrow_present: bool = capture_target < state.borrows.borrow_present.count and state.borrows.borrow_present[capture_target]
                                 borrow_mutable: bool = borrow_present and capture_target < state.borrows.borrow_mutable.count and state.borrows.borrow_mutable[capture_target]
@@ -240,7 +246,7 @@ extend ElisaProof:
                         pattern_source_carries_resource: mutable bool = false
                         for arm in arms |arm, state, report, function_name, functions, pattern_source_classified, pattern_source_supported, pattern_source_carries_resource|:
                             arm_state: mutable ProofResourceState = proof_resource_empty()
-                            proof_resource_copy_into(state, &arm_state)
+                            proof_resource_copy_into(state, &arm_state, report)
                             proof_resource_mark_scope_inherited(state, &arm_state)
                             proof_resource_check_pattern_names_with_source(arm.pattern, scrutinee, &pattern_source_classified, &pattern_source_supported, &pattern_source_carries_resource, &arm_state, report, functions, position, function_name)
                             match arm.guard:
@@ -271,7 +277,7 @@ extend ElisaProof:
                             state.evidence.facts.clear()
                             continue
                         block_state: mutable ProofResourceState = proof_resource_empty()
-                        proof_resource_copy_into(state, &block_state)
+                        proof_resource_copy_into(state, &block_state, report)
                         proof_resource_mark_scope_inherited(state, &block_state)
                         if block_kind == "region" and binding == "":
                             region_name: sview = clause[0] if clause.count > 0 else ""
@@ -300,8 +306,8 @@ extend ElisaProof:
                     Ast::Stmt.Contract(kind, expression, position):
                         if kind in {"assert", "requires"} or proof_is_ensure_kind(kind):
                             (proof_resource_check_contract_expression(expression, state, report, function_name, functions, 0) can Global{Read,Write})
-                            proof_resource_add_failing_obligation(report, "borrow-contract-unsupported", position, function_name, "resource-bearing expressions are not admitted in logical contracts") if proof_resource_expr_has_address_of(expression) or proof_resource_expr_uses_local_borrow(expression, state)
-                            proof_resource_add_failing_obligation(report, "region-contract-unsupported", position, function_name, "region-owned expressions are not admitted in logical contracts") if proof_resource_expr_contains_region_value(expression, state)
+                            proof_resource_add_failing_obligation(report, "borrow-contract-unsupported", position, function_name, "resource-bearing expressions are not admitted in logical contracts") if proof_resource_expr_has_address_of(expression) or proof_resource_expr_uses_local_borrow(expression, state, report)
+                            proof_resource_add_failing_obligation(report, "region-contract-unsupported", position, function_name, "region-owned expressions are not admitted in logical contracts") if proof_resource_expr_contains_region_value(expression, state, report)
                     Ast::Stmt.Break(_, _):
                         pass
                     Ast::Stmt.Continue(_, _):
@@ -319,7 +325,11 @@ extend ElisaProof:
             state.context.function_name <- function_name
             state.context.generic_declaration_line <- line
             state.evidence.facts.extend(facts)
-            proof_global_constant_static_scope(file, function_name, line, &state.statics.static_scope, &state.statics.static_names, &state.statics.static_root_names)
+            proof_global_constant_static_scope(file, function_name, line, &state.statics.static_scope, &state.statics.static_names, &state.statics.static_root_names, report)
+            if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                report.proof_obligation(false)
+                proof_add_budget_finding(report, "resource-analysis-budget", line, function_name, "resource static-scope discovery exceeded its shared source-work budget", "resource-static-scope-work", report.source_types.source_effect_index.work.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             function_index: usize = proof_function_index_of_current(functions, function_name)
             region_parameter_count: usize = proof_resource_function_region_param_count(functions, function_index)
             for region_index in 0..<region_parameter_count |region_index, functions, function_index, state, report|:
@@ -333,10 +343,10 @@ extend ElisaProof:
                     proof_resource_record_event(&state, report, "resource-region-param", "external", 0, region, "", 0)
             for parameter in parameters |state, report|:
                 state.context.formal_parameter_types.push(parameter.type_expression)
-                parameter_markers: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(parameter.type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, state.context.generic_declaration_line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
+                parameter_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(parameter.type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, state.context.generic_declaration_line, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
                 is_reference: bool = parameter_markers.complete and parameter_markers.reference
                 is_mutable_reference: bool = parameter_markers.complete and parameter_markers.mutable_reference
-                writable: bool = parameter_markers.complete and (parameter.is_mutable or parameter_markers.mutable or is_mutable_reference)
+                writable: bool = parameter_markers.complete and (parameter.is_mutable or parameter_markers.is_mutable or is_mutable_reference)
                 # Unknown formals enter the kernel as values. Their opaque marker bit prevents
                 # later resource operations from using that conservative placeholder as a capability.
                 proof_resource_add_binding_traced(&state, report, parameter.name, is_reference, is_mutable_reference, writable, state.bindings.binding_names.count, false, "", proof_resource_empty_place(), 0)
@@ -354,4 +364,8 @@ extend ElisaProof:
                         proof_resource_record_sview_parameter(&state, report, parameter.type_expression, parameter.name, parameter_region, Ast::expr_pos(parameter.type_expression), function_name)
             state.context.formal_count <- state.bindings.binding_names.count
             (proof_resource_check_statements(body, &state, report, function_name, functions) can Global{Read,Write})
+            if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                report.proof_obligation(false)
+                proof_add_budget_finding(report, "resource-analysis-budget", line, function_name, "resource expression classification exceeded its shared source-work budget", "resource-expression-work", report.source_types.source_effect_index.work.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             proof_resource_finish(&state, report, function_name, line, failed_before, parameters.count, functions, function_index)
