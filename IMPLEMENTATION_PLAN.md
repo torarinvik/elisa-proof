@@ -4,14 +4,14 @@
 
 This is the active high-return sequence. Older toolchain snapshots and experiment logs below are historical evidence, not current status. Use the newest clean Elisa compiler revision that can produce a source-matched Stage1; preserve expression-based Elisa and its safety/effect checks in every source change.
 
-1. **Restore a trustworthy compiler lane.** Elisa-compiler `main` is still pinned at c93a777, but its checkout is dirty and its available Stage1 product is 5cda9b4, so it is not a clean current-source compiler. Proof still pins Stage0 093ec96, while Core `main` and the installed Stage0 now match f8735f58. Do not mix these revisions or refresh the proof pin yet. The last clean c93 seed failed before object emission with 438 `call may store` and 81 `cannot infer region` diagnostics; `emit_edir.elisa:1374` remains a separate `source_identity_region` inference failure. A compiler-owned p115 O0 probe is currently running against Core candidate 26af7953; wait for that exact probe before starting another compiler job. The earlier StoreFlow audit ruled out recursive `Expr.IndexN` as the remaining retention cause; preserve its AST-storage negative control and resolve the `Expr.Scope` owner save/restore path with a sound model. Only run a full seed after focused diagnostics show an actual reduction, then build Stage0 and Stage1 from one clean tuple. Keep timing skipped.
+1. **Restore a trustworthy compiler lane.** Elisa-compiler `main` remains c93a777, but its checkout is dirty and its available Stage1 product is 5cda9b4, so it is not a clean current-source compiler. Proof still pins Stage0 093ec96, while Core `main` and the installed Stage0 now match f8735f58. Do not mix these revisions or refresh the proof pin yet. The last clean c93 seed failed before object emission with 438 `call may store` and 81 `cannot infer region` diagnostics. The compiler-owned p115 O0 probe against Core 26af7953 has now completed with 651 `call may store` and 3 `cannot infer region` diagnostics, versus 438 and 81 on the clean baseline. Region inference improved sharply, while StoreFlow diagnostics rose by 213; these classes are separate and the aggregate is not a quality score. `emit_edir.elisa:1374` still fails and no object was emitted, so this candidate is not qualified for a full seed. Preserve the AST-retention negative control and resolve the `Expr.Scope` owner save/restore path with a sound model; separately resolve `source_identity_region`. Rebuild Stage0 and Stage1 from one clean tuple only after focused counts improve. Keep timing skipped.
 
 2. **Restore the recursive proof semantic gate.** Core `main` is now f8735f58. Its relevant-formal SMT binding change removes the recursive call-precondition diagnostics and has focused positive/negative environment tests, but `TestGhostRecursiveProofSupportsImmutableLocalsAndSViewIndex` still fails at the recursive `ensure` equality. The VC contains the `next_state` defining equation; the missing link is the local `byte: u8 = value[index].u8()` because SMT translation cannot recover the source type of the indexed `char` cast. A general bitvector/call-alias experiment made the focused test exceed two minutes and was discarded. Next implement a narrowly scoped, exact SView-byte/cast model with bounded solver work; retain sign-changing conversion negatives and require the recursive gate plus the full semantic package to pass.
 3. **Qualify global-mutable grants and kernel soundness.** Existing Core grant controls cover separate `Global.Read`/`Global.Write`, read-modify-write, const purity, brace syntax, shadowing, and indexed/reference access, but they have not been rerun on f8735f58. The proof runtime grant regression still lacks a current source-matched executable. Re-run the Core grant matrix on f8735f58, then—after restoring the compiler lane—run proof CLI and direct-API grants, wrong-member, alias/reference, inferred-row, and transitive-call controls. Preserve the typed-kernel classical-mode fixture and frozen replay/mutation checks; malformed certificates, missing identity, and exhausted budgets must fail closed.
 
-4. **Verify proof/kernel soundness and high-return performance changes.** Static authority/admission, structural replay, pattern literal, source-work, kernel-audit, and goal/index-budget checks pass. The current dirty proof-source change rejects missing-expression sentinels as arithmetic leaves and skips only absent slice bounds after validating their arena shape; its focused static checks pass, but runtime replay is unqualified. The proof build correctly refuses the stale compiler snapshot. After a clean Stage1 is available, run focused malformed-slice/sentinel mutations, goal-fact, postcondition-context, index-safety, type-bound-local, linear-certificate, structural-replay, and source-authority regressions, then the relevant proof suite. Compare work counters and adversarial scaling where available, retaining bounded accounting for walks, allocation, hashing, and probes.
+4. **Verify proof/kernel soundness and high-return performance changes.** The local proof main now includes arithmetic safety leaf/shape hardening, aggregate traversal, bounded quantifier scans, and binary/unary operator arity checks. Source-only budget, width, index, AST-mirror, quantifier-premise, source-length, and diff checks pass. Runtime refusal/replay testing correctly refuses the old binary because it does not match the current proof HEAD; the Stage1 source checkout is also dirty and its product is stale. Once a clean source-matched Stage1 exists, run malformed-slice/sentinel and operator/arity mutations, goal-fact, postcondition-context, index-safety, type-bound-local, linear-certificate, structural-replay, and source-authority regressions, then the relevant proof suite. Compare work counters and adversarial scaling where available, retaining bounded accounting for walks, allocation, hashing, and probes.
 
-5. **Commit qualified source improvements and refresh this plan.** Core commits ce002c04 and f8735f58 are on main and synced to origin; f873’s focused SMT relevant-formal tests pass, while the recursive `ensure` gate remains red. Proof main is eight commits ahead of origin with dirty source changes, including the sentinel validation work; do not commit those changes until they pass a source-matched Stage1 build and replay controls. Record exact compiler/proof revisions and commands with results. Keep timing skipped and refresh the proof pin only after Stage0 and Stage1 come from one coherent tuple.
+5. **Commit qualified source improvements and refresh this plan.** Core commits ce002c04 and f8735f58 are on main and synced to origin; f873’s focused SMT relevant-formal tests pass, while the recursive `ensure` gate remains red. Proof main is seventeen commits ahead of origin; recent kernel hardening is committed locally but not runtime-qualified, and additional bounded-work changes remain in the working tree pending static verification and a source-matched runtime lane. Record exact compiler/proof revisions and commands with results. Keep timing skipped and refresh the proof pin only after Stage0 and Stage1 come from one coherent tuple.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -25100,3 +25100,31 @@ work-metered quantifier classification and reuses it for the ambiguous-constant 
 diagnostic branches. Exhaustion returns an incomplete diagnostic rather than treating a partial
 scan as absence of a quantifier. Static diff review and `git diff --check` pass; no tests or build
 were run.
+
+### 23.27.1422 Meter remaining quantifier rule probes (2026-10-14)
+
+Goal-rule inference now charges the existing tactic preflight counter while scanning contract
+annotations and records a refused goal if that lookup exhausts the budget. Tactic `instantiate`
+now charges its source quota for the selected fact's quantifier lookup, using a local remaining-work
+counter so exhaustion clamps the shared ledger at its quota rather than storing the helper's
+`limit + 1` sentinel. Return-width refusal diagnostics
+use the generic `goal` label, since that path only records failure and does not need quantifier
+metadata. `git diff --check` passes; no tests or build were run.
+
+
+### 23.27.1423 Route postcondition quantifier inference through the shared metered prover (2026-10-14)
+
+Removed the postcondition rule helper that performed raw annotation scans. Return and function
+postconditions now pass the generic rule to `proof_certify_goal_with_rule_core`, which infers
+quantifier rules with its shared tactic-work budget. Refused result-dependent obligations use a
+generic diagnostic rule because classification does not affect acceptance. `git diff --check` passes;
+no tests or build were run.
+
+### 23.27.1424 Reserve tactic expression matching work (2026-10-14)
+
+Interactive assumption and apply actions previously reserved source work for quantifier annotation
+scans but not for recursive expression equality, quantifier-shape validation, or call/move scans
+over every candidate. They now measure the goal and candidate expression sizes, charge sizing work,
+and reserve eight complete passes over each possible comparison before entering the matching loop.
+Budget exhaustion refuses the action rather than allowing candidate-count × expression-size work to
+escape the tactic source quota. Static diff and source-length checks pass; no tests or build were run.
