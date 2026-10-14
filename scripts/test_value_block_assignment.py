@@ -1,11 +1,12 @@
 """Block assignment checks private scopes and refuses stale outer state."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = (ROOT / "examples/captured_search_assignment.elisa").read_text().replace("slot == 4", "slot >= 4")
 for name, source, accepted in (
     ("shadowed-search", BASE, True),

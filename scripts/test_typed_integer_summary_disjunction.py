@@ -1,11 +1,12 @@
 """Replay contextual integer-literal equality only inside matching comparisons."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 run = subprocess.run([BINARY, "--json", str(ROOT / "test/typed_integer_summary_disjunction.elisa")],
                      capture_output=True, text=True, timeout=60)
 report = json.loads(run.stdout)

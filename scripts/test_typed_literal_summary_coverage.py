@@ -1,6 +1,6 @@
 """Typed-literal admission must remain independently verified within analysis caps."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
@@ -8,7 +8,8 @@ if not __debug__:
     raise SystemExit("run without Python -O")
 
 root = Path(__file__).resolve().parents[1]
-binary = os.environ.get("ELISA_PROOF_BIN", str(root / "build/elisa-proof"))
+
+binary = qualified_test_binary.proof_test_binary(root)
 run = subprocess.run(
     [binary, "--function-json", "proof_kernel_replay_arena_shape_valid",
      str(root / "examples/kernel_replay_standalone.elisa")],

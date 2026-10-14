@@ -1,6 +1,6 @@
 """A lexical non-callable must not borrow a global tuple-return signature."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
@@ -8,7 +8,8 @@ if not __debug__:
     raise SystemExit("run without Python -O")
 
 root = Path(__file__).resolve().parents[1]
-binary = os.environ.get("ELISA_PROOF_BIN", str(root / "build/elisa-proof"))
+
+binary = qualified_test_binary.proof_test_binary(root)
 process = subprocess.run(
     [binary, "--function-json", "shadowed_tuple_callee",
      str(root / "examples/rejected_tuple_callee_shadow.elisa")],

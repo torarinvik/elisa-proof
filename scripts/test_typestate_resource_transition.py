@@ -1,11 +1,12 @@
 """The prover admits compiler-validated affine state transitions, and no others."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BIN = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BIN = qualified_test_binary.proof_test_binary(ROOT)
 POSITIVE = ROOT / "examples/typestate_resource_transition.elisa"
 NEGATIVE = ROOT / "examples/rejected_typestate_transition_missing_edge.elisa"
 if not __debug__:

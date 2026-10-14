@@ -3,13 +3,14 @@ declared type, so the callee's label summaries prove goals after the binding. Th
 type, never a bound: goals needing more than the callee ensures still fail. Many bound tuples in
 one body stay within the fact budget."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(path):

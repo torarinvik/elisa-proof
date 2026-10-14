@@ -1,12 +1,13 @@
 """Pure conditional loop values retain guards; nested mutations revoke them."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 # Entry replay of a scalar invariant in a nested assignment is a separate gap.
 # A true invariant isolates effect classification and post-search guard retention.
 BASE = (ROOT / "test/repro/conditional_search_field_bound.elisa").read_text().replace("invariant hit <= 4", "invariant true")

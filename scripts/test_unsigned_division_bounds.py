@@ -1,11 +1,12 @@
 """Replay unsigned quotient bounds and refuse width, sign, and overflow overreach."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 run = subprocess.run(
     [str(BINARY), "--json", str(ROOT / "examples/unsigned_division_bounds.elisa")],
     capture_output=True,
