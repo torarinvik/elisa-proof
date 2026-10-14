@@ -99,11 +99,11 @@ extend ElisaProof:
                     return (false, Ast::Expr.Invalid) if arms.count == 0 or not proof_match_guard_shape_supported(scrutinee, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                     scrutinee_cost: usize = 0
                     return (false, Ast::Expr.Invalid) if not proof_replay_summary_expr_cost_with_limit(scrutinee, &scrutinee_cost, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
-                    # The cost extraction plus the two legacy effect scans are covered here;
-                    # the support walk below charges its own visits through the shared ref.
-                    return (false, Ast::Expr.Invalid) if scrutinee_cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / 3
-                    work <- work + scrutinee_cost * 3
-                    return (false, Ast::Expr.Invalid) if proof_expr_has_call(scrutinee) or proof_expr_has_move(scrutinee) or not proof_expr_supported_with_work(scrutinee, work)
+                    # Reserve the cost walk and the unmetered move scan. Call detection and
+                    # support checking charge their actual visits to the shared counter.
+                    return (false, Ast::Expr.Invalid) if scrutinee_cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / 2
+                    work <- work + scrutinee_cost * 2
+                    return (false, Ast::Expr.Invalid) if proof_expr_has_call_with_work(scrutinee, work, PROOF_MATCH_LOWERING_WORK_LIMIT) or proof_expr_has_move_with_work(scrutinee, work, PROOF_MATCH_LOWERING_WORK_LIMIT) or not proof_expr_supported_with_work(scrutinee, work)
                     fallback: mutable Ast::Expr = Ast::Expr.Invalid
                     index: mutable usize = arms.count
                     while index > 0 |index, arms, position, fallback, work, scrutinee_cost|:
@@ -133,7 +133,7 @@ extend ElisaProof:
                         # as a pure proposition.
                         return (false, Ast::Expr.Invalid) if not proof_replay_summary_expr_repeat_charge_with_limit(arm_value, 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                         return (false, Ast::Expr.Invalid) if:
-                            proof_expr_has_move(arm_value)
+                            proof_expr_has_move_with_work(arm_value, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                             not proof_expr_supported_with_work(arm_value, work)
                         if index == arms.count - 1:
                             match arm.pattern:
@@ -168,9 +168,11 @@ extend ElisaProof:
                                     # The shared substitution entrypoint reserves its own input
                                     # scan, mapping probes, and output growth before rebuilding.
                                     substituted_guard: Ast::Expr = proof_substitute_with_work(arm.guard, arm_names, arm_values, work)
-                                    return (false, Ast::Expr.Invalid) if not proof_replay_summary_expr_repeat_charge_with_limit(substituted_guard, 2, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
+                                    # Reserve the cost walk and unmetered move scan; call detection
+                                    # accounts for its own traversal through the shared counter.
+                                    return (false, Ast::Expr.Invalid) if not proof_replay_summary_expr_repeat_charge_with_limit(substituted_guard, 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                                     return (false, Ast::Expr.Invalid) if:
-                                        proof_expr_has_call(substituted_guard) or proof_expr_has_move(substituted_guard)
+                                        proof_expr_has_call_with_work(substituted_guard, work, PROOF_MATCH_LOWERING_WORK_LIMIT) or proof_expr_has_move_with_work(substituted_guard, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                                         not proof_expr_supported_with_work(substituted_guard, work)
                                     resolved_condition <- Ast::Expr.Binary(resolved_condition, TokenKind.And, substituted_guard, position)
                             fallback <- Ast::Expr.If(resolved_condition, arm_value, fallback, position)
@@ -277,23 +279,15 @@ extend ElisaProof:
                     # A conditional call may not run. Only integer conversions, which read their
                     # receiver and nothing else, may sit here; the runtime purity gate then
                     # refuses one that a source function shadows.
-                    return false if not proof_replay_summary_expr_repeat_charge_with_limit(condition, 2, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
-                    return false if not proof_expr_calls_are_conversion_shapes(condition, depth + 1)
-                    return false if not proof_replay_summary_expr_repeat_charge_with_limit(then_expr, 2, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
-                    return false if not proof_expr_calls_are_conversion_shapes(then_expr, depth + 1)
-                    return false if not proof_replay_summary_expr_repeat_charge_with_limit(else_expr, 2, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
-                    return false if not proof_expr_calls_are_conversion_shapes(else_expr, depth + 1)
+                    return false if not proof_expr_calls_are_conversion_shapes_with_work(condition, depth + 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
+                    return false if not proof_expr_calls_are_conversion_shapes_with_work(then_expr, depth + 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
+                    return false if not proof_expr_calls_are_conversion_shapes_with_work(else_expr, depth + 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                     return proof_expr_supported_depth_with_work(condition, depth + 1, work) and proof_expr_supported_depth_with_work(then_expr, depth + 1, work) and proof_expr_supported_depth_with_work(else_expr, depth + 1, work)
                 Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    return false if not proof_replay_summary_expr_repeat_charge_with_limit(iterable, 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
-                    return false if not proof_replay_summary_expr_repeat_charge_with_limit(condition, 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
-                    return false if not proof_replay_summary_expr_repeat_charge_with_limit(body, 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
-                    return false if proof_expr_has_call(iterable) or proof_expr_has_call(condition) or proof_expr_has_call(body)
+                    return false if proof_expr_has_call_with_work(iterable, work, PROOF_MATCH_LOWERING_WORK_LIMIT) or proof_expr_has_call_with_work(condition, work, PROOF_MATCH_LOWERING_WORK_LIMIT) or proof_expr_has_call_with_work(body, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                     return proof_expr_supported_depth_with_work(iterable, depth + 1, work) and proof_expr_supported_depth_with_work(condition, depth + 1, work) and proof_expr_supported_depth_with_work(body, depth + 1, work)
                 Ast::Expr.Refinement(base, predicate, _):
-                    return false if not proof_replay_summary_expr_repeat_charge_with_limit(base, 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
-                    return false if not proof_replay_summary_expr_repeat_charge_with_limit(predicate, 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
-                    return false if proof_expr_has_call(base) or proof_expr_has_call(predicate)
+                    return false if proof_expr_has_call_with_work(base, work, PROOF_MATCH_LOWERING_WORK_LIMIT) or proof_expr_has_call_with_work(predicate, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                     return proof_expr_supported_depth_with_work(base, depth + 1, work) and proof_expr_supported_depth_with_work(predicate, depth + 1, work)
                 Ast::Expr.Block(statements, value, captures, _):
                     # Captured value blocks synthesize writes back into their outer bindings.
@@ -301,14 +295,12 @@ extend ElisaProof:
                     # a pure expression would let an outer fact survive a hidden mutation.
                     return false if:
                         captures.count > 0
-                        not proof_replay_summary_expr_repeat_charge_with_limit(value, 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
-                        proof_expr_has_call(value)
+                        proof_expr_has_call_with_work(value, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                     for statement in statements:
                         match statement:
                             Ast::Stmt.VarDecl(_, _, initializer, _):
-                                return false if not proof_replay_summary_expr_repeat_charge_with_limit(initializer, 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                                 return false if:
-                                    proof_expr_has_call(initializer)
+                                    proof_expr_has_call_with_work(initializer, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                                     not proof_expr_supported_depth_with_work(initializer, depth + 1, work)
                             _:
                                 return false
@@ -337,28 +329,42 @@ extend ElisaProof:
         # Every call in the term is a zero-argument integer conversion. Shapes not walked here
         # count only when they hold no call at all.
         def proof_expr_calls_are_conversion_shapes(expression: Ast::Expr, depth: usize) -> bool:
+            work: mutable usize = 0
+            return proof_expr_calls_are_conversion_shapes_with_work(expression, depth, &work, PROOF_MATCH_LOWERING_WORK_LIMIT)
+
+        def proof_expr_calls_are_conversion_shapes_with_work(expression: Ast::Expr, depth: usize, work: mutable usize&, work_limit: usize) -> bool:
+            return false if work_limit > PROOF_MATCH_LOWERING_WORK_LIMIT or work > work_limit or work >= work_limit
+            known_shape: bool = proof_expr_calls_are_conversion_shapes_depth_with_work(expression, depth, work, work_limit)
+            return known_shape and work < work_limit
+
+        def proof_expr_calls_are_conversion_shapes_depth_with_work(expression: Ast::Expr, depth: usize, work: mutable usize&, work_limit: usize) -> bool:
+            return false if work >= work_limit
+            work <- work + 1
             return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Call(callee, arguments, _, _):
                     return false if arguments.count != 0
                     match callee:
                         Ast::Expr.Field(receiver, target, _):
+                            target_cost: usize = sview_len(target)
+                            return false if target_cost > (work_limit - work) / 10
+                            work <- work + target_cost * 10
                             integer: bool = target in {"i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"}
-                            return integer and proof_expr_calls_are_conversion_shapes(receiver, depth + 1)
+                            return integer and proof_expr_calls_are_conversion_shapes_depth_with_work(receiver, depth + 1, work, work_limit)
                         _:
                             return false
                 Ast::Expr.Paren(inner, _):
-                    return proof_expr_calls_are_conversion_shapes(inner, depth + 1)
+                    return proof_expr_calls_are_conversion_shapes_depth_with_work(inner, depth + 1, work, work_limit)
                 Ast::Expr.Unary(_, operand, _):
-                    return proof_expr_calls_are_conversion_shapes(operand, depth + 1)
+                    return proof_expr_calls_are_conversion_shapes_depth_with_work(operand, depth + 1, work, work_limit)
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_expr_calls_are_conversion_shapes(left, depth + 1) and proof_expr_calls_are_conversion_shapes(right, depth + 1)
+                    return proof_expr_calls_are_conversion_shapes_depth_with_work(left, depth + 1, work, work_limit) and proof_expr_calls_are_conversion_shapes_depth_with_work(right, depth + 1, work, work_limit)
                 Ast::Expr.Index(object, index, _):
-                    return proof_expr_calls_are_conversion_shapes(object, depth + 1) and proof_expr_calls_are_conversion_shapes(index, depth + 1)
+                    return proof_expr_calls_are_conversion_shapes_depth_with_work(object, depth + 1, work, work_limit) and proof_expr_calls_are_conversion_shapes_depth_with_work(index, depth + 1, work, work_limit)
                 Ast::Expr.Field(object, _, _):
-                    return proof_expr_calls_are_conversion_shapes(object, depth + 1)
+                    return proof_expr_calls_are_conversion_shapes_depth_with_work(object, depth + 1, work, work_limit)
                 _:
-                    return not proof_expr_has_call(expression)
+                    return not proof_expr_has_call_with_work(expression, work, work_limit)
 
     private:
         # A pattern whose logical condition decides it exactly, so its negation holds on later
