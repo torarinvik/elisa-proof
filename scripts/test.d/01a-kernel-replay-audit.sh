@@ -13,6 +13,8 @@ python3 "$ROOT_DIR/scripts/test_generic_alias_application_dispatch.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_ast_kernel_mirror_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_index_read_work_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_primitive_witness_marker_work.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_operator_impl_index_guards.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_array_scalar_operator_marker_validation.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_bound_work_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_difference_closure_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_bounded_model_width_safety.py" || exit 1

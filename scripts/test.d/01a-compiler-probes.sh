@@ -162,6 +162,18 @@ if [[ "$(basename "$SELF_HOST_COMPILER")" == "elisac-stage1" ]]; then
         printf 'proof test matrix failed: stage1 rejected region-polymorphic new[r] allocation\n' >&2
         exit 1
     fi
+    generic_reset_output="$standalone_probe_dir/generic-same-arena-reset.ll"
+    generic_reset_log="$standalone_probe_dir/generic-same-arena-reset.log"
+    if "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit llvm -O0 -o "$generic_reset_output" "$ROOT_DIR/test/repro/generic_same_arena_reset_view_leak.elisa" >"$generic_reset_log" 2>&1; then
+        printf 'proof test matrix failed: stage1 accepted a generic helper that may reset the arena backing its view\n' >&2
+        exit 1
+    fi
+    if ! grep -Fq 'region dependency facts were invalidated by destroy of region' "$generic_reset_log"; then
+        printf 'proof test matrix failed: same-arena generic reset refusal lacked the destroyed-region diagnostic\n' >&2
+        cat "$generic_reset_log" >&2
+        exit 1
+    fi
+    [[ ! -e "$generic_reset_output" ]] || { printf 'proof test matrix failed: emitted LLVM for a generic stale-view read\n' >&2; exit 1; }
     "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/region-new-call.o" "$ROOT_DIR/examples/region_new_call_argument.elisa" >/dev/null 2>&1
     region_new_call_compiler_status=$?
     if [[ "$region_new_call_compiler_status" -ne 0 ]]; then
