@@ -1,12 +1,13 @@
 """A copied element keeps its bound, while its mutable source equality expires."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof")).resolve()
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT)).resolve()
 SOURCE = """def copied(xs: mutable darray[i64]&, n: usize, p: i64, i: usize, j: usize) -> i64:
     requires n <= xs.count
     requires i < j

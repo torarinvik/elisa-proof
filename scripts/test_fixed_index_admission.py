@@ -1,12 +1,13 @@
 """Fixed storage admits indexing even when scalar witness traversal is exhausted."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = (ROOT / "examples/late_fixed_array_index.elisa").read_text()
 FIRST = BASE.replace("struct Store:\n", "struct Store:\n    flags: mutable bool[3]\n").replace("    flags: mutable bool[3]\ndef", "def")
 CASES = (

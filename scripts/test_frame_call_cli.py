@@ -1,12 +1,13 @@
 """Conditional-call frame events retain every original success and failure."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 callee = "def bump(value: mutable usize&) -> bool changes value:\n    value <- value + 1\n    return true\n"
 for name, frame, count, proven, finding in (
     ("allowed", "changes counter", 6, 6, None),

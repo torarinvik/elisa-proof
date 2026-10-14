@@ -1,13 +1,14 @@
 """Record the pinned compiler's character subtraction behavior and proof refusal."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+
 COMPILER = os.environ.get("ELISA_COMPILER_BIN")
-PROOF = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+PROOF = qualified_test_binary.proof_test_binary(ROOT)
 if not COMPILER:
     raise SystemExit("set ELISA_COMPILER_BIN to the pinned stage1 compiler")
 

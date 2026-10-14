@@ -1,11 +1,12 @@
 """Float call receiver admission preserves IEEE and source dispatch refusal."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = "extern forward(value: f32) -> f32\ndef checked(value: f32) -> bool:\n    forward(value) < 1.0\n"
 CASES = (
     ("extern-f32", BASE, True),

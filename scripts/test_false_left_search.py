@@ -1,13 +1,14 @@
 """False-left search normalization preserves proofs and rejects missing truth."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 if not __debug__:
     raise SystemExit("run without Python -O")
 root = Path(__file__).resolve().parents[1]
-binary = os.environ.get("ELISA_PROOF_BIN", str(root / "build/elisa-proof"))
+
+binary = qualified_test_binary.proof_test_binary(root)
 reports = []
 for _ in range(2):
     run = subprocess.run(

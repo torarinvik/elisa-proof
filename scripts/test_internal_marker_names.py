@@ -1,11 +1,12 @@
 """Source declarations cannot capture private symbolic-state markers."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 for filename, reserved_name, source_line in (
     ("rejected_opaque_call_marker_collision.elisa", "__opaque_call__", 1),

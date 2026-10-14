@@ -1,11 +1,12 @@
 """A premise with the goal as an alternative is split first, and a call rewritten by a summary keeps its original form when only that form appears in the facts."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def report(fixture, expected_status):

@@ -1,8 +1,9 @@
 """Focused failure status agrees with the diagnostic bound to that exact goal."""
-import json,os,subprocess
+import json,os,subprocess, qualified_test_binary
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
-binary=Path(os.environ.get("ELISA_PROOF_BIN",root/"build/elisa-proof")).resolve()
+
+binary=Path(qualified_test_binary.proof_test_binary(root)).resolve()
 source=root/'examples/rejected_budget.elisa'
 def query(*args):
     result=subprocess.run([str(binary),*map(str,args)],capture_output=True,text=True,timeout=60)

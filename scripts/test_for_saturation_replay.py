@@ -1,12 +1,13 @@
 """Decimal accumulator preservation authenticates source, bound and scope."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get('ELISA_PROOF_BIN', str(ROOT / 'build/elisa-proof'))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = (ROOT / 'examples/direct_digit_loop_replay_gap.elisa').read_text()
 CASES = (
     ('valid', BASE, True),

@@ -2,7 +2,7 @@
 recorded origin. The open-goal rendering is pinned as a snapshot; the JSON report is the source of
 truth for gates and fact counts, and bad or missing ids exit 2 without a rendering."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
@@ -10,7 +10,8 @@ if not __debug__:
     raise SystemExit("explanation checks must run without Python -O")
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(*arguments):

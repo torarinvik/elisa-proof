@@ -8,7 +8,7 @@ used to infer asymptotic work.
 import argparse
 import hashlib
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import platform
 import re
@@ -19,7 +19,8 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_MAX_RSS_KIB = 2 * 1024 * 1024
 SIZES = (1, 2, 4, 8, 12, 16)

@@ -2,12 +2,13 @@
 local that names a comparison (`ok: bool = i < n; if ok:`) both carry their fact. A reassigned
 flag, a moved operand, and the negated branch stay unproven."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(path):

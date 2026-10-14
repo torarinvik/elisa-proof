@@ -1,12 +1,13 @@
 """Foreach element lower bounds follow the exact unsigned iterable and binder."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 result = subprocess.run(
     [BINARY, "--json", str(ROOT / "examples/foreach_element_lower_bound.elisa")],
     capture_output=True,

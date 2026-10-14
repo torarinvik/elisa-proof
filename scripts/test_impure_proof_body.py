@@ -1,11 +1,12 @@
 """An impure proof block cannot certify its enclosing guard or function."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 SOURCE = ROOT / "examples/rejected_impure_proof.elisa"
 for route in (("--json",), ("--function-json", "impure_proof")):
     result = subprocess.run([BINARY, *route, str(SOURCE)], capture_output=True,

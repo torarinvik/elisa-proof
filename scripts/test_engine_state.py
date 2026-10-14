@@ -2,13 +2,14 @@
 proof engine proved and replayed everything (`engine_state`, and a text line), and never claims
 it did when a goal is open, the source is malformed, or no front-end diagnostic was raised."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(path, *flags):

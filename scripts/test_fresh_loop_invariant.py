@@ -1,12 +1,13 @@
 """Fresh aggregate goals cannot enter or preserve loop invariants by structural equality."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 SOURCE = """def fresh_loop_invariant(value: i64, count: i64) -> void:
     requires count >= 0
     for index in 0..<count:

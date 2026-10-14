@@ -1,12 +1,13 @@
 """IEEE float ownership classification must preserve actual borrow checks."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 CASES = (
     ("f32", "extern forward(value: f32) -> f32\ndef checked(value: f32) -> f32:\n    forward(value)\n", True),
     ("f64", "extern forward(value: f64) -> f64\ndef checked(value: f64) -> f64:\n    forward(value)\n", True),
