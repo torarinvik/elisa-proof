@@ -8,41 +8,65 @@ def proof_output_cached_source_admission_status(admitted: darray[bool]&, goal_id
     return false if goal_id >= admitted.count
     admitted[goal_id]
 
+def proof_output_cached_producer_claim_status(claimed: darray[bool]&, goal_id: usize) -> bool:
+    return false if goal_id >= claimed.count
+    claimed[goal_id]
+
+def proof_output_finding_source_status(finding: ProofFinding, source_admitted: bool) -> sview:
+    if finding.status == "disproved":
+        return "disproved" if finding.has_goal and source_admitted else "unknown"
+    return finding.status if not finding.has_goal or source_admitted
+    "unknown"
+
 def proof_output_reserve_status_snapshot_work(work_used: mutable usize&, count: usize) -> bool:
     limit: usize = ElisaProof::proof_replay_summary_source_work_limit()
     return false if work_used > limit
     if count > limit - work_used:
-        work_used <- limit
+        work_used <- limit + 1
         return false
     work_used <- work_used + count
     true
 
+def proof_output_checked_view_producer_claims_with_work[@view](checked_view: ProofCheckedView[view]& @view, work_used: mutable usize&) -> (complete: bool, producer_claimed_goals: darray[bool]) can[Memory.Allocate, Abort.Panic]:
+    return (false, []) if not proof_checked_view_source_validated(checked_view)
+    attempt_count: usize = proof_checked_view_attempt_count(checked_view)
+    report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
+    return (false, []) if attempt_count != report.results.goal_attempts.count
+    return (false, []) if not proof_output_reserve_status_snapshot_work(work_used, attempt_count)
+    producer_claimed_goals: mutable darray[bool] = []
+    for goal_id in 0..<attempt_count |goal_id, checked_view, producer_claimed_goals|:
+        producer_claimed_goals.push(proof_checked_view_attempt_had_producer_claim(checked_view, goal_id))
+    (true, producer_claimed_goals)
+
 def proof_output_checked_view_goal_statuses_with_work[@view](checked_view: ProofCheckedView[view]& @view, work_used: mutable usize&) -> (complete: bool, replayed_goals: darray[bool], source_admitted_goals: darray[bool]) can[Memory.Allocate, Abort.Panic]:
-    report: ProofReport& = proof_checked_view_report(checked_view)
-    # Each goal snapshot performs two checked-view queries (replay and source admission).
-    # Reserve both before allocating or querying so an incomplete snapshot stays fail-closed.
+    report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
+    # Each goal snapshot performs three checked-view queries (replay, goal admission, and
+    # fact admission). Reserve all of them before allocating or querying so an incomplete
+    # snapshot stays fail-closed.
     limit: usize = ElisaProof::proof_replay_summary_source_work_limit()
-    return (false, [], []) if:
-        work_used > limit
-        report.results.goal_attempts.count > (limit - work_used) / 2
-    work_used <- work_used + report.results.goal_attempts.count * 2
+    return (false, [], []) if work_used > limit
+    if report.results.goal_attempts.count > (limit - work_used) / 3:
+        # Keep exhaustion sticky across later fields rendered from the same report.
+        work_used <- limit + 1
+        return (false, [], [])
+    work_used <- work_used + report.results.goal_attempts.count * 3
     replayed_goals: mutable darray[bool] = []
     source_admitted_goals: mutable darray[bool] = []
     for goal_id in 0..<report.results.goal_attempts.count |goal_id, checked_view, replayed_goals, source_admitted_goals|:
         replayed_goals.push(proof_checked_view_attempt_status(checked_view, goal_id))
-        source_admitted_goals.push(proof_checked_view_goal_source_admissible(checked_view, goal_id))
+        source_admitted_goals.push(proof_checked_view_goal_source_admissible(checked_view, goal_id) and proof_checked_view_goal_facts_source_admissible(checked_view, goal_id))
     return (true, replayed_goals, source_admitted_goals)
 
 def proof_output_checked_view_goal_status_with_work[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize, work_used: mutable usize&) -> (complete: bool, replayed: bool, source_admitted: bool):
-    report: ProofReport& = proof_checked_view_report(checked_view)
+    report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     return (true, false, false) if goal_id >= report.results.goal_attempts.count
-    return (false, false, false) if not proof_output_reserve_status_snapshot_work(work_used, 2)
+    return (false, false, false) if not proof_output_reserve_status_snapshot_work(work_used, 3)
     replayed: bool = proof_checked_view_attempt_status(checked_view, goal_id)
-    source_admitted: bool = proof_checked_view_goal_source_admissible(checked_view, goal_id)
+    source_admitted: bool = proof_checked_view_goal_source_admissible(checked_view, goal_id) and proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)
     return (true, replayed, source_admitted)
 
 def proof_output_checked_view_certificate_statuses_with_work[@view](checked_view: ProofCheckedView[view]& @view, work_used: mutable usize&) -> (complete: bool, replayed_certificates: darray[bool], replayed_certificate_count: u32) can[Memory.Allocate, Abort.Panic]:
-    report: ProofReport& = proof_checked_view_report(checked_view)
+    report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     return (false, [], 0) if not proof_output_reserve_status_snapshot_work(work_used, report.analysis_1.certificates.count)
     replayed_certificates: mutable darray[bool] = []
     replayed_certificate_count: mutable u32 = 0
@@ -53,7 +77,7 @@ def proof_output_checked_view_certificate_statuses_with_work[@view](checked_view
     return (true, replayed_certificates, replayed_certificate_count)
 
 def proof_output_checked_view_replayed_certificate_count_with_work[@view](checked_view: ProofCheckedView[view]& @view, work_used: mutable usize&) -> (complete: bool, count: u32):
-    report: ProofReport& = proof_checked_view_report(checked_view)
+    report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     return (false, 0) if not proof_output_reserve_status_snapshot_work(work_used, report.analysis_1.certificates.count)
     replayed_count: mutable u32 = 0
     for certificate_id in 0..<report.analysis_1.certificates.count |certificate_id, checked_view, replayed_count|:
@@ -72,58 +96,71 @@ module ElisaProofOutputReplayStatus:
     private:
         # Confirmation counts read statuses directly from this checked-view capability. Do not
         # accept caller-owned arrays as replay authority, even when an output route also keeps a
-        # local snapshot for serialization.
+        # local snapshot for serialization. Counts are report-level output, so per-goal source
+        # admission alone is insufficient: an incomplete theorem/source check must make them
+        # unknown rather than presenting a partial count as the report's confirmation summary.
         def proof_output_confirmation_counts_from_checked_view[@view](checked_view: ProofCheckedView[view]& @view, work_used: mutable usize&) -> (known: bool, replay_confirmed: u32, frame_checks: u32):
-            report: ProofReport& = proof_checked_view_report(checked_view)
+            report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
+            ledger_count: usize = proof_checked_view_obligation_diagnostic_count(checked_view)
+            producer_summary: (available: bool, producer_claims: u32, obligations: u32) = proof_checked_view_obligation_producer_claim_summary(checked_view)
             return (false, 0, 0) if:
                 not proof_checked_view_goal_source_admissions_complete(checked_view)
-                report.results.obligation_inventory.count != report.results.obligations.usize()
-                report.results.proven > report.results.obligations
-                not proof_output_reserve_status_snapshot_work(work_used, report.results.obligation_inventory.count)
-            for entry in report.results.obligation_inventory |entry, work_used|:
-                return (false, 0, 0) if not proof_output_reserve_status_snapshot_work(work_used, sview_len(entry.source_kind))
-            return (false, 0, 0) if not proof_output_reserve_status_snapshot_work(work_used, report.results.obligation_inventory.count)
+                not proof_checked_view_theorem_source_admissions_complete(checked_view)
+                not proof_checked_view_source_checks_complete(checked_view)
+                not proof_checked_view_source_admissible(checked_view)
+                not producer_summary.available
+                ledger_count != producer_summary.obligations.usize()
+                producer_summary.producer_claims > producer_summary.obligations
+                not proof_output_reserve_status_snapshot_work(work_used, ledger_count)
+            for index in 0..<ledger_count |index, checked_view, work_used|:
+                entry: (available: bool, obligation: ProofCheckedViewObligationDiagnostic[view]) = proof_checked_view_diagnostic_obligation(checked_view, index)
+                return (false, 0, 0) if not entry.available or not proof_output_reserve_status_snapshot_work(work_used, sview_len(entry.obligation.source_kind))
+            return (false, 0, 0) if not proof_output_reserve_status_snapshot_work(work_used, ledger_count)
 
             cursor: mutable usize = 0
             proven_obligations: mutable u32 = 0
             replay_confirmed: mutable u32 = 0
             frame_checks: mutable u32 = 0
-            for index in 0..<report.results.obligation_inventory.count |index, report, cursor, proven_obligations, replay_confirmed, frame_checks, work_used|:
-                entry: ProofObligationEntry = report.results.obligation_inventory[index]
+            for index in 0..<ledger_count |index, checked_view, cursor, proven_obligations, replay_confirmed, frame_checks, work_used|:
+                entry_status: (available: bool, obligation: ProofCheckedViewObligationDiagnostic[view]) = proof_checked_view_diagnostic_obligation(checked_view, index)
+                return (false, 0, 0) if not entry_status.available
+                entry: ProofCheckedViewObligationDiagnostic[view] = entry_status.obligation
                 return (false, 0, 0) if:
                     entry.identity != index or entry.attempts_start != cursor
                     cursor > report.results.goal_attempts.count or entry.attempts_count > report.results.goal_attempts.count - cursor
-                proven_obligations <- proven_obligations + 1 if entry.proven
+                proven_obligations <- proven_obligations + 1 if entry.producer_claim
                 if entry.source_kind == "frame":
                     return (false, 0, 0) if entry.attempts_count != 0
-                    frame_checks <- frame_checks + 1 if entry.proven
-                elif entry.proven and entry.attempts_count == 0:
+                    frame_checks <- frame_checks + 1 if entry.producer_claim
+                elif entry.producer_claim and entry.attempts_count == 0:
                     return (false, 0, 0)
-                elif entry.proven:
+                elif entry.producer_claim:
                     all_attempts_replayed: mutable bool = true
                     end: usize = cursor + entry.attempts_count
                     for attempt_index in cursor..<end |attempt_index, report, checked_view, all_attempts_replayed, work_used|:
-                        return (false, 0, 0) if not proof_output_reserve_status_snapshot_work(work_used, 2)
-                        attempt: ProofGoalAttempt = report.results.goal_attempts[attempt_index]
-                        all_attempts_replayed <- false if not attempt.proven or not proof_checked_view_attempt_status(checked_view, attempt_index) or not proof_checked_view_goal_source_admissible(checked_view, attempt_index)
+                        return (false, 0, 0) if not proof_output_reserve_status_snapshot_work(work_used, 4)
+                        all_attempts_replayed <- false if not proof_checked_view_attempt_had_producer_claim(checked_view, attempt_index) or not proof_checked_view_attempt_status(checked_view, attempt_index) or not proof_checked_view_goal_source_admissible(checked_view, attempt_index) or not proof_checked_view_goal_facts_source_admissible(checked_view, attempt_index)
                     replay_confirmed <- replay_confirmed + 1 if all_attempts_replayed
                 cursor <- cursor + entry.attempts_count
 
-            return (false, 0, 0) if cursor != report.results.goal_attempts.count or proven_obligations != report.results.proven
+            return (false, 0, 0) if cursor != report.results.goal_attempts.count or proven_obligations != producer_summary.producer_claims
             (true, replay_confirmed, frame_checks)
 
-        def proof_output_finding_counts_with_work(report: ProofReport&, work_used: mutable usize&) -> (complete: bool, disproved: u32, unsupported: u32, unknown: u32):
+        def proof_output_finding_counts_with_work(report: ProofReport&, source_admitted_goals: darray[bool]&, work_used: mutable usize&) -> (complete: bool, disproved: u32, unsupported: u32, unknown: u32):
             return (false, 0, 0, 0) if not proof_output_reserve_status_snapshot_work(work_used, report.results.findings.count)
             disproved: mutable u32 = 0
             unsupported: mutable u32 = 0
             unknown: mutable u32 = 0
             for finding in report.results.findings |disproved, unsupported, unknown, work_used|:
                 return (false, 0, 0, 0) if not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.status))
-                disproved <- disproved + 1 if finding.status == "disproved"
-                unsupported <- unsupported + 1 if finding.status == "unsupported"
+                source_admitted: bool = finding.has_goal and finding.goal_id < report.results.goal_attempts.count and proof_output_cached_source_admission_status(source_admitted_goals, finding.goal_id)
+                status: sview = finding.status
+                status <- proof_output_finding_source_status(finding, source_admitted)
+                disproved <- disproved + 1 if status == "disproved"
+                unsupported <- unsupported + 1 if status == "unsupported"
                 # A timeout is an undecided finding at report scope, even though the
                 # goal-specific status API preserves the more precise `timeout` label.
-                unknown <- unknown + 1 if finding.status in {"unknown", "timeout"}
+                unknown <- unknown + 1 if status in {"unknown", "timeout"}
             return (true, disproved, unsupported, unknown)
 
         def proof_report_verification_state_from_findings(report: ProofReport&, source_checks_complete: bool, replay_complete: bool, finding_counts: (complete: bool, disproved: u32, unsupported: u32, unknown: u32)) -> sview:
@@ -132,30 +169,40 @@ module ElisaProofOutputReplayStatus:
             return "unknown" if not finding_counts.complete or finding_counts.unknown > 0 or not source_checks_complete or not replay_complete
             return "proved"
 
-        def proof_report_engine_state_from_status(report: ProofReport&, replay_complete: bool) -> sview:
+        def proof_report_engine_state_from_status[@view](checked_view: ProofCheckedView[view]& @view) -> sview:
+            report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
+            producer_summary: (available: bool, producer_claims: u32, obligations: u32) = proof_checked_view_obligation_producer_claim_summary(checked_view)
             # `failed` counts finding records, not unresolved obligations. Keep the engine
             # verdict fail-closed if an open obligation ever lacks a corresponding finding.
-            return "proved" if report.results.failed == 0 and report.results.proven == report.results.obligations and replay_complete
+            # Aggregate producer counts and replay alone cannot establish that the report's
+            # source claims were complete and admissible.
+            return "proved" if:
+                report.results.failed == 0
+                producer_summary.available and producer_summary.producer_claims == producer_summary.obligations
+                proof_checked_view_replay_complete(checked_view)
+                proof_checked_view_source_checks_complete(checked_view)
+                proof_checked_view_source_admissible(checked_view)
+                proof_checked_view_source_admissions_complete(checked_view)
             return "open"
 
-        def proof_goal_state_from_finding_selection(report: ProofReport&, goal_id: usize, goal_source_admissible: bool, replayed: bool, selected: (complete: bool, known: bool, index: usize, ambiguous: bool)) -> (complete: bool, state: sview):
+        def proof_goal_state_from_finding_selection(report: ProofReport&, goal_id: usize, goal_source_admissible: bool, replayed: bool, producer_claim: bool, selected: (complete: bool, known: bool, index: usize, ambiguous: bool)) -> (complete: bool, state: sview):
             return (true, "not_found") if goal_id >= report.results.goal_attempts.count
             attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
-            if attempt.proven and replayed:
+            if producer_claim and replayed:
                 # Goal status is local: an unrelated open obligation makes the report incomplete,
                 # but it does not invalidate this goal when source checks and replay passed locally.
                 return (true, "proved") if goal_source_admissible else (true, "unknown")
-            return (true, "unknown") if attempt.proven or attempt.has_certificate
+            return (true, "unknown") if producer_claim or attempt.has_certificate
             return (false, "unknown") if not selected.complete
-            return (true, "disproved") if selected.known and report.results.findings[selected.index].status == "disproved"
-            return (true, "unsupported") if selected.known and report.results.findings[selected.index].status == "unsupported"
-            return (true, "timeout") if selected.known and report.results.findings[selected.index].status == "timeout"
+            return (true, "disproved") if goal_source_admissible and selected.known and report.results.findings[selected.index].status == "disproved"
+            return (true, "unsupported") if goal_source_admissible and selected.known and report.results.findings[selected.index].status == "unsupported"
+            return (true, "timeout") if goal_source_admissible and selected.known and report.results.findings[selected.index].status == "timeout"
             return (true, "unknown")
 
     public:
-        def proof_output_checked_view_finding_summary_with_work[@view](checked_view: ProofCheckedView[view]& @view, work_used: mutable usize&) -> (complete: bool, disproved: u32, unsupported: u32, unknown: u32, verification_state: sview):
-            report: ProofReport& = proof_checked_view_report(checked_view)
-            counts: (complete: bool, disproved: u32, unsupported: u32, unknown: u32) = proof_output_finding_counts_with_work(report, work_used)
+        def proof_output_checked_view_finding_summary_with_work[@view](checked_view: ProofCheckedView[view]& @view, source_admitted_goals: darray[bool]&, work_used: mutable usize&) -> (complete: bool, disproved: u32, unsupported: u32, unknown: u32, verification_state: sview):
+            report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
+            counts: (complete: bool, disproved: u32, unsupported: u32, unknown: u32) = proof_output_finding_counts_with_work(report, source_admitted_goals, work_used)
             source_checks_complete: bool = proof_checked_view_source_checks_complete(checked_view)
             replay_complete: bool = proof_checked_view_replay_complete(checked_view)
             state: mutable sview = proof_report_verification_state_from_findings(report, source_checks_complete, replay_complete, counts)
@@ -163,24 +210,25 @@ module ElisaProofOutputReplayStatus:
             return (counts.complete, counts.disproved, counts.unsupported, counts.unknown, state)
 
         def proof_report_engine_state[@view](checked_view: ProofCheckedView[view]& @view) -> sview:
-            report: ProofReport& = proof_checked_view_report(checked_view)
-            proof_report_engine_state_from_status(report, proof_checked_view_replay_complete(checked_view))
+            proof_report_engine_state_from_status(checked_view)
 
-        def proof_goal_status_with_finding_with_work[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize, work_used: mutable usize&) -> (complete: bool, state: sview, replayed: bool, source_admitted: bool, finding_selection: (complete: bool, known: bool, index: usize, ambiguous: bool)):
-            report: ProofReport& = proof_checked_view_report(checked_view)
+        def proof_goal_status_with_finding_with_work[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize, work_used: mutable usize&) -> (complete: bool, state: sview, replayed: bool, source_admitted: bool, finding_selection: (complete: bool, known: bool, index: usize, ambiguous: bool), producer_claimed: bool):
+            report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
             snapshot: (complete: bool, replayed: bool, source_admitted: bool) = proof_output_checked_view_goal_status_with_work(checked_view, goal_id, work_used)
             no_finding: (complete: bool, known: bool, index: usize, ambiguous: bool) = (true, false, 0, false)
-            return (true, "not_found", false, false, no_finding) if goal_id >= report.results.goal_attempts.count
-            return (false, "unknown", snapshot.replayed, snapshot.source_admitted, (false, false, 0, false)) if not snapshot.complete
+            return (true, "not_found", false, false, no_finding, false) if goal_id >= report.results.goal_attempts.count
+            return (false, "unknown", snapshot.replayed, snapshot.source_admitted, (false, false, 0, false), false) if not snapshot.complete
+            return (false, "unknown", snapshot.replayed, snapshot.source_admitted, (false, false, 0, false), false) if not proof_output_reserve_status_snapshot_work(work_used, 1)
+            producer_claim: bool = proof_checked_view_attempt_had_producer_claim(checked_view, goal_id)
             attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
             selected: mutable (complete: bool, known: bool, index: usize, ambiguous: bool) = no_finding
-            if not attempt.proven and not attempt.has_certificate:
+            if not producer_claim and not attempt.has_certificate:
                 selected <- proof_repair_finding_index_with_work(report, attempt, goal_id, work_used)
-            state_result: (complete: bool, state: sview) = proof_goal_state_from_finding_selection(report, goal_id, snapshot.source_admitted, snapshot.replayed, selected)
-            return (state_result.complete and selected.complete, state_result.state, snapshot.replayed, snapshot.source_admitted, selected)
+            state_result: (complete: bool, state: sview) = proof_goal_state_from_finding_selection(report, goal_id, snapshot.source_admitted, snapshot.replayed, producer_claim, selected)
+            return (state_result.complete and selected.complete, state_result.state, snapshot.replayed, snapshot.source_admitted, selected, producer_claim)
 
         def proof_goal_state_with_work[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize, work_used: mutable usize&) -> (complete: bool, state: sview):
-            result: (complete: bool, state: sview, replayed: bool, source_admitted: bool, finding_selection: (complete: bool, known: bool, index: usize, ambiguous: bool)) = proof_goal_status_with_finding_with_work(checked_view, goal_id, work_used)
+            result: (complete: bool, state: sview, replayed: bool, source_admitted: bool, finding_selection: (complete: bool, known: bool, index: usize, ambiguous: bool), producer_claimed: bool) = proof_goal_status_with_finding_with_work(checked_view, goal_id, work_used)
             return (result.complete, result.state)
 
         def proof_output_checked_view_confirmation_counts_with_work[@view](checked_view: ProofCheckedView[view]& @view, work_used: mutable usize&) -> (known: bool, replay_confirmed: u32, frame_checks: u32):

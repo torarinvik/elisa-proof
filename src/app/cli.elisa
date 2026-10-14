@@ -77,7 +77,7 @@ def proof_main_with_source_arena[@r](argc: i64, argv: mutable void&, source_aren
         function_json_output <- true
         if argc < 4:
             usage: mutable darray[u8] = []
-            proof_push(&usage, "usage: elisa-proof --function-json <name> <file.elisa>\n")
+            proof_push(&usage, "usage: elisa-proof --function-json <name|module::...::name> <file.elisa>\n")
             proof_write(usage)
             return 2
         path_slot <- 3
@@ -256,18 +256,16 @@ def proof_main_with_source_arena[@r](argc: i64, argv: mutable void&, source_aren
     replay_gap_snapshot_available: mutable bool = false
     replay_gap_count: mutable u32 = 0
     checked_view: ProofCheckedView[r] = (proof_check_and_replay_with_source(source_arena, semantic_diagnostics, source_analysis, focused_function_name, linear_hints) can Global{Read,Write})
-    report: ProofReport& = proof_checked_view_report(checked_view)
+    report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     source: darray[u8]& = proof_checked_view_source(checked_view)
     file: Ast::File& = proof_checked_view_file(checked_view)
     source_bytes: usize = proof_checked_view_source_bytes(checked_view)
     source_fingerprint: u32 = proof_checked_view_source_fingerprint(checked_view)
-    import_failed: bool = proof_checked_view_import_failed(checked_view)
-    source_literal_ensures: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]& = proof_checked_view_literal_inventory(checked_view)
-    source_assert_by_goals: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]& = proof_checked_view_assert_by_inventory(checked_view)
+    source_literal_ensures: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]& = proof_checked_view_literal_inventory(checked_view)
+    source_assert_by_goals: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]& = proof_checked_view_assert_by_inventory(checked_view)
     replay_gap: (available: bool, count: u32) = proof_checked_view_replay_gap_count(checked_view)
     replay_gap_snapshot_available <- replay_gap.available
     replay_gap_count <- replay_gap.count
-    semantic_errors: u32 = proof_checked_view_semantic_errors(checked_view)
     semantic_visible: u32 = proof_checked_view_semantic_visible(checked_view)
     source_complete: bool = proof_checked_view_source_complete(checked_view)
     source_admissible: bool = proof_checked_view_source_admissible(checked_view)
@@ -332,9 +330,11 @@ def proof_main_with_source_arena[@r](argc: i64, argv: mutable void&, source_aren
         return proof_route_exit(focused_goal_id < report.results.goal_attempts.count, source_admissible and suggestions_complete)
     if repair_output or repair_all_output:
         repair_snapshot: (complete: bool, replayed_goals: darray[bool], source_admitted_goals: darray[bool]) = proof_output_checked_view_goal_statuses_with_work(checked_view, replay_work)
+        producer_claim_snapshot: (complete: bool, producer_claimed_goals: darray[bool]) = proof_output_checked_view_producer_claims_with_work(checked_view, replay_work)
         replayed_goals: darray[bool] = repair_snapshot.replayed_goals
         source_admitted_goals: darray[bool] = repair_snapshot.source_admitted_goals
-        source_goal_admissions_complete <- source_goal_admissions_complete and repair_snapshot.complete
+        producer_claimed_goals: darray[bool] = producer_claim_snapshot.producer_claimed_goals
+        source_goal_admissions_complete <- source_goal_admissions_complete and repair_snapshot.complete and producer_claim_snapshot.complete
         response: mutable darray[u8] = []
         if repair_all_output:
             # The whole unresolved queue in one pass, in goal order. Producer status alone does
@@ -344,8 +344,8 @@ def proof_main_with_source_arena[@r](argc: i64, argv: mutable void&, source_aren
             unresolved_count: mutable usize = 0
             candidate_count_total: mutable usize = 0
             entries: mutable darray[u8] = []
-            for goal_index in 0..<report.results.goal_attempts.count |goal_index, report, entries, repaired_count, unresolved_count, candidate_count_total, replayed_goals, source_admitted_goals, source_admissible, source_goal_admissions_complete|:
-                continue if report.results.goal_attempts[goal_index].proven and proof_output_cached_replay_status(replayed_goals, goal_index) and proof_output_cached_source_admission_status(source_admitted_goals, goal_index)
+            for goal_index in 0..<report.results.goal_attempts.count |goal_index, report, entries, repaired_count, unresolved_count, candidate_count_total, producer_claimed_goals, replayed_goals, source_admitted_goals, source_admissible, source_goal_admissions_complete|:
+                continue if proof_output_cached_producer_claim_status(producer_claimed_goals, goal_index) and proof_output_cached_replay_status(replayed_goals, goal_index) and proof_output_cached_source_admission_status(source_admitted_goals, goal_index)
                 unresolved_count <- unresolved_count + 1
                 goal_source_admissible: bool = proof_output_cached_source_admission_status(source_admitted_goals, goal_index)
                 # A script found against an inadmissible source would be refused by --script, so
@@ -431,19 +431,21 @@ def proof_main_with_source_arena[@r](argc: i64, argv: mutable void&, source_aren
         proof_write(json)
         return 1 if not source_complete or not source_admissible or not source_admissions_complete or not json_complete else 0
     text_goal_snapshot: (complete: bool, replayed_goals: darray[bool], source_admitted_goals: darray[bool]) = proof_output_checked_view_goal_statuses_with_work(checked_view, replay_work)
+    semantic_visibility_snapshot: (complete: bool, visible: darray[bool]) = proof_semantic_diagnostic_visibility_snapshot_with_work(semantic_diagnostics, report, replay_work)
+    semantic_visibility: darray[bool] = semantic_visibility_snapshot.visible
     text_certificate_snapshot: (complete: bool, count: u32) = proof_output_checked_view_replayed_certificate_count_with_work(checked_view, replay_work)
     confirmation: (known: bool, replay_confirmed: u32, frame_checks: u32) = ElisaProofOutputReplayStatus::proof_output_checked_view_confirmation_counts_with_work(checked_view, replay_work)
-    text_finding_counts: (complete: bool, disproved: u32, unsupported: u32, unknown: u32, verification_state: sview) = ElisaProofOutputReplayStatus::proof_output_checked_view_finding_summary_with_work(checked_view, replay_work)
+    text_finding_counts: (complete: bool, disproved: u32, unsupported: u32, unknown: u32, verification_state: sview) = ElisaProofOutputReplayStatus::proof_output_checked_view_finding_summary_with_work(checked_view, source_admitted_goals, replay_work)
     text_findings_work_reserved: bool = proof_output_reserve_status_snapshot_work(replay_work, report.results.findings.count)
-    text_status_snapshot_complete: bool = text_goal_snapshot.complete and text_certificate_snapshot.complete and confirmation.known and text_finding_counts.complete and text_findings_work_reserved
+    text_status_snapshot_complete: bool = text_goal_snapshot.complete and text_certificate_snapshot.complete and confirmation.known and text_finding_counts.complete and text_findings_work_reserved and semantic_visibility_snapshot.complete and source_admissions_complete
     certificate_status_snapshot_complete: bool = proof_checked_view_source_validated(checked_view) and text_certificate_snapshot.complete
     output: mutable darray[u8] = []
     proof_push(&output, "Elisa Proof\n")
     proof_push(&output, "  verification state: ")
     proof_push(&output, "unknown" if not source_complete or not source_admissible or not source_admissions_complete or not text_status_snapshot_complete else text_finding_counts.verification_state)
+    proof_push(&output, "\n  engine state: ")
+    proof_push(&output, "unknown" if not text_status_snapshot_complete else ElisaProofOutputReplayStatus::proof_report_engine_state(checked_view))
     proof_push(&output, "\n")
-    if (semantic_errors > 0 or import_failed) and ElisaProofOutputReplayStatus::proof_report_engine_state(checked_view) == "proved":
-        proof_push(&output, "  front end diagnostic, engine: proved\n")
     proof_push(&output, "  declarations: ")
     proof_push_number(&output, report.results.declarations)
     proof_push(&output, "\n  obligations: ")
@@ -467,11 +469,13 @@ def proof_main_with_source_arena[@r](argc: i64, argv: mutable void&, source_aren
     proof_push_number(&output, report.results.failed)
     proof_push(&output, "\n")
     if text_findings_work_reserved:
-        for finding in report.results.findings |output|:
+        for finding in report.results.findings |__cli_finding_loop_unit = false, output, source_admitted_goals| -> __cli_finding_loop_unit:
+            finding_source_admitted: bool = finding.has_goal and finding.goal_id < source_admitted_goals.count and proof_output_cached_source_admission_status(source_admitted_goals, finding.goal_id)
+            finding_status: sview = proof_output_finding_source_status(finding, finding_source_admitted)
             proof_push(&output, "  ")
             proof_push(&output, finding.kind)
             proof_push(&output, " [")
-            proof_push(&output, finding.status)
+            proof_push(&output, finding_status)
             proof_push(&output, "]")
             proof_push(&output, " line ")
             proof_push_number(&output, finding.line)
@@ -481,7 +485,10 @@ def proof_main_with_source_arena[@r](argc: i64, argv: mutable void&, source_aren
     else:
         proof_push(&output, "  finding details: omitted (output work limit)\n")
     proof_push(&output, "  semantic diagnostics: ")
-    proof_push_number(&output, semantic_visible)
+    if semantic_visibility_snapshot.complete:
+        proof_push_number(&output, semantic_visible)
+    else:
+        proof_push(&output, "unknown (visibility work limit)")
     proof_push(&output, "\n")
     proof_push(&output, "  certificate replay: ")
     if certificate_status_snapshot_complete and replay_gap_snapshot_available:
@@ -494,8 +501,9 @@ def proof_main_with_source_arena[@r](argc: i64, argv: mutable void&, source_aren
     proof_push(&output, "  source-neutral kernel: ")
     proof_push_number(&output, report.analysis_1.kernel.nodes.count.u32())
     proof_push(&output, " nodes, format elisa-proof-kernel-v1\n")
-    for diagnostic in semantic_diagnostics |output, report|:
-        continue if not proof_semantic_diagnostic_visible(diagnostic, report)
+    for diagnostic_index in 0..<semantic_diagnostics.count |diagnostic_index, semantic_diagnostics, semantic_visibility, semantic_visibility_snapshot, output|:
+        continue if semantic_visibility_snapshot.complete and not semantic_visibility[diagnostic_index]
+        diagnostic: Semantic::Diagnostic = semantic_diagnostics[diagnostic_index]
         proof_push(&output, "  semantic line ")
         proof_push_number(&output, diagnostic.line)
         proof_push(&output, ": ")

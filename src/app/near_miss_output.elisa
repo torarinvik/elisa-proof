@@ -3,26 +3,294 @@
 # facts that came closest to proving it), and `missing_fact` is the goal itself, the weakest
 # single extra fact that would close it. An agent repairs the goal by establishing that fact
 # from the relevant ones, usually as a `requires` or a loop guard.
-def proof_push_json_near_miss(buffer: mutable darray[u8]&, report: ProofReport&, attempt: ProofGoalAttempt) -> void can[Memory.Allocate, Abort.Panic]:
+struct ProofNearMissNameIndex:
+    names: darray[sview]
+    hashes: darray[u32]
+    slots: darray[usize]
+
+const PROOF_NEAR_MISS_AST_DEPTH_LIMIT: usize = 96
+
+def proof_near_miss_name_hash(name: sview) -> u32:
+    hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+    for index in 0..<sview_len(name) |index, hash, name|:
+        hash <- ((hash ^ sview_at(name, index).i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+    hash.u32()
+
+def proof_near_miss_name_index(raw_names: darray[sview]&, work: mutable usize&) -> (index: ProofNearMissNameIndex, complete: bool) can[Memory.Allocate]:
+    index: mutable ProofNearMissNameIndex = ProofNearMissNameIndex{names: [], hashes: [], slots: []}
+    raw_count: usize = raw_names.count
+    return (index, true) if raw_count == 0
+    return (index, false) if raw_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+    target_capacity: usize = raw_count * 2
+    capacity: mutable usize = 1
+    while capacity < target_capacity |capacity, target_capacity, work|:
+        return (index, false) if capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+        capacity <- capacity * 2
+    return (index, false) if not proof_replay_source_work_charge(capacity, work)
+    index.slots.resize(capacity)
+    for slot in 0..<capacity |slot, index, capacity|:
+        index.slots[slot] <- capacity
+    for name in raw_names |name, index, capacity, work|:
+        return (index, false) if not proof_replay_source_work_charge(1 + sview_len(name), work)
+        hash: u32 = proof_near_miss_name_hash(name)
+        slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+        probes: mutable usize = 0
+        while probes < capacity and probes <= 64 |probes, slot, hash, name, index, capacity, work|:
+            return (index, false) if not proof_replay_source_work_charge(1, work)
+            current: usize = index.slots[slot]
+            if current == capacity:
+                row: usize = index.names.count
+                index.names.push(name)
+                index.hashes.push(hash)
+                index.slots[slot] <- row
+                break
+            return (index, false) if current >= index.names.count or current >= index.hashes.count
+            if index.hashes[current] == hash:
+                return (index, false) if not proof_replay_source_work_charge(sview_len(name), work)
+                break if index.names[current] == name
+            slot <- (slot + 1) % capacity
+            probes <- probes + 1
+        return (index, false) if probes >= capacity or probes > 64
+    (index, work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+
+def proof_near_miss_name_index_contains(index: ProofNearMissNameIndex&, name: sview, work: mutable usize&) -> (complete: bool, contains: bool):
+    capacity: usize = index.slots.count
+    return (false, false) if index.names.count != index.hashes.count or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+    return (true, false) if capacity == 0
+    return (false, false) if capacity < index.names.count
+    return (false, false) if not proof_replay_source_work_charge(1 + sview_len(name), work)
+    hash: u32 = proof_near_miss_name_hash(name)
+    slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+    probes: mutable usize = 0
+    while probes < capacity and probes <= 64 |probes, slot, hash, name, index, capacity, work|:
+        return (false, false) if not proof_replay_source_work_charge(1, work)
+        row: usize = index.slots[slot]
+        return (true, false) if row == capacity
+        return (false, false) if row >= index.names.count or row >= index.hashes.count
+        if index.hashes[row] == hash:
+            return (false, false) if not proof_replay_source_work_charge(sview_len(name), work)
+            return (true, true) if index.names[row] == name
+        slot <- (slot + 1) % capacity
+        probes <- probes + 1
+    return (false, false)
+
+def proof_near_miss_has_possible_name(index: ProofNearMissNameIndex&, work: mutable usize&) -> (complete: bool, has_name: bool):
+    for name in index.names |name, work|:
+        # At an opaque/depth fallback we cannot tell whether a name occurs as
+        # a qualified member, which lexical binders do not hide.
+        return (false, false) if not proof_replay_source_work_charge(1 + sview_len(name), work)
+        return (true, true)
+    return (true, false)
+
+def proof_near_miss_expr_mentions_any_name(expression: Ast::Expr, index: ProofNearMissNameIndex&, shadowed: darray[sview]&, work: mutable usize&, depth: usize) -> (complete: bool, mentions: bool):
+    if depth >= PROOF_NEAR_MISS_AST_DEPTH_LIMIT:
+        fallback: (complete: bool, has_name: bool) = proof_near_miss_has_possible_name(index, work)
+        return fallback
+    return (false, false) if not proof_replay_source_work_charge(1, work)
+    match expression:
+        Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _):
+            return (true, false)
+        Ast::Expr.Ident(name, _):
+            for hidden in shadowed |name, hidden, work|:
+                return (false, false) if not proof_replay_source_work_charge(1 + sview_len(name) + sview_len(hidden), work)
+                return (true, false) if name == hidden
+            return proof_near_miss_name_index_contains(index, name, work)
+        Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+            return proof_near_miss_expr_mentions_any_name(inner, index, shadowed, work, depth + 1)
+        Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+            left_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(left, index, shadowed, work, depth + 1)
+            return (false, false) if not left_result.complete
+            return left_result if left_result.mentions
+            proof_near_miss_expr_mentions_any_name(right, index, shadowed, work, depth + 1)
+        Ast::Expr.Call(callee, arguments, _, _) | Ast::Expr.IndexN(callee, arguments, _):
+            callee_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(callee, index, shadowed, work, depth + 1)
+            return (false, false) if not callee_result.complete
+            return callee_result if callee_result.mentions
+            for argument in arguments |argument, index, shadowed, work, depth|:
+                result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(argument, index, shadowed, work, depth + 1)
+                return (false, false) if not result.complete
+                return result if result.mentions
+            return (true, false)
+        Ast::Expr.Field(object, _, _):
+            proof_near_miss_expr_mentions_any_name(object, index, shadowed, work, depth + 1)
+        Ast::Expr.Scope(object, member, _):
+            # A lexical binder can hide a bare identifier, but it cannot hide a
+            # qualified member such as Module::x.
+            member_result: (complete: bool, mentions: bool) = proof_near_miss_name_index_contains(index, member, work)
+            return (false, false) if not member_result.complete
+            return member_result if member_result.mentions
+            proof_near_miss_expr_mentions_any_name(object, index, shadowed, work, depth + 1)
+        Ast::Expr.Slice(object, low, high, _):
+            for child in [object, low, high] |child, index, shadowed, work, depth|:
+                result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(child, index, shadowed, work, depth + 1)
+                return (false, false) if not result.complete
+                return result if result.mentions
+            return (true, false)
+        Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+            for element in elements |element, index, shadowed, work, depth|:
+                result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(element, index, shadowed, work, depth + 1)
+                return (false, false) if not result.complete
+                return result if result.mentions
+            return (true, false)
+        Ast::Expr.DictLit(entries, _):
+            for entry in entries |entry, index, shadowed, work, depth|:
+                key_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(entry.key, index, shadowed, work, depth + 1)
+                return (false, false) if not key_result.complete
+                return key_result if key_result.mentions
+                value_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(entry.value, index, shadowed, work, depth + 1)
+                return (false, false) if not value_result.complete
+                return value_result if value_result.mentions
+            return (true, false)
+        Ast::Expr.Construct(type_expression, fields, _) | Ast::Expr.RecordUpdate(type_expression, fields, _):
+            base_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(type_expression, index, shadowed, work, depth + 1)
+            return (false, false) if not base_result.complete
+            return base_result if base_result.mentions
+            for field in fields |field, index, shadowed, work, depth|:
+                result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(field.value, index, shadowed, work, depth + 1)
+                return (false, false) if not result.complete
+                return result if result.mentions
+            return (true, false)
+        Ast::Expr.If(condition, then_expr, else_expr, _):
+            for child in [condition, then_expr, else_expr] |child, index, shadowed, work, depth|:
+                result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(child, index, shadowed, work, depth + 1)
+                return (false, false) if not result.complete
+                return result if result.mentions
+            return (true, false)
+        Ast::Expr.Match(scrutinee, arms, _):
+            scrutinee_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(scrutinee, index, shadowed, work, depth + 1)
+            return (false, false) if not scrutinee_result.complete
+            return scrutinee_result if scrutinee_result.mentions
+            for arm in arms |arm, index, shadowed, work, depth|:
+                guard_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(arm.guard, index, shadowed, work, depth + 1)
+                return (false, false) if not guard_result.complete
+                return guard_result if guard_result.mentions
+                if arm.body.count != 1:
+                    fallback: (complete: bool, has_name: bool) = proof_near_miss_has_possible_name(index, work)
+                    return fallback
+                match arm.body[0]:
+                    Ast::Stmt.Expr(value, _):
+                        body_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(value, index, shadowed, work, depth + 1)
+                        return (false, false) if not body_result.complete
+                        return body_result if body_result.mentions
+                    _:
+                        fallback: (complete: bool, has_name: bool) = proof_near_miss_has_possible_name(index, work)
+                        return fallback
+            return (true, false)
+        Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+            iterable_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(iterable, index, shadowed, work, depth + 1)
+            return (false, false) if not iterable_result.complete
+            return iterable_result if iterable_result.mentions
+            previous_count: usize = shadowed.count
+            shadowed.push(variable)
+            condition_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(condition, index, shadowed, work, depth + 1)
+            if not condition_result.complete:
+                shadowed.truncate(previous_count)
+                return (false, false)
+            body_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(body, index, shadowed, work, depth + 1) if not condition_result.mentions else (true, false)
+            shadowed.truncate(previous_count)
+            return (false, false) if not body_result.complete
+            return condition_result if condition_result.mentions
+            body_result
+        Ast::Expr.Refinement(base, predicate, _):
+            base_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(base, index, shadowed, work, depth + 1)
+            return (false, false) if not base_result.complete
+            return base_result if base_result.mentions
+            proof_near_miss_expr_mentions_any_name(predicate, index, shadowed, work, depth + 1)
+        Ast::Expr.Block(statements, value, _, _):
+            local_names: mutable darray[sview] = []
+            for statement in statements |statement, index, shadowed, work, depth, local_names|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, _, initializer, _):
+                        initializer_result: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(initializer, index, shadowed, work, depth + 1)
+                        return (false, false) if not initializer_result.complete
+                        return initializer_result if initializer_result.mentions
+                        local_names.push(local_name)
+                    _:
+                        fallback: (complete: bool, has_name: bool) = proof_near_miss_has_possible_name(index, work)
+                        return fallback
+            value_shadowed: mutable darray[sview] = []
+            for hidden in shadowed |hidden, value_shadowed|:
+                value_shadowed.push(hidden)
+            for local_name in local_names |local_name, value_shadowed|:
+                value_shadowed.push(local_name)
+            proof_near_miss_expr_mentions_any_name(value, index, value_shadowed, work, depth + 1)
+        _:
+            proof_near_miss_has_possible_name(index, work)
+
+def proof_near_miss_collect_goal_names_with_work(expression: Ast::Expr, names: mutable darray[sview]&, supported: mutable bool&, work: mutable usize&, depth: usize) -> bool:
+    return false if depth >= PROOF_NEAR_MISS_AST_DEPTH_LIMIT or not proof_replay_source_work_charge(1, work)
+    match expression:
+        Ast::Expr.Ident(name, _):
+            return true if name == ""
+            return false if not proof_replay_source_work_charge(1 + sview_len(name), work)
+            names.push(name)
+        Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _):
+            pass
+        Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _):
+            return proof_near_miss_collect_goal_names_with_work(inner, names, supported, work, depth + 1)
+        Ast::Expr.Binary(left, _, right, _):
+            return false if not proof_near_miss_collect_goal_names_with_work(left, names, supported, work, depth + 1)
+            return proof_near_miss_collect_goal_names_with_work(right, names, supported, work, depth + 1)
+        _:
+            supported <- false
+    true
+
+def proof_push_json_near_miss(buffer: mutable darray[u8]&, report: ProofReport&, attempt: ProofGoalAttempt, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
     names: mutable darray[sview] = []
-    proof_diagnostic_counterexample_collect_names(attempt.goal, &names)
-    proof_push(buffer, "{\"goal_names\":[")
+    goal_names_complete: mutable bool = true
+    return proof_near_miss_incomplete(buffer) if not proof_near_miss_collect_goal_names_with_work(attempt.goal, &names, &goal_names_complete, work, 0)
+    indexed_names: (index: ProofNearMissNameIndex, complete: bool) = proof_near_miss_name_index(names, work)
+    return proof_near_miss_incomplete(buffer) if not indexed_names.complete
+    name_index: ProofNearMissNameIndex = indexed_names.index
+    names.clear()
+    names.extend(name_index.names)
+    return proof_near_miss_incomplete(buffer) if:
+        attempt.facts_start > report.analysis_1.certificate_facts.count
+        attempt.facts_count > report.analysis_1.certificate_facts.count - attempt.facts_start
+    relevant_facts: mutable darray[usize] = []
+    for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, name_index, relevant_facts, work|:
+        return proof_near_miss_incomplete(buffer) if not proof_replay_source_work_charge(1, work)
+        fact: Ast::Expr = report.analysis_1.certificate_facts[attempt.facts_start + fact_index]
+        shadowed: mutable darray[sview] = []
+        shared: (complete: bool, mentions: bool) = proof_near_miss_expr_mentions_any_name(fact, name_index, shadowed, work, 0)
+        return proof_near_miss_incomplete(buffer) if not shared.complete
+        relevant_facts.push(fact_index) if shared.mentions
+    # Reserve rendering work before emitting the object so budget exhaustion never leaves a
+    # partial relevance list that consumers could mistake for a complete explanation.
+    return proof_near_miss_incomplete(buffer) if not proof_replay_summary_expr_repeat_charge_with_name_compare_work(attempt.goal, 65, 0, work)
+    return proof_near_miss_incomplete(buffer) if relevant_facts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 10
+    return proof_near_miss_incomplete(buffer) if not proof_replay_source_work_charge(relevant_facts.count * 10, work)
+    for name in names |name, work|:
+        return proof_near_miss_incomplete(buffer) if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 6
+        return proof_near_miss_incomplete(buffer) if not proof_replay_source_work_charge(sview_len(name) * 6, work)
+    linear_rows_json: mutable darray[u8] = []
+    linear_rows_complete: bool = proof_push_json_linear_rows_with_work(&linear_rows_json, report, attempt, work)
+    # Unsupported goal forms or omitted linear rows keep the report useful, but must never be
+    # surfaced as a complete near-miss analysis to callers that only inspect the aggregate bit.
+    analysis_complete: bool = goal_names_complete and linear_rows_complete
+    proof_push(buffer, "{\"analysis_complete\":")
+    proof_push(buffer, "true" if analysis_complete else "false")
+    proof_push(buffer, ",\"goal_names_complete\":")
+    proof_push(buffer, "true" if goal_names_complete else "false")
+    proof_push(buffer, ",\"relevant_facts_complete\":")
+    proof_push(buffer, "true" if goal_names_complete else "false")
+    proof_push(buffer, ",\"goal_names\":[")
     for name_index in 0..<names.count |name_index, names, buffer|:
         proof_push(buffer, ",") if name_index > 0
         proof_push_json_string(buffer, names[name_index])
     proof_push(buffer, "],\"relevant_facts\":[")
-    written: mutable usize = 0
-    for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer, names, written|:
-        fact: Ast::Expr = report.analysis_1.certificate_facts[attempt.facts_start + fact_index]
-        shared: mutable bool = false
-        for name_index in 0..<names.count |name_index, names, fact, shared|:
-            shared <- true if proof_expr_mentions_name(fact, names[name_index])
-        if shared:
-            proof_push(buffer, ",") if written > 0
-            proof_push_number(buffer, fact_index.u32())
-            written <- written + 1
+    for relevant_index in 0..<relevant_facts.count |relevant_index, relevant_facts, buffer|:
+        proof_push(buffer, ",") if relevant_index > 0
+        proof_push_number(buffer, relevant_facts[relevant_index].u32())
     proof_push(buffer, "],\"missing_fact\":")
     proof_push_json_expr(buffer, attempt.goal)
+    proof_push(buffer, ",\"linear_rows_complete\":")
+    proof_push(buffer, "true" if linear_rows_complete else "false")
     proof_push(buffer, ",\"linear_rows\":")
-    proof_push_json_linear_rows(buffer, report, attempt)
+    proof_push(buffer, linear_rows_json)
     proof_push(buffer, "}")
+    analysis_complete
+
+def proof_near_miss_incomplete(buffer: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"analysis_complete\":false,\"goal_names_complete\":false,\"relevant_facts_complete\":false,\"goal_names\":[],\"relevant_facts\":[],\"missing_fact\":null,\"linear_rows_complete\":false,\"linear_rows\":null}")
+    false

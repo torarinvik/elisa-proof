@@ -13,7 +13,7 @@ def proof_report_trusted_boundary_count_with_work(report: ProofReport&, work_use
     return (true, count)
 
 def proof_push_json_report_summary_with_replay[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, replay_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
-    report: ProofReport& = proof_checked_view_report(checked_view)
+    report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     semantic_errors: u32 = proof_checked_view_semantic_errors(checked_view)
     semantic_visible: u32 = proof_checked_view_semantic_visible(checked_view)
     source_bytes: usize = proof_checked_view_source_bytes(checked_view)
@@ -24,7 +24,7 @@ def proof_push_json_report_summary_with_replay[@view, @buffer](buffer: mutable d
     certificate_count: (complete: bool, count: u32) = proof_output_checked_view_replayed_certificate_count_with_work(checked_view, replay_work)
     replayed_certificate_count: u32 = certificate_count.count
     confirmation: (known: bool, replay_confirmed: u32, frame_checks: u32) = ElisaProofOutputReplayStatus::proof_output_checked_view_confirmation_counts_with_work(checked_view, replay_work)
-    finding_counts: (complete: bool, disproved: u32, unsupported: u32, unknown: u32, verification_state: sview) = ElisaProofOutputReplayStatus::proof_output_checked_view_finding_summary_with_work(checked_view, replay_work)
+    finding_counts: (complete: bool, disproved: u32, unsupported: u32, unknown: u32, verification_state: sview) = ElisaProofOutputReplayStatus::proof_output_checked_view_finding_summary_with_work(checked_view, source_admitted_goals, replay_work)
     trusted_boundary_snapshot: (complete: bool, count: u32) = proof_report_trusted_boundary_count_with_work(report, replay_work)
     all_source_admissions_complete: bool = proof_checked_view_source_admissions_complete(checked_view)
     status_snapshot_complete: bool = snapshot.complete and certificate_count.complete and confirmation.known and finding_counts.complete and trusted_boundary_snapshot.complete and all_source_admissions_complete
@@ -38,8 +38,9 @@ def proof_push_json_report_summary_with_replay[@view, @buffer](buffer: mutable d
     effective_source_admissible: bool = source_admissible and source_admissions_complete and all_source_admissions_complete
     verdict: mutable sview = "proved"
     verdict <- "failed" if not source_checks_complete
-    verdict <- "failed" if verdict == "proved" and not source_complete
     verdict <- "proved_with_replay_gaps" if verdict == "proved" and not replay_complete
+    verdict <- "failed" if verdict == "proved" and not source_complete
+    verdict <- "failed" if not effective_source_admissible
     verdict <- "failed" if not status_snapshot_complete
     verification_state: mutable sview = finding_counts.verification_state
     verification_state <- "unknown" if not status_snapshot_complete
@@ -88,11 +89,19 @@ def proof_push_json_report_summary_with_replay[@view, @buffer](buffer: mutable d
     proof_push(buffer, "},\"details\":{\"omitted\":true,\"authoritative_route\":\"elisa-proof --json <file.elisa>\"}}")
     return status_snapshot_complete
 
-def proof_semantic_diagnostic_visible(diagnostic: Semantic::Diagnostic, report: ProofReport&) -> bool:
-    return false if:
-        diagnostic.kind == Semantic::DiagnosticKind.AssertByUnproven
-        diagnostic.kind == Semantic::DiagnosticKind.MutualDecreasesCycle and any verified_name in report.analysis_1.structural.verified_names where verified_name == diagnostic.name
-    return true
+def proof_semantic_diagnostic_visibility_snapshot_with_work(diagnostics: darray[Semantic::Diagnostic]&, report: ProofReport&, source_work: mutable usize&) -> (complete: bool, visible: darray[bool]):
+    visible: mutable darray[bool] = []
+    return (false, visible) if not proof_output_reserve_status_snapshot_work(source_work, diagnostics.count)
+    for diagnostic in diagnostics |diagnostic, report, visible, source_work|:
+        if diagnostic.kind == Semantic::DiagnosticKind.AssertByUnproven:
+            visible.push(false)
+        elif diagnostic.kind == Semantic::DiagnosticKind.MutualDecreasesCycle:
+            verified_member: (complete: bool, verified: bool) = proof_structural_verified_member_lookup_with_work(report, diagnostic.name, source_work)
+            return (false, []) if not verified_member.complete
+            visible.push(not verified_member.verified)
+        else:
+            visible.push(true)
+    return (true, visible)
 
 def proof_report_discharges_return(report: ProofReport&, name: sview, line: u32) -> bool:
     # This compatibility API has no receipt, so report fields cannot establish a discharge.
@@ -103,7 +112,9 @@ def proof_report_discharges_return_with_replayed(report: ProofReport&, name: svi
     false
 
 def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, semantic_diagnostics: darray[Semantic::Diagnostic]&, source_map: ProofSourceMap&, replay_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Global.Read]:
-    report: ProofReport& = proof_checked_view_report(checked_view)
+    report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
+    semantic_visibility_snapshot: (complete: bool, visible: darray[bool]) = proof_semantic_diagnostic_visibility_snapshot_with_work(semantic_diagnostics, report, replay_work)
+    semantic_visibility: darray[bool] = semantic_visibility_snapshot.visible
     semantic_visible: u32 = proof_checked_view_semantic_visible(checked_view)
     import_failed: bool = proof_checked_view_import_failed(checked_view)
     semantic_errors: u32 = proof_checked_view_semantic_errors(checked_view)
@@ -112,19 +123,21 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
     source_files_work_reserved: bool = proof_output_reserve_status_snapshot_work(replay_work, source_map.files.count)
     snapshot: (complete: bool, replayed_goals: darray[bool], source_admitted_goals: darray[bool]) = proof_output_checked_view_goal_statuses_with_work(checked_view, replay_work)
     certificate_snapshot: (complete: bool, replayed_certificates: darray[bool], replayed_certificate_count: u32) = proof_output_checked_view_certificate_statuses_with_work(checked_view, replay_work)
+    producer_claim_snapshot: (complete: bool, producer_claimed_goals: darray[bool]) = proof_output_checked_view_producer_claims_with_work(checked_view, replay_work)
     replayed_goals: darray[bool] = snapshot.replayed_goals
     source_admitted_goals: darray[bool] = snapshot.source_admitted_goals
+    producer_claimed_goals: darray[bool] = producer_claim_snapshot.producer_claimed_goals
     replayed_certificates: darray[bool] = certificate_snapshot.replayed_certificates
     replayed_certificate_count: u32 = certificate_snapshot.replayed_certificate_count
     focus_function: sview = report.context.focused_function
     confirmation: (known: bool, replay_confirmed: u32, frame_checks: u32) = ElisaProofOutputReplayStatus::proof_output_checked_view_confirmation_counts_with_work(checked_view, replay_work)
-    finding_counts: (complete: bool, disproved: u32, unsupported: u32, unknown: u32, verification_state: sview) = ElisaProofOutputReplayStatus::proof_output_checked_view_finding_summary_with_work(checked_view, replay_work)
+    finding_counts: (complete: bool, disproved: u32, unsupported: u32, unknown: u32, verification_state: sview) = ElisaProofOutputReplayStatus::proof_output_checked_view_finding_summary_with_work(checked_view, source_admitted_goals, replay_work)
     finding_details_work_reserved: bool = proof_output_reserve_status_snapshot_work(replay_work, report.results.findings.count)
     trusted_boundary_snapshot: (complete: bool, count: u32) = proof_report_trusted_boundary_count_with_work(report, replay_work)
     boundary_facts_work_reserved: bool = proof_output_reserve_status_snapshot_work(replay_work, report.analysis_1.traces.records.count)
     fact_traces_work_reserved: bool = proof_output_reserve_status_snapshot_work(replay_work, report.analysis_1.traces.records.count)
     all_source_admissions_complete: bool = proof_checked_view_source_admissions_complete(checked_view)
-    status_snapshot_complete: bool = snapshot.complete and certificate_snapshot.complete and confirmation.known and source_files_work_reserved and finding_counts.complete and finding_details_work_reserved and trusted_boundary_snapshot.complete and boundary_facts_work_reserved and fact_traces_work_reserved and all_source_admissions_complete
+    status_snapshot_complete: bool = snapshot.complete and producer_claim_snapshot.complete and certificate_snapshot.complete and confirmation.known and source_files_work_reserved and finding_counts.complete and finding_details_work_reserved and trusted_boundary_snapshot.complete and boundary_facts_work_reserved and fact_traces_work_reserved and semantic_visibility_snapshot.complete and all_source_admissions_complete
     certificate_status_snapshot_complete: bool = proof_checked_view_source_validated(checked_view) and certificate_snapshot.complete
     replay_complete: bool = proof_checked_view_replay_complete(checked_view)
     replay_gap: (available: bool, count: u32) = proof_checked_view_replay_gap_count(checked_view)
@@ -140,8 +153,9 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
     effective_source_admissible: bool = source_admissible and source_admissions_complete and all_source_admissions_complete
     verdict: mutable sview = "proved"
     verdict <- "failed" if not source_checks_complete
-    verdict <- "failed" if verdict == "proved" and not source_complete
     verdict <- "proved_with_replay_gaps" if verdict == "proved" and not replay_complete
+    verdict <- "failed" if verdict == "proved" and not source_complete
+    verdict <- "failed" if not effective_source_admissible
     verdict <- "failed" if not status_snapshot_complete
     verification_state: mutable sview = finding_counts.verification_state
     verification_state <- "unknown" if not status_snapshot_complete
@@ -165,11 +179,12 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
         proof_push(buffer, ",\"unrequested_proposition_findings\":[")
         for index in 0..<report.results.focused_unrequested_findings.count |index, report, buffer|:
             finding: ProofFinding = report.results.focused_unrequested_findings[index]
+            finding_status: sview = proof_output_finding_source_status(finding, false)
             proof_push(buffer, ",") if index > 0
             proof_push(buffer, "{\"kind\":")
             proof_push_json_string(buffer, finding.kind)
             proof_push(buffer, ",\"status\":")
-            proof_push_json_string(buffer, finding.status)
+            proof_push_json_string(buffer, finding_status)
             proof_push(buffer, ",\"line\":")
             proof_push_number(buffer, finding.line)
             proof_push(buffer, ",\"name\":")
@@ -195,7 +210,7 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
     proof_push(buffer, ",\"boundary_facts\":[")
     boundary_index: mutable usize = 0
     if boundary_facts_work_reserved:
-        for trace in report.analysis_1.traces.records |buffer, boundary_index|:
+        for trace in report.analysis_1.traces.records |__trace_summary_loop_unit = false, buffer, boundary_index| -> __trace_summary_loop_unit:
             if proof_trace_is_trusted_boundary(trace):
                 proof_push(buffer, ",") if boundary_index > 0
                 proof_push(buffer, "{\"kind\":")
@@ -231,12 +246,14 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
     proof_push(buffer, ",\"declaration_details_complete\":true" if declaration_details_complete else ",\"declaration_details_complete\":false")
     proof_push(buffer, ",\"semantic_diagnostics\":[")
     semantic_index: mutable usize = 0
-    for diagnostic in semantic_diagnostics |diagnostic, report, buffer, semantic_index|:
-        continue if not proof_semantic_diagnostic_visible(diagnostic, report)
+    for diagnostic_index in 0..<semantic_diagnostics.count |diagnostic_index, semantic_diagnostics, semantic_visibility, semantic_visibility_snapshot, buffer, semantic_index|:
+        diagnostic: Semantic::Diagnostic = semantic_diagnostics[diagnostic_index]
+        continue if semantic_visibility_snapshot.complete and not semantic_visibility[diagnostic_index]
         proof_push(buffer, ",") if semantic_index > 0
         proof_push_json_semantic_diagnostic(buffer, diagnostic)
         semantic_index <- semantic_index + 1
-    proof_push(buffer, "],\"replay\":{\"certificates\":")
+    proof_push(buffer, "],\"semantic_diagnostics_complete\":true" if semantic_visibility_snapshot.complete else "],\"semantic_diagnostics_complete\":false")
+    proof_push(buffer, ",\"replay\":{\"certificates\":")
     proof_push_number(buffer, report.analysis_1.certificates.count.u32())
     proof_push(buffer, ",\"status_snapshot_complete\":")
     proof_push(buffer, "true" if status_snapshot_complete else "false")
@@ -268,7 +285,7 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
         proof_push_number(buffer, report.analysis_1.kernel.fact_trace_premises[index].u32())
     proof_push(buffer, "],\"fact_traces\":[")
     if fact_traces_work_reserved:
-        for index in 0..<report.analysis_1.traces.records.count |index, report, buffer|:
+        for index in 0..<report.analysis_1.traces.records.count |__trace_output_loop_unit = false, index, report, buffer| -> __trace_output_loop_unit:
             trace: ProofFactTrace = report.analysis_1.traces.records[index]
             proof_push(buffer, ",") if index > 0
             proof_push(buffer, "{\"expression\":")
@@ -288,7 +305,7 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
             proof_push(buffer, ",\"summary_bindings\":[")
             valid_summary_bindings: bool = trace.summary_bindings_start <= report.analysis_1.traces.summary_names.count and trace.summary_bindings_count <= report.analysis_1.traces.summary_names.count - trace.summary_bindings_start and trace.summary_bindings_start <= report.analysis_1.traces.summary_values.count and trace.summary_bindings_count <= report.analysis_1.traces.summary_values.count - trace.summary_bindings_start
             if valid_summary_bindings:
-                for binding_index in 0..<trace.summary_bindings_count |binding_index, trace, report, buffer|:
+            for binding_index in 0..<trace.summary_bindings_count |__trace_binding_loop_unit = false, binding_index, trace, report, buffer| -> __trace_binding_loop_unit:
                     proof_push(buffer, ",") if binding_index > 0
                     summary_index: usize = trace.summary_bindings_start + binding_index
                     proof_push(buffer, "{\"parameter\":")
@@ -299,7 +316,7 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
             proof_push(buffer, "],\"summary_require_goal_ids\":[")
             valid_summary_requires: bool = trace.summary_requires_start <= report.analysis_1.traces.summary_require_goal_ids.count and trace.summary_requires_count <= report.analysis_1.traces.summary_require_goal_ids.count - trace.summary_requires_start
             if valid_summary_requires:
-                for require_index in 0..<trace.summary_requires_count |require_index, trace, report, buffer|:
+            for require_index in 0..<trace.summary_requires_count |__trace_require_loop_unit = false, require_index, trace, report, buffer| -> __trace_require_loop_unit:
                     proof_push(buffer, ",") if require_index > 0
                     proof_push_number(buffer, report.analysis_1.traces.summary_require_goal_ids[trace.summary_requires_start + require_index].u32())
             proof_push(buffer, "],\"summary_ensure_index\":")
@@ -308,13 +325,16 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
     proof_push(buffer, "],\"fact_traces_complete\":true" if fact_traces_work_reserved else "],\"fact_traces_complete\":false")
     proof_push(buffer, "},\"findings\":[")
     if finding_details_work_reserved:
-        for index in 0..<report.results.findings.count |index, report, buffer, replayed_goals|:
+        for index in 0..<report.results.findings.count |__finding_output_loop_unit = false, index, report, buffer, replayed_goals, source_admitted_goals| -> __finding_output_loop_unit:
             finding: ProofFinding = report.results.findings[index]
+            finding_source_admitted: bool = finding.has_goal and finding.goal_id < source_admitted_goals.count and proof_output_cached_source_admission_status(source_admitted_goals, finding.goal_id)
+            finding_status: sview = proof_output_finding_source_status(finding, finding_source_admitted)
+            counterexample_trusted: bool = finding.counterexample_found and finding_status == "disproved"
             proof_push(buffer, ",") if index > 0
             proof_push(buffer, "{\"kind\":")
             proof_push_json_string(buffer, finding.kind)
             proof_push(buffer, ",\"status\":")
-            proof_push_json_string(buffer, finding.status)
+            proof_push_json_string(buffer, finding_status)
             proof_push(buffer, ",\"line\":")
             proof_push_number(buffer, finding.line)
             proof_push_json_source_position(buffer, source_map, finding.line)
@@ -335,24 +355,26 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
                 if finding.has_goal and finding.goal_id < report.results.goal_attempts.count:
                     attempt: ProofGoalAttempt = report.results.goal_attempts[finding.goal_id]
                     refusal_gate: mutable sview = "unknown"
-                    refusal_gate <- "kernel-replay-gap" if attempt.proven and not proof_output_cached_replay_status(replayed_goals, finding.goal_id)
-                    refusal_gate <- proof_attempt_refusal_gate(report, attempt) if not attempt.proven
+                    producer_claim: bool = proof_checked_view_attempt_had_producer_claim(checked_view, finding.goal_id)
+                    refusal_gate <- "kernel-replay-gap" if producer_claim and not proof_output_cached_replay_status(replayed_goals, finding.goal_id)
+                    refusal_gate <- proof_attempt_refusal_gate(report, attempt) if not producer_claim
                     proof_push_json_string(buffer, refusal_gate)
                 else:
                     # Keep the A-02 field present for every failed ensure, even when the front-end
                     # could not bind its diagnostic back to a goal attempt. The unavailable search
                     # trace is explicit rather than guessed.
                     proof_push_json_string(buffer, "unknown")
-            elif finding.has_goal and finding.goal_id < report.results.goal_attempts.count and not report.results.goal_attempts[finding.goal_id].proven:
+            elif finding.has_goal and finding.goal_id < report.results.goal_attempts.count and not proof_checked_view_attempt_had_producer_claim(checked_view, finding.goal_id):
                 proof_push(buffer, ",\"refusal_gate\":")
                 proof_push_json_string(buffer, proof_attempt_refusal_gate(report, report.results.goal_attempts[finding.goal_id]))
             proof_push(buffer, ",\"counterexample_found\":")
-            proof_push(buffer, "true" if finding.counterexample_found else "false")
+            proof_push(buffer, "true" if counterexample_trusted else "false")
             proof_push(buffer, ",\"goal_id\":")
             proof_push_number(buffer, finding.goal_id.u32()) if finding.has_goal
             proof_push(buffer, "null") if not finding.has_goal
             proof_push(buffer, ",\"counterexample\":[")
-            for counterexample_index in 0..<finding.counterexample_count |counterexample_index, finding, report, buffer|:
+            counterexample_count: usize = finding.counterexample_count if counterexample_trusted else 0
+            for counterexample_index in 0..<counterexample_count |counterexample_index, finding, report, buffer|:
                 proof_push(buffer, ",") if counterexample_index > 0
                 proof_push_json_expr(buffer, report.results.counterexample_facts[finding.counterexample_start + counterexample_index])
             proof_push(buffer, "]")
@@ -360,7 +382,7 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
     proof_push(buffer, "]")
     proof_push(buffer, ",\"findings_complete\":true" if finding_details_work_reserved else ",\"findings_complete\":false")
     proof_push(buffer, ",\"goals\":[")
-    for index in 0..<report.results.goal_attempts.count |index, report, buffer, origin_work, replayed_goals, source_admitted_goals, source_admissions_complete|:
+    for index in 0..<report.results.goal_attempts.count |index, report, buffer, origin_work, replayed_goals, source_admitted_goals, producer_claimed_goals, source_admissions_complete|:
         attempt: ProofGoalAttempt = report.results.goal_attempts[index]
         replay_status: mutable sview = "not_certified"
         replay_status <- "gap" if attempt.has_certificate
@@ -375,14 +397,15 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
         proof_push_json_string(buffer, attempt.name)
         proof_push(buffer, ",\"rule\":")
         proof_push_json_string(buffer, attempt.rule)
-        replay_proven: bool = attempt.proven and proof_output_cached_replay_status(replayed_goals, index) and proof_output_cached_source_admission_status(source_admitted_goals, index)
+        producer_claim: bool = proof_output_cached_producer_claim_status(producer_claimed_goals, index)
+        replay_proven: bool = producer_claim and proof_output_cached_replay_status(replayed_goals, index) and proof_output_cached_source_admission_status(source_admitted_goals, index)
         proof_push(buffer, ",\"proven\":")
         proof_push(buffer, "true" if replay_proven else "false")
         proof_push(buffer, ",\"replay_status\":")
         proof_push_json_string(buffer, replay_status)
         if not replay_proven:
             proof_push(buffer, ",\"refusal_gate\":")
-            refusal_gate: sview = "source-admission-incomplete" if attempt.proven and not source_admissions_complete else ("source-unbound" if attempt.proven and not proof_output_cached_source_admission_status(source_admitted_goals, index) else ("kernel-replay-gap" if attempt.proven else proof_attempt_refusal_gate(report, attempt)))
+            refusal_gate: sview = "source-admission-incomplete" if producer_claim and not source_admissions_complete else ("source-unbound" if producer_claim and not proof_output_cached_source_admission_status(source_admitted_goals, index) else ("kernel-replay-gap" if producer_claim else proof_attempt_refusal_gate(report, attempt)))
             proof_push_json_string(buffer, refusal_gate)
         proof_push(buffer, ",\"certificate_id\":")
         if attempt.has_certificate and attempt.certificate_index < report.analysis_1.certificates.count:
@@ -415,9 +438,10 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
     repair_failure_details_complete: mutable bool = true
     finding_index: mutable ProofRepairFindingLookupIndex = ProofRepairFindingLookupIndex{}
     finding_index_ready: mutable bool = false
-    for index in 0..<report.results.goal_attempts.count |index, report, buffer, repair_index, origin_work, replay_work, replayed_goals, source_admitted_goals, source_admissions_complete, repair_failure_details_complete, finding_index, finding_index_ready|:
+    for index in 0..<report.results.goal_attempts.count |index, report, buffer, repair_index, origin_work, replay_work, replayed_goals, source_admitted_goals, producer_claimed_goals, source_admissions_complete, repair_failure_details_complete, finding_index, finding_index_ready|:
         attempt: ProofGoalAttempt = report.results.goal_attempts[index]
-        continue if attempt.proven and proof_output_cached_replay_status(replayed_goals, index) and proof_output_cached_source_admission_status(source_admitted_goals, index)
+        producer_claim: bool = proof_output_cached_producer_claim_status(producer_claimed_goals, index)
+        continue if producer_claim and proof_output_cached_replay_status(replayed_goals, index) and proof_output_cached_source_admission_status(source_admitted_goals, index)
         if not finding_index_ready:
             finding_index <- proof_repair_finding_index_build(report, report.results.goal_attempts.count, replay_work)
             finding_index_ready <- true
@@ -435,14 +459,15 @@ def proof_push_json_report_with_replay[@view, @buffer](buffer: mutable darray[u8
         replay_status <- "replayed" if proof_output_cached_replay_status(replayed_goals, index)
         proof_push(buffer, ",\"replay_status\":")
         proof_push_json_string(buffer, replay_status)
-        proof_push(buffer, ",\"refusal_gate\":\"source-admission-incomplete\"") if attempt.proven and not source_admissions_complete
-        proof_push(buffer, ",\"refusal_gate\":\"source-unbound\"") if attempt.proven and source_admissions_complete and not proof_output_cached_source_admission_status(source_admitted_goals, index)
+        proof_push(buffer, ",\"refusal_gate\":\"source-admission-incomplete\"") if producer_claim and not source_admissions_complete
+        proof_push(buffer, ",\"refusal_gate\":\"source-unbound\"") if producer_claim and source_admissions_complete and not proof_output_cached_source_admission_status(source_admitted_goals, index)
         proof_push(buffer, ",\"failure\":")
-        failure_complete: bool = proof_push_json_repair_failure(buffer, report, attempt, index, finding_index, replay_work)
+        failure_complete: bool = proof_push_json_repair_failure(buffer, report, attempt, index, proof_output_cached_source_admission_status(source_admitted_goals, index), finding_index, replay_work)
         repair_failure_details_complete <- false if not failure_complete
         proof_push(buffer, ",\"failure_complete\":true" if failure_complete else ",\"failure_complete\":false")
         proof_push(buffer, ",\"near_miss\":")
-        proof_push_json_near_miss(buffer, report, attempt)
+        near_miss_complete: bool = proof_push_json_near_miss(buffer, report, attempt, replay_work)
+        repair_failure_details_complete <- false if not near_miss_complete
         proof_push(buffer, ",\"dependencies\":")
         dependencies_complete: bool = proof_push_json_goal_dependencies(buffer, report, attempt.facts_start, attempt.facts_count, attempt.name, origin_work)
         proof_push(buffer, ",\"dependencies_complete\":true" if dependencies_complete else ",\"dependencies_complete\":false")

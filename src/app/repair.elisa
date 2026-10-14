@@ -86,11 +86,11 @@ def proof_push_json_goal_dependencies(buffer: mutable darray[u8]&, report: Proof
     proof_push(buffer, "]")
     return true
 
-def proof_push_json_repair_finding(buffer: mutable darray[u8]&, report: ProofReport&, finding: ProofFinding) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_json_repair_finding(buffer: mutable darray[u8]&, report: ProofReport&, finding: ProofFinding, finding_status: sview, counterexample_trusted: bool) -> void can[Memory.Allocate, Abort.Panic]:
     proof_push(buffer, "{\"kind\":")
     proof_push_json_string(buffer, finding.kind)
     proof_push(buffer, ",\"status\":")
-    proof_push_json_string(buffer, finding.status)
+    proof_push_json_string(buffer, finding_status)
     proof_push(buffer, ",\"message\":")
     proof_push_json_string(buffer, finding.message)
     if finding.budget_dimension != "":
@@ -102,23 +102,24 @@ def proof_push_json_repair_finding(buffer: mutable darray[u8]&, report: ProofRep
         proof_push_number(buffer, finding.budget_limit.u32())
         proof_push(buffer, "}")
     proof_push(buffer, ",\"counterexample_found\":")
-    proof_push(buffer, "true" if finding.counterexample_found else "false")
+    proof_push(buffer, "true" if counterexample_trusted else "false")
     proof_push(buffer, ",\"goal_id\":")
     proof_push_number(buffer, finding.goal_id.u32()) if finding.has_goal
     proof_push(buffer, "null") if not finding.has_goal
     proof_push(buffer, ",\"counterexample\":[")
-    for index in 0..<finding.counterexample_count |index, finding, report, buffer|:
+    counterexample_count: usize = finding.counterexample_count if counterexample_trusted else 0
+    for index in 0..<counterexample_count |index, finding, report, buffer|:
         proof_push(buffer, ",") if index > 0
         proof_push_json_expr(buffer, report.results.counterexample_facts[finding.counterexample_start + index])
     proof_push(buffer, "]}")
 
-def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize, finding_index: ProofRepairFindingLookupIndex&, work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize, goal_source_admitted: bool, finding_index: ProofRepairFindingLookupIndex&, work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
     selected: (complete: bool, known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index_lookup(finding_index, attempt, goal_id, work_used)
-    proof_push_json_repair_failure_from_selection(buffer, report, selected, work_used)
+    proof_push_json_repair_failure_from_selection(buffer, report, selected, goal_id, goal_source_admitted, work_used)
 
-def proof_push_json_repair_failure_from_selection(buffer: mutable darray[u8]&, report: ProofReport&, selected: (complete: bool, known: bool, index: usize, ambiguous: bool), work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+def proof_push_json_repair_failure_from_selection(buffer: mutable darray[u8]&, report: ProofReport&, selected: (complete: bool, known: bool, index: usize, ambiguous: bool), goal_id: usize, goal_source_admitted: bool, work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
     if selected.known:
-        finding_complete: bool = proof_push_json_repair_finding_with_work(buffer, report, report.results.findings[selected.index], work_used)
+        finding_complete: bool = proof_push_json_repair_finding_with_work(buffer, report, report.results.findings[selected.index], goal_id, goal_source_admitted, work_used)
         if finding_complete:
             return selected.complete
         proof_push(buffer, "{\"kind\":\"unresolved-goal\",\"status\":\"unknown\",\"message\":\"diagnostic rendering incomplete because the output work limit was reached\",\"counterexample_found\":false,\"goal_id\":null,\"counterexample\":[]}")
@@ -133,14 +134,17 @@ def proof_push_json_repair_failure_from_selection(buffer: mutable darray[u8]&, r
     proof_push(buffer, ",\"counterexample_found\":false,\"goal_id\":null,\"counterexample\":[]}")
     return selected.complete
 
-def proof_push_json_repair_finding_with_work(buffer: mutable darray[u8]&, report: ProofReport&, finding: ProofFinding, work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+def proof_push_json_repair_finding_with_work(buffer: mutable darray[u8]&, report: ProofReport&, finding: ProofFinding, goal_id: usize, goal_source_admitted: bool, work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
     return false if:
         not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.kind))
         not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.status))
         not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.name))
         not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.message))
         not proof_output_reserve_status_snapshot_work(work_used, finding.counterexample_count)
-    proof_push_json_repair_finding(buffer, report, finding)
+    status_source_admitted: bool = goal_source_admitted and finding.has_goal and finding.goal_id == goal_id
+    finding_status: sview = proof_output_finding_source_status(finding, status_source_admitted)
+    counterexample_trusted: bool = finding.counterexample_found and finding_status == "disproved"
+    proof_push_json_repair_finding(buffer, report, finding, finding_status, counterexample_trusted)
     return true
 
 # Render one goal as an Elisa-like proof a person can read and edit. Everything printed comes from
@@ -177,7 +181,7 @@ def proof_repair_strip_outer_parens(expression: Ast::Expr) -> (complete: bool, v
     return (false, current)
 
 def proof_repair_check_candidate[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize, repair_state: darray[u8]&, script_text: darray[u8]&, context_prevalidated: bool) -> (usable: bool, admitted: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global.Read, Global.Write]:
-    report: ProofReport& = proof_checked_view_report(checked_view)
+    report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     candidate_arena: mutable Arena = zeroed
     usable: mutable bool = false
     admitted: mutable bool = false
@@ -288,7 +292,7 @@ def proof_repair_push_script_text(buffer: mutable darray[u8]&, report: ProofRepo
 # its own. Rewrites are generated only from explicit equalities in this goal's own fact list.
 def proof_repair_search[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize) -> (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool, has_apply: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global.Read, Global.Write]:
     return (false, 0, 0, false, "", 0, false, false, false) if not proof_checked_view_goal_source_admissible(checked_view, goal_id) or not proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)
-    report: ProofReport& = proof_checked_view_report(checked_view)
+    report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     repair_state: mutable darray[u8] = []
     repair_goal: mutable Ast::Expr = Ast::Expr.Invalid
     repair_fact_start: mutable usize = 0
@@ -454,7 +458,7 @@ def proof_repair_search[@view](checked_view: ProofCheckedView[view]& @view, goal
 # One goal's entry in a whole-file repair report: what it is, whether a proposal survived the
 # kernel, and the runnable script when one did.
 def proof_push_repair_goal[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, goal_id: usize, found: (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool, has_apply: bool), source_goal_admissible: bool, source_goal_admissions_complete: bool) -> void can[Memory.Allocate, Abort.Panic]:
-    report: ProofReport& = proof_checked_view_report(checked_view)
+    report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     if goal_id >= report.results.goal_attempts.count:
         proof_push(buffer, "{\"goal_id\":")
         proof_push_number(buffer, goal_id.u32())
