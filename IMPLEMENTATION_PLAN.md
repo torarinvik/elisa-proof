@@ -25475,5 +25475,133 @@ separate source-authentication review. `git diff --check` passes; no tests or bu
 The new call replay shape check rejected qualified generic roots in alias application positions but
 did not make the same check for qualified type expressions nested inside an actual, such as
 `T::Member`. Source conversion rejects those when `T` is a caller generic. Replay now performs the
-same metered generic lookup before descending through a qualified type actual. `git diff --check`
-passes; no tests or builds were run.
+same metered generic lookup before descending through a qualified type actual. The focused
+generic-alias dispatch guard, source-length gate, and `git diff --check` pass. Runtime qualification
+remains open without a matching compiler product.
+
+
+### 23.27.1458 Enforce nested generic-alias validity and arity in replay (2026-10-14)
+
+The replay shape validator accepted nested alias application syntax without independently requiring
+the source-authenticated generic-body validity bit and exact formal arity. This could consume work
+before later normalization declined the same alias, and made the admission predicate weaker than
+source conversion. Replay now checks the validity and arity before descending into nested actuals;
+the focused generic-alias guard covers both single- and multi-argument forms; source-length and
+diff checks pass. A matching compiler/runtime build remains unavailable.
+
+
+### 23.27.1459 Remove dead unmetered congruence saturation helpers (2026-10-14)
+
+Call-site inspection found that the old unmetered congruence operand-index builder and saturation
+round had no callers; active replay uses `proof_kernel_replay_congruence_saturate_indexed_with_goal_work`.
+Removed the dead builder and round helpers, retaining the operand-index data type and accessor used
+by the metered implementation. `rg` confirms no remaining references to the removed entrypoints and
+`git diff --check` passes. No tests or builds were run.
+
+
+### 23.27.1460 Remove disconnected unmetered unsigned replay families (2026-10-14)
+
+Call-graph inspection found that the legacy unsigned-widening and strict-progress implementations
+had no callers; production replay routes through their shared-goal-meter counterparts. Removed
+those files and their last unmetered sum-bound/safety callers, along with the unmetered signed
+safety wrapper reachable only from those paths. The metered widening, strict-progress, unsigned
+goal-safety, and signed-expression-safety implementations remain in use. `rg` confirms no
+references to the removed unmetered entrypoints. Also removed the orphaned unsigned span-cursor,
+subtraction-upper, and span-descent helpers while retaining their metered counterparts.
+The remaining fixed-width file now delegates signed-expression safety to the shared-meter
+implementation; its unused private recursive walker and isolated width wrappers are removed.
+`git diff --check` passes. No tests or builds were run.
+
+
+### 23.27.1461 Remove unreferenced fresh-meter proposition wrappers (2026-10-14)
+
+Call-site inspection found two private proposition-validation wrappers with no callers. Each reset the
+work counter before invoking the metered implementation, creating dead alternate entrypoints that
+could accidentally be reused without a shared caller meter. Removed the wrappers; retained the
+recursive metered predicates used by active API and tactic paths. `rg` confirms no remaining
+references, and `git diff --check` passes. No tests or builds were run.
+
+
+### 23.27.1462 Remove unreferenced unmetered congruence wrapper (2026-10-14)
+
+Call-site inspection found the private `proof_kernel_replay_congruence_goal` wrapper had no callers;
+it reset the work counter before entering the shared-meter implementation. Removed this obsolete
+entrypoint while retaining `proof_kernel_replay_congruence_goal_with_goal_work`, which active
+resource-model paths call. Repository search and `git diff --check` confirm the cleanup. No tests or
+builds were run.
+
+
+### 23.27.1464 Remove recursive fresh-meter denial compatibility path (2026-10-14)
+
+The unmetered denial value checker recursed through conditionals by calling an unmetered fragment
+wrapper, which reset the counter at each nested condition. Those helpers and a fresh-meter push
+wrapper had no callers; active denial replay already uses `proof_kernel_replay_denial_fragment_with_work`
+and its shared meter throughout recursive value checks. Removed the disconnected legacy cycle and
+wrapper. Repository search and `git diff --check` pass. No tests or builds were run.
+
+
+### 23.27.1463 Remove disconnected fresh-meter goal-depth entrypoints (2026-10-14)
+
+Repository-wide call-site search found no callers of the private `proof_kernel_replay_goal_depth` or
+`proof_kernel_replay_goal_depth_remaining` wrappers. Both created a fresh bounded work counter before
+entering recursive goal replay, leaving alternate entrypoints outside the shared accounting used by
+active APIs. Removed them; all retained goal search uses the explicit `work_used` parameter. `rg` and
+`git diff --check` pass. No tests or builds were run.
+
+
+### 23.27.1465 Remove unused fresh-meter disjunction adapters (2026-10-14)
+
+The disjunction replay module had private convenience adapters that reset a new work counter before
+each search. Repository-wide call-site inspection found that no active path used them; callers use
+the explicit `*_with_work` variants and carry one meter through candidate filtering and recursive
+entailment. Removed the disconnected adapters and retained the shared-meter algorithms. `rg` and
+`git diff --check` confirm the active entrypoints remain and the obsolete adapters are gone. No tests
+or builds were run.
+
+### 23.27.1466 Remove disconnected unmetered difference replay (2026-10-14)
+
+Call-site inspection found the legacy difference collector, matrix query, and comparison solver
+reachable only through obsolete plain-bound adapters. Production replay uses the indexed
+`goal_metered_difference` path, which retains the affine peer-safety rules with the shared goal
+meter. Removed the disconnected unmetered solver and its unused adapters; kept the difference
+constraint insertion helper used by the metered implementation and the compatibility plain-bound
+wrapper expected by the source audit. Repository search and `git diff --check` confirm there are no
+remaining references to the removed solver entrypoints. No tests or builds were run.
+
+
+### 23.27.1467 Remove disconnected unmetered negative-fact path (2026-10-14)
+
+Repository-wide call-site inspection found `proof_kernel_replay_negative_fact` was referenced only by
+its own recursion. Active negative-fact checking enters through the shared-meter implementation. Removed
+the unreachable plain helper; retained operand-matching helpers that have other callers. `rg` and
+`git diff --check` pass. No tests or builds were run.
+
+
+### 23.27.1468 Pin current Core stage0 and record qualification boundary (2026-10-14)
+
+Updated `ELISA_STAGE0_REV` to Core commit `4fadc2c033c484636aa6d395318d41d2fe678936`, which adds a
+narrow SMT model for `char` to unsigned-8 truncation. The Core commit's focused SView, truncation,
+and wrapping-control tests pass. Rebuilt stage0 from a clean worktree at that exact commit and
+verified its embedded revision and clean provenance. Compiling this proof application directly with
+stage0 is not a valid qualification path: stage0 rejects the Stage1 `for`-expression/yield syntax
+used throughout the existing source, and emits no product. A matching Stage1 build is still needed
+before runtime qualification. Fourteen focused static scripts, the source-length check, symbolic
+harness, and diff check pass. Seven binary-backed regressions refused to run because the available
+proof product was built from another proof HEAD; their results remain unknown.
+
+
+### 23.27.1469 Remove unreachable unmetered integer-classifier families (2026-10-14)
+
+Call-graph review found several legacy replay roots with no callers: the plain pinned-premise
+planner, comparison-disjunct shape, disjunct-negation pass, exact-integer bounds model, and their
+dependent integer classifier chains. Removed those files/helpers and the obsolete unmetered bounds
+collector path. The active resource-model routes use the `*_with_work` or `*_with_goal_work`
+counterparts. Repository-wide search and `git diff --check` pass. No tests or builds were run.
+
+### 23.27.1467 Remove unused fresh-meter equality-closure adapter (2026-10-14)
+
+Repository-wide call-site inspection found no callers of `proof_kernel_replay_close_equalities`. The
+wrapper reset a fresh resource-work counter before invoking the iterative equality-closure
+implementation. Removed it while retaining `proof_kernel_replay_close_equalities_with_work`, which
+callers use with their existing budget. `rg` confirms no references to the removed entrypoint, and
+`git diff --check` passes. No tests or builds were run.
