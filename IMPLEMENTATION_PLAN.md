@@ -25151,15 +25151,13 @@ no kernel replay verdict bypass. `git diff --check` passes; no tests or build we
 
 The proof-side alias-formal index requires every `__alias_owner` annotation to carry a
 nonzero declaration identity equal to `offset + 1`, then associates it with the AST alias
-using name, line, and byte offset. The committed compiler revision named in
-`ELISA_COMPILER_REV` (`c93a77740053fe9e9350641d095b57b3fe8bed27`) does not emit either
-field for `__alias_owner` or `__alias_param`. The compiler worktree at that same HEAD now
-has an uncommitted parser change that stamps both marker kinds with the alias token offset
-and identity, matching the proof-side contract. This should resolve the metadata mismatch
-when built from that worktree, but the fix is not yet part of the pinned commit or the
-recorded compiler artifact. Preserve the exact-identity requirement; next commit and
-qualify the compiler change, update the proof pin, and rebuild the matched proof/compiler
-pair. No build or runtime qualification was run during this audit.
+using name, line, and byte offset. Compiler commit
+`c5a6616a740434c2e2002582970b004b5ca0ecfa` now stamps both `__alias_owner` and
+`__alias_param` rows with the alias token offset and identity, and adds a parser parity case.
+`ELISA_COMPILER_REV` now pins that commit. The metadata producer and proof validator therefore
+agree at the source level; the recorded compiler artifact and matched proof/compiler runtime
+qualification still need to be rebuilt and checked. No build or runtime qualification was run
+during this audit.
 
 ### 23.27.1428 Guard the unsigned conditional shortcut with branch-width consistency (2026-10-14)
 
@@ -25201,14 +25199,6 @@ parallel recursive implementation that could drift from branch-sort checks and i
 The source guard verifies the delegation, and focused static checks pass; runtime replay remains
 unqualified pending a source-matched Stage1.
 
-### 23.27.1434 Reuse arena validation across typed tactic-step roots (2026-10-14)
-
-Typed tactic-step replay validates the before and after states plus optional action terms against
-one immutable arena. It now reuses the arena-validation workspace across those roots and charges
-them to one transition work limit, matching the typed branch path. Repeated shared subgraphs are
-validated once while malformed roots and aggregate exhaustion still refuse the transition. Static
-diff and source-length checks pass; no tests or build were run.
-
 ### 23.27.1433 Share typing work across typed tactic transitions (2026-10-14)
 
 Typed tactic-step replay previously started the before-state and after-state proposition checks
@@ -25220,6 +25210,14 @@ uses the work-aware report after typed whole-arena admission, avoiding a second 
 retaining proposition and transition checks. The dedicated source guard is included in the kernel
 audit suite and passes; focused width/budget checks and source length also pass. Runtime replay remains
 unqualified pending a source-matched Stage1.
+
+### 23.27.1434 Reuse arena validation across typed tactic-step roots (2026-10-14)
+
+Typed tactic-step replay validates the before and after states plus optional action terms against
+one immutable arena. It now reuses the arena-validation workspace across those roots and charges
+them to one transition work limit, matching the typed branch path. Repeated shared subgraphs are
+validated once while malformed roots and aggregate exhaustion still refuse the transition. Static
+diff and source-length checks pass; no tests or build were run.
 
 ### 23.27.1435 Keep validated typing cache private (2026-10-14)
 
