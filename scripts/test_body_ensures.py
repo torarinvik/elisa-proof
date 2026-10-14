@@ -26,6 +26,11 @@ assert accepted["findings"] == [], accepted["findings"]
 functions = {d["name"]: d for d in accepted["declaration_details"] if d.get("kind") == "function"}
 for name in ("plural_on_every_return", "plural_summary", "caller_reads_plural", "both_spellings"):
     assert functions[name]["verified"], functions[name]
+assert functions["implicit_result_substitution"]["verified"], functions["implicit_result_substitution"]
+assert accepted["source"]["admissible"] is True, accepted["source"]
+assert accepted["source"]["goal_admissions_complete"] is True, accepted["source"]
+substituted_goals = [goal for goal in accepted["goals"] if goal["name"] == "implicit_result_substitution"]
+assert substituted_goals and all(goal["replay_status"] == "replayed" and goal["proven"] for goal in substituted_goals), substituted_goals
 
 rejected = report("rejected_body_ensures", 1)
 assert rejected["status"] == "failed", rejected

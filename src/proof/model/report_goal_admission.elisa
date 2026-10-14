@@ -104,24 +104,80 @@ extend ElisaProof:
                 _:
                     return true
 
+        # The frozen parser inventory is sorted by declaration offset. Duplicate offsets remain
+        # visible and fail closed, while ordinary owner lookup is logarithmic in function count.
+        def proof_report_postcondition_return_lookup(inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, name: sview, line: u32, offset: u32, source_work: mutable usize&) -> (complete: bool, found: bool, supported: bool, expression: Ast::Expr):
+            absent: Ast::Expr = Ast::Expr.Absent
+            low: mutable usize = 0
+            high: mutable usize = inventory.count
+            while low < high |low, high, inventory, offset, source_work|:
+                return (false, false, false, absent) if not proof_report_source_work_charge(1, source_work)
+                middle: usize = low + (high - low) / 2
+                if inventory[middle].offset < offset:
+                    low <- middle + 1
+                else:
+                    high <- middle
+            return (true, false, false, absent) if low >= inventory.count or inventory[low].offset != offset
+            first: usize = low
+            count: mutable usize = 0
+            selected: mutable (name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr) = inventory[first]
+            while low < inventory.count and inventory[low].offset == offset |low, inventory, name, line, source_work, count, selected|:
+                row: (name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr) = inventory[low]
+                return (false, false, false, absent) if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(row.name), source_work)
+                count <- count + 1
+                selected <- row if row.name == name and row.line == line
+                low <- low + 1
+            return (true, false, false, absent) if count != 1 or selected.name != name or selected.line != line
+            (true, true, selected.supported, selected.expression)
+
+        def proof_report_postcondition_result_substitution_matches(source_expression: Ast::Expr, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, report: ProofReport&, attempt: ProofGoalAttempt, source_work: mutable usize&) -> bool:
+            return false if attempt.owner_function_line == 0
+            return_row: (complete: bool, found: bool, supported: bool, expression: Ast::Expr) = proof_report_postcondition_return_lookup(return_inventory, attempt.name, attempt.owner_function_line, attempt.owner_function_offset, source_work)
+            returned: Ast::Expr = return_row.expression
+            return false if not return_row.complete or not return_row.found or not return_row.supported
+            work_limit: usize = proof_replay_summary_source_work_limit()
+            # The size extraction and `proof_substitute` below each traverse the contract.
+            # Reserve both passes before using its measured size to bound replacement growth.
+            return false if not proof_replay_summary_expr_repeat_charge_with_limit(source_expression, 2, source_work, work_limit)
+            source_expression_cost: mutable usize = 0
+            overloaded_return_work_exhausted: mutable bool = false
+            return false if:
+                not proof_replay_summary_expr_cost_with_limit(source_expression, &source_expression_cost, source_work, work_limit)
+                not proof_report_source_work_charge(source_expression_cost, source_work)
+                not proof_replay_summary_expr_repeat_charge_with_limit(returned, source_expression_cost + 1, source_work, work_limit)
+                proof_report_postcondition_has_unsafe_source_shape_depth(returned, 0, true, true)
+                proof_source_expression_has_overloaded_operator_with_work(returned, report.source.source_primitive_operator_mask, source_work, overloaded_return_work_exhausted)
+                overloaded_return_work_exhausted
+            names: mutable darray[sview] = ["result"]
+            values: mutable darray[Ast::Expr] = [returned]
+            substituted: Ast::Expr = proof_substitute(source_expression, names, values)
+            return false if not proof_replay_summary_expr_equal_with_limit(substituted, attempt.goal, source_work, work_limit)
+            true
+
         # Validate a goal after the caller has checked report-wide structure. Batch callers
         # pass precomputed finding and literal-source snapshots so report ledgers are scanned once.
-        def proof_report_source_postcondition_ast_goal_attempt_admitted(source_expression: Ast::Expr, report: ProofReport&, goal_id: usize, source_work: mutable usize&) -> bool:
+        def proof_report_source_postcondition_ast_goal_attempt_admitted(source_expression: Ast::Expr, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, report: ProofReport&, goal_id: usize, source_work: mutable usize&) -> bool:
             return false if goal_id >= report.results.goal_attempts.count
             attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
             work_limit: usize = proof_replay_summary_source_work_limit()
+            overloaded_source_work_exhausted: mutable bool = false
             return false if:
-                not proof_replay_summary_expr_repeat_charge_with_limit(source_expression, 1, source_work, work_limit)
-                proof_report_postcondition_has_unsafe_source_shape_depth(source_expression, 0, true, true)
-                not proof_replay_summary_expr_equal_with_limit(source_expression, attempt.goal, source_work, work_limit)
+                not proof_replay_summary_expr_repeat_charge_with_limit(source_expression, 2, source_work, work_limit)
+                proof_report_postcondition_has_unsafe_source_shape_depth(source_expression, 0, false, true)
+                proof_source_expression_has_overloaded_operator_with_work(source_expression, report.source.source_primitive_operator_mask, source_work, overloaded_source_work_exhausted)
+                overloaded_source_work_exhausted
+            if proof_expr_mentions_name(source_expression, "result"):
+                return false if not proof_report_postcondition_result_substitution_matches(source_expression, return_inventory, report, attempt, source_work)
+            else:
+                return false if not proof_replay_summary_expr_equal_with_limit(source_expression, attempt.goal, source_work, work_limit)
             if attempt.producer_proven:
                 return false if not attempt.has_certificate or attempt.certificate_index >= report.analysis_1.certificates.count
                 certificate: ProofGoalCertificate = report.analysis_1.certificates[attempt.certificate_index]
                 return false if:
-                    not proof_replay_summary_expr_equal_with_limit(source_expression, certificate.goal, source_work, work_limit)
+                    not proof_replay_summary_expr_equal_with_limit(attempt.goal, certificate.goal, source_work, work_limit)
             return true
 
-        def proof_report_goal_source_admissible_after_structure_internal(report: ProofReport&, goal_id: usize, literal_ensure_inventory: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, literal_index: ProofSourceLiteralEnsureAdmissionIndex, has_literal_index: bool, postcondition_ast_index: ProofSourcePostconditionAstIndex, has_postcondition_ast_index: bool, assert_by_inventory: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal_finding_clear: darray[bool]&, has_finding_snapshot: bool, source_work: mutable usize&) -> bool:
+        def proof_report_goal_source_admissible_after_structure_internal(report: ProofReport&, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, has_return_inventory: bool, goal_id: usize, literal_ensure_inventory: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, literal_index: ProofSourceLiteralEnsureAdmissionIndex, has_literal_index: bool, postcondition_ast_index: ProofSourcePostconditionAstIndex, has_postcondition_ast_index: bool, assert_by_inventory: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal_finding_clear: darray[bool]&, has_finding_snapshot: bool, source_work: mutable usize&) -> bool:
             return false if goal_id >= report.results.goal_attempts.count
             attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
             selected_event: (found: bool, entry: ProofObligationEntry) = proof_report_obligation_event_for_goal(report, goal_id, source_work)
@@ -148,7 +204,7 @@ extend ElisaProof:
                     source_ast: (complete: bool, found: bool, count: usize, contract_line: u32, expression: Ast::Expr) = proof_source_postcondition_ast_index_find(postcondition_ast_index, selected.source_name, selected.source_function_offset, selected.source_line, selected.source_obligation_index, source_work)
                     return false if not source_ast.complete or not source_ast.found or source_ast.count != 1
                     source_contract_line <- source_ast.contract_line
-                    event_admitted <- proof_report_source_postcondition_ast_goal_attempt_admitted(source_ast.expression, report, goal_id, source_work)
+                    event_admitted <- has_return_inventory and proof_report_source_postcondition_ast_goal_attempt_admitted(source_ast.expression, return_inventory, report, goal_id, source_work)
                 if has_literal_index:
                     return false if not has_postcondition_ast_index
                     if not event_admitted:
@@ -191,11 +247,12 @@ extend ElisaProof:
 
         def proof_report_goal_source_admissible_after_structure(report: ProofReport&, goal_id: usize, literal_ensure_inventory: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, assert_by_inventory: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, source_work: mutable usize&) -> bool:
             no_finding_snapshot: darray[bool] = []
-            proof_report_goal_source_admissible_after_structure_internal(report, goal_id, literal_ensure_inventory, ProofSourceLiteralEnsureAdmissionIndex{}, false, ProofSourcePostconditionAstIndex{}, false, assert_by_inventory, no_finding_snapshot, false, source_work)
+            no_returns: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)] = []
+            proof_report_goal_source_admissible_after_structure_internal(report, no_returns, false, goal_id, literal_ensure_inventory, ProofSourceLiteralEnsureAdmissionIndex{}, false, ProofSourcePostconditionAstIndex{}, false, assert_by_inventory, no_finding_snapshot, false, source_work)
 
-        def proof_report_goal_source_admissible_after_structure_with_snapshots(report: ProofReport&, goal_id: usize, literal_ensure_inventory: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, literal_index: ProofSourceLiteralEnsureAdmissionIndex, postcondition_ast_index: ProofSourcePostconditionAstIndex, assert_by_inventory: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal_finding_clear: darray[bool]&, source_work: mutable usize&) -> bool:
+        def proof_report_goal_source_admissible_after_structure_with_snapshots(report: ProofReport&, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, goal_id: usize, literal_ensure_inventory: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, literal_index: ProofSourceLiteralEnsureAdmissionIndex, postcondition_ast_index: ProofSourcePostconditionAstIndex, assert_by_inventory: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal_finding_clear: darray[bool]&, source_work: mutable usize&) -> bool:
             return false if not literal_index.valid or not postcondition_ast_index.valid
-            proof_report_goal_source_admissible_after_structure_internal(report, goal_id, literal_ensure_inventory, literal_index, true, postcondition_ast_index, true, assert_by_inventory, goal_finding_clear, true, source_work)
+            proof_report_goal_source_admissible_after_structure_internal(report, return_inventory, true, goal_id, literal_ensure_inventory, literal_index, true, postcondition_ast_index, true, assert_by_inventory, goal_finding_clear, true, source_work)
 
     private:
         # This raw helper is used only after the checked-view transaction has supplied its frozen
