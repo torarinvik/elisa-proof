@@ -25585,9 +25585,13 @@ and wrapping-control tests pass. Rebuilt stage0 from a clean worktree at that ex
 verified its embedded revision and clean provenance. Compiling this proof application directly with
 stage0 is not a valid qualification path: stage0 rejects the Stage1 `for`-expression/yield syntax
 used throughout the existing source, and emits no product. A matching Stage1 build is still needed
-before runtime qualification. Fourteen focused static scripts, the source-length check, symbolic
-harness, and diff check pass. Seven binary-backed regressions refused to run because the available
-proof product was built from another proof HEAD; their results remain unknown.
+before runtime qualification. A pinned Stage1 seed using compiler `c5a6616a` and Core stage0
+`4fadc2c0` emitted no hard source diagnostics, then received SIGKILL (status 137) at roughly 3.5 GiB
+RSS before producing an object; the seed's 6 GiB guard did not report firing, so the cause is unknown.
+Fifteen focused static scripts, the source-length check, and cached/uncached diff checks pass on the
+current cleanup snapshot.
+Seven binary-backed regressions refused to run because the available proof product was built from
+another proof HEAD; their results remain unknown.
 
 
 ### 23.27.1469 Remove unreachable unmetered integer-classifier families (2026-10-14)
@@ -25598,10 +25602,203 @@ dependent integer classifier chains. Removed those files/helpers and the obsolet
 collector path. The active resource-model routes use the `*_with_work` or `*_with_goal_work`
 counterparts. Repository-wide search and `git diff --check` pass. No tests or builds were run.
 
-### 23.27.1467 Remove unused fresh-meter equality-closure adapter (2026-10-14)
+### 23.27.1470 Mirror caller-generic shadowing in replay alias applications (2026-10-14)
+
+Source conversion suppresses alias application when an indexed type head resolves to a caller
+generic. Replay previously continued alias lookup for both single- and multi-argument indexed
+forms, allowing replay to classify the same AST differently from source conversion when a generic
+and alias share a name. Replay now follows the source rule: after built-in dispatch, it records
+caller-generic heads and skips alias application, then validates the head and arguments through the
+existing recursive path. The generic-alias dispatch regression asserts both indexed forms follow
+this rule. The focused static guard, source-length check, and `git diff --check` pass. Runtime
+qualification remains unavailable because no compiler product matches the current pinned source.
+
+### 23.27.1471 Remove unused fresh-meter equality-closure adapter (2026-10-14)
 
 Repository-wide call-site inspection found no callers of `proof_kernel_replay_close_equalities`. The
 wrapper reset a fresh resource-work counter before invoking the iterative equality-closure
 implementation. Removed it while retaining `proof_kernel_replay_close_equalities_with_work`, which
 callers use with their existing budget. `rg` confirms no references to the removed entrypoint, and
 `git diff --check` passes. No tests or builds were run.
+
+### 23.27.1472 Remove disconnected unmetered conditional-difference replay (2026-10-14)
+
+The active unsigned-bound and conditional-plan callers use the goal-metered cached-marker
+implementation. Repository-wide search found the legacy `proof_kernel_replay_unsigned_conditional_difference_safe`
+definition had no callers and internally invoked unmetered width, comparison, and expression-equality
+helpers. Removed the dead implementation and its include. Static caller search and `git diff --check`
+pass; runtime qualification remains unavailable without a matching compiler product.
+
+### 23.27.1473 Remove disconnected unmetered subtraction-alias replay (2026-10-14)
+
+Repository-wide call-site inspection found no callers of the legacy subtraction-alias plan or its
+rewrite helpers. The active resource-model tier uses the corresponding goal-metered plan. Removed
+the disconnected file and include, plus peer-width and increment helpers used only by that path.
+Static caller search and `git diff --check` pass. No tests or builds were run.
+
+### 23.27.1474 Remove unused unmetered type-marker fact collector (2026-10-14)
+
+Repository-wide call-site inspection found the legacy type-marker fact collector had no callers.
+It walked every fact with an unmetered marker classifier, while the active bounded-model path uses
+`proof_kernel_replay_type_marker_callee_with_goal_work` and charges each classification to the
+shared goal budget. Removed the disconnected collector and its unmetered classifier. `rg` confirms
+no references remain; `git diff --check` passes. No tests or builds were run.
+
+### 23.27.1475 Add reassignment and branch-mutation call-result regressions (2026-10-14)
+
+Extended `examples/local_call_result_binding_probe.elisa` with false postconditions after direct
+assignment and assignment inside a conditional branch. The existing source replay checks reject
+both because they invalidate the exact local call-result binding. Added both names to
+`scripts/test_local_call_result_binding.py` as expected `ensure-unproven` cases. Python syntax
+compilation and `git diff --check` pass. The binary-backed end-to-end regression was not run because
+the available proof executable is not qualified against the current source/compiler pair.
+
+### 23.27.1476 Remove disconnected unmetered congruence closure (2026-10-14)
+
+Call-site inspection showed the legacy congruence lookup/collection/union/seed path had no entrypoint
+or callers. Production report replay enters `proof_kernel_replay_congruence_goal_with_goal_work`,
+which shares the report budget. Removed the unreachable legacy closure while preserving operand and
+marker helpers used by metered congruence and scalar-witness validation. Repository search and
+`git diff --check` pass. No tests or builds were run.
+
+### 23.27.1478 Require complete replay in custom-cast soundness controls (2026-10-14)
+
+Tightened `scripts/test_cast_dispatch_soundness.py`: custom-source, extern, sibling-module,
+selector-name, and builtin controls now require zero replay gaps and no trusted assumptions where
+applicable. The builtin widening path must report fully `proved`, with all certificates replayed;
+the test also confirms the direct custom `__cast__` call proves its declared result. This prevents
+the cast regression from passing on a replay-gap status while preserving a valid custom-hook control.
+Python syntax compilation and `git diff --check` pass. Binary-backed checks remain unrun because
+the available proof executable does not match current source/compiler pins.
+
+### 23.27.1477 Preserve the equality-closure work budget during disequality tightening (2026-10-14)
+
+Bound closure passed its shared work counter into the disequality pass, but the pass retained a
+legacy primitive-comparison wrapper that reset the counter while validating each candidate. The
+active tightening path now calls `proof_kernel_replay_primitive_comparison_with_work` with the
+existing counter and limit. Removed the disconnected fresh-counter wrappers and made fact-shape
+classification consume the same budget, failing closed on exhaustion. `rg` confirms no references
+to the removed wrappers remain and `git diff --check` passes. No tests or builds were run.
+
+### 23.27.1479 Remove dead fresh-budget fact-query adapters (2026-10-14)
+
+The compatibility wrappers for fact containment and call-summary lookup created fresh goal-search
+counters. Repository-wide call-site search found no callers; active replay paths call the shared
+`*_with_work` variants. Removed both wrappers so nested replay cannot accidentally lose the parent
+budget through these dead interfaces. `rg` confirms only the shared-meter implementations remain;
+`git diff --check` passes. No tests or builds were run.
+
+### 23.27.1480 Remove disconnected unmetered disequality fact matcher (2026-10-14)
+
+The equality-closure and difference-constraint paths use the shared-meter
+`proof_kernel_replay_facts_state_disequality_with_work`. The old duplicate
+`proof_kernel_replay_facts_state_disequality` had no callers and performed a fact scan plus
+structural comparisons without a work limit. Removed it. Repository search confirms no references;
+focused difference-closure checks and source-length validation pass. No compiler-backed run was
+available for the current source/compiler pair.
+
+### 23.27.1481 Remove superseded unmetered width replay family (2026-10-14)
+
+Call-site search showed the legacy width-in-expression implementation and its indexed-element,
+marker, and signed-marker helpers had no active callers; fixed-width reports use the goal-metered
+counterparts. The only still-used helper in that module was its generic local work charge, which
+was moved next to the active fixed-width safety code. Removed the dead module and include, the
+obsolete element-marker decoder, and the guarded-difference helper that depended on fresh-meter
+width scans. Repository search and `git diff --check` pass. No tests or builds were run.
+
+### 23.27.1480 Remove obsolete unmetered constant-comparison evaluator (2026-10-14)
+
+Call-site tracing found the legacy small-constant evaluator reset its own work counter and fed an
+unreachable literal-comparison chain. Active resource replay uses the goal-metered constant and
+comparison routines; tactic simplification passes its existing goal counter to the metered evaluator.
+Removed the dead comparison chain and its fresh-budget adapter while retaining the arithmetic-op,
+small-range, tagged-order, and i64 comparison helpers used by active metered paths. Repository-wide
+reference searches and `git diff --check` pass. No tests or builds were run.
+
+### 23.27.1482 Remove legacy unmetered bounded-model pin helpers (2026-10-14)
+
+The old literal-pin lookup, cached-pin matcher, and operand-through-pins helpers in
+`fact_model_integrated_helpers.elisa` had no callers. Their duplicate replacements in the active
+bounded-model and negative-fact paths charge the shared goal-work counter. Removed the legacy block
+and added a guard preventing those raw entrypoints from returning. A concurrent source-index edit
+had also pushed `source_conversion_type_aliases.elisa` over the 600-line gate; split its declaration
+collectors into `source_conversion_type_alias_collectors.elisa` and included it immediately after
+the shared index builders. Bounded-model and source-authority guards, source-length validation, and
+`git diff --check` pass. Compiler qualification remains outstanding.
+
+### 23.27.1483 Share resource-place constant evaluation budget (2026-10-14)
+
+Resource-place replay charged path comparisons to the state meter but called the legacy constant
+integer evaluator for index expressions, which reset a separate counter. Index decoding and prefix
+overlap comparisons now pass `state.scope.resource_work_used` to the bounded evaluator. Exhaustion
+sets the sticky sentinel; overlap treats that state conservatively as possible overlap so it cannot
+admit a conflicting borrow or lend. Static call-site search, local budget-flow inspection, and
+`git diff --check` pass. No tests or builds were run.
+
+### 23.27.1484 Enforce nominal generic arity in replayed type arguments (2026-10-14)
+
+Source conversion records each nominal declaration's generic formal count, but replay's call-site
+target previously omitted that inventory and accepted nominal type applications after only
+recursively validating their arguments. Wired indexed arities into replay metadata and check
+single- and multi-argument applications against the resolved owner or qualified type row.
+Incomplete metadata fails closed; caller-generic heads retain their shadowing rule.
+`git diff --check` passes. No tests or builds were run.
+
+### 23.27.1485 Remove unmetered disjunction literal readers (2026-10-14)
+
+The raw Boolean-literal fold and small-integer decoder in disjunction replay had no callers
+outside their own recursive definitions. Removed both; active disjunction replay uses the
+shared-work variants. Added a static regression preventing the raw entrypoints from returning
+and requiring text-length charging in the metered Boolean reader. Focused static checks and
+`git diff --check` pass. Compiler-backed qualification remains blocked by the current
+compiler/source provenance mismatch.
+
+### 23.27.1486 Remove dead fresh-meter integer and definitional-equality paths (2026-10-14)
+
+After resource-place indices were moved to the shared resource budget, repository-wide call tracing
+showed the fresh-meter `constant_int` adapters remained only in the uncalled legacy affine and
+arithmetic-normalization helpers. The active affine and difference checkers use goal-work variants.
+Removed those disconnected paths and the fresh-meter adapters, retaining the bounded evaluator used
+by resource replay with a caller-supplied limit. `rg` confirms no references to the removed entrypoints
+remain; `git diff --check` passes. No tests or builds were run.
+
+### 23.27.1487 Guard nominal generic arity in replay normalization (2026-10-14)
+
+Replay now carries source-derived nominal generic arities, but the existing static dispatch guard
+covered generic aliases only. Extended it to require complete arity metadata and owner-aware,
+qualified, and global nominal lookup paths, plus exact arity checks for both one-argument and
+multi-argument applications. The generic alias/nominal dispatch guard, source-authority guard,
+source-length check, and `git diff --check` pass. Runtime qualification remains unavailable on
+the source-mismatched proof binary.
+
+### 23.27.1487 Fail closed on empty nominal generic metadata (2026-10-14)
+
+Replay's nominal generic-arity lookup returned a complete “not found” result for an empty
+declared-type inventory before checking whether the source-derived generic-arity inventory was
+valid. Moved the validity check ahead of that empty-inventory fast path, so incomplete source
+collection cannot authorize generic applications. `git diff --check` and source-length validation
+pass. No tests or builds were run.
+
+### 23.27.1487 Remove dead fresh-budget replay adapters (2026-10-14)
+
+Call-site inspection found the no-meter literal-state wrapper, substitution wrapper, and division
+negated-name wrapper had no callers. Their active replay paths already pass shared goal or resource
+work counters to the corresponding bounded implementations. Removed the unused wrappers to keep
+fresh-budget entrypoints out of the kernel surface. Repository-wide reference searches and
+`git diff --check` pass. No tests or builds were run.
+
+### 23.27.1488 Remove additional dead fresh-meter replay adapters (2026-10-14)
+
+Repository-wide call-count inspection found four more private adapters with no callers:
+division dividend-range extraction, conditional equality lookup, nested-conditional lookup, and
+exact replacement. Removed the adapters while retaining each shared-meter implementation.
+`rg` confirms the removed entry points have no references; `git diff --check` and source-length
+validation pass. No tests or builds were run.
+
+### 23.27.1488 Guard nominal-arity metadata before empty-index fallback (2026-10-14)
+
+The nominal arity reader now refuses when source-derived generic counts are invalid, including
+when the nominal declaration table is empty. Extended the source guard to pin the ordering of
+that validity check before the empty-table “not found” result, preventing an incomplete index
+from silently authorizing an application. The generic alias/nominal dispatch guard and
+`git diff --check` pass.
