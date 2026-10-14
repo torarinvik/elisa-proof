@@ -244,68 +244,11 @@ extend ElisaProof:
             return false
 
         def proof_signed_expression_safe_with_bounds(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&, depth: usize) -> bool:
-            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    return proof_signed_expression_safe_with_bounds(inner, facts, bounds, depth + 1)
-                Ast::Expr.Unary(operator, operand, _):
-                    return false if not proof_signed_expression_safe_with_bounds(operand, facts, bounds, depth + 1)
-                    if operator == TokenKind.Minus:
-                        width: i64 = proof_signed_width_in_expression(operand, facts)
-                        if width != 0:
-                            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
-                            return interval.has_lower and interval.has_upper and interval.lower >= ElisaProofKernelCore::proof_kernel_signed_width_min(width) and interval.upper <= ElisaProofKernelCore::proof_kernel_signed_width_max(width)
-                    return true
-                Ast::Expr.Binary(left, operator, right, _):
-                    return false if:
-                        not proof_signed_expression_safe_with_bounds(left, facts, bounds, depth + 1)
-                        not proof_signed_expression_safe_with_bounds(right, facts, bounds, depth + 1)
-                    arithmetic: bool = operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.LShift or operator == TokenKind.RShift or operator == TokenKind.Ampersand or operator == TokenKind.Pipe or operator == TokenKind.Caret
-                    return true if not arithmetic
-                    width: i64 = proof_signed_width_in_expression(expression, facts)
-                    if width == 0:
-                        return true if proof_unsigned_width_in_expression(expression, facts) != 0
-                        constant: (known: bool, value: i64) = proof_constant_int(expression)
-                        return constant.known and constant.value >= ElisaProofKernelCore::PROOF_KERNEL_I64_MIN and constant.value <= ElisaProofKernelCore::PROOF_KERNEL_I64_MAX if constant.known
-                        # A range binder can be a witnessed primitive integer without carrying
-                        # a signed/unsigned width marker. Admit only nonnegative intervals that
-                        # fit even in the smallest supported integer type; that is safe for either
-                        # signed arithmetic or unsigned arithmetic, including subtraction.
-                        interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
-                        return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= ElisaProofKernelCore::PROOF_KERNEL_I8_MAX if proof_scalar_term_witnessed(expression, facts, depth + 1)
-                        # A witnessed primitive integer with no signed-width trace is not safe to
-                        # reinterpret using the host i64 model. Calls and overloaded terms are
-                        # independently excluded by their witness/dispatch gates.
-                        return not proof_scalar_term_witnessed(expression, facts, depth + 1)
-                    interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
-                    return true if:
-                        interval.has_lower and interval.has_upper and interval.lower >= ElisaProofKernelCore::proof_kernel_signed_width_min(width) and interval.upper <= ElisaProofKernelCore::proof_kernel_signed_width_max(width)
-                        proof_signed_guarded_subtraction_safe(expression, facts, bounds, width)
-                        proof_signed_nonnegative_sum_safe(expression, facts, bounds, width)
-                    return proof_signed_increment_has_strict_peer(expression, facts, width) if width > 0
-                    return false
-                Ast::Expr.If(condition, then_expression, else_expression, _):
-                    then_signed: i64 = proof_signed_width_in_expression(then_expression, facts)
-                    then_unsigned: i64 = proof_unsigned_width_in_expression(then_expression, facts)
-                    else_signed: i64 = proof_signed_width_in_expression(else_expression, facts)
-                    else_unsigned: i64 = proof_unsigned_width_in_expression(else_expression, facts)
-                    return false if:
-                        then_signed != 0 and then_unsigned != 0
-                        else_signed != 0 and else_unsigned != 0
-                        then_signed != 0 and else_unsigned != 0
-                        then_unsigned != 0 and else_signed != 0
-                        then_signed != 0 and else_signed != 0 and then_signed != else_signed
-                        then_unsigned != 0 and else_unsigned != 0 and then_unsigned != else_unsigned
-                    return proof_signed_expression_safe_with_bounds(condition, facts, bounds, depth + 1) and proof_signed_expression_safe_with_bounds(then_expression, facts, bounds, depth + 1) and proof_signed_expression_safe_with_bounds(else_expression, facts, bounds, depth + 1)
-                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
-                    return proof_signed_expression_safe_with_bounds(object, facts, bounds, depth + 1)
-                Ast::Expr.Call(callee, arguments, _, _):
-                    return false if not proof_signed_expression_safe_with_bounds(callee, facts, bounds, depth + 1)
-                    for argument in arguments |argument, facts, bounds, depth|:
-                        return false if not proof_signed_expression_safe_with_bounds(argument, facts, bounds, depth + 1)
-                    return true
-                _:
-                    return true
+            budget: mutable usize = 0
+            exhausted: mutable bool = false
+            markers: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, &budget, &exhausted)
+            return false if not markers.complete or exhausted
+            proof_signed_expression_safe_with_bounds_work(expression, facts, bounds, depth, markers.witnesses, &budget, &exhausted)
 
         # A signed name equal to a signed term, `p == v - g`, takes the term's interval when
         # every subterm of it is itself range-safe under the bounds so far: the machine value

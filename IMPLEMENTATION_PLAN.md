@@ -25147,6 +25147,22 @@ kernel replay for expressions such as `(x + 1).i8()`. The signed legacy entry po
 same path as the work-aware helper. This closes a source-side false-safe precheck; the audit found
 no kernel replay verdict bypass. `git diff --check` passes; no tests or build were run.
 
+### 23.27.1427 Reconcile pinned compiler alias-formal metadata (2026-10-14)
+
+The proof-side alias-formal index requires every `__alias_owner` annotation to carry a
+nonzero declaration identity equal to `offset + 1`, then associates it with the AST alias
+using name, line, and byte offset. This requirement is consistent with the proof-side
+same-line ambiguity guard, but the compiler revision pinned in `ELISA_COMPILER_REV`
+(`c93a77740053fe9e9350641d095b57b3fe8bed27`) does not emit either field for
+`__alias_owner` or `__alias_param`: its parser constructs those annotations with only
+owner, name, and line. Consequently, source-conversion alias-formal index construction
+fails closed on reports from that pinned compiler whenever such metadata is present.
+The proof checker must retain the exact-identity requirement; the integration follow-up
+is to add and qualify matching identity/offset emission in the pinned compiler revision,
+then advance the pin and rebuild the proof artifact. The current sibling compiler checkout
+is at a different revision and is not evidence for the pinned source. This finding is
+source-inspected only; no tests or build were run.
+
 ### 23.27.1427 Guard the unsigned conditional shortcut with branch-width consistency (2026-10-14)
 
 The unsigned conditional-difference fast path could return before the general conditional branch
@@ -25170,3 +25186,19 @@ Its caller had no shared preflight reservation, so bounded AST depth alone still
 subtree work to grow with the whole input. The entry now builds the checked scalar-witness index
 once and delegates to the same work-aware walker used by primary proof paths; exhaustion refuses the
 candidate. Static diff review and `git diff --check` pass; no tests or build were run.
+
+### 23.27.1429 Check producer branch sorts before the unsigned shortcut (2026-10-14)
+
+The unsigned producer's conditional-difference shortcut also ran before its main `If` case. Branch
+sort compatibility now runs immediately after the metered expression preflight and before width
+shortcuts, negative-bit scans, and conditional-difference acceptance. This mirrors the kernel order
+and prevents the fast path from bypassing the new invariant. `git diff --check` passes; no tests or
+build were run.
+
+### 23.27.1429 Reuse metered signed arithmetic safety for legacy callers (2026-10-14)
+
+The legacy signed-safety entry point now builds its scalar marker set under the linear-safety work
+budget and delegates to the same work-aware traversal used by current producers. This removes a
+parallel recursive implementation that could drift from branch-sort checks and its bounded form.
+The source guard verifies the delegation, and focused static checks pass; runtime replay remains
+unqualified pending a source-matched Stage1.
