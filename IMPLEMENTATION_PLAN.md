@@ -25012,3 +25012,13 @@ constructor and record-update bases, every aggregate child, and the argument pre
 calls; resource argument/region boundaries are validated and argument visits are metered. Indexed
 access and quantifiers retain their existing explicit policies. `git diff --check` and the
 source-length gate pass; no tests or build were run.
+
+### 23.27.1412 Bind parser annotations and argument tables to source snapshots (2026-10-14)
+
+Source-bound admission now compares the complete parser-owned annotation rows and the complete
+parallel annotation-argument table against the report snapshot, including each row's identity,
+position, ownership, and argument slice. This also binds contract-quantifier markers, whose
+`forall`/`exists` meaning is erased from the AST block node, along with generic, alias, import,
+extern, and effect metadata. Row visits and variable text lengths use the shared source-admission
+budget. `git diff --check` passes; no tests or build were run, and runtime qualification remains
+blocked by the compiler provenance mismatch.
