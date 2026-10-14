@@ -23799,13 +23799,14 @@ were run.
 
 The lazy first-query scan in §23.27.1299 resolves the original early-hit case for the query that
 triggers index construction: a complete ordered exact scan returns an early match before optional
-setup begins, and a miss is charged before the remaining budget is split. It does not establish
-the same guarantee for a later recursive query after the shared index has been built. That query
-must hash its root and confirm exact candidates under the residual goal meter; an expensive
-recursive query may still exhaust work where an early ordered match would have fit before setup.
-Keep §23.27.1286 open for that recursive-query case until query admission reserves a measured
-comparison bound or uses a bounded ordered precheck before index hashing. Source inspection only;
-no tests or builds were run.
+setup begins, and a miss is charged before the remaining budget is split. Later recursive queries
+with cached hashes now use a four-row source-ordered precheck before query hashing and bucket
+traversal. Each row visit and each exact structural comparison uses the shared goal-search meter;
+the precheck returns only after exact root identity or exact structural equality. A miss continues
+through the hash index, and the indexed path still checks exact equality after hash filtering, so
+the bounded precheck does not change proof authority. The source regression guard checks ordering,
+the row cap, metering, and exact comparison. Static guard and source-length gates pass; no build or
+runtime qualification was possible under the source/compiler provenance hold.
 
 ### 23.27.1302 Avoid repeated-scan reservation for rejected call arguments
 
@@ -23825,9 +23826,11 @@ The interval hash index already memoizes hashes by node root, but after reaching
 it still ran structural equality even when the bound and query referenced the identical arena root.
 The lookup now returns that exact row on root identity before traversing either expression. Hash
 collisions and structurally equal expressions with distinct roots still require the existing exact
-metered comparison. This removes an avoidable whole-expression walk for recursive exact-root hits;
-it does not close the distinct-root fallback-budget case in §23.27.1301. Static whitespace and
-source-length gates pass; no tests or builds were run.
+metered comparison. This removes an avoidable whole-expression walk for recursive exact-root hits.
+The bounded ordered precheck in §23.27.1301 also gives later recursive queries a chance to find an
+early distinct-root match before hashing, while preserving exact comparison and the shared meter.
+Static guards and source-length gates pass; no build or runtime qualification was possible under the
+source/compiler provenance hold.
 
 ### 23.27.1304 Index exact arena-root bounds directly
 
@@ -24854,3 +24857,27 @@ source when its file list is incomplete. The package producer reserves file-list
 emission, so valid exported v4 packages carry a complete list. Updated the portable trust
 inventory guard. `git diff --check` and `scripts/check_source_length.py` pass; runtime package
 round-trip qualification remains outstanding.
+
+### 23.27.1395 Refuse package exports beyond reader budgets
+
+The v4 exporter could produce a package exceeding the strict reader's theorem, hypothesis,
+statement/name/rule/origin string, source path, UTF-8, aggregate canonical-identity byte,
+aggregate arena string, or whole-document byte limits. The exporter now checks those same limits before writing
+the package object, ensures emitted origin rows fit the hypothesis list, and derives each origin
+completeness marker from the rows actually serialized. It emits a refusal instead of an oversized
+or self-rejected package. Source facts and kernel hypothesis roots are
+separate tables; when their counts differ, the exporter omits their presentation-only origin rows
+and marks origin metadata incomplete while retaining the replayable theorem. Incomplete origin
+prefixes and unresolved `null` rows are explicitly marked incomplete at both theorem and package
+level. This latest origin-count adjustment was not tested or built; package round-trip qualification
+remains outstanding.
+
+### 23.27.1396 Exclude generic-bound rows from function identity census
+
+Parser generic metadata arrays contain both ordinary generic parameters and generic-bound rows.
+The latter encode the source line with the high bit set and are associated with `__generic`
+bound metadata, not `__generic_param_identity` function-binder markers. Structural replay now
+keeps these rows in the generic owner/name index but excludes them from the function binder row
+census after validating their indexed owner/name presence. This prevents bounded function or
+protocol parameters from being mistaken for missing function identity markers. Runtime replay
+qualification remains outstanding; no test or build was run for this correction.
