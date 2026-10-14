@@ -1,4 +1,5 @@
 # Pattern elimination and algebraic/record constructor encoding regressions.
+run_py_test test_pattern_builtin_shadow.py
 run_json_report "$ROOT_DIR/examples/pattern_scalar_literals.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "char" for node in report["kernel"]["nodes"])'
 pattern_scalar_literals_probe_status=${PIPESTATUS[1]}
 if [[ "$pattern_scalar_literals_probe_status" -ne 0 ]]; then

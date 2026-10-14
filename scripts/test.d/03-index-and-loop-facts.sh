@@ -405,14 +405,16 @@ if [[ "$boolean_proposition_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: valid Boolean opaque propositions did not replay\n' >&2
     exit 1
 fi
-for typed_proposition_fixture in kernel_named_container_call enum_variant_proposition; do
-    run_json_report "$ROOT_DIR/examples/$typed_proposition_fixture.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); expected={"kernel_named_container_call":["valid_call"], "enum_variant_proposition":["variant_tag_is_proposition", "shorthand_payload_tag_is_proposition"]}[sys.argv[1]]; assert r["status"] == "proved" and r["summary"]["failed"] == 0; assert r["replay"]["gaps"] == 0 and r["replay"]["certificates"] == r["replay"]["replayed"]; assert not r["findings"]; assert all(any(d["kind"] == "function" and d["name"] == name and d["verified"] for d in r["declaration_details"]) for name in expected)' "$typed_proposition_fixture"
+for typed_proposition_fixture in kernel_named_container_call enum_variant_proposition enum_alias_precedence; do
+    run_json_report "$ROOT_DIR/examples/$typed_proposition_fixture.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); expected={"kernel_named_container_call":["valid_call"], "enum_variant_proposition":["variant_tag_is_proposition", "shorthand_payload_tag_is_proposition"], "enum_alias_precedence":["module_alias_wins", "root_nominal_wins", "cross_module_unique_alias", "root_import_alias_wins"]}[sys.argv[1]]; assert r["status"] == "proved" and r["summary"]["failed"] == 0; assert r["replay"]["gaps"] == 0 and r["replay"]["certificates"] == r["replay"]["replayed"]; assert not r["findings"]; assert all(any(d["kind"] == "function" and d["name"] == name and d["verified"] for d in r["declaration_details"]) for name in expected)' "$typed_proposition_fixture"
     typed_proposition_status=${PIPESTATUS[1]}
     if [[ "$typed_proposition_status" -ne 0 ]]; then
         printf 'proof test matrix failed: typed positive proposition fixture %s\n' "$typed_proposition_fixture" >&2
         exit 1
     fi
 done
+run_py_test test_qualified_type_bound_builtins.py
+run_py_test test_enum_module_alias_replay.py
 assertion_proposition_report="$standalone_probe_dir/rejected-nonbool-assert.json"
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_nonbool_assert_call.elisa" >"$assertion_proposition_report"

@@ -238,7 +238,7 @@ if [[ "$resource_target_status" -ne 1 || "$resource_target_json_status" -ne 0 ]]
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_borrow_after_move.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "resource-use-after-move" and finding["message"] == "a borrow cannot be created from a moved resource binding" and finding["status"] == "disproved" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
+run_json_report "$ROOT_DIR/examples/rejected_borrow_after_move.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "resource-use-after-move" and finding["message"] == "a borrow cannot be created from a moved resource binding" and finding["status"] == "unknown" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
 rejected_borrow_after_move_probe_statuses=("${PIPESTATUS[@]}")
 rejected_borrow_after_move_probe_status=${rejected_borrow_after_move_probe_statuses[0]}
 rejected_borrow_after_move_json_status=${rejected_borrow_after_move_probe_statuses[1]}

@@ -239,7 +239,7 @@ extend ElisaProof:
             goal: Ast::Expr = report.goal_attempts[like].goal
             for index in 0..<report.goal_attempts.count |index, report, owner, line, goal|:
                 attempt: ProofGoalAttempt = report.goal_attempts[index]
-                return index if attempt.name == owner and attempt.line == line and attempt.proven and attempt.has_certificate and proof_replay_expr_equal(attempt.goal, goal)
+                return index if attempt.name == owner and attempt.line == line and attempt.producer_proven and attempt.has_certificate and proof_replay_expr_equal(attempt.goal, goal)
             return report.goal_attempts.count
 
         def test_scope_summary_valid(report: mutable ProofReport&, trace: ProofFactTrace, owner_line: u32, consumer_line: u32) -> bool can[Global.Read, Global.Write]:

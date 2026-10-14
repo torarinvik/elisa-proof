@@ -381,7 +381,7 @@ if [[ "$rejected_sview_call_provenance_status" -ne 1 ]]; then
 fi
 # Pinned compiler 74d24269 rejects the read after second.push as
 # StorageDependencyInvalidated (ordinal 352 in this compiler revision).
-if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; semantic=[(d["kind_code"], d["line"], d["name"], d["expected"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [(352, 18, "view", "second")], semantic; assert report["summary"]["semantic_errors"] == 1; assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "disproved" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
+if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "unknown"; semantic=[(d["kind_code"], d["line"], d["name"], d["expected"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [(352, 18, "view", "second")], semantic; assert report["summary"]["semantic_errors"] == 1; assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "unknown" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
     printf '%s\n' 'proof test matrix failed: call-return provenance was not replayed to the actual backing argument' >&2
     exit 1
 fi
@@ -390,7 +390,7 @@ set +e
 run_json_report "$ROOT_DIR/examples/rejected_reference_call_return_wrong_provenance.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-reference-call-provenance.json"
 rejected_reference_call_provenance_status=$?
 set -e
-if [[ "$rejected_reference_call_provenance_status" -ne 1 ]] || ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-reference-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == "resource-use-after-move" and f["status"] == "disproved" and f["line"] == 16 for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
+if [[ "$rejected_reference_call_provenance_status" -ne 1 ]] || ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-reference-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == "resource-use-after-move" and f["status"] == "unknown" and f["line"] == 16 for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
     printf '%s\n' 'proof test matrix failed: a write to the reference call-return backing argument was accepted' >&2
     exit 1
 fi
@@ -556,7 +556,7 @@ if [[ "$continue_decreases_probe_status" -ne 0 ]]; then
     exit 1
 fi
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_getelse_recovery.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert any(finding["kind"] == "getelse-recovery-nonterminating" and finding["status"] == "disproved" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
+run_json_report "$ROOT_DIR/examples/rejected_getelse_recovery.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unknown"; assert any(finding["kind"] == "getelse-recovery-nonterminating" and finding["status"] == "unknown" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
 rejected_getelse_recovery_probe_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_getelse_recovery_probe_status" -ne 0 ]]; then

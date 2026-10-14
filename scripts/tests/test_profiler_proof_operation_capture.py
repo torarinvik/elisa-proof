@@ -18,6 +18,10 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+import sys as __proof_test_sys
+__proof_test_sys.path.insert(0, str(ROOT / "scripts"))
+import qualified_test_binary
 PROFILER_SHA256 = "eb4e06d91e737abb87aedd7a1b2d280218ed1036033d609bc729befbb32f4101"
 PROFILER_REVISION = "39f46e4983c4e233b542e7c57ff27f15c96fb8e2"
 STAGE1_SHA256 = "1bf9bf4e1301c56c25bedb079e385f2fdd80e243a992a95bcfd3da6b41a059a3"
@@ -107,7 +111,7 @@ def main() -> None:
     compiler_root = Path(os.environ["ELISA_COMPILER_ROOT"]).resolve()
     compiler = compiler_root / "bin/elisac-stage1"
     runtime = compiler_root / "build/runtime/elisacore_runtime.o"
-    producer = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof")).resolve()
+    producer = Path(qualified_test_binary.proof_test_binary(ROOT)).resolve()
     replay = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay")).resolve()
     workload = ROOT / WORKLOAD
 

@@ -1,0 +1,58 @@
+def api_goal_finding_link_mutations_rejected() -> bool can Memory.Allocate, Global.Read, Global.Write:
+    report: mutable ProofReport = proof_empty_report()
+    proof_add_finding(&report, "declaration-unsupported", 1, "checked", "fixture")
+    report.results.findings[0].has_goal <- true
+    report.results.findings[0].goal_id <- 0
+    no_attempts_work: mutable usize = 0
+    no_attempts: (goal_finding_clear: darray[bool], complete: bool) = proof_report_source_goal_finding_snapshot(&report, &no_attempts_work)
+    return false if no_attempts.complete
+    no_attempts_refutation_work: mutable usize = 0
+    no_attempts_shared: (goal_finding_clear: darray[bool], complete: bool) = proof_report_source_goal_finding_snapshot_from_refutations(&report, [], &no_attempts_refutation_work, false)
+    return false if no_attempts_shared.complete
+
+    facts: darray[Ast::Expr] = []
+    goal: Ast::Expr = Ast::Expr.BoolLit(true, Ast::pos_at_line(1))
+    proof_add_goal_attempt(&report, facts, goal, 1, "checked", "goal", true)
+    report.results.findings[0].goal_id <- 1
+    with_attempt_work: mutable usize = 0
+    with_attempt: (goal_finding_clear: darray[bool], complete: bool) = proof_report_source_goal_finding_snapshot(&report, &with_attempt_work)
+    return false if with_attempt.complete
+    with_attempt_refutation_work: mutable usize = 0
+    with_attempt_shared: (goal_finding_clear: darray[bool], complete: bool) = proof_report_source_goal_finding_snapshot_from_refutations(&report, [], &with_attempt_refutation_work, false)
+    return not with_attempt_shared.complete
+
+def api_source_assert_by_attempt_index(report: ProofReport&, inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&) -> usize:
+    return report.goal_attempts.count if inventory.count == 0
+    expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool) = inventory[0]
+    for index in 0..<report.goal_attempts.count |index, report, expected|:
+        attempt: ProofGoalAttempt = report.goal_attempts[index]
+        if attempt.name == expected.name and attempt.line == expected.attempt_line and attempt.rule == "goal":
+            match attempt.goal:
+                Ast::Expr.BoolLit(value, position):
+                    return index if value == expected.expected_value and position.line == expected.goal_line and position.offset == expected.goal_offset
+                _:
+                    pass
+    return report.goal_attempts.count
+
+def api_change_source_assert_by_owner(report: mutable ProofReport&, inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&, owner_line: u32, owner_offset: u32, mutate_attempt: bool) -> bool:
+    attempt_index: usize = api_source_assert_by_attempt_index(report, inventory)
+    return false if attempt_index >= report.goal_attempts.count
+    for event_index in 0..<report.results.obligation_inventory.count |event_index, report, attempt_index, owner_line, owner_offset, mutate_attempt|:
+        event: ProofObligationEntry = report.results.obligation_inventory[event_index]
+        if attempt_index >= event.attempts_start and attempt_index - event.attempts_start < event.attempts_count:
+            original: ProofGoalAttempt = report.goal_attempts[attempt_index]
+            return false if event.owner_function_line != original.owner_function_line or event.owner_function_offset != original.owner_function_offset
+            report.results.obligation_inventory[event_index].owner_function_line <- owner_line
+            report.results.obligation_inventory[event_index].owner_function_offset <- owner_offset
+            if mutate_attempt:
+                report.goal_attempts[attempt_index] <- ProofGoalAttempt{goal: original.goal, budget_exhausted: original.budget_exhausted, facts_start: original.facts_start, facts_count: original.facts_count, kernel_goal: original.kernel_goal, kernel_facts_start: original.kernel_facts_start, kernel_facts_count: original.kernel_facts_count, line: original.line, name: original.name, rule: original.rule, source_phase: original.source_phase, source_call_position: original.source_call_position, producer_proven: original.producer_proven, has_certificate: original.has_certificate, certificate_index: original.certificate_index, owner_function_line: owner_line, owner_function_offset: owner_offset}
+            return true
+    return false
+
+def api_source_owner_mutation_roundtrip(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, route: usize, owner_line: u32, owner_offset: u32, mutate_attempt: bool) -> bool can Memory.Allocate, Abort.Panic:
+    goals: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = proof_source_assert_by_inventory(report.source_declarations)
+    return false if not api_change_source_assert_by_owner(report, goals, owner_line, owner_offset, mutate_attempt) or proof_report_source_admission_invariants_consistent(report)
+    (api_probe_before_replay(text, &source, &report, &diagnostics, route) can Global{Read,Write})
+    goals <- proof_source_assert_by_inventory(report.source_declarations)
+    (proof_replay_certificates(&report) can Global{Read,Write})
+    report.replay_gaps == 0 and proof_source_assert_by_coverage(goals, report) and proof_report_source_admission_invariants_consistent(report)

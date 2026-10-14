@@ -8,18 +8,21 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 from collections import Counter
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from qualified_test_binary import proof_test_binary
 PROFILER_ROOT = ROOT.parent / "elisa-profiler"
 COMPILER_ROOT = ROOT.parent / "Elisa-compiler"
 STAGE1 = COMPILER_ROOT / "bin" / "elisac-stage1"
 RUNTIME = COMPILER_ROOT / "build" / "runtime" / "elisacore_runtime.o"
 PROBE = ROOT / "examples" / "proof_allocation_lifetime.elisa"
 POST_RESET_VIEW_NEGATIVE = ROOT / "examples" / "rejected_sview_after_region_destroy.elisa"
-PROOF_BIN = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build" / "elisa-proof"))
+PROOF_BIN = Path(proof_test_binary(ROOT))
 
 
 def run(command: list[str], *, env: dict[str, str], timeout: int = 900) -> str:
@@ -38,7 +41,7 @@ def main() -> None:
     if not STAGE1.is_file() or not RUNTIME.is_file():
         raise SystemExit("R-014 requires the compiler checkout's Stage1 and matching runtime")
     if not PROOF_BIN.is_file():
-        raise SystemExit("R-014 post-reset sview control requires ELISA_PROOF_BIN or build/elisa-proof")
+        raise SystemExit("R-014 post-reset sview control requires a current qualified proof binary")
 
     env = os.environ.copy()
     env.update({

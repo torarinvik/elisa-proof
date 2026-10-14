@@ -356,12 +356,12 @@ import json, sys
 report = json.load(sys.stdin)
 destroyed = sys.argv[1] == "rejected_region_destroyed_write"
 assert report["status"] == "failed"
-assert report["verification_state"] == ("disproved" if destroyed else "unsupported")
+assert report["verification_state"] == ("unknown" if destroyed else "unsupported")
 assert report["summary"]["semantic_errors"] == 0
 assert report["replay"]["gaps"] == 0
 assert report["replay"]["certificates"] == report["replay"]["replayed"]
 if destroyed:
-    assert any(f["kind"] == "region-use-after-destroy" and f["status"] == "disproved" for f in report["findings"])
+    assert any(f["kind"] == "region-use-after-destroy" and f["status"] == "unknown" for f in report["findings"])
 else:
     assert all(f["status"] != "disproved" for f in report["findings"])
 ' "$diagnostic_fixture"

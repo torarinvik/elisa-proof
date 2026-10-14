@@ -7,7 +7,11 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+import sys as __proof_test_sys
+__proof_test_sys.path.insert(0, str(ROOT / "scripts"))
+import qualified_test_binary
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 COUNTER_KEYS = (
     "producer_disjunction_facts_scanned",
     "producer_disjunction_refutation_checks",

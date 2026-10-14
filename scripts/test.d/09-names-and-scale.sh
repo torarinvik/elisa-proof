@@ -1,5 +1,7 @@
 # shellcheck shell=bash
 # Part 9 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
+run_py_test test_qualified_type_bound_module_scope.py
+run_py_test test_summary_scheduler_scaling.py
 "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --repair-all "$ROOT_DIR/examples/rejected_repair_target.elisa" > "$proof_render_dir/batch_open.json"
 proof_batch_open_status=$?
 set -e
@@ -88,7 +90,7 @@ if [[ "$effect_containment_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_effect_containment.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; certified = {g["name"] for g in report["goals"] if g["rule"] == "effect-containment"}; assert not (certified & {"narrower_than_callee", "one_uncovered_callee", "opaque_callee"}); kinds = {f["name"]: (f["kind"], f["status"]) for f in report["findings"]}; assert kinds["narrower_than_callee"] == ("effect-row-exceeded", "disproved"); assert kinds["opaque_callee"] == ("effect-call-opaque", "unsupported")'
+run_json_report "$ROOT_DIR/examples/rejected_effect_containment.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; certified = {g["name"] for g in report["goals"] if g["rule"] == "effect-containment"}; assert not (certified & {"narrower_than_callee", "one_uncovered_callee", "opaque_callee"}); kinds = {f["name"]: (f["kind"], f["status"]) for f in report["findings"]}; assert kinds["narrower_than_callee"] == ("effect-row-exceeded", "unknown"); assert kinds["opaque_callee"] == ("effect-call-opaque", "unsupported")'
 rejected_effect_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_effect_status" -ne 0 ]]; then

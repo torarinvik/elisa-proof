@@ -312,8 +312,8 @@ if certified & {"narrower_than_callee", "one_uncovered_callee", "opaque_callee"}
     raise SystemExit("dogfood failed: an uncontained effect row was certified")
 kinds = {finding["name"]: (finding["kind"], finding["status"]) for finding in report["findings"]}
 expected = {
-    "narrower_than_callee": ("effect-row-exceeded", "disproved"),
-    "one_uncovered_callee": ("effect-row-exceeded", "disproved"),
+    "narrower_than_callee": ("effect-row-exceeded", "unknown"),
+    "one_uncovered_callee": ("effect-row-exceeded", "unknown"),
     "opaque_callee": ("effect-call-opaque", "unsupported"),
 }
 for name, want in expected.items():

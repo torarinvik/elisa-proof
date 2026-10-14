@@ -7,7 +7,11 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PROOF = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+import sys as __proof_test_sys
+__proof_test_sys.path.insert(0, str(ROOT / "scripts"))
+import qualified_test_binary
+PROOF = Path(qualified_test_binary.proof_test_binary(ROOT))
 INVARIANT_HARNESS = Path(os.environ.get("ELISA_REPORT_INVENTORY_HARNESS", ""))
 BRANCH_HARNESS = Path(os.environ.get("ELISA_ASSERT_BY_BRANCH_HARNESS", ""))
 LOOP_HARNESS = Path(os.environ.get("ELISA_ASSERT_BY_LOOP_HARNESS", ""))

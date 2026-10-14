@@ -6,6 +6,14 @@
 KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB="${ELISA_KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB:-4000000}"
 python3 "$ROOT_DIR/scripts/test_kernel_coverage_targets.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_audit_accounting.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_ast_kernel_mirror_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_kernel_index_read_work_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_index_read_operator_parity.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_global_mutable_array_owner_identity.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_global_constant_owner_identity.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_requires_call_owner_identity.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_source_owner_offset.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_source_admission_budget.py" || exit 1
 kernel_replay_audit_dir="$standalone_probe_dir/kernel-replay-audit"
 kernel_replay_audit_summary="$standalone_probe_dir/kernel-replay-audit-summary.json"
 ELISA_FULL_AUDIT_SOURCE="$ROOT_DIR/examples/kernel_replay_standalone.elisa" \

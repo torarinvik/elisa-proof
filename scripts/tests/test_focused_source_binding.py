@@ -9,7 +9,11 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+import sys as __proof_test_sys
+__proof_test_sys.path.insert(0, str(ROOT / "scripts"))
+import qualified_test_binary
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 HARNESS = Path(os.environ.get("ELISA_FOCUSED_SOURCE_BINDING_HARNESS", ""))
 SOURCE = ROOT / "examples/function_focus_source_binding.elisa"
 

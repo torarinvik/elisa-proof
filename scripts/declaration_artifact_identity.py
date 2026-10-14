@@ -21,6 +21,9 @@ import stat
 import sys
 import tempfile
 
+from soundness_incident_registry import registry_allows_unqualified_reuse
+from strict_json import loads as strict_json_loads
+
 
 SCHEMA = "elisa-proof-declaration-artifact-v2"
 MANIFEST_SCHEMA = "elisa-proof-build-manifest-v1"
@@ -30,6 +33,87 @@ MAX_RECORD_BYTES = 1024 * 1024
 MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
 MAX_SOURCE_SLICE_BYTES = 512 * 1024
 MAX_STORE_FILE_BYTES = MAX_RECORD_BYTES + 4 * ((MAX_PAYLOAD_BYTES + 2) // 3) + 4096
+MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_CHECKSUM_BYTES = 128
+MAX_DEPENDENCIES_BYTES = 1024 * 1024
+MAX_SOUNDNESS_REGISTRY_BYTES = 1024 * 1024
+SOUNDNESS_INCIDENT_REGISTRY = Path(__file__).with_name("soundness_incidents.json")
+
+
+def _read_bounded_regular_file(path: Path, max_bytes: int, *, allow_empty: bool = True) -> bytes | None:
+    descriptor = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size < (0 if allow_empty else 1) \
+                or file_stat.st_size > max_bytes:
+            return None
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            raw = source.read(max_bytes + 1)
+        after_stat = os.fstat(descriptor)
+        if len(raw) != file_stat.st_size or len(raw) > max_bytes \
+                or (after_stat.st_dev, after_stat.st_ino, after_stat.st_size,
+                    after_stat.st_mtime_ns, after_stat.st_ctime_ns) != (
+                    file_stat.st_dev, file_stat.st_ino, file_stat.st_size,
+                    file_stat.st_mtime_ns, file_stat.st_ctime_ns):
+            return None
+        return raw
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _read_soundness_registry_bytes() -> bytes | None:
+    return _read_bounded_regular_file(SOUNDNESS_INCIDENT_REGISTRY, MAX_SOUNDNESS_REGISTRY_BYTES)
+
+
+def _sha256_regular_file(path: Path) -> str:
+    descriptor = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("proof executable is not a regular file")
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+                before.st_dev, before.st_ino, before.st_size,
+                before.st_mtime_ns, before.st_ctime_ns):
+            raise ValueError("proof executable changed while hashing")
+        return digest.hexdigest()
+    except OSError as error:
+        raise ValueError("proof executable named by the build manifest is unavailable") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def soundness_registry_allows_artifact_reuse() -> bool:
+    """Permit artifact storage only when the incident inventory authorizes reuse.
+
+    Records pin build inputs but do not carry a per-rule semantic inventory. Until incidents
+    can be matched to those rules, both publication and reuse fail closed if any incident is
+    confirmed or still awaiting exact product classification.
+    """
+    raw_registry = _read_soundness_registry_bytes()
+    if raw_registry is None:
+        return False
+    try:
+        registry = strict_json_loads(raw_registry)
+    except (UnicodeError, ValueError):
+        return False
+    return registry_allows_unqualified_reuse(registry)
 
 
 def is_sha256(value: object) -> bool:
@@ -46,14 +130,22 @@ def sha256_bytes(value: bytes) -> str:
 
 def checked_manifest(path: Path) -> dict:
     """Load the current build manifest and check its checksum and named compiler output."""
-    raw = path.read_bytes()
+    raw = _read_bounded_regular_file(path, MAX_MANIFEST_BYTES, allow_empty=False)
+    if raw is None:
+        raise ValueError("build manifest is unavailable, non-regular, changed, or oversized")
     checksum_path = Path(str(path) + ".sha256")
-    expected = checksum_path.read_text(encoding="ascii").strip()
+    checksum_bytes = _read_bounded_regular_file(checksum_path, MAX_CHECKSUM_BYTES, allow_empty=False)
+    if checksum_bytes is None:
+        raise ValueError("build manifest checksum is unavailable or invalid")
+    try:
+        expected = checksum_bytes.decode("ascii").strip()
+    except UnicodeDecodeError as error:
+        raise ValueError("build manifest checksum is not ASCII") from error
     if not is_sha256(expected) or sha256_bytes(raw) != expected:
         raise ValueError("build manifest checksum is missing or invalid")
     try:
-        manifest = json.loads(raw)
-    except json.JSONDecodeError as error:
+        manifest = strict_json_loads(raw)
+    except ValueError as error:
         raise ValueError("build manifest is not valid JSON") from error
     if not isinstance(manifest, dict) or manifest.get("schema") != MANIFEST_SCHEMA:
         raise ValueError("unsupported proof build manifest schema")
@@ -89,10 +181,7 @@ def checked_manifest(path: Path) -> dict:
         raise ValueError("build manifest compiler product digest is invalid")
     if not is_sha256(manifest["runtime"].get("sha256")):
         raise ValueError("build manifest runtime digest is invalid")
-    try:
-        actual_binary = sha256_bytes(Path(binary_path).read_bytes())
-    except OSError as error:
-        raise ValueError("proof executable named by the build manifest is unavailable") from error
+    actual_binary = _sha256_regular_file(Path(binary_path))
     if actual_binary != binary["sha256"]:
         raise ValueError("proof executable does not match the build manifest")
     for key in ("target", "compile_mode"):
@@ -295,6 +384,8 @@ def publish_artifact(store_dir: Path, record: dict, current_manifest: dict,
     file is fsynced and hard-linked into place, so readers see either no entry or a complete
     entry and an existing artifact can never be overwritten.
     """
+    if not soundness_registry_allows_artifact_reuse():
+        raise ValueError("soundness incident registry does not authorize declaration artifacts")
     if not isinstance(payload, bytes) or not isinstance(source_slice, bytes):
         raise ValueError("source slice and payload must be bytes")
     if not validate_artifact_record(record, current_manifest, source_slice, payload,
@@ -337,28 +428,17 @@ def publish_artifact(store_dir: Path, record: dict, current_manifest: dict,
 def read_artifact(store_dir: Path, artifact_sha256: str, current_manifest: dict,
                   source_slice: bytes, current_dependencies: list[dict]) -> tuple[dict, bytes]:
     """Read a bounded store entry and reject every incomplete or stale identity."""
+    if not soundness_registry_allows_artifact_reuse():
+        raise ValueError("soundness incident registry does not authorize declaration artifacts")
     if not isinstance(source_slice, bytes) or not isinstance(current_dependencies, list):
         raise ValueError("current source slice and dependencies have invalid types")
     path = _store_path(Path(store_dir), artifact_sha256)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    raw = _read_bounded_regular_file(path, MAX_STORE_FILE_BYTES, allow_empty=False)
+    if raw is None:
+        raise ValueError("declaration artifact entry is unavailable, invalid, or oversized")
     try:
-        descriptor = os.open(path, flags)
-    except OSError as error:
-        raise ValueError("declaration artifact entry is missing or unavailable") from error
-    try:
-        file_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size < 1 \
-                or file_stat.st_size > MAX_STORE_FILE_BYTES:
-            raise ValueError("declaration artifact entry has an invalid size or file type")
-        with os.fdopen(descriptor, "rb", closefd=False) as source:
-            raw = source.read(MAX_STORE_FILE_BYTES + 1)
-    finally:
-        os.close(descriptor)
-    if len(raw) != file_stat.st_size or len(raw) > MAX_STORE_FILE_BYTES:
-        raise ValueError("declaration artifact entry is truncated or oversized")
-    try:
-        envelope = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        envelope = strict_json_loads(raw)
+    except (ValueError, UnicodeDecodeError) as error:
         raise ValueError("declaration artifact entry is not valid JSON") from error
     if not isinstance(envelope, dict) or envelope.get("schema") != STORE_SCHEMA:
         raise ValueError("unsupported declaration artifact store schema")
@@ -393,11 +473,24 @@ def main() -> int:
     arguments = parser.parse_args()
     try:
         manifest = checked_manifest(arguments.manifest)
-        dependencies = json.loads(arguments.dependencies.read_text(encoding="utf-8"))
+        dependency_bytes = _read_bounded_regular_file(
+            arguments.dependencies, MAX_DEPENDENCIES_BYTES, allow_empty=False
+        )
+        if dependency_bytes is None:
+            raise ValueError("dependencies file is unavailable or oversized")
+        dependencies = strict_json_loads(dependency_bytes)
         if not isinstance(dependencies, list):
             raise ValueError("dependencies file must contain a JSON array")
+        source_slice = _read_bounded_regular_file(
+            arguments.source_slice, MAX_SOURCE_SLICE_BYTES
+        )
+        if source_slice is None:
+            raise ValueError("declaration source slice is unavailable or oversized")
+        payload = _read_bounded_regular_file(arguments.payload, MAX_PAYLOAD_BYTES)
+        if payload is None:
+            raise ValueError("declaration payload is unavailable or oversized")
         record = artifact_record(manifest, arguments.module, arguments.kind, arguments.name,
-                                 arguments.source_slice.read_bytes(), arguments.payload.read_bytes(), dependencies)
+                                 source_slice, payload, dependencies)
         sys.stdout.buffer.write(canonical_bytes(record) + b"\n")
     except (OSError, json.JSONDecodeError, ValueError) as error:
         print(f"declaration artifact identity: {error}", file=sys.stderr)
