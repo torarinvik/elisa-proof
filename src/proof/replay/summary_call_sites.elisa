@@ -19,11 +19,11 @@ extend ElisaProof:
             comparison: (equal: bool, complete: bool) = proof_replay_global_constant_scope_equal_with_work(left, right, work)
             comparison.complete and comparison.equal
 
-        def proof_replay_summary_call_owner_scope(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, current_scope: darray[sview]&, found_scope: mutable darray[sview]&, matches: mutable usize&, work: mutable usize&, depth: usize) -> void:
+        def proof_replay_summary_call_owner_scope(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, current_scope: darray[sview]&, found_scope: mutable darray[sview]&, matches: mutable usize&, work: mutable usize&, depth: usize) -> void:
             if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 matches <- 2
                 return
-            for declaration in declarations |owner, owner_line, current_scope, found_scope, matches, work, depth|:
+            for declaration in declarations |owner, owner_line, owner_offset, exact_owner, current_scope, found_scope, matches, work, depth|:
                 return if matches >= 2
                 if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                     matches <- 2
@@ -39,7 +39,7 @@ extend ElisaProof:
                             matches <- 2
                             return
                         work <- work + sview_len(owner)
-                        if name == owner and (owner_line == 0 or position.line == owner_line):
+                        if name == owner and (owner_line == 0 or position.line == owner_line) and (not exact_owner or position.offset.usize() == owner_offset):
                             matches <- matches + 1
                             found_scope.clear()
                             found_scope.extend(current_scope)
@@ -54,9 +54,9 @@ extend ElisaProof:
                             return
                         work <- work + current_scope.count
                         next_scope: mutable darray[sview] = proof_replay_global_constant_scope_with_module(current_scope, module_name)
-                        proof_replay_summary_call_owner_scope(body, owner, owner_line, &next_scope, found_scope, matches, work, depth + 1)
+                        proof_replay_summary_call_owner_scope(body, owner, owner_line, owner_offset, exact_owner, &next_scope, found_scope, matches, work, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        proof_replay_summary_call_owner_scope(body, owner, owner_line, current_scope, found_scope, matches, work, depth + 1)
+                        proof_replay_summary_call_owner_scope(body, owner, owner_line, owner_offset, exact_owner, current_scope, found_scope, matches, work, depth + 1)
                     Ast::Decl.Invalid:
                         matches <- 2
                     Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
@@ -70,10 +70,12 @@ extend ElisaProof:
                 not proof_replay_summary_scope_work_charge(source_path, work) or not proof_replay_summary_scope_work_charge(declaration_path, work)
             owner_line: mutable u32 = report.analysis_2.replay_owner_line
             owner_line <- 0 if owner_line == 4294967295
+            owner_offset: usize = report.analysis_2.replay_owner_offset
+            exact_owner: bool = report.analysis_2.replay_owner_offset_valid
             owner_scope: mutable darray[sview] = []
             matches: mutable usize = 0
             root_scope: mutable darray[sview] = []
-            proof_replay_summary_call_owner_scope(report.source.source_declarations, trace.name, owner_line, &root_scope, &owner_scope, &matches, work, 0)
+            proof_replay_summary_call_owner_scope(report.source.source_declarations, trace.name, owner_line, owner_offset, exact_owner, &root_scope, &owner_scope, &matches, work, 0)
             return false if matches != 1
             return true if proof_replay_summary_scope_equal_with_work(&declaration_path, &source_path, work)
             relative_path: mutable darray[sview] = []
@@ -89,25 +91,39 @@ extend ElisaProof:
             proof_replay_summary_owner_source_preflight_with_limit(report, owner, owner_line, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
 
         def proof_replay_summary_owner_source_preflight_with_limit(report: ProofReport&, owner: sview, owner_line: u32, work: mutable usize&, work_limit: usize) -> bool:
-            return false if work_limit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or work > work_limit
+            scan_start: usize = work
+            return false if not proof_replay_summary_owner_source_scan_with_limit(report, owner, owner_line, work, work_limit)
+            scan_cost: usize = work - scan_start
             seed: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - (work_limit - work)
-            metered_work: mutable usize = seed
-            scan_start: usize = metered_work
-            found: mutable Ast::Expr = Ast::Expr.Invalid
-            found_owner_line: mutable u32 = 0
-            matches: mutable usize = 0
-            owners: mutable usize = 0
-            if not proof_replay_summary_call_exact_span_in_declarations(report.source.source_declarations, owner, owner_line, Ast::Expr.Invalid, &found, &found_owner_line, &matches, &owners, &metered_work, 0):
-                work <- work_limit
-                return false
-            scan_cost: usize = metered_work - scan_start
-            if scan_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - metered_work) / 3:
+            if scan_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - seed) / 3:
                 work <- work_limit
                 return false
             # Reserve the same bounded tree size for the legacy owner, parameter and shadow
             # predicates that follow this complete preflight walk.
-            metered_work <- metered_work + scan_cost * 3
-            work <- work + (metered_work - seed)
+            work <- work + scan_cost * 3
+            true
+
+        # Charge only the exact owner lookup itself. CONTROL callers meter their subsequent
+        # declaration predicates separately, so they must not inherit the legacy reservations.
+        def proof_replay_summary_owner_source_scan_with_limit(report: ProofReport&, owner: sview, owner_line: u32, work: mutable usize&, work_limit: usize) -> bool:
+            return false if work_limit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or work > work_limit
+            seed: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - (work_limit - work)
+            metered_work: mutable usize = seed
+            scan_start: usize = metered_work
+            owner_offset: usize = report.analysis_2.replay_owner_offset if owner_line != 0 else 0
+            exact_owner: bool = report.analysis_2.replay_owner_offset_valid
+            found: mutable Ast::Expr = Ast::Expr.Invalid
+            found_owner_line: mutable u32 = 0
+            matches: mutable usize = 0
+            owners: mutable usize = 0
+            if not proof_replay_summary_call_exact_span_in_declarations(report.source.source_declarations, owner, owner_line, owner_offset, exact_owner, Ast::Expr.Invalid, &found, &found_owner_line, &matches, &owners, &metered_work, 0):
+                work <- work_limit
+                return false
+            scan_cost: usize = metered_work - scan_start
+            if scan_cost > work_limit - work:
+                work <- work_limit
+                return false
+            work <- work + scan_cost
             true
 
         def proof_replay_summary_call_constant_source_unshadowed(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, work: mutable usize&) -> bool:
@@ -477,7 +493,7 @@ extend ElisaProof:
                         _:
                             return false
                     return false if name == "" or position.line == 0
-                    target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{selection: ProofReplayCallSiteTargetSelection{enabled: true, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: true, offset: position.offset.usize(), line: position.line, name: name, calls_at_offset: 0, matched_calls: 0, track_unresolved_dispatch: true, unresolved_dispatch_found: false, source_annotations: annotations}, conversions: ProofReplayCallSiteTargetConversions{field_conversion_parameters: [], field_conversion_names: [], field_conversion_index_valid: false, field_conversion_index_hashes: [], field_conversion_index_values: [], field_conversion_index_counts: [], field_conversion_custom_cast_present: false}, aliases: ProofReplayCallSiteTargetAliases{field_conversion_alias_names: [], field_conversion_alias_targets: [], field_conversion_alias_lines: [], field_conversion_bare_alias_root_fallback_valid: false, field_conversion_alias_owners: [], field_conversion_alias_has_formals: [], field_conversion_alias_scope_index_valid: false, field_conversion_alias_scope_index_hashes: [], field_conversion_alias_scope_index_values: [], field_conversion_alias_scope_index_counts: [], field_conversion_alias_index_valid: false, field_conversion_alias_index_hashes: [], field_conversion_alias_index_values: [], field_conversion_alias_index_counts: []}, generics: ProofReplayCallSiteTargetGenerics{field_conversion_generic_params_valid: false, field_conversion_generic_param_lines: [], field_conversion_generic_param_names: [], field_conversion_generic_param_line: 0, field_conversion_generic_param_index_valid: false, field_conversion_generic_param_index_hashes: [], field_conversion_generic_param_index_values: [], field_conversion_generic_param_index_counts: []}, types: ProofReplayCallSiteTargetTypes{field_conversion_declared_types: [], field_conversion_declared_type_owners: [], field_conversion_declared_type_scope_index_valid: false, field_conversion_declared_type_scope_index_hashes: [], field_conversion_declared_type_scope_index_values: [], field_conversion_declared_type_scope_index_counts: [], field_conversion_declared_type_index_valid: false, field_conversion_declared_type_index_hashes: [], field_conversion_declared_type_index_values: [], field_conversion_declared_type_index_counts: []}}
+                    target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{selection: ProofReplayCallSiteTargetSelection{enabled: true, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: true, offset: position.offset.usize(), line: position.line, name: name, calls_at_offset: 0, matched_calls: 0, track_unresolved_dispatch: true, unresolved_dispatch_found: false, source_annotations: annotations}, conversions: ProofReplayCallSiteTargetConversions{field_conversion_parameters: [], field_conversion_names: [], field_conversion_index_valid: false, field_conversion_index_hashes: [], field_conversion_index_values: [], field_conversion_index_counts: [], field_conversion_custom_cast_present: false}, aliases: ProofReplayCallSiteTargetAliases{field_conversion_alias_names: [], field_conversion_alias_targets: [], field_conversion_alias_lines: [], field_conversion_bare_alias_root_fallback_valid: false, field_conversion_alias_owners: [], field_conversion_alias_has_formals: [], field_conversion_alias_scope_index_valid: false, field_conversion_alias_scope_index_hashes: [], field_conversion_alias_scope_index_values: [], field_conversion_alias_scope_index_counts: [], field_conversion_alias_index_valid: false, field_conversion_alias_index_hashes: [], field_conversion_alias_index_values: [], field_conversion_alias_index_counts: []}, generics: ProofReplayCallSiteTargetGenerics{field_conversion_generic_params_valid: false, field_conversion_generic_param_lines: [], field_conversion_generic_param_names: [], field_conversion_generic_param_line: 0, field_conversion_generic_param_owner: "", field_conversion_generic_param_owner_known: false, field_conversion_generic_param_index_valid: false, field_conversion_generic_param_index_hashes: [], field_conversion_generic_param_index_values: [], field_conversion_generic_param_index_counts: []}, types: ProofReplayCallSiteTargetTypes{field_conversion_declared_types: [], field_conversion_declared_type_owners: [], field_conversion_declared_type_scope_index_valid: false, field_conversion_declared_type_scope_index_hashes: [], field_conversion_declared_type_scope_index_values: [], field_conversion_declared_type_scope_index_counts: [], field_conversion_declared_type_index_valid: false, field_conversion_declared_type_index_hashes: [], field_conversion_declared_type_index_values: [], field_conversion_declared_type_index_counts: []}}
                     target.selection.allow_scoped_target <- true
                     target.capture.expected_call <- call
                     target.capture.require_exact_call <- true

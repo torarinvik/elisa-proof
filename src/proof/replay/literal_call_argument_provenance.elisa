@@ -104,32 +104,35 @@ extend ElisaProof:
                         return false
             return true
 
-        def proof_replay_literal_call_source_declaration(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, current_module: sview, expected_position: Ast::Pos, matches: mutable usize&, found_call: mutable Ast::Expr&, safe: mutable bool&, depth: usize) -> bool:
+        def proof_replay_literal_call_source_declaration(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, current_module: sview, expected_position: Ast::Pos, matches: mutable usize&, found_call: mutable Ast::Expr&, safe: mutable bool&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
-            for declaration in declarations |owner, owner_line, current_module, expected_position, matches, found_call, safe, depth|:
+            for declaration in declarations |owner, owner_line, owner_offset, current_module, expected_position, matches, found_call, safe, depth|:
                 match declaration:
                     Ast::Decl.Func(name, _, _, body, _, _, position):
-                        if name == owner and position.line == owner_line:
+                        if name == owner and position.line == owner_line and position.offset.usize() == owner_offset:
                             return false if not proof_replay_literal_call_find_statements(body, expected_position, matches, found_call, safe, false, 0)
                     Ast::Decl.Module(module_name, nested, _):
-                        return false if not proof_replay_literal_call_source_declaration(nested, owner, owner_line, module_name, expected_position, matches, found_call, safe, depth + 1)
+                        return false if not proof_replay_literal_call_source_declaration(nested, owner, owner_line, owner_offset, module_name, expected_position, matches, found_call, safe, depth + 1)
                     Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_literal_call_source_declaration(nested, owner, owner_line, current_module, expected_position, matches, found_call, safe, depth + 1)
+                        return false if not proof_replay_literal_call_source_declaration(nested, owner, owner_line, owner_offset, current_module, expected_position, matches, found_call, safe, depth + 1)
                     _:
                         pass
             return true
 
-        def proof_replay_literal_call_signature(declarations: darray[Ast::Decl]&, name: sview, target_module: sview, current_module: sview, argument_count: usize, argument_names: darray[sview]&, argument_index: usize, width: mutable i64&, function_matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_literal_call_signature(declarations: darray[Ast::Decl]&, name: sview, target_scope: darray[sview]&, current_scope: darray[sview]&, argument_count: usize, argument_names: darray[sview]&, argument_index: usize, width: mutable i64&, function_matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
             return false if:
                 depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
             work <- work + declarations.count
-            for declaration in declarations |name, target_module, current_module, argument_count, argument_names, argument_index, width, function_matches, work, depth|:
+            for declaration in declarations |name, target_scope, current_scope, argument_count, argument_names, argument_index, width, function_matches, work, depth|:
                 match declaration:
                     Ast::Decl.Func(candidate_name, parameters, _, _, _, _, _):
-                        return false if sview_len(candidate_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-                        work <- work + sview_len(candidate_name)
-                        if candidate_name == name and current_module == target_module:
+                        same_name: (equal: bool, complete: bool) = proof_replay_global_constant_text_equal_with_work(candidate_name, name, work)
+                        return false if not same_name.complete
+                        if same_name.equal:
+                            same_scope: (equal: bool, complete: bool) = proof_replay_global_constant_scope_equal_with_work(current_scope, target_scope, work)
+                            return false if not same_scope.complete
+                            continue if not same_scope.equal
                             function_matches <- function_matches + 1
                             return false if:
                                 argument_count != parameters.count or argument_index >= parameters.count
@@ -150,11 +153,11 @@ extend ElisaProof:
                                 _:
                                     return false
                     Ast::Decl.Module(module_name, nested, _):
-                        return false if sview_len(module_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-                        work <- work + sview_len(module_name)
-                        return false if not proof_replay_literal_call_signature(nested, name, target_module, module_name, argument_count, argument_names, argument_index, width, function_matches, work, depth + 1)
+                        next_scope_result: (complete: bool, scope: darray[sview]) = proof_replay_global_constant_scope_with_module_and_work(current_scope, module_name, work)
+                        return false if not next_scope_result.complete
+                        return false if not proof_replay_literal_call_signature(nested, name, target_scope, next_scope_result.scope, argument_count, argument_names, argument_index, width, function_matches, work, depth + 1)
                     Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_literal_call_signature(nested, name, target_module, current_module, argument_count, argument_names, argument_index, width, function_matches, work, depth + 1)
+                        return false if not proof_replay_literal_call_signature(nested, name, target_scope, current_scope, argument_count, argument_names, argument_index, width, function_matches, work, depth + 1)
                     _:
                         pass
             return true
@@ -164,23 +167,36 @@ extend ElisaProof:
                 return index if proof_internal_rebind_name(index) == name
             return PROOF_INTERNAL_REBIND_SYMBOL_COUNT
 
-        def proof_replay_literal_binding_width_matches(report: ProofReport&, symbol: sview, expected_width: i64, expected_position: Ast::Pos, owner: sview, call_line: u32) -> bool:
+        def proof_replay_literal_binding_width_matches(report: ProofReport&, symbol: sview, expected_width: i64, expected_position: Ast::Pos, owner: sview, call_line: u32, work: mutable usize&) -> bool:
+            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or report.analysis_1.traces.records.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + report.analysis_1.traces.records.count
             signed_found: mutable bool = false
             for trace in report.analysis_1.traces.records |trace, symbol, expected_width, owner, call_line, signed_found|:
-                continue if trace.kind != "type-bound" or trace.name != owner or trace.line != call_line
+                kind_match: (equal: bool, complete: bool) = proof_replay_global_constant_text_equal_with_work(trace.kind, "type-bound", work)
+                owner_match: (equal: bool, complete: bool) = proof_replay_global_constant_text_equal_with_work(trace.name, owner, work)
+                return false if not kind_match.complete or not owner_match.complete
+                continue if not kind_match.equal or not owner_match.equal or trace.line != call_line
+                return false if not proof_replay_summary_expr_charge_with_work(trace.expression, work)
                 match trace.expression:
                     Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, argument_names, position):
-                        if callee in {"__elisa_signed_type_bound", "__elisa_unsigned_type_bound", "__elisa_signed_place_type_bound"}:
+                        signed_marker: (equal: bool, complete: bool) = proof_replay_global_constant_text_equal_with_work(callee, "__elisa_signed_type_bound", work)
+                        unsigned_marker: (equal: bool, complete: bool) = proof_replay_global_constant_text_equal_with_work(callee, "__elisa_unsigned_type_bound", work)
+                        place_marker: (equal: bool, complete: bool) = proof_replay_global_constant_text_equal_with_work(callee, "__elisa_signed_place_type_bound", work)
+                        return false if not signed_marker.complete or not unsigned_marker.complete or not place_marker.complete
+                        if signed_marker.equal or unsigned_marker.equal or place_marker.equal:
                             return false if position.line != call_line or not proof_replay_source_position_equal(position, expected_position) or argument_names.count != 0
                             continue if arguments.count == 0
                             match arguments[0]:
-                                Ast::Expr.Ident(bound_name, _) if bound_name == symbol:
-                                    return false if callee != "__elisa_signed_type_bound" or arguments.count != 2
-                                    match arguments[1]:
-                                        Ast::Expr.IntLit(width, _) if width == expected_width:
-                                            signed_found <- true
-                                        _:
-                                            return false
+                                Ast::Expr.Ident(bound_name, _):
+                                    same_symbol: (equal: bool, complete: bool) = proof_replay_global_constant_text_equal_with_work(bound_name, symbol, work)
+                                    return false if not same_symbol.complete
+                                    if same_symbol.equal:
+                                        return false if not signed_marker.equal or arguments.count != 2
+                                        match arguments[1]:
+                                            Ast::Expr.IntLit(width, _) if width == expected_width:
+                                                signed_found <- true
+                                            _:
+                                                return false
                                 _:
                                     pass
                     _:
@@ -213,6 +229,7 @@ extend ElisaProof:
             return false if:
                 report.analysis_2.trace_owner_line != trace.line
                 report.analysis_2.replay_owner_line == 0 or report.analysis_2.replay_owner_line == 4294967295
+                not report.analysis_2.replay_owner_offset_valid
                 not proof_replay_summary_owner_source_preflight(report, trace.name, report.analysis_2.replay_owner_line, work)
                 proof_replay_summary_has_unresolved_import(report.source.source_annotations, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 report.source.source_declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
@@ -229,24 +246,23 @@ extend ElisaProof:
                     # plus exact source-call evidence is the stable identity; do not trust that
                     # transient counter during replay.
                     return false if symbol_index >= PROOF_INTERNAL_REBIND_SYMBOL_COUNT or not proof_replay_literal_binding_unique_with_work(report, symbol, trace.expression, trace.name, trace.line, work)
-                    caller_module: mutable sview = ""
+                    caller_scope: mutable darray[sview] = []
                     caller_count: mutable usize = 0
-                    return false if report.source.source_declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-                    work <- work + report.source.source_declarations.count
-                    proof_replay_module_at_function_line(report.source.source_declarations, report.analysis_2.replay_owner_line, "", &caller_module, &caller_count, 0)
-                    return false if caller_count != 1
+                    root_scope: darray[sview] = []
+                    proof_replay_summary_call_owner_scope(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, true, root_scope, &caller_scope, &caller_count, work, 0)
+                    return false if caller_count != 1 or not proof_replay_summary_scope_work_charge(caller_scope, work)
                     source_matches: mutable usize = 0
                     source_call: mutable Ast::Expr = Ast::Expr.Invalid
                     source_safe: mutable bool = true
                     return false if:
-                        not proof_replay_literal_call_source_declaration(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, "", position, &source_matches, &source_call, &source_safe, 0)
+                        not proof_replay_literal_call_source_declaration(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, "", position, &source_matches, &source_call, &source_safe, 0)
                         source_matches != 1 or not source_safe
                     match source_call:
                         Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), arguments, argument_names, call_position):
                             return false if:
                                 callee_name == "" or proof_name_is_reserved_internal(callee_name)
                                 not proof_replay_source_position_equal(call_position, position)
-                                proof_replay_local_binding_parameter_name_present_with_default_limit(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, callee_name, work, 0)
+                                proof_replay_local_binding_parameter_name_present_at_offset_with_work(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, true, callee_name, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
                             caller_body: mutable darray[Ast::Stmt] = []
                             return false if:
                                 not proof_replay_source_owner_body_with_work(report, trace.name, report.analysis_2.replay_owner_line, &caller_body, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
@@ -263,14 +279,14 @@ extend ElisaProof:
                                 not proof_replay_summary_owner_source_preflight(report, trace.name, report.analysis_2.replay_owner_line, work)
                             overload_count: mutable usize = 0
                             return false if:
-                                not proof_replay_summary_same_module_name_count(report.source.source_declarations, callee_name, caller_module, "", &overload_count, work, 0)
+                                not proof_replay_same_module_name_count_at_scope(report.source.source_declarations, callee_name, caller_scope, root_scope, &overload_count, work, 0)
                                 overload_count != 1
                             function_matches: mutable usize = 0
                             width: mutable i64 = 0
                             return false if:
-                                not proof_replay_literal_call_signature(report.source.source_declarations, callee_name, caller_module, "", arguments.count, argument_names, argument_index, &width, &function_matches, work, 0)
+                                not proof_replay_literal_call_signature(report.source.source_declarations, callee_name, caller_scope, root_scope, arguments.count, argument_names, argument_index, &width, &function_matches, work, 0)
                                 function_matches != 1 or width <= 0 or not proof_literal_argument_fits(literal, width, 0)
-                            return proof_replay_literal_binding_width_matches(report, symbol, width, position, trace.name, trace.line)
+                            return proof_replay_literal_binding_width_matches(report, symbol, width, position, trace.name, trace.line, work)
                         _:
                             return false
                 _:

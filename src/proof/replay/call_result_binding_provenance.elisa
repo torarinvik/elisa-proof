@@ -138,17 +138,22 @@ extend ElisaProof:
                         pass
             return true
 
-        def proof_replay_call_result_binding_signature(declarations: darray[Ast::Decl]&, declaration_index: ProofReplayDeterministicDeclarationIndex&, name: sview, owner_module: sview, current_module: sview, argument_count: usize, result_type: Ast::Expr, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_call_result_binding_signature(declarations: darray[Ast::Decl]&, declaration_index: ProofReplayDeterministicDeclarationIndex&, name: sview, owner_scope: darray[sview]&, current_scope: darray[sview]&, argument_count: usize, result_type: Ast::Expr, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
             return false if:
                 depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + declarations.count
-            for declaration in declarations |name, owner_module, current_module, argument_count, result_type, matches, source_work, depth|:
+            for declaration in declarations |name, owner_scope, current_scope, argument_count, result_type, matches, source_work, depth|:
                 match declaration:
                     Ast::Decl.Func(candidate, parameters, return_type, _, _, _, _):
                         return false if sview_len(candidate) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
                         source_work <- source_work + sview_len(candidate)
-                        if candidate == name and current_module == owner_module:
+                        same_name: (equal: bool, complete: bool) = proof_replay_global_constant_text_equal_with_work(candidate, name, source_work)
+                        return false if not same_name.complete
+                        if same_name.equal:
+                            same_scope: (equal: bool, complete: bool) = proof_replay_global_constant_scope_equal_with_work(current_scope, owner_scope, source_work)
+                            return false if not same_scope.complete
+                            continue if not same_scope.equal
                             matches <- matches + 1
                             return false if parameters.count != argument_count or not proof_replay_summary_expr_charge_with_work(return_type, source_work) or not proof_replay_summary_expr_equal_with_work(return_type, result_type, source_work)
                             for parameter in parameters:
@@ -156,11 +161,11 @@ extend ElisaProof:
                                     not proof_replay_summary_expr_charge_with_work(parameter.type_expression, source_work)
                                     parameter.is_mutable or parameter.has_default or proof_replay_deterministic_parameter_type(parameter.type_expression, 0) or not proof_replay_deterministic_scalar_type_indexed(parameter.type_expression, declaration_index, source_work, 0)
                     Ast::Decl.Module(module_name, nested, _):
-                        return false if sview_len(module_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
-                        source_work <- source_work + sview_len(module_name)
-                        return false if not proof_replay_call_result_binding_signature(nested, declaration_index, name, owner_module, module_name, argument_count, result_type, matches, source_work, depth + 1)
+                        next_scope: (complete: bool, scope: darray[sview]) = proof_replay_global_constant_scope_with_module_and_work(current_scope, module_name, source_work)
+                        return false if not next_scope.complete
+                        return false if not proof_replay_call_result_binding_signature(nested, declaration_index, name, owner_scope, next_scope.scope, argument_count, result_type, matches, source_work, depth + 1)
                     Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_call_result_binding_signature(nested, declaration_index, name, owner_module, current_module, argument_count, result_type, matches, source_work, depth + 1)
+                        return false if not proof_replay_call_result_binding_signature(nested, declaration_index, name, owner_scope, current_scope, argument_count, result_type, matches, source_work, depth + 1)
                     _:
                         pass
             return true
@@ -192,12 +197,14 @@ extend ElisaProof:
                             return false if callee_name == "" or proof_name_is_reserved_internal(callee_name)
                             for argument in arguments |argument, source_work|:
                                 return false if:
-                                    not proof_replay_summary_expr_charge_with_work(argument, source_work)
+                                    not proof_replay_summary_expr_repeat_charge_with_work(argument, 1, source_work)
                                     proof_replay_expression_contains_call_node(argument, 0)
-                            owner_module: mutable sview = ""
+                            owner_scope: mutable darray[sview] = []
                             owner_module_count: mutable usize = 0
-                            proof_replay_module_at_function_line(report.source.source_declarations, report.analysis_2.replay_owner_line, "", &owner_module, &owner_module_count, 0)
-                            return false if owner_module_count != 1
+                            root_scope: darray[sview] = []
+                            exact_owner: bool = report.analysis_2.replay_owner_offset_valid
+                            proof_replay_summary_call_owner_scope(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, exact_owner, root_scope, &owner_scope, &owner_module_count, source_work, 0)
+                            return false if owner_module_count != 1 or not proof_replay_summary_scope_work_charge(owner_scope, source_work)
                             binding_count: mutable usize = 0
                             owner_count: mutable usize = 0
                             binding_end_offset: mutable u32 = 0
@@ -208,9 +215,10 @@ extend ElisaProof:
                                 owner_count != 1 or binding_count != 1
                                 binding_end_offset == 0
                             owner_body: mutable darray[Ast::Stmt] = []
+                            parameter_shadowed: bool = proof_replay_local_binding_parameter_name_present_at_offset_with_work(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, true, callee_name, source_work, PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT, 0) if exact_owner else proof_replay_local_binding_parameter_name_present_with_default_limit(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, callee_name, source_work, 0)
                             return false if:
                                 not proof_replay_source_owner_body_with_work(report, trace.name, report.analysis_2.replay_owner_line, &owner_body, source_work, PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT)
-                                proof_replay_local_binding_parameter_name_present_with_default_limit(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, callee_name, source_work, 0)
+                                parameter_shadowed
                                 not proof_replay_source_call_locals_unshadowed_at_with_work(owner_body, report.source.source_annotations, source_call, source_work)
                             consumer_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
                             return false if:
@@ -234,9 +242,9 @@ extend ElisaProof:
                                         not proof_replay_deterministic_call_source_site_with_cache(report, trace, source_initializer, source_work, cache)
                                         not proof_replay_deterministic_call_declaration_index_ensure(report.source.source_declarations, report.source.source_annotations, source_work, cache)
                                     same_module_count: mutable usize = 0
-                                    return false if not proof_replay_summary_same_module_name_count(report.source.source_declarations, callee_name, owner_module, "", &same_module_count, source_work, 0) or same_module_count != 1
+                                    return false if not proof_replay_same_module_name_count_at_scope(report.source.source_declarations, callee_name, owner_scope, root_scope, &same_module_count, source_work, 0) or same_module_count != 1
                                     signature_count: mutable usize = 0
-                                    return false if not proof_replay_call_result_binding_signature(report.source.source_declarations, cache.declaration_index, callee_name, owner_module, "", source_arguments.count, source_type, &signature_count, source_work, 0) or signature_count != 1
+                                    return false if not proof_replay_call_result_binding_signature(report.source.source_declarations, cache.declaration_index, callee_name, owner_scope, root_scope, source_arguments.count, source_type, &signature_count, source_work, 0) or signature_count != 1
                                     return true
                                 _:
                                     return false
