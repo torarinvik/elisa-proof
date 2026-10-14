@@ -405,8 +405,9 @@ evaluation does not remove their existing source-correspondence limitation.
 The independent arithmetic guard above is not a proof of source correspondence for the
 source-adapter rows below. Threaded-summary replay now derives bare callable names, parenthesis
 stripping and expression-name mentions in replay-local, depth-bounded helpers. Threaded-summary
-checks now use source indexes rebuilt in a replay-owned scratch report, and each generic snapshot
-row must match one exact generic identity annotation. The resource type-marker and
+checks now use source indexes rebuilt in a replay-owned scratch report. Each function-generic row
+must match one exact identity annotation, and marker/row cardinality rejects omitted function rows.
+The resource type-marker and
 reference-free/storage-alias classifiers themselves remain shared with source analysis. Independent
 semantic re-derivation and source mutations with alias/lifetime controls remain required; these
 dependencies are not a verification claim.
@@ -524,6 +525,7 @@ dependencies are not a verification claim.
 | `proof_source_conversion_generic_line_index_build` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
 | `proof_source_conversion_generic_owner_index_ensure` | `proof/check/source_conversion_name_lookups.elisa` | source adapter |
 | `proof_source_conversion_generic_owner_lookup` | `proof/check/source_conversion_name_lookups.elisa` | source adapter; exact owner-row authentication during structural replay |
+| `proof_source_conversion_generic_function_owner_lookup` | `proof/check/source_conversion_name_lookups.elisa` | source adapter; exact function-owner generic authentication during structural replay |
 | `proof_source_conversion_indexes_build` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
 | `proof_source_conversion_root_alias_visibility_scan` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
 | `proof_source_conversion_scope_expression_key_hash` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |

@@ -24777,8 +24777,17 @@ it does not match the current proof source; these changes remain unqualified at 
 A fresh kernel inventory run found two newly introduced calls from structural source-cache
 validation into the source-conversion owner indexes. Both authenticate each copied generic
 parameter row against its exact source owner offset before structural replay accepts the rebuilt
-source graph. The same inventory run exposed a package-format helper newly shared with
-correspondence matching. Added all three dependencies to their external-call inventories with
-their source-adapter roles. The workspace-cache boundary, kernel inventory, pattern-literal,
+source graph. A follow-up inventory pass also found the exact function-owner variant used while
+authenticating typed structural summaries. The same inventory run exposed a package-format helper
+newly shared with correspondence matching. Added all four dependencies to their external-call
+inventories with their source-adapter roles. The workspace-cache boundary, kernel inventory, pattern-literal,
 source-authority, diff, and source-length checks pass. Compiler/runtime qualification remains
 outstanding.
+
+### 23.27.1390 Reject omitted function-generic source rows in replay caches
+
+Replay source-cache authentication now compares the number of copied function-generic rows with
+the independently indexed generic-identity markers. It validates each row against an exact
+function owner and exact generic marker, and rejects duplicate row identities. This closes the
+omitted-row case that a one-way row-to-marker lookup alone did not detect. Static diff and
+source-length checks pass; runtime source-mutation qualification remains outstanding.
