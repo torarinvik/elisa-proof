@@ -2,19 +2,151 @@ extend ElisaProof:
     public:
         const PROOF_ALIAS_TRANSFER_BUDGET: usize = 16
 
+        # Snapshot transfer revisits each original expression while splitting,
+        # substituting, checking receiver freedom, deduplicating against the fact
+        # set, and attempting derived facts. Screen for a possible rewrite first;
+        # reserve the cross-product only when one exists, before copying or mutation.
+        def proof_alias_transfer_preflight(facts: darray[Ast::Expr]&, receiver: Ast::Expr, local: Ast::Expr, index_root: sview, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> bool can[Global.Read, Global.Write]:
+            work: mutable usize = report.analysis_1.budgets.frame_call_source_work
+            exhausted: mutable bool = false
+            total_cost: mutable usize = 0
+            fact_cost: mutable usize = facts.count
+            for fact in facts |fact, facts, report, owner, position, work, exhausted, total_cost|:
+                cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, &work, &exhausted)
+                if not cost.complete or exhausted or cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - total_cost or cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - fact_cost:
+                    report.analysis_1.budgets.frame_call_source_work <- work
+                    proof_frame_source_work_report_exhaustion(report, owner, position.line, "alias-transfer-work", "snapshot fact transfer exceeded its bounded source-work budget")
+                    return false
+                total_cost <- total_cost + cost.cost
+                fact_cost <- fact_cost + cost.cost
+            receiver_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(receiver, &work, &exhausted)
+            if not receiver_cost.complete or exhausted or receiver_cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - total_cost:
+                report.analysis_1.budgets.frame_call_source_work <- work
+                proof_frame_source_work_report_exhaustion(report, owner, position.line, "alias-transfer-work", "snapshot fact transfer exceeded its bounded source-work budget")
+                return false
+            total_cost <- total_cost + receiver_cost.cost
+            local_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(local, &work, &exhausted)
+            if not local_cost.complete or exhausted or local_cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - total_cost:
+                report.analysis_1.budgets.frame_call_source_work <- work
+                proof_frame_source_work_report_exhaustion(report, owner, position.line, "alias-transfer-work", "snapshot fact transfer exceeded its bounded source-work budget")
+                return false
+            total_cost <- total_cost + local_cost.cost
+            # A source-sized receiver scan tests each subexpression against the receiver. Charge
+            # that comparison work before screening candidates. With no candidate fact, transfer
+            # stays linear; reserve the quadratic deduplication estimate only when rewriting can
+            # actually be attempted.
+            receiver_multiplier: usize = receiver_cost.cost + 2
+            complete: bool = proof_linear_safety_work_charge_product4_with_work(&work, &exhausted, fact_cost, receiver_multiplier, 1, 1, 1)
+            potential_candidate: mutable bool = false
+            if complete:
+                for fact in facts |fact, receiver, index_root, potential_candidate|:
+                    continue if potential_candidate
+                    potential_candidate <- proof_expr_reads(fact, receiver, 0)
+                    if not potential_candidate and index_root != "":
+                        range: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
+                        potential_candidate <- range.known and proof_expr_mentions_name(range.body, index_root)
+            else:
+                report.analysis_1.budgets.frame_call_source_work <- work
+                proof_frame_source_work_report_exhaustion(report, owner, position.line, "alias-transfer-work", "snapshot fact transfer exceeded its bounded source-work budget")
+                return false
+            complete <- proof_linear_safety_work_charge(&work, &exhausted, facts.count)
+            if potential_candidate:
+                complete <- complete and proof_linear_safety_charge_cross_with_work(&work, &exhausted, total_cost, total_cost, 3)
+            complete <- complete and proof_linear_safety_work_charge_scaled(&work, &exhausted, total_cost, 8)
+            report.analysis_1.budgets.frame_call_source_work <- work
+            if not complete or exhausted:
+                proof_frame_source_work_report_exhaustion(report, owner, position.line, "alias-transfer-work", "snapshot fact transfer exceeded its bounded source-work budget")
+                return false
+            return not proof_frame_source_work_stop(report, owner, position.line)
+
+        # Snapshot candidates share one enumeration and tactic-preflight budget for the whole
+        # transfer instead of resetting both limits for every failed derived-fact attempt.
+        def proof_alias_transfer_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, report: mutable ProofReport&, owner: sview, line: u32, operator_mask: usize, shared_work: mutable usize&, tactic_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+            proven: bool = (proof_goal_with_shared_work(facts, goal, annotations, operator_mask, &shared_work, &tactic_work) can Global{Read,Write})
+            report.analysis_1.budgets.frame_call_source_work <- shared_work
+            if shared_work >= PROOF_LINEAR_SAFETY_WORK_LIMIT or tactic_work >= PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT:
+                report.analysis_1.budgets.frame_call_source_work <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                proof_frame_source_work_report_exhaustion(report, owner, line, "alias-transfer-search-work", "snapshot fact transfer exceeded its shared proof-search budget")
+                return false
+            proven
+
+        # Alias discovery scans every fact and may compare each equality against every saved
+        # value. Reserve that lookup separately before the first fact or value traversal.
+        def proof_alias_lookup_preflight(names: darray[sview]&, values: darray[Ast::Expr]&, facts: darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, declared: sview, position: Ast::Pos) -> bool can[Global.Read, Global.Write]:
+            work: mutable usize = report.analysis_1.budgets.frame_call_source_work
+            exhausted: mutable bool = false
+            if facts.count >= PROOF_LINEAR_SAFETY_WORK_LIMIT or names.count >= PROOF_LINEAR_SAFETY_WORK_LIMIT or values.count >= PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                report.analysis_1.budgets.frame_call_source_work <- work
+                proof_frame_source_work_report_exhaustion(report, owner, position.line, "alias-lookup-work", "saved-value alias lookup exceeded its bounded source-work budget")
+                return false
+            fact_cost: mutable usize = facts.count
+            for fact in facts |fact, work, exhausted, fact_cost|:
+                cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, &work, &exhausted)
+                if not cost.complete or exhausted or cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - fact_cost:
+                    report.analysis_1.budgets.frame_call_source_work <- work
+                    proof_frame_source_work_report_exhaustion(report, owner, position.line, "alias-lookup-work", "saved-value alias lookup exceeded its bounded source-work budget")
+                    return false
+                fact_cost <- fact_cost + cost.cost
+            value_cost: mutable usize = 0
+            for value in values |value, work, exhausted, value_cost|:
+                row_cost: mutable usize = 1
+                match value:
+                    Ast::Expr.Ident(value_name, _):
+                        row_cost <- row_cost + sview_len(value_name)
+                    _:
+                        pass
+                if not proof_linear_safety_work_charge(&work, &exhausted, row_cost) or row_cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - value_cost:
+                    report.analysis_1.budgets.frame_call_source_work <- work
+                    proof_frame_source_work_report_exhaustion(report, owner, position.line, "alias-lookup-work", "saved-value alias lookup exceeded its bounded source-work budget")
+                    return false
+                value_cost <- value_cost + row_cost
+            name_cost: mutable usize = names.count
+            declared_length: usize = sview_len(declared)
+            if not proof_linear_safety_work_charge(&work, &exhausted, names.count):
+                report.analysis_1.budgets.frame_call_source_work <- work
+                proof_frame_source_work_report_exhaustion(report, owner, position.line, "alias-lookup-work", "saved-value alias lookup exceeded its bounded source-work budget")
+                return false
+            if declared_length > PROOF_LINEAR_SAFETY_WORK_LIMIT - name_cost:
+                report.analysis_1.budgets.frame_call_source_work <- work
+                proof_frame_source_work_report_exhaustion(report, owner, position.line, "alias-lookup-work", "saved-value alias lookup exceeded its bounded source-work budget")
+                return false
+            name_cost <- name_cost + declared_length
+            for candidate_name in names |candidate_name, work, exhausted, name_cost|:
+                name_length: usize = sview_len(candidate_name)
+                if not proof_linear_safety_work_charge(&work, &exhausted, name_length) or name_length > PROOF_LINEAR_SAFETY_WORK_LIMIT - name_cost:
+                    report.analysis_1.budgets.frame_call_source_work <- work
+                    proof_frame_source_work_report_exhaustion(report, owner, position.line, "alias-lookup-work", "saved-value alias lookup exceeded its bounded source-work budget")
+                    return false
+                name_cost <- name_cost + name_length
+            complete: bool = proof_linear_safety_work_charge_scaled(&work, &exhausted, fact_cost, 1)
+            complete <- complete and proof_linear_safety_charge_cross_with_work(&work, &exhausted, facts.count, value_cost + name_cost + values.count + 1, 1)
+            complete <- complete and proof_linear_safety_charge_cross_with_work(&work, &exhausted, values.count, fact_cost, 1)
+            complete <- complete and proof_linear_safety_work_charge_product4_with_work(&work, &exhausted, facts.count, values.count, declared_length, 1, 1)
+            report.analysis_1.budgets.frame_call_source_work <- work
+            if not complete or exhausted:
+                proof_frame_source_work_report_exhaustion(report, owner, position.line, "alias-lookup-work", "saved-value alias lookup exceeded its bounded source-work budget")
+                return false
+            return not proof_frame_source_work_stop(report, owner, position.line)
+
         # Instantiate numeric consequences while the indexed initializer still
         # denotes its pre-write value. Only receiver-free consequences escape.
         def proof_transfer_index_snapshot_facts(receiver: Ast::Expr, local: Ast::Expr, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos, annotations: darray[Ast::EnumAnnotation]&) -> void:
+            return if not proof_frame_expression_rechecks_with_work(receiver, report, owner, position.line, 1)
             shape = proof_indexed_write_root(receiver)
             return if not shape.known
+            return if not proof_alias_transfer_preflight(facts, receiver, local, shape.root, report, owner, position)
             original: darray[Ast::Expr] = proof_copy_exprs(facts)
             binding: Ast::Expr = Ast::Expr.Binary(local, TokenKind.EqEq, receiver, position)
             budget: mutable usize = PROOF_ALIAS_TRANSFER_BUDGET
-            for fact in original |original, receiver, local, facts, report, owner, position, annotations, binding, shape, budget|:
+            shared_work: mutable usize = report.analysis_1.budgets.frame_call_source_work
+            tactic_work: mutable usize = 0
+            operator_mask: usize = report.source.source_primitive_operator_mask
+            for fact in original |original, receiver, local, facts, report, owner, position, annotations, binding, shape, budget, shared_work, tactic_work, operator_mask|:
                 pieces: mutable darray[Ast::Expr] = []
                 proof_conjunct_components(fact, pieces)
                 proof_push_cell_instance(fact, receiver, pieces)
-                for piece in pieces |original, fact, receiver, local, facts, report, owner, position, annotations, binding, shape, budget|:
+                for piece in pieces |original, fact, receiver, local, facts, report, owner, position, annotations, binding, shape, budget, shared_work, tactic_work, operator_mask|:
+                    return if proof_frame_source_work_stop(report, owner, position.line)
                     return if budget == 0
                     replaced = proof_replace_place(piece, receiver, local, 0)
                     continue if not replaced.changed or proof_expr_mentions_name(replaced.value, shape.root)
@@ -23,7 +155,10 @@ extend ElisaProof:
                     premises.push(binding)
                     premises.push(fact)
                     proof_push_unread_facts(original, shape.root, premises) if proof_symbolic_range(fact).known
-                    continue if not (proof_goal(premises, replaced.value, annotations) can Global{Read,Write})
+                    proven: bool = (proof_alias_transfer_goal(premises, replaced.value, annotations, report, owner, position.line, operator_mask, &shared_work, &tactic_work) can Global{Read,Write})
+                    if not proven:
+                        return if proof_frame_source_work_stop(report, owner, position.line)
+                        continue
                     budget <- budget - 1
                     proof_add_derived_fact_from(facts, report, replaced.value, premises, "proof-step", position.line, owner)
 
@@ -31,15 +166,24 @@ extend ElisaProof:
         # while its pre-state premises are still available. The equality to the mutable source
         # itself is intentionally not retained: mutation invalidation must still revoke it.
         def proof_transfer_numeric_snapshot_facts(receiver: Ast::Expr, local: Ast::Expr, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos, annotations: darray[Ast::EnumAnnotation]&) -> void can[Global.Read, Global.Write]:
+            return if not proof_alias_transfer_preflight(facts, receiver, local, "", report, owner, position)
             original: darray[Ast::Expr] = proof_copy_exprs(facts)
             budget: mutable usize = PROOF_ALIAS_TRANSFER_BUDGET
             copied: Ast::Expr = Ast::Expr.Binary(local, TokenKind.EqEq, receiver, position)
-            if not proof_expr_equal(local, receiver) and (proof_goal(original, copied, annotations) can Global{Read,Write}):
-                proof_add_derived_fact_from(facts, report, copied, original, "proof-step", position.line, owner)
-            for fact in original |fact, original, receiver, local, facts, report, owner, position, annotations, budget|:
+            shared_work: mutable usize = report.analysis_1.budgets.frame_call_source_work
+            tactic_work: mutable usize = 0
+            operator_mask: usize = report.source.source_primitive_operator_mask
+            if not proof_expr_equal(local, receiver):
+                copied_proven: bool = (proof_alias_transfer_goal(original, copied, annotations, report, owner, position.line, operator_mask, &shared_work, &tactic_work) can Global{Read,Write})
+                if copied_proven:
+                    proof_add_derived_fact_from(facts, report, copied, original, "proof-step", position.line, owner)
+                else:
+                    return if proof_frame_source_work_stop(report, owner, position.line)
+            for fact in original |fact, original, receiver, local, facts, report, owner, position, annotations, budget, shared_work, tactic_work, operator_mask|:
                 pieces: mutable darray[Ast::Expr] = []
                 proof_conjunct_components(fact, pieces)
-                for piece in pieces |piece, original, receiver, local, facts, report, owner, position, annotations, budget|:
+                for piece in pieces |piece, original, receiver, local, facts, report, owner, position, annotations, budget, shared_work, tactic_work, operator_mask|:
+                    return if proof_frame_source_work_stop(report, owner, position.line)
                     return if budget == 0
                     rewritten: (changed: bool, value: Ast::Expr) = proof_replace_place(piece, receiver, local, 0)
                     continue if not rewritten.changed or proof_expr_reads(rewritten.value, receiver, 0)
@@ -50,7 +194,10 @@ extend ElisaProof:
                         _:
                             pass
                     budget <- budget - 1
-                    continue if not (proof_goal(original, rewritten.value, annotations) can Global{Read,Write})
+                    proven: bool = (proof_alias_transfer_goal(original, rewritten.value, annotations, report, owner, position.line, operator_mask, &shared_work, &tactic_work) can Global{Read,Write})
+                    if not proven:
+                        return if proof_frame_source_work_stop(report, owner, position.line)
+                        continue
                     proof_add_derived_fact_from(facts, report, rewritten.value, original, "proof-step", position.line, owner)
 
         # A write through a verified primitive scalar reference cannot change a copy already
@@ -110,20 +257,30 @@ extend ElisaProof:
         # alias before the drop and enters as a proof step over the facts that hold just before
         # the rebind, so replay re-proves it from them.
         def proof_transfer_facts_to_alias(names: darray[sview]&, values: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, declared: sview, position: Ast::Pos) -> void can[Global.Read, Global.Write]:
+            return if not proof_alias_lookup_preflight(names, values, facts, report, owner, declared, position)
             alias: (index: usize, name: sview) = proof_old_value_alias(names, values, facts, declared)
             return if alias.name == ""
+            return if not proof_alias_transfer_preflight(facts, Ast::Expr.Ident(declared, position), Ast::Expr.Ident(alias.name, position), "", report, owner, position)
             renamed: darray[sview] = [declared]
             replacement: darray[Ast::Expr] = [Ast::Expr.Ident(alias.name, position)]
             original: darray[Ast::Expr] = proof_copy_exprs(facts)
             annotations: darray[Ast::EnumAnnotation] = []
             budget: mutable usize = PROOF_ALIAS_TRANSFER_BUDGET
-            for fact_index in 0..<original.count |original, facts, report, owner, declared, alias, renamed, replacement, annotations, budget, position|:
+            transfer_work: mutable usize = report.analysis_1.budgets.frame_call_source_work
+            tactic_work: mutable usize = 0
+            operator_mask: usize = report.source.source_primitive_operator_mask
+            for fact_index in 0..<original.count |original, facts, report, owner, declared, alias, renamed, replacement, annotations, budget, position, transfer_work, tactic_work, operator_mask|:
                 return if budget == 0
                 continue if fact_index == alias.index or not proof_expr_mentions_name(original[fact_index], declared)
-                rewritten: Ast::Expr = proof_substitute(original[fact_index], renamed, replacement)
+                rewritten: Ast::Expr = proof_substitute_with_work_limit(original[fact_index], renamed, replacement, &transfer_work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+                report.analysis_1.budgets.frame_call_source_work <- transfer_work
+                return if proof_frame_source_work_stop(report, owner, position.line)
                 continue if proof_expr_mentions_name(rewritten, declared)
                 continue if any existing in facts where proof_expr_equal(existing, rewritten)
-                continue if not (proof_goal(original, rewritten, annotations) can Global{Read,Write})
+                proven: bool = (proof_alias_transfer_goal(original, rewritten, annotations, report, owner, position.line, operator_mask, &transfer_work, &tactic_work) can Global{Read,Write})
+                if not proven:
+                    return if proof_frame_source_work_stop(report, owner, position.line)
+                    continue
                 budget <- budget - 1
                 proof_add_derived_fact_from(facts, report, rewritten, original, "proof-step", position.line, owner)
 

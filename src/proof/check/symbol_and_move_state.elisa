@@ -286,27 +286,84 @@ extend ElisaProof:
             source_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
             proof_fact_is_global_constant_with_work(report, fact, owner, &source_work)
 
+        def proof_resymbolize_budget_admitted(names: darray[sview]&, values: darray[Ast::Expr]&, facts: darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, target: sview, position: Ast::Pos) -> bool can[Global.Read, Global.Write]:
+            work: mutable usize = report.analysis_1.budgets.frame_call_source_work
+            exhausted: mutable bool = false
+            if names.count >= PROOF_LINEAR_SAFETY_WORK_LIMIT or values.count >= PROOF_LINEAR_SAFETY_WORK_LIMIT or facts.count >= PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                report.analysis_1.budgets.frame_call_source_work <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                proof_frame_source_work_report_exhaustion(report, owner, position.line, "resymbolize-work", "binding resymbolization exceeded its bounded source-work budget")
+                return false
+            value_cost: mutable usize = values.count
+            for value in values |value, work, exhausted, value_cost|:
+                cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(value, &work, &exhausted)
+                if not cost.complete or exhausted or cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - value_cost:
+                    report.analysis_1.budgets.frame_call_source_work <- work
+                    proof_frame_source_work_report_exhaustion(report, owner, position.line, "resymbolize-work", "binding resymbolization exceeded its bounded source-work budget")
+                    return false
+                value_cost <- value_cost + cost.cost
+            fact_cost: mutable usize = facts.count
+            for fact in facts |fact, work, exhausted, fact_cost|:
+                cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, &work, &exhausted)
+                if not cost.complete or exhausted or cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - fact_cost:
+                    report.analysis_1.budgets.frame_call_source_work <- work
+                    proof_frame_source_work_report_exhaustion(report, owner, position.line, "resymbolize-work", "binding resymbolization exceeded its bounded source-work budget")
+                    return false
+                fact_cost <- fact_cost + cost.cost
+            name_cost: mutable usize = names.count
+            target_length: usize = sview_len(target)
+            if target_length > PROOF_LINEAR_SAFETY_WORK_LIMIT - name_cost or not proof_linear_safety_work_charge(&work, &exhausted, names.count):
+                report.analysis_1.budgets.frame_call_source_work <- work
+                proof_frame_source_work_report_exhaustion(report, owner, position.line, "resymbolize-work", "binding resymbolization exceeded its bounded source-work budget")
+                return false
+            name_cost <- name_cost + target_length
+            for name in names |name, work, exhausted, name_cost|:
+                name_length: usize = sview_len(name)
+                if name_length > PROOF_LINEAR_SAFETY_WORK_LIMIT - name_cost or not proof_linear_safety_work_charge(&work, &exhausted, name_length):
+                    report.analysis_1.budgets.frame_call_source_work <- work
+                    proof_frame_source_work_report_exhaustion(report, owner, position.line, "resymbolize-work", "binding resymbolization exceeded its bounded source-work budget")
+                    return false
+                name_cost <- name_cost + name_length
+            target_capacity: usize = names.count + 1
+            complete: bool = proof_linear_safety_work_charge_scaled(&work, &exhausted, value_cost, target_capacity)
+            complete <- complete and proof_linear_safety_work_charge_scaled(&work, &exhausted, fact_cost, target_capacity * 2)
+            complete <- complete and proof_linear_safety_work_charge_scaled(&work, &exhausted, name_cost, target_capacity * 3)
+            complete <- complete and proof_linear_safety_work_charge_scaled(&work, &exhausted, 1, names.count + values.count + target_capacity * 2)
+            report.analysis_1.budgets.frame_call_source_work <- work
+            if not complete or exhausted:
+                proof_frame_source_work_report_exhaustion(report, owner, position.line, "resymbolize-work", "binding resymbolization exceeded its bounded source-work budget")
+                return false
+            return not proof_frame_source_work_stop(report, owner, position.line)
+
         # A binding becomes an opaque symbol again whenever its new value is not expressible in
         # terms of the existing symbols: a declaration reuses a spelling, an unsigned local is
         # bound or rebound, or any binding is updated by a compound assignment. Every fact that
         # mentions the old symbol, and every other binding whose recorded value mentions it,
-        # would otherwise silently describe the new value. Purge both transitively. Only the
-        # compiler type facts of cascaded bindings are re-established; their types are unchanged.
-        def proof_resymbolize_binding(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, target: sview, position: Ast::Pos) -> void:
+        # would otherwise silently describe the new value. Purge both transitively. A worklist
+        # visits each newly found name once, avoiding repeated whole-environment fixed-point scans.
+        # Only compiler type facts of cascaded bindings are re-established; their types are unchanged.
+        def proof_resymbolize_binding(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, target: sview, position: Ast::Pos) -> void can[Global.Read, Global.Write]:
             return if target == ""
+            if not proof_resymbolize_budget_admitted(names, values, facts, report, owner, target, position):
+                facts.clear()
+                for index in 0..<values.count |index, names, values, position|:
+                    values[index] <- Ast::Expr.Ident(names[index], position) if index < names.count
+                return
             targets: mutable darray[sview] = [target]
-            changed: mutable bool = true
-            while changed |changed, targets, names, values|:
-                changed <- false
-                for index in 0..<values.count |index, names, values, targets, changed|:
-                    continue if index >= names.count
-                    continue if any existing in targets where existing == names[index]
-                    mentions: mutable bool = false
-                    for candidate in targets |candidate, values, index, mentions|:
-                        mentions <- true if proof_expr_mentions_name(values[index], candidate)
-                    if mentions:
-                        targets.push(names[index])
-                        changed <- true
+            target_seen: mutable darray[bool] = [false for _slot in 0..<names.count]
+            for index in 0..<names.count |index, names, target_seen, target|:
+                target_seen[index] <- true if names[index] == target
+            target_index: mutable usize = 0
+            while target_index < targets.count |target_index, targets, target_seen, names, values|:
+                candidate: sview = targets[target_index]
+                for index in 0..<values.count |index, names, values, target_seen, targets, candidate|:
+                    continue if index >= names.count or target_seen[index]
+                    if proof_expr_mentions_name(values[index], candidate):
+                        target_name: sview = names[index]
+                        targets.push(target_name)
+                        for duplicate_index in 0..<names.count |duplicate_index, names, target_seen, target_name|:
+                            if names[duplicate_index] == target_name:
+                                target_seen[duplicate_index] <- true
+                target_index <- target_index + 1
             cascaded_widths: mutable darray[i64] = []
             for candidate in targets |candidate, facts, cascaded_widths|:
                 cascaded_widths.push(proof_unsigned_marker_width_for_name(facts, candidate))
@@ -320,9 +377,8 @@ extend ElisaProof:
                 facts[write_index] <- facts[read_index]
                 write_index <- write_index + 1
             facts.resize(write_index)
-            for index in 0..<values.count |index, names, values, targets, position|:
-                continue if index >= names.count
-                values[index] <- Ast::Expr.Ident(names[index], position) if any candidate in targets where candidate == names[index]
+            for index in 0..<values.count |index, names, values, target_seen, position|:
+                values[index] <- Ast::Expr.Ident(names[index], position) if index < names.count and target_seen[index]
             for target_index in 0..<targets.count |target_index, targets, cascaded_widths, facts, report, owner, position|:
                 continue if target_index == 0 or target_index >= cascaded_widths.count
                 proof_add_unsigned_binding_facts(facts, report, targets[target_index], cascaded_widths[target_index], position.line, owner, position)
