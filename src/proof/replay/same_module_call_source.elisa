@@ -32,28 +32,80 @@ extend ElisaProof:
                         pass
             return (true, false)
 
+        # Count unambiguous callees under the caller's complete module path. Keeping the
+        # path as segments preserves nested-module identity instead of collapsing it to a leaf.
+        def proof_replay_same_module_name_count_at_scope(declarations: darray[Ast::Decl]&, name: sview, owner_scope: darray[sview]&, current_scope: darray[sview]&, count: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if:
+                depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            colliding_module_scope: (complete: bool, scope: darray[sview]) = proof_replay_global_constant_scope_with_module_and_work(owner_scope, name, work)
+            return false if not colliding_module_scope.complete
+            work <- work + declarations.count
+            for declaration in declarations |name, owner_scope, current_scope, count, work, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate, _, _, _, _, _, _):
+                        same_name: (equal: bool, complete: bool) = proof_replay_global_constant_text_equal_with_work(candidate, name, work)
+                        return false if not same_name.complete
+                        if same_name.equal:
+                            same_scope: (equal: bool, complete: bool) = proof_replay_global_constant_scope_equal_with_work(current_scope, owner_scope, work)
+                            return false if not same_scope.complete
+                            count <- count + 1 if same_scope.equal
+                    Ast::Decl.Extern(candidate, _, _, _, _, _, _, _):
+                        same_name: (equal: bool, complete: bool) = proof_replay_global_constant_text_equal_with_work(candidate, name, work)
+                        return false if not same_name.complete
+                        if same_name.equal:
+                            same_scope: (equal: bool, complete: bool) = proof_replay_global_constant_scope_equal_with_work(current_scope, owner_scope, work)
+                            return false if not same_scope.complete
+                            count <- count + 1 if same_scope.equal
+                    Ast::Decl.Struct(candidate, _, _, _, _, _, _) | Ast::Decl.Enum(candidate, _, _, _, _) | Ast::Decl.Alias(candidate, _, _) | Ast::Decl.Law(candidate, _, _) | Ast::Decl.Const(candidate, _, _, _, _):
+                        same_name: (equal: bool, complete: bool) = proof_replay_global_constant_text_equal_with_work(candidate, name, work)
+                        return false if not same_name.complete
+                        if same_name.equal:
+                            same_scope: (equal: bool, complete: bool) = proof_replay_global_constant_scope_equal_with_work(current_scope, owner_scope, work)
+                            return false if not same_scope.complete or same_scope.equal
+                    Ast::Decl.Module(module_name, nested, _):
+                        next_scope_result: (complete: bool, scope: darray[sview]) = proof_replay_global_constant_scope_with_module_and_work(current_scope, module_name, work)
+                        return false if not next_scope_result.complete
+                        next_scope: darray[sview] = next_scope_result.scope
+                        same_scope: (equal: bool, complete: bool) = proof_replay_global_constant_scope_equal_with_work(next_scope, colliding_module_scope.scope, work)
+                        return false if not same_scope.complete or same_scope.equal
+                        return false if not proof_replay_summary_scope_work_charge(next_scope, work)
+                        return false if not proof_replay_same_module_name_count_at_scope(nested, name, owner_scope, next_scope, count, work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_same_module_name_count_at_scope(nested, name, owner_scope, current_scope, count, work, depth + 1)
+                    Ast::Decl.Import(_, _) | Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
+            return true
+
         def proof_replay_same_module_bare_call_with_work(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr, work: mutable usize&) -> (known: bool, call: Ast::Expr):
             unknown: (known: bool, call: Ast::Expr) = (false, Ast::Expr.Invalid)
             match call:
                 Ast::Expr.Call(Ast::Expr.Scope(base, name, callee_position), arguments, labels, position):
                     unresolved_imports: (complete: bool, unresolved: bool) = proof_replay_same_module_unresolved_imports_with_work(report.source.source_annotations, work)
                     return unknown if not unresolved_imports.complete or unresolved_imports.unresolved
-                    owner: mutable sview = ""
-                    owners: mutable usize = 0
+                    owner_scope: mutable darray[sview] = []
+                    owner_matches: mutable usize = 0
+                    exact_owner: bool = report.analysis_2.replay_owner_offset_valid
+                    root_scope: darray[sview] = []
+                    proof_replay_summary_call_owner_scope(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, exact_owner, root_scope, &owner_scope, &owner_matches, work, 0)
                     return unknown if:
-                        not proof_replay_summary_function_owner_module(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, "", &owner, &owners, work, 0)
-                        not proof_replay_source_work_charge_or_exhaust(sview_len(owner), work)
+                        not proof_replay_summary_scope_work_charge(owner_scope, work)
                         not proof_replay_summary_expr_charge_with_work(base, work)
-                        owners != 1 or owner == "" or not proof_replay_exact_module_path_matches_owner(owner, base)
+                        owner_matches != 1 or owner_scope.count == 0
+                    base_scope: mutable darray[sview] = []
+                    return unknown if not proof_qualified_path_segments(base, &base_scope, 0) or not proof_replay_summary_scope_work_charge(base_scope, work)
+                    owner_matches_base: (equal: bool, complete: bool) = proof_replay_global_constant_scope_equal_with_work(owner_scope, base_scope, work)
+                    return unknown if not owner_matches_base.complete or not owner_matches_base.equal
                     same_module_count: mutable usize = 0
-                    return unknown if not proof_replay_summary_same_module_name_count(report.source.source_declarations, name, owner, "", &same_module_count, work, 0) or same_module_count != 1
+                    return unknown if not proof_replay_same_module_name_count_at_scope(report.source.source_declarations, name, owner_scope, root_scope, &same_module_count, work, 0) or same_module_count != 1
                     body: mutable darray[Ast::Stmt] = []
                     return unknown if not proof_replay_source_owner_body_with_work(report, trace.name, report.analysis_2.replay_owner_line, &body, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     # The source call is qualified, but rewriting it to a bare name is safe
                     # only where no live local binding shadows the member spelling.
-                    return unknown if:
-                        proof_replay_local_binding_parameter_name_present_with_default_limit(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, name, work, 0)
-                        not proof_replay_source_call_locals_unshadowed_at_with_work(body, report.source.source_annotations, call, work)
+                    parameter_shadowed: bool = proof_replay_local_binding_parameter_name_present_at_offset_with_work(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, true, name, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0) if exact_owner else proof_replay_local_binding_parameter_name_present_with_default_limit(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, name, work, 0)
+                    return unknown if parameter_shadowed or not proof_replay_source_call_locals_unshadowed_at_with_work(body, report.source.source_annotations, call, work)
                     return (true, Ast::Expr.Call(Ast::Expr.Ident(name, callee_position), arguments, labels, position))
                 _:
                     return unknown

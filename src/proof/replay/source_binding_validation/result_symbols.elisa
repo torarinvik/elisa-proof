@@ -14,9 +14,12 @@
 #     consumer (the same reaching-definition check as a local-alias summary).
 extend ElisaProof:
     private:
-        def proof_replay_result_symbol_find(body: darray[Ast::Stmt]&, position: Ast::Pos, found: mutable usize&, local: mutable sview&, local_type: mutable Ast::Expr&, call: mutable Ast::Expr&, depth: usize) -> void:
-            return if depth >= 96
-            for statement in body |position, found, local, local_type, call, depth|:
+        def proof_replay_result_symbol_find(body: darray[Ast::Stmt]&, position: Ast::Pos, found: mutable usize&, local: mutable sview&, local_type: mutable Ast::Expr&, call: mutable Ast::Expr&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            for statement in body |position, found, local, local_type, call, source_work, depth|:
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    return proof_replay_mutable_local_work_exhaust(source_work)
+                source_work <- source_work + 1
                 match statement:
                     Ast::Stmt.VarDecl(name, declared_type, initializer, statement_position):
                         if proof_replay_source_position_equal(statement_position, position):
@@ -30,17 +33,21 @@ extend ElisaProof:
                                 _:
                                     pass
                     Ast::Stmt.If(_, yes, no, _):
-                        proof_replay_result_symbol_find(yes, position, found, local, local_type, call, depth + 1)
-                        proof_replay_result_symbol_find(no, position, found, local, local_type, call, depth + 1)
+                        return false if not proof_replay_result_symbol_find(yes, position, found, local, local_type, call, source_work, depth + 1)
+                        return false if not proof_replay_result_symbol_find(no, position, found, local, local_type, call, source_work, depth + 1)
                     Ast::Stmt.While(_, nested, _) | Ast::Stmt.For(_, _, _, nested, _) | Ast::Stmt.Block(_, _, _, nested, _):
-                        proof_replay_result_symbol_find(nested, position, found, local, local_type, call, depth + 1)
+                        return false if not proof_replay_result_symbol_find(nested, position, found, local, local_type, call, source_work, depth + 1)
                     Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |position, found, local, local_type, call, depth|:
-                            proof_replay_result_symbol_find(arm.body, position, found, local, local_type, call, depth + 1)
+                        for arm in arms |position, found, local, local_type, call, source_work, depth|:
+                            if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                return proof_replay_mutable_local_work_exhaust(source_work)
+                            source_work <- source_work + 1
+                            return false if not proof_replay_result_symbol_find(arm.body, position, found, local, local_type, call, source_work, depth + 1)
                     Ast::Stmt.Expr(Ast::Expr.Block(nested, _, _, _), _):
-                        proof_replay_result_symbol_find(nested, position, found, local, local_type, call, depth + 1)
+                        return false if not proof_replay_result_symbol_find(nested, position, found, local, local_type, call, source_work, depth + 1)
                     _:
                         pass
+            return true
 
         # Find the result call as a direct body statement. The caller binds its consumer to the
         # actual loop-header certificate; separate return/break/continue certificates use their
@@ -314,7 +321,7 @@ extend ElisaProof:
             local: mutable sview = ""
             local_type: mutable Ast::Expr = Ast::Expr.Invalid
             call: mutable Ast::Expr = Ast::Expr.Invalid
-            proof_replay_result_symbol_find(body, symbol_position, &found, &local, &local_type, &call, 0)
+            return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid) if not proof_replay_result_symbol_find(body, symbol_position, &found, &local, &local_type, &call, source_work, 0)
             return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid) if found != 1 or local == "" or not proof_replay_is_call(call)
             alias_found: mutable bool = false
             for candidate in report.analysis_1.traces.records |candidate, report, owner, symbol, symbol_position, local, alias_found, source_work|:

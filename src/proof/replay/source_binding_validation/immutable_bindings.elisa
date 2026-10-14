@@ -13,6 +13,29 @@ extend ElisaProof:
         def proof_replay_local_binding_parameter_source_unshadowed_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, source_work: mutable usize&) -> bool:
             proof_replay_local_binding_parameter_source_unshadowed_with_limit(declarations, owner, owner_line, name, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
 
+        def proof_replay_local_binding_parameter_source_unshadowed_at_offset_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, name: sview, source_work: mutable usize&) -> bool:
+            proof_replay_local_binding_parameter_source_unshadowed_at_offset_with_limit(declarations, owner, owner_line, owner_offset, exact_owner, name, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+
+        def proof_replay_local_binding_parameter_source_unshadowed_at_offset_with_limit(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, name: sview, source_work: mutable usize&, work_limit: usize) -> bool:
+            return false if:
+                not exact_owner or owner == "" or owner_line == 0 or name == ""
+                work_limit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or source_work > work_limit
+            virtual_seed: usize = source_work + (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work_limit)
+            virtual_work: mutable usize = virtual_seed
+            body: mutable darray[Ast::Stmt] = []
+            owner_matches: mutable usize = 0
+            owner_complete: bool = proof_replay_local_binding_find_owner_at_offset_with_work(declarations, owner, owner_line, owner_offset, body, &owner_matches, virtual_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
+            if not owner_complete or owner_matches != 1:
+                source_work <- work_limit if virtual_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT else source_work + (virtual_work - virtual_seed)
+                return false
+            declares: bool = proof_replay_source_body_declares_with_work(declarations, body, name, virtual_work)
+            charged: usize = virtual_work - virtual_seed
+            if virtual_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or charged > work_limit - source_work:
+                source_work <- work_limit
+                return false
+            source_work <- source_work + charged
+            not declares
+
         def proof_replay_local_binding_parameter_source_unshadowed_with_limit(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, source_work: mutable usize&, work_limit: usize) -> bool:
             return false if:
                 owner == "" or owner_line == 0 or name == ""
@@ -33,16 +56,20 @@ extend ElisaProof:
             source_work <- source_work + charged
             not declares
 
-        def proof_replay_local_binding_parameter_present_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, source_work: mutable usize&, depth: usize) -> (complete: bool, found: bool):
+        def proof_replay_local_binding_parameter_present_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, name: sview, source_work: mutable usize&, depth: usize) -> (complete: bool, found: bool):
             return (false, false) if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
-            for declaration in declarations |owner, owner_line, name, source_work, depth|:
+            if depth == 0 and not exact_owner:
+                owner_body: mutable darray[Ast::Stmt] = []
+                owner_matches: mutable usize = 0
+                return (false, false) if not proof_replay_local_binding_find_owner_with_work(declarations, owner, owner_line, &owner_body, &owner_matches, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0) or owner_matches != 1
+            for declaration in declarations |owner, owner_line, owner_offset, exact_owner, name, source_work, depth|:
                 return (false, false) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
                 match declaration:
                     Ast::Decl.Func(found_name, parameters, _, _, _, _, position):
                         return (false, false) if:
                             not proof_replay_source_work_charge_or_exhaust(sview_len(found_name), source_work)
                             not proof_replay_source_work_charge_or_exhaust(sview_len(owner), source_work)
-                        if found_name == owner and position.line == owner_line:
+                        if found_name == owner and position.line == owner_line and (not exact_owner or position.offset.usize() == owner_offset):
                             for parameter in parameters |name, source_work|:
                                 return (false, false) if:
                                     not proof_replay_source_work_charge_or_exhaust(1, source_work)
@@ -51,7 +78,7 @@ extend ElisaProof:
                                 return (true, true) if parameter.name == name
                             return (true, false)
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        result: (complete: bool, found: bool) = proof_replay_local_binding_parameter_present_with_work(nested, owner, owner_line, name, source_work, depth + 1)
+                        result: (complete: bool, found: bool) = proof_replay_local_binding_parameter_present_with_work(nested, owner, owner_line, owner_offset, exact_owner, name, source_work, depth + 1)
                         return result if not result.complete or result.found
                     Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
@@ -61,14 +88,19 @@ extend ElisaProof:
                         return (false, false)
             return (true, false)
 
-        def proof_replay_local_binding_stable_name(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, target: sview, source_work: mutable usize&) -> bool:
+        def proof_replay_local_binding_stable_name(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, name: sview, target: sview, source_work: mutable usize&) -> bool:
             return false if name == "" or name == target
-            parameter: (complete: bool, found: bool) = proof_replay_local_binding_parameter_present_with_work(declarations, owner, owner_line, name, source_work, 0)
+            parameter: (complete: bool, found: bool) = proof_replay_local_binding_parameter_present_with_work(declarations, owner, owner_line, owner_offset, exact_owner, name, source_work, 0)
             return false if not parameter.complete
             if not parameter.found:
-                return proof_replay_local_binding_prior_immutable_local_with_work(declarations, owner, owner_line, name, target, source_work)
-            return false if not proof_replay_local_binding_parameter_source_unshadowed_with_work(declarations, owner, owner_line, name, source_work)
-            return true if proof_replay_local_binding_immutable_integer_parameter_with_work(declarations, owner, owner_line, name, source_work, 0)
+                return proof_replay_local_binding_prior_immutable_local_with_work(declarations, owner, owner_line, owner_offset, exact_owner, name, target, source_work)
+            if exact_owner:
+                return false if not proof_replay_local_binding_parameter_source_unshadowed_at_offset_with_work(declarations, owner, owner_line, owner_offset, true, name, source_work)
+            else:
+                return false if not proof_replay_local_binding_parameter_source_unshadowed_with_work(declarations, owner, owner_line, name, source_work)
+            return true if proof_replay_local_binding_immutable_integer_parameter_at_offset_with_work(declarations, owner, owner_line, owner_offset, exact_owner, name, source_work, 0)
+            if exact_owner:
+                return proof_replay_local_binding_unwritten_integer_parameter_at_offset_with_work(declarations, owner, owner_line, owner_offset, name, source_work)
             return proof_replay_local_binding_unwritten_integer_parameter_with_work(declarations, owner, owner_line, name, source_work)
 
         # A mutable or by-reference integer parameter is as stable as an immutable one when the
@@ -77,6 +109,16 @@ extend ElisaProof:
         # exclusive borrows are a language guarantee the producer also relies on.
         def proof_replay_local_binding_unwritten_integer_parameter_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, source_work: mutable usize&) -> bool:
             proof_replay_local_binding_unwritten_parameter_type_name_with_work(declarations, owner, owner_line, name, source_work) != ""
+
+        def proof_replay_local_binding_unwritten_integer_parameter_at_offset_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, name: sview, source_work: mutable usize&) -> bool:
+            type_result: (complete: bool, type_name: sview) = proof_replay_local_binding_parameter_type_name_at_offset_with_work(declarations, owner, owner_line, owner_offset, true, name, source_work, true, 0)
+            return false if not type_result.complete or type_result.type_name == ""
+            body: mutable darray[Ast::Stmt] = []
+            owner_matches: mutable usize = 0
+            return false if:
+                not proof_replay_local_binding_find_owner_at_offset_with_work(declarations, owner, owner_line, owner_offset, body, &owner_matches, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0) or owner_matches != 1
+                proof_replay_source_body_touches_with_work(declarations, body, name, true, source_work)
+            true
 
         def proof_replay_local_binding_unwritten_parameter_type_name_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, source_work: mutable usize&) -> sview:
             type_result: (complete: bool, type_name: sview) = proof_replay_local_binding_parameter_type_name_with_work(declarations, owner, owner_line, name, source_work, true, 0)
@@ -123,11 +165,15 @@ extend ElisaProof:
         # assert any equation about a call. Require unique direct declarations
         # in the same owner and source order; parameter shadowing is refused by
         # the caller. Forward references and cycles cannot pass this order.
-        def proof_replay_local_binding_prior_immutable_local_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, target: sview, source_work: mutable usize&) -> bool:
+        def proof_replay_local_binding_prior_immutable_local_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, name: sview, target: sview, source_work: mutable usize&) -> bool:
             body: mutable darray[Ast::Stmt] = []
             owners: mutable usize = 0
-            return false if:
-                not proof_replay_local_binding_find_owner_with_work(declarations, owner, owner_line, &body, &owners, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0) or owners != 1
+            owner_complete: mutable bool = false
+            if exact_owner:
+                owner_complete <- proof_replay_local_binding_find_owner_at_offset_with_work(declarations, owner, owner_line, owner_offset, body, &owners, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
+            else:
+                owner_complete <- proof_replay_local_binding_find_owner_with_work(declarations, owner, owner_line, &body, &owners, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
+            return false if not owner_complete or owners != 1
                 not proof_replay_source_single_declaration_with_work(declarations, body, name, source_work)
                 not proof_replay_source_single_declaration_with_work(declarations, body, target, source_work)
             source_count: mutable usize = 0
@@ -181,36 +227,36 @@ extend ElisaProof:
         # Retain only source-pure integer initializers over immutable inputs. Numeric conversions
         # are Elisa special forms; an exact equation to the conversion expression is valid even
         # when that conversion narrows its input.
-        def proof_replay_local_binding_stable_initializer(expression: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, source_work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_local_binding_stable_initializer(expression: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
             match expression:
                 Ast::Expr.IntLit(_, _):
                     return true
                 Ast::Expr.Ident(name, _):
-                    return proof_replay_local_binding_stable_name(declarations, owner, owner_line, name, target, source_work)
+                    return proof_replay_local_binding_stable_name(declarations, owner, owner_line, owner_offset, exact_owner, name, target, source_work)
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_local_binding_stable_initializer(inner, target, declarations, owner, owner_line, source_work, depth + 1)
+                    return proof_replay_local_binding_stable_initializer(inner, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1)
                 Ast::Expr.Unary(TokenKind.Minus, inner, _):
-                    return proof_replay_local_binding_stable_initializer(inner, target, declarations, owner, owner_line, source_work, depth + 1)
+                    return proof_replay_local_binding_stable_initializer(inner, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent
-                    return proof_replay_local_binding_stable_initializer(left, target, declarations, owner, owner_line, source_work, depth + 1) and proof_replay_local_binding_stable_initializer(right, target, declarations, owner, owner_line, source_work, depth + 1)
+                    return proof_replay_local_binding_stable_initializer(left, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1) and proof_replay_local_binding_stable_initializer(right, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1)
                 Ast::Expr.If(condition, then_value, else_value, _):
-                    return proof_replay_local_binding_stable_condition(condition, target, declarations, owner, owner_line, source_work, depth + 1) and proof_replay_local_binding_conditional_value(then_value, target, declarations, owner, owner_line, source_work, depth + 1) and proof_replay_local_binding_conditional_value(else_value, target, declarations, owner, owner_line, source_work, depth + 1)
+                    return proof_replay_local_binding_stable_condition(condition, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1) and proof_replay_local_binding_conditional_value(then_value, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1) and proof_replay_local_binding_conditional_value(else_value, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1)
                 Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(receiver, _), method, _), arguments, _, _):
                     return false if:
                         arguments.count != 0
                         method != "i8" and method != "i16" and method != "i32" and method != "i64" and method != "isize" and method != "u8" and method != "u16" and method != "u32" and method != "u64" and method != "usize"
                         proof_replay_local_binding_cast_hook_present(declarations, source_work, 0)
-                    return proof_replay_local_binding_stable_name(declarations, owner, owner_line, receiver, target, source_work)
+                    return proof_replay_local_binding_stable_name(declarations, owner, owner_line, owner_offset, exact_owner, receiver, target, source_work)
                 _:
                     return false
 
-        def proof_replay_local_binding_stable_initializer_with_limit(expression: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, source_work: mutable usize&, depth: usize, work_limit: usize) -> bool:
+        def proof_replay_local_binding_stable_initializer_with_limit(expression: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, source_work: mutable usize&, depth: usize, work_limit: usize) -> bool:
             return false if work_limit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or source_work > work_limit
             virtual_seed: usize = source_work + (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work_limit)
             virtual_work: mutable usize = virtual_seed
-            stable: bool = proof_replay_local_binding_stable_initializer(expression, target, declarations, owner, owner_line, virtual_work, depth)
+            stable: bool = proof_replay_local_binding_stable_initializer(expression, target, declarations, owner, owner_line, owner_offset, exact_owner, virtual_work, depth)
             charged: usize = virtual_work - virtual_seed
             return false if charged > work_limit - source_work
             source_work <- source_work + charged
@@ -220,31 +266,31 @@ extend ElisaProof:
         # A conditional equation is source-exact only when its predicate and
         # both arms read stable integer inputs, including prior immutable
         # captures. The caller separately refuses overloaded primitive operators.
-        def proof_replay_local_binding_conditional_value(expression: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, source_work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_local_binding_conditional_value(expression: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Ident(name, _):
                     return false if name == "" or name == target
-                    parameter: (complete: bool, found: bool) = proof_replay_local_binding_parameter_present_with_work(declarations, owner, owner_line, name, source_work, 0)
+                    parameter: (complete: bool, found: bool) = proof_replay_local_binding_parameter_present_with_work(declarations, owner, owner_line, owner_offset, exact_owner, name, source_work, 0)
                     return false if not parameter.complete
                     if not parameter.found:
-                        return proof_replay_local_binding_prior_immutable_local_with_work(declarations, owner, owner_line, name, target, source_work)
+                        return proof_replay_local_binding_prior_immutable_local_with_work(declarations, owner, owner_line, owner_offset, exact_owner, name, target, source_work)
                 _:
                     pass
-            return proof_replay_local_binding_stable_initializer(expression, target, declarations, owner, owner_line, source_work, depth + 1)
+            return proof_replay_local_binding_stable_initializer(expression, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1)
 
-        def proof_replay_local_binding_stable_condition(expression: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, source_work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_local_binding_stable_condition(expression: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_local_binding_stable_condition(inner, target, declarations, owner, owner_line, source_work, depth + 1)
+                    return proof_replay_local_binding_stable_condition(inner, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1)
                 Ast::Expr.Unary(TokenKind.Not, inner, _):
-                    return proof_replay_local_binding_stable_condition(inner, target, declarations, owner, owner_line, source_work, depth + 1)
+                    return proof_replay_local_binding_stable_condition(inner, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And or operator == TokenKind.Or:
-                        return proof_replay_local_binding_stable_condition(left, target, declarations, owner, owner_line, source_work, depth + 1) and proof_replay_local_binding_stable_condition(right, target, declarations, owner, owner_line, source_work, depth + 1)
+                        return proof_replay_local_binding_stable_condition(left, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1) and proof_replay_local_binding_stable_condition(right, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1)
                     return false if not proof_is_comparison(operator)
-                    return proof_replay_local_binding_conditional_value(left, target, declarations, owner, owner_line, source_work, depth + 1) and proof_replay_local_binding_conditional_value(right, target, declarations, owner, owner_line, source_work, depth + 1)
+                    return proof_replay_local_binding_conditional_value(left, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1) and proof_replay_local_binding_conditional_value(right, target, declarations, owner, owner_line, owner_offset, exact_owner, source_work, depth + 1)
                 _:
                     return false
 
@@ -263,48 +309,73 @@ extend ElisaProof:
             proof_replay_local_binding_parameter_type_name_with_work(declarations, owner, owner_line, parameter_name, source_work, false, depth)
 
         def proof_replay_local_binding_immutable_integer_parameter_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, source_work: mutable usize&, depth: usize) -> bool:
-            result: (complete: bool, type_name: sview) = proof_replay_local_binding_integer_parameter_type_name_with_work(declarations, owner, owner_line, parameter_name, source_work, depth)
-            result.complete and result.type_name != ""
+            owner_matches: mutable usize = 0
+            scanned: (complete: bool, matches: usize, type_name: sview, mutable_parameter: bool) = proof_replay_local_binding_parameter_type_scan_with_work(declarations, owner, owner_line, 0, false, parameter_name, source_work, false, depth, &owner_matches)
+            return false if not scanned.complete or owner_matches != 1 or scanned.matches != 1 or scanned.mutable_parameter
+            scanned.type_name != ""
+
+        def proof_replay_local_binding_immutable_integer_parameter_at_offset_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, parameter_name: sview, source_work: mutable usize&, depth: usize) -> bool:
+            return false if not exact_owner
+            owner_matches: mutable usize = 0
+            scanned: (complete: bool, matches: usize, type_name: sview, mutable_parameter: bool) = proof_replay_local_binding_parameter_type_scan_with_work(declarations, owner, owner_line, owner_offset, true, parameter_name, source_work, false, depth, &owner_matches)
+            return false if not scanned.complete or owner_matches != 1 or scanned.matches != 1 or scanned.mutable_parameter
+            scanned.type_name != ""
 
         def proof_replay_local_binding_parameter_type_name_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, source_work: mutable usize&, reference_layers: bool, depth: usize) -> (complete: bool, type_name: sview):
-            scanned: (complete: bool, matches: usize, type_name: sview) = proof_replay_local_binding_parameter_type_scan_with_work(declarations, owner, owner_line, parameter_name, source_work, reference_layers, depth)
+            owner_body: mutable darray[Ast::Stmt] = []
+            owner_matches: mutable usize = 0
+            return (false, "") if not proof_replay_local_binding_find_owner_with_work(declarations, owner, owner_line, &owner_body, &owner_matches, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0) or owner_matches != 1
+            exact_owner_matches: mutable usize = 0
+            scanned: (complete: bool, matches: usize, type_name: sview, mutable_parameter: bool) = proof_replay_local_binding_parameter_type_scan_with_work(declarations, owner, owner_line, 0, false, parameter_name, source_work, reference_layers, depth, &exact_owner_matches)
             return (false, "") if scanned.complete and scanned.matches > 1
             return (scanned.complete, scanned.type_name) if scanned.complete and scanned.matches == 1
             return (scanned.complete, "")
 
-        def proof_replay_local_binding_parameter_type_scan_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, source_work: mutable usize&, reference_layers: bool, depth: usize) -> (complete: bool, matches: usize, type_name: sview):
-            return (false, 0, "") if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or owner == "" or owner_line == 0 or parameter_name == ""
+        def proof_replay_local_binding_parameter_type_name_at_offset_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, parameter_name: sview, source_work: mutable usize&, reference_layers: bool, depth: usize) -> (complete: bool, type_name: sview):
+            return (false, "") if not exact_owner
+            owner_matches: mutable usize = 0
+            scanned: (complete: bool, matches: usize, type_name: sview, mutable_parameter: bool) = proof_replay_local_binding_parameter_type_scan_with_work(declarations, owner, owner_line, owner_offset, true, parameter_name, source_work, reference_layers, depth, &owner_matches)
+            return (false, "") if not scanned.complete or owner_matches != 1 or scanned.matches > 1
+            return (true, scanned.type_name) if scanned.matches == 1
+            return (true, "")
+
+        def proof_replay_local_binding_parameter_type_scan_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, parameter_name: sview, source_work: mutable usize&, reference_layers: bool, depth: usize, owner_matches: mutable usize&) -> (complete: bool, matches: usize, type_name: sview, mutable_parameter: bool):
+            return (false, 0, "", false) if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or owner == "" or owner_line == 0 or parameter_name == ""
             matches: mutable usize = 0
             type_name: mutable sview = ""
-            for declaration in declarations |owner, owner_line, parameter_name, reference_layers, depth, matches, type_name, source_work|:
-                return (false, 0, "") if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+            mutable_parameter: mutable bool = false
+            for declaration in declarations |owner, owner_line, owner_offset, exact_owner, parameter_name, reference_layers, depth, matches, type_name, mutable_parameter, source_work, owner_matches|:
+                return (false, 0, "", false) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, _, _, _, position):
-                        return (false, 0, "") if not proof_replay_mutable_local_text_compare_work_charge(name, owner, source_work)
-                        if name == owner and position.line == owner_line:
-                            for parameter in parameters |parameter_name, reference_layers, matches, type_name, source_work|:
-                                return (false, 0, "") if:
+                        return (false, 0, "", false) if not proof_replay_mutable_local_text_compare_work_charge(name, owner, source_work)
+                        if name == owner and position.line == owner_line and (not exact_owner or position.offset.usize() == owner_offset):
+                            owner_matches <- owner_matches + 1
+                            for parameter in parameters |parameter_name, reference_layers, matches, type_name, mutable_parameter, source_work|:
+                                return (false, 0, "", false) if:
                                     not proof_replay_source_work_charge_or_exhaust(1, source_work)
                                     not proof_replay_mutable_local_text_compare_work_charge(parameter.name, parameter_name, source_work)
                                 if parameter.name == parameter_name:
                                     matches <- matches + 1
-                                    return (false, 0, "") if not proof_replay_summary_expr_repeat_charge_with_limit(parameter.type_expression, 2, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                                    mutable_parameter <- parameter.is_mutable
+                                    return (false, 0, "", false) if not proof_replay_summary_expr_repeat_charge_with_limit(parameter.type_expression, 2, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                                     if reference_layers:
                                         type_name <- proof_replay_local_binding_reference_integer_name(parameter.type_expression, 0)
                                     else:
                                         type_name <- proof_replay_local_binding_integer_type_name(parameter.type_expression, 0) if not proof_replay_local_binding_mutable_integer_type(parameter.type_expression)
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        nested_result: (complete: bool, matches: usize, type_name: sview) = proof_replay_local_binding_parameter_type_scan_with_work(nested, owner, owner_line, parameter_name, source_work, reference_layers, depth + 1)
+                        nested_result: (complete: bool, matches: usize, type_name: sview, mutable_parameter: bool) = proof_replay_local_binding_parameter_type_scan_with_work(nested, owner, owner_line, owner_offset, exact_owner, parameter_name, source_work, reference_layers, depth + 1, owner_matches)
                         return nested_result if not nested_result.complete
                         matches <- matches + nested_result.matches
                         type_name <- nested_result.type_name if nested_result.matches == 1
+                        mutable_parameter <- nested_result.mutable_parameter if nested_result.matches == 1
                     Ast::Decl.Invalid:
-                        return (false, 0, "")
+                        return (false, 0, "", false)
                     Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
                     _:
-                        return (false, 0, "")
-            (true, matches, type_name)
+                        return (false, 0, "", false)
+            (true, matches, type_name, mutable_parameter)
 
         # Built-in arithmetic in the kernel is not evidence about overloaded Elisa operators.
         # Reject a local equation whenever its initializer contains any source-overloaded
@@ -321,7 +392,12 @@ extend ElisaProof:
                     owner_scan_work: usize = source_work - owner_scan_start
                     function_body: mutable darray[Ast::Stmt] = []
                     owner_matches: mutable usize = 0
-                    return false if not proof_replay_local_binding_find_owner_with_work(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, &function_body, &owner_matches, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0) or owner_matches != 1
+                    owner_lookup_complete: mutable bool = false
+                    if report.analysis_2.replay_owner_offset_valid:
+                        owner_lookup_complete <- proof_replay_local_binding_find_owner_at_offset_with_work(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, function_body, &owner_matches, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
+                    else:
+                        owner_lookup_complete <- proof_replay_local_binding_find_owner_with_work(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, &function_body, &owner_matches, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
+                    return false if not owner_lookup_complete or owner_matches != 1
                     consumer_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
                     return false if:
                         not proof_replay_mutable_local_consumer_position_with_work(report, trace, function_body, &consumer_position, source_work)

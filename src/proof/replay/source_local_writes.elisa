@@ -290,9 +290,76 @@ extend ElisaProof:
                         return false
             return true
 
+        # Check the exact `(name, line)` owner identity without copying a body that the caller
+        # does not need. This keeps owner disambiguation bounded while avoiding a second
+        # allocation and body-sized charge after the source-span walk.
+        def proof_replay_local_binding_owner_count_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, matches: mutable usize&, work: mutable usize&, work_limit: usize, depth: usize) -> bool:
+            return false if depth >= 64 or work > work_limit
+            for declaration in declarations |owner, owner_line, matches, work, work_limit, depth|:
+                if work >= work_limit:
+                    work <- work_limit
+                    return false
+                work <- work + 1
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, position):
+                        if sview_len(name) > work_limit - work:
+                            work <- work_limit
+                            return false
+                        work <- work + sview_len(name)
+                        if name == owner and position.line == owner_line:
+                            matches <- matches + 1
+                            return false if matches != 1
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_local_binding_owner_count_with_work(nested, owner, owner_line, matches, work, work_limit, depth + 1)
+                    Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
+            return true
+
+        # Resolve a replay owner from its authenticated source declaration coordinates. This
+        # allows same-name declarations on one line to remain distinct without weakening the
+        # legacy line-only helper used by context-free callers.
+        def proof_replay_local_binding_find_owner_at_offset_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, body: mutable darray[Ast::Stmt]&, matches: mutable usize&, work: mutable usize&, work_limit: usize, depth: usize) -> bool:
+            return false if depth >= 64 or work > work_limit
+            for declaration in declarations |owner, owner_line, owner_offset, body, matches, work, work_limit, depth|:
+                if work >= work_limit:
+                    work <- work_limit
+                    return false
+                work <- work + 1
+                match declaration:
+                    Ast::Decl.Func(name, _, _, statements, _, _, position):
+                        if sview_len(name) > work_limit - work:
+                            work <- work_limit
+                            return false
+                        work <- work + sview_len(name)
+                        if name == owner and position.line == owner_line and position.offset.usize() == owner_offset:
+                            matches <- matches + 1
+                            return false if matches != 1
+                            if statements.count > work_limit - work:
+                                work <- work_limit
+                                return false
+                            work <- work + statements.count
+                            body.extend(statements)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_local_binding_find_owner_at_offset_with_work(nested, owner, owner_line, owner_offset, body, matches, work, work_limit, depth + 1)
+                    Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
+            return true
+
         def proof_replay_source_owner_body_with_work(report: ProofReport&, owner: sview, owner_line: u32, body: mutable darray[Ast::Stmt]&, work: mutable usize&, work_limit: usize) -> bool:
             return false if owner == "" or owner_line == 0 or owner_line == 4294967295 or work > work_limit
             body.clear()
             matches: mutable usize = 0
+            if report.analysis_2.replay_owner_offset_valid:
+                return false if report.analysis_2.replay_owner_line != owner_line
+                return false if not proof_replay_local_binding_find_owner_at_offset_with_work(report.source.source_declarations, owner, owner_line, report.analysis_2.replay_owner_offset, body, &matches, work, work_limit, 0)
+                return matches == 1
             return false if not proof_replay_local_binding_find_owner_with_work(report.source.source_declarations, owner, owner_line, body, &matches, work, work_limit, 0)
             return matches == 1
