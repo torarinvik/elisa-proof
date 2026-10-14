@@ -154,6 +154,7 @@ def validate_frontend_metadata(
     if re.fullmatch(r"[0-9a-f]{40}", pinned_stage0_revision) is None:
         raise ValueError("ELISA_STAGE0_REV must be an exact 40-character commit hash")
 
+    compiler_stages: dict[str, str] = {}
     for role, manifest in manifests.items():
         frontend = manifest.get("frontend")
         compiler = manifest.get("compiler")
@@ -164,6 +165,7 @@ def validate_frontend_metadata(
         if frontend.get("tree") != expected_frontend_tree:
             raise ValueError(f"{role} binary was built against a different frontend source tree")
         stage = compiler.get("stage")
+        compiler_stages[role] = stage
         if stage == "stage1":
             if compiler.get("source_dirty") is not False:
                 raise ValueError(f"{role} Stage1 compiler source was dirty or its cleanliness is unknown")
@@ -183,6 +185,8 @@ def validate_frontend_metadata(
                 raise ValueError(f"{role} Stage0 source revision does not match ELISA_STAGE0_REV")
         else:
             raise ValueError(f"{role} manifest names an unsupported compiler stage")
+    if compiler_stages.get(PRODUCTS[0]) != compiler_stages.get(PRODUCTS[1]):
+        raise ValueError("proof and replay binaries were built by different compiler stages")
     return str(manifests[PRODUCTS[0]]["compiler"]["stage"])
 
 

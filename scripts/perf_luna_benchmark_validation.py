@@ -132,7 +132,7 @@ def replay_result(result: dict, expected_status: str, expected_reason: str | Non
         raise RuntimeError(f"{label}: unexpected portable replay output") from error
     if not isinstance(replay, dict):
         raise RuntimeError(f"{label}: replay result has an invalid top-level schema")
-    if replay.get("format") != "elisa-proof-replay-result-v1" or replay.get("status") != expected_status:
+    if replay.get("format") != "elisa-proof-replay-result-v2" or replay.get("status") != expected_status:
         raise RuntimeError(f"{label}: unexpected replay result format or status")
     if expected_status == "replayed":
         summary = replay.get("summary", {})
