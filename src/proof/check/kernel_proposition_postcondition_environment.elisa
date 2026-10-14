@@ -1,0 +1,191 @@
+# Bounded source-derived type context for replaying direct body postconditions.
+extend ElisaProof:
+    private:
+        struct ProofSourceKernelPostconditionOwnerContext:
+            name: sview
+            line: u32
+            offset: usize
+            parameters: darray[Ast::ParamDecl]
+            return_type: Ast::Expr?
+            module_path: darray[sview]
+            constant_names: darray[sview]
+            constant_types: darray[sview]
+            constant_source_types: darray[Ast::Expr]
+            same_line_functions: usize
+            generic_metadata_ambiguous: bool
+
+        # This value is scoped to one source-analysis invocation. Its AST-backed slices and
+        # expressions must never be retained in a process-global or report-owned cache.
+        struct ProofSourceKernelPostconditionContextIndex:
+            owners: mutable darray[ProofSourceKernelPostconditionOwnerContext]
+            complete: bool
+
+        def proof_source_kernel_postcondition_owner_keys_collect(declarations: darray[Ast::Decl]&, keys: mutable darray[(name: sview, line: u32, offset: usize)]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            for declaration in declarations |keys, source_work, depth|:
+                return false if not proof_source_kernel_charge_work(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, position):
+                        return false if keys.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+                        return false if not proof_source_kernel_charge_work(sview_len(name), source_work)
+                        keys.push((name, position.line, position.offset.usize()))
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_kernel_postcondition_owner_keys_collect(nested, keys, source_work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_source_kernel_postcondition_context_index_build(declarations: darray[Ast::Decl]&, generic_param_lines: darray[u32]&, generic_param_names: darray[sview]&, generic_params_valid: bool, source_work: mutable usize&) -> (complete: bool, index: ProofSourceKernelPostconditionContextIndex) can[Memory.Allocate, Abort.Panic]:
+            empty: ProofSourceKernelPostconditionContextIndex = ProofSourceKernelPostconditionContextIndex{owners: [], complete: false}
+            return (false, empty) if not generic_params_valid or generic_param_lines.count != generic_param_names.count
+            keys: mutable darray[(name: sview, line: u32, offset: usize)] = []
+            return (false, empty) if not proof_source_kernel_postcondition_owner_keys_collect(declarations, &keys, &source_work, 0)
+            owners: mutable darray[ProofSourceKernelPostconditionOwnerContext] = []
+            for key_index in 0..<keys.count |key_index, keys, owners, declarations, generic_param_lines, generic_param_names, source_work|:
+                key: (name: sview, line: u32, offset: usize) = keys[key_index]
+                duplicate_key: mutable bool = false
+                for previous in owners |previous, key, duplicate_key, source_work|:
+                    return (false, empty) if not proof_source_kernel_charge_work(1 + sview_len(key.name) + sview_len(previous.name), source_work)
+                    duplicate_key <- true if previous.name == key.name and previous.line == key.line and previous.offset == key.offset
+                return (false, empty) if duplicate_key
+                owner_matches: mutable usize = 0
+                same_line_functions: mutable usize = 0
+                parameters: mutable darray[Ast::ParamDecl] = []
+                return_type: mutable Ast::Expr? = null
+                module_path: mutable darray[sview] = []
+                current_path: mutable darray[sview] = []
+                return (false, empty) if:
+                    not proof_source_kernel_postcondition_owner_validate(declarations, key.name, key.line, key.offset, &owner_matches, &same_line_functions, &parameters, &return_type, &module_path, &current_path, &source_work, 0)
+                    owner_matches != 1
+                generic_rows: mutable usize = 0
+                for generic_index in 0..<generic_param_lines.count |generic_index, generic_param_lines, generic_param_names, key, generic_rows, source_work|:
+                    return (false, empty) if not proof_source_kernel_charge_work(1, source_work)
+                    if generic_param_lines[generic_index] == key.line:
+                        return (false, empty) if not proof_source_kernel_charge_work(sview_len(generic_param_names[generic_index]), source_work)
+                        generic_rows <- generic_rows + 1
+                generic_ambiguous: bool = generic_rows != 0 and same_line_functions != 1
+                constant_names: mutable darray[sview] = []
+                constant_types: mutable darray[sview] = []
+                constant_source_types: mutable darray[Ast::Expr] = []
+                if module_path.count != 0:
+                    return (false, empty) if not proof_source_kernel_collect_scope_constants_with_work(declarations, module_path, 0, &constant_names, &constant_types, &constant_source_types, &source_work, 0)
+                owners.push(ProofSourceKernelPostconditionOwnerContext{name: key.name, line: key.line, offset: key.offset, parameters: parameters, return_type: return_type, module_path: module_path, constant_names: constant_names, constant_types: constant_types, constant_source_types: constant_source_types, same_line_functions: same_line_functions, generic_metadata_ambiguous: generic_ambiguous})
+            index: ProofSourceKernelPostconditionContextIndex = ProofSourceKernelPostconditionContextIndex{owners: owners, complete: source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT}
+            return (index.complete, index)
+
+        def proof_source_kernel_postcondition_owner_validate(declarations: darray[Ast::Decl]&, owner_name: sview, owner_line: u32, owner_offset: usize, owner_matches: mutable usize&, same_line_functions: mutable usize&, parameters: mutable darray[Ast::ParamDecl]&, return_type: mutable Ast::Expr?, module_path: mutable darray[sview]&, current_path: mutable darray[sview]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            for declaration in declarations |owner_name, owner_line, owner_offset, owner_matches, same_line_functions, parameters, return_type, module_path, current_path, source_work, depth|:
+                return false if not proof_source_kernel_charge_work(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, function_parameters, function_return_type, _, _, _, position):
+                        if position.line == owner_line:
+                            same_line_functions <- same_line_functions + 1
+                            return false if not proof_source_kernel_charge_work(sview_len(name) + sview_len(owner_name), source_work)
+                            if name == owner_name and position.line == owner_line and position.offset.usize() == owner_offset:
+                                owner_matches <- owner_matches + 1
+                                return false if owner_matches > 1
+                                return false if function_parameters.count > PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT - parameters.count
+                                return false if not proof_source_kernel_charge_work(function_parameters.count + current_path.count, source_work)
+                                parameters.extend(function_parameters)
+                                return_type <- function_return_type
+                                for path_name in current_path |path_name, source_work|:
+                                    return false if not proof_source_kernel_charge_work(sview_len(path_name), source_work)
+                                module_path.extend(current_path)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        match declaration:
+                            Ast::Decl.Module(module_name, _, _):
+                                return false if not proof_source_kernel_charge_work(sview_len(module_name), source_work)
+                                current_path.push(module_name)
+                                complete: bool = proof_source_kernel_postcondition_owner_validate(nested, owner_name, owner_line, owner_offset, &owner_matches, &same_line_functions, parameters, return_type, module_path, current_path, source_work, depth + 1)
+                                current_path.pop()
+                                return false if not complete
+                            _:
+                                return false if not proof_source_kernel_postcondition_owner_validate(nested, owner_name, owner_line, owner_offset, &owner_matches, &same_line_functions, parameters, return_type, module_path, current_path, source_work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_source_kernel_collect_scope_constants_with_work(declarations: darray[Ast::Decl]&, module_path: darray[sview]&, level: usize, names: mutable darray[sview]&, types: mutable darray[sview]&, source_types: mutable darray[Ast::Expr]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            for declaration in declarations |module_path, level, names, types, source_types, source_work, depth|:
+                return false if not proof_source_kernel_charge_work(1, source_work)
+                match declaration:
+                    Ast::Decl.Const(constant_name, constant_type, _, _, _):
+                        if level == module_path.count:
+                            has_type: bool = match constant_type:
+                                Ast::Expr.Absent: false
+                                _: true
+                            if has_type:
+                                return false if names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+                                return false if not proof_replay_summary_expr_charge_with_limit(constant_type, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                                type_name: sview = proof_source_type_spelling(constant_type, 0)
+                                return false if not proof_source_kernel_charge_work(sview_len(constant_name), source_work)
+                                return false if not proof_source_kernel_charge_work(sview_len(type_name), source_work)
+                                names.push(constant_name)
+                                types.push(type_name)
+                                source_types.push(constant_type)
+                    Ast::Decl.Module(module_name, body, _):
+                        if level < module_path.count:
+                            return false if not proof_source_kernel_charge_work(sview_len(module_name), source_work)
+                            return false if not proof_source_kernel_charge_work(sview_len(module_path[level]), source_work)
+                            if module_name == module_path[level]:
+                                return false if not proof_source_kernel_collect_scope_constants_with_work(body, module_path, level + 1, names, types, source_types, source_work, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        return false if not proof_source_kernel_collect_scope_constants_with_work(body, module_path, level, names, types, source_types, source_work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_source_kernel_postcondition_environment_from_index(index: ProofSourceKernelPostconditionContextIndex&, owner_name: sview, owner_line: u32, owner_offset: usize, declarations: darray[Ast::Decl]&, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], generic_param_lines: darray[u32]&, generic_param_names: darray[sview]&, generic_params_valid: bool, source_work: mutable usize&) -> (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) can[Memory.Allocate, Abort.Panic]:
+            empty: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: []}
+            return (false, empty) if not index.complete or not generic_params_valid or generic_param_lines.count != generic_param_names.count
+            owner_index: mutable usize = index.owners.count
+            for candidate in 0..<index.owners.count |candidate, index, owner_name, owner_line, owner_offset, owner_index, source_work|:
+                owner: ProofSourceKernelPostconditionOwnerContext = index.owners[candidate]
+                return (false, empty) if not proof_source_kernel_charge_work(1 + sview_len(owner.name) + sview_len(owner_name), source_work)
+                if owner.name == owner_name and owner.line == owner_line and owner.offset == owner_offset:
+                    return (false, empty) if owner_index != index.owners.count
+                    owner_index <- candidate
+            return (false, empty) if owner_index >= index.owners.count
+            owner: ProofSourceKernelPostconditionOwnerContext = index.owners[owner_index]
+            return (false, empty) if owner.generic_metadata_ambiguous
+            names: mutable darray[sview] = []
+            types: mutable darray[sview] = []
+            source_types: mutable darray[Ast::Expr] = []
+            return (false, empty) if owner.constant_names.count != owner.constant_types.count or owner.constant_names.count != owner.constant_source_types.count
+            for constant_index in 0..<owner.constant_names.count |constant_index, owner, names, types, source_types, source_work|:
+                return (false, empty) if names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+                return (false, empty) if not proof_source_kernel_charge_work(1 + sview_len(owner.constant_names[constant_index]) + sview_len(owner.constant_types[constant_index]), source_work)
+                names.push(owner.constant_names[constant_index])
+                types.push(owner.constant_types[constant_index])
+                source_types.push(owner.constant_source_types[constant_index])
+            for parameter in owner.parameters |owner, names, types, source_types, source_work|:
+                return (false, empty) if names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+                return (false, empty) if not proof_replay_summary_expr_charge_with_limit(parameter.type_expression, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                parameter_type_name: sview = proof_source_type_spelling(parameter.type_expression, 0)
+                return (false, empty) if:
+                    not proof_source_kernel_charge_work(sview_len(parameter.name), source_work)
+                    not proof_source_kernel_charge_work(sview_len(parameter_type_name), source_work)
+                    owner.return_type is declared_return_type and parameter.name == "result"
+                names.push(parameter.name)
+                types.push(parameter_type_name)
+                source_types.push(parameter.type_expression)
+            if owner.return_type is declared_return_type:
+                return (false, empty) if names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+                return (false, empty) if not proof_replay_summary_expr_charge_with_limit(declared_return_type, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                result_type_name: sview = proof_source_type_spelling(declared_return_type, 0)
+                return (false, empty) if not proof_source_kernel_charge_work(sview_len("result") + sview_len(result_type_name), source_work)
+                names.push("result")
+                types.push(result_type_name)
+                source_types.push(declared_return_type)
+            workspace: mutable ProofSourceKernelFormationWorkspace = ProofSourceKernelFormationWorkspace{nodes: [], children: [], visible_name_slots: [], type_index: type_index, generic_param_lines: generic_param_lines, generic_param_names: generic_param_names, generic_params_valid: generic_params_valid, owner_declaration_line: owner.line, tuple_label_index: tuple_label_index, validation_workspace: ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new(), typing_workspace: ElisaProofKernelReplay::proof_kernel_replay_typing_workspace_new(), scoped_function_index: proof_source_kernel_scoped_function_index_new(), typing_work_used: 0, source_work_used: source_work}
+            formed: (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) = proof_source_kernel_type_environment(names, types, source_types, owner.module_path, global_bindings, &workspace, declarations)
+            source_work <- workspace.source_work_used
+            return (formed.known and source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, formed.environment)
+
+        # Compatibility one-shot wrapper. Repeated replay should build once and use the index API.
+        def proof_source_kernel_postcondition_environment(owner_name: sview, owner_line: u32, owner_offset: usize, declarations: darray[Ast::Decl]&, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], generic_param_lines: darray[u32]&, generic_param_names: darray[sview]&, generic_params_valid: bool, source_work: mutable usize&) -> (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) can[Memory.Allocate, Abort.Panic]:
+            index_result: (complete: bool, index: ProofSourceKernelPostconditionContextIndex) = proof_source_kernel_postcondition_context_index_build(declarations, generic_param_lines, generic_param_names, generic_params_valid, &source_work)
+            return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: []}) if not index_result.complete
+            proof_source_kernel_postcondition_environment_from_index(index_result.index, owner_name, owner_line, owner_offset, declarations, type_index, tuple_label_index, global_bindings, generic_param_lines, generic_param_names, generic_params_valid, &source_work)
