@@ -24979,14 +24979,6 @@ including non-function declarations and encoded bound rows. Counts, row visits, 
 lengths are charged to the admission budget; malformed or changed snapshots refuse source
 authority. No tests or build were run.
 
-### 23.27.1408 Scan quantified range and body for negative integer bit patterns (2026-10-14)
-
-The unsigned machine-word representability scan traversed quantified terms as leaves even though
-the kernel arena stores their range and body in scalar `left` and `right` edges. It now scans both
-under the same shared depth and work counters, failing closed on invalid children or exhaustion.
-This prevents a negative integer term in a quantified branch condition from escaping the
-bit-pattern gate. No tests or build were run.
-
 ### 23.27.1408 Admit only known scalar leaves in arithmetic safety walks (2026-10-14)
 
 The signed and unsigned safety walkers treated any childless node as safe. Some non-expression
@@ -24995,3 +24987,19 @@ node is a leaf or has value semantics. The ordinary signed, cached signed, and u
 terminate only on the canonical scalar leaf kinds; all other unhandled nodes fail closed. Explicit
 quantifier rejection remains in place because the expression-only walks lack checked binder sorts
 and range refinements. `git diff --check` and the source-length gate pass; no tests or build were run.
+
+### 23.27.1409 Scan quantified range and body for negative integer bit patterns (2026-10-14)
+
+The unsigned machine-word representability scan traversed quantified terms as leaves even though
+the kernel arena stores their range and body in scalar `left` and `right` edges. It now scans both
+under the same shared depth and work counters, failing closed on invalid children or exhaustion.
+This prevents a negative integer term in a quantified branch condition from escaping the
+bit-pattern gate. No tests or build were run.
+
+### 23.27.1410 Avoid overflow in source-admission work reservations (2026-10-14)
+
+Postcondition AST inventory admission sometimes added several source-controlled string lengths
+before passing the total to a bounded work charger. The sum itself could overflow before the
+charger compared it with the remaining budget. Each length is now charged separately in those
+multi-field checks, so every reservation is bounded before accumulation. Static diff check passes;
+no build or runtime qualification was run.
