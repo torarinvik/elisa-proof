@@ -24832,6 +24832,25 @@ round-trip qualification remains outstanding.
 
 Resource call and return analysis now resolves a checked summary root from the exact function-table
 slot instead of rescanning the kernel arena by function name at each call. The lookup still checks
-verification state and reauthenticates the root's kind, function name, resource version, and owner;
-unresolved or stale slots fail closed. The focused diff passes `git diff --check`; no tests or
-builds were run.
+verification state, requires an owner row at that slot, and reauthenticates the root's kind,
+function name, resource version, and owner; unresolved or stale slots fail closed. The focused diff
+passes `git diff --check`; no tests or builds were run.
+
+### 23.27.1393 Count only function-owned generic markers in replay census
+
+Replay source-cache validation compared function-generic rows with every generic-identity marker.
+The compiler also emits those markers for non-function declarations, so valid generic structs,
+impl members, or protocol declarations could cause structural replay to fail closed. The census
+now classifies each parser-origin marker by exact function declaration identity, then requires a
+one-to-one count with authenticated function rows. The threaded generic-owner and structural replay
+guards, diff check, and source-length gate pass. Mutation/runtime qualification remains outstanding
+because the installed proof binary does not match this source.
+
+### 23.27.1394 Admit the complete v4 source-file inventory
+
+The source-file serializer emits a `files_complete` field in addition to the path array. The v4
+reader's exact-key source schema now includes that field and rejects a package claiming admissible
+source when its file list is incomplete. The package producer reserves file-list work before
+emission, so valid exported v4 packages carry a complete list. Updated the portable trust
+inventory guard. `git diff --check` and `scripts/check_source_length.py` pass; runtime package
+round-trip qualification remains outstanding.
