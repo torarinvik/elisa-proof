@@ -138,6 +138,117 @@ extend ElisaProof:
                 _:
                     proof_push_call_name(names, qualifiers, "__opaque_call__", "")
 
+        # Lemma-cycle analysis needs calls from erased assert-by steps too. Keep duplicates in
+        # that graph: reachability is unchanged, while appending edges avoids the quadratic
+        # linear-scan deduplication performed by proof_push_call_name.
+        def proof_collect_lemma_call_names(expression: Ast::Expr, names: mutable darray[sview]&) -> void:
+            match expression:
+                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                Ast::Expr.Call(callee, arguments, _, _):
+                    called: sview = proof_callable_name(callee)
+                    if called != "":
+                        names.push(called)
+                    proof_collect_lemma_call_names(callee, names)
+                    for argument in arguments |names|:
+                        proof_collect_lemma_call_names(argument, names)
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
+                    if lowered.known:
+                        proof_collect_lemma_call_names(lowered.call, names)
+                    else:
+                        names.push("__opaque_call__")
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    proof_collect_lemma_call_names(inner, names)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    proof_collect_lemma_call_names(left, names)
+                    proof_collect_lemma_call_names(right, names)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    proof_collect_lemma_call_names(object, names)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_collect_lemma_call_names(object, names)
+                    proof_collect_lemma_call_names(low, names)
+                    proof_collect_lemma_call_names(high, names)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_collect_lemma_call_names(object, names)
+                    for argument in arguments |names|:
+                        proof_collect_lemma_call_names(argument, names)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |names|:
+                        proof_collect_lemma_call_names(element, names)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |names|:
+                        proof_collect_lemma_call_names(entry.key, names)
+                        proof_collect_lemma_call_names(entry.value, names)
+                Ast::Expr.Construct(type_expression, fields, _):
+                    proof_collect_lemma_call_names(type_expression, names)
+                    for field in fields |names|:
+                        proof_collect_lemma_call_names(field.value, names)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_collect_lemma_call_names(base, names)
+                    for field in fields |names|:
+                        proof_collect_lemma_call_names(field.value, names)
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    proof_collect_lemma_call_names(condition, names)
+                    proof_collect_lemma_call_names(then_expr, names)
+                    proof_collect_lemma_call_names(else_expr, names)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    proof_collect_lemma_call_names(iterable, names)
+                    proof_collect_lemma_call_names(condition, names)
+                    proof_collect_lemma_call_names(body, names)
+                Ast::Expr.Refinement(base, predicate, _):
+                    proof_collect_lemma_call_names(base, names)
+                    proof_collect_lemma_call_names(predicate, names)
+                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                    proof_collect_lemma_call_names(scrutinee, names)
+                    for arm in arms |names|:
+                        proof_collect_lemma_call_names(arm.guard, names)
+                        proof_collect_lemma_body_call_names(arm.body, names)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    proof_collect_lemma_call_names(guarded, names)
+                    proof_collect_lemma_body_call_names(recovery, names)
+                Ast::Expr.Lambda(_, _, _):
+                    names.push("__opaque_call__")
+                Ast::Expr.Block(statements, value, _, _):
+                    proof_collect_lemma_body_call_names(statements, names)
+                    proof_collect_lemma_call_names(value, names)
+                _:
+                    names.push("__opaque_call__")
+
+        def proof_collect_lemma_body_call_names(body: darray[Ast::Stmt]&, names: mutable darray[sview]&) -> void:
+            for statement in body |names|:
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        proof_collect_lemma_call_names(returned, names) if value is returned
+                    Ast::Stmt.Expr(expression, _):
+                        proof_collect_lemma_call_names(expression, names)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        proof_collect_lemma_call_names(initializer, names)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        proof_collect_lemma_call_names(target, names)
+                        proof_collect_lemma_call_names(initializer, names)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_collect_lemma_call_names(condition, names)
+                        proof_collect_lemma_body_call_names(then_body, names)
+                        proof_collect_lemma_body_call_names(else_body, names)
+                    Ast::Stmt.While(condition, while_body, _):
+                        proof_collect_lemma_call_names(condition, names)
+                        proof_collect_lemma_body_call_names(while_body, names)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        proof_collect_lemma_call_names(iterable, names)
+                        proof_collect_lemma_body_call_names(for_body, names)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        proof_collect_lemma_call_names(scrutinee, names)
+                        for arm in arms |names|:
+                            proof_collect_lemma_call_names(arm.guard, names)
+                            proof_collect_lemma_body_call_names(arm.body, names)
+                    Ast::Stmt.Block(_, _, _, block_body, _):
+                        proof_collect_lemma_body_call_names(block_body, names)
+                    Ast::Stmt.Contract(kind, expression, _):
+                        proof_collect_lemma_call_names(expression, names) if kind == "assert"
+                    _:
+                        names.push("__opaque_call__")
+
         # Source-aware graph collection preserves the callee AST for named edges and the whole
         # call for unclassified callable forms. The name-only collector above intentionally
         # deduplicates by leaf name and qualifier, which is not a sound identity for

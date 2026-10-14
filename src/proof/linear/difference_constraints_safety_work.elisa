@@ -1,6 +1,66 @@
 # Budgeted shape scans and difference-fact collection used by all linear-safety clients.
 extend ElisaProof:
     public:
+        # Kernel support checks descend into checked-get recovery statements before lowering
+        # them away. Include that otherwise-erased subtree in the same source-shape budget so
+        # congruence's later support and encoding walks cannot hide behind one GetElse node.
+        def proof_linear_safety_recovery_shape_with_work(statements: darray[Ast::Stmt], depth: usize, nodes: mutable usize&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                exhausted <- true
+                return false
+            for statement in statements |depth, nodes, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                nodes <- nodes + 1
+                match statement:
+                    Ast::Stmt.Invalid:
+                        return true
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                        return false if not proof_linear_safety_expression_shape_with_work(expression, depth + 1, &nodes, &budget, &exhausted)
+                    Ast::Stmt.Return(value, _):
+                        if value is returned:
+                            return false if not proof_linear_safety_expression_shape_with_work(returned, depth + 1, &nodes, &budget, &exhausted)
+                    Ast::Stmt.Block(_, _, _, body, _):
+                        return false if not proof_linear_safety_recovery_shape_with_work(body, depth + 1, &nodes, &budget, &exhausted)
+                    Ast::Stmt.VarDecl(name, type_expression, value, _):
+                        return true if name == ""
+                        return false if not proof_linear_safety_work_charge(budget, exhausted, sview_len(name))
+                        return false if:
+                            not proof_linear_safety_expression_shape_with_work(type_expression, depth + 1, &nodes, &budget, &exhausted)
+                            not proof_linear_safety_expression_shape_with_work(value, depth + 1, &nodes, &budget, &exhausted)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        return false if:
+                            not proof_linear_safety_expression_shape_with_work(target, depth + 1, &nodes, &budget, &exhausted)
+                            not proof_linear_safety_expression_shape_with_work(value, depth + 1, &nodes, &budget, &exhausted)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return false if:
+                            not proof_linear_safety_expression_shape_with_work(condition, depth + 1, &nodes, &budget, &exhausted)
+                            not proof_linear_safety_recovery_shape_with_work(then_body, depth + 1, &nodes, &budget, &exhausted)
+                            not proof_linear_safety_recovery_shape_with_work(else_body, depth + 1, &nodes, &budget, &exhausted)
+                    Ast::Stmt.While(condition, body, _):
+                        return false if:
+                            not proof_linear_safety_expression_shape_with_work(condition, depth + 1, &nodes, &budget, &exhausted)
+                            not proof_linear_safety_recovery_shape_with_work(body, depth + 1, &nodes, &budget, &exhausted)
+                    Ast::Stmt.For(_, variables, iterable, body, _):
+                        return true if variables.count == 0
+                        for variable in variables |budget, depth, nodes, exhausted|:
+                            return true if variable == ""
+                            return false if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(variable))
+                            nodes <- nodes + 1
+                        return false if:
+                            not proof_linear_safety_expression_shape_with_work(iterable, depth + 1, &nodes, &budget, &exhausted)
+                            not proof_linear_safety_recovery_shape_with_work(body, depth + 1, &nodes, &budget, &exhausted)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return false if not proof_linear_safety_expression_shape_with_work(scrutinee, depth + 1, &nodes, &budget, &exhausted)
+                        for arm in arms |budget, depth, nodes, exhausted|:
+                            return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                            nodes <- nodes + 1
+                            return false if:
+                                not proof_linear_safety_expression_shape_with_work(arm.guard, depth + 1, &nodes, &budget, &exhausted)
+                                not proof_linear_safety_recovery_shape_with_work(arm.body, depth + 1, &nodes, &budget, &exhausted)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+            return true
+
         def proof_linear_safety_expression_shape_with_work(expression: Ast::Expr, depth: usize, nodes: mutable usize&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
                 exhausted <- true
@@ -45,6 +105,38 @@ extend ElisaProof:
                     for element in elements |depth, nodes, budget, exhausted|:
                         return false if not proof_linear_safety_expression_shape_with_work(element, depth + 1, &nodes, &budget, &exhausted)
                     return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |depth, nodes, budget, exhausted|:
+                        return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                        nodes <- nodes + 1
+                        return false if:
+                            not proof_linear_safety_expression_shape_with_work(entry.key, depth + 1, &nodes, &budget, &exhausted)
+                            not proof_linear_safety_expression_shape_with_work(entry.value, depth + 1, &nodes, &budget, &exhausted)
+                    return true
+                Ast::Expr.Construct(type_expression, fields, _) | Ast::Expr.RecordUpdate(type_expression, fields, _):
+                    return false if not proof_linear_safety_expression_shape_with_work(type_expression, depth + 1, &nodes, &budget, &exhausted)
+                    for field in fields |depth, nodes, budget, exhausted|:
+                        return false if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(field.name))
+                        nodes <- nodes + 1
+                        return false if not proof_linear_safety_expression_shape_with_work(field.value, depth + 1, &nodes, &budget, &exhausted)
+                    return true
+                Ast::Expr.GetElse(value, recovery, _):
+                    return false if:
+                        not proof_linear_safety_expression_shape_with_work(value, depth + 1, &nodes, &budget, &exhausted)
+                        not proof_linear_safety_recovery_shape_with_work(recovery, depth + 1, &nodes, &budget, &exhausted)
+                    return true
+                Ast::Expr.Block(statements, value, captures, _):
+                    # Kernel support accepts at most two quantifier binders in this form, but
+                    # rejects bad outer shapes before reading their children. Mirror that fast
+                    # rejection so a huge unsupported block does not consume the proof budget.
+                    return true if captures.count != 0 or statements.count == 0 or statements.count > ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, type_expression, _, _):
+                            return true if binder == "" or not proof_kernel_quantifier_integer_type(type_expression)
+                        _:
+                            return true
+                    return false if not proof_linear_safety_recovery_shape_with_work(statements, depth + 1, &nodes, &budget, &exhausted)
+                    return proof_linear_safety_expression_shape_with_work(value, depth + 1, &nodes, &budget, &exhausted)
                 _:
                     return true
 
@@ -59,7 +151,7 @@ extend ElisaProof:
         def proof_linear_safety_bound_shape_total_with_work(bounds: darray[ProofBound]&, total_nodes: mutable usize&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             total_nodes <- 0
             for bound in bounds |bound, total_nodes, budget, exhausted|:
-                return false if not proof_linear_safety_work_charge(budget, exhausted, 1 + sview_len(bound.name))
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(bound.name))
                 if bound.term_key:
                     return false if not proof_linear_safety_expression_shape_with_work(bound.term, 0, &total_nodes, &budget, &exhausted)
             return true
