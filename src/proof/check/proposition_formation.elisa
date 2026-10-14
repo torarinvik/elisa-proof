@@ -175,11 +175,18 @@ extend ElisaProof:
                     return Ast::Expr.Absent
 
         def proof_source_validate_context_proposition[@r](expression: Ast::Expr, name: sview, names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, module_path: darray[sview]&, global_kernel_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], kernel_workspace: mutable ProofSourceKernelFormationWorkspace& @r, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace& @r, file: Ast::File&, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void can[Memory.Allocate, Abort.Panic]:
+            return if kernel_workspace.source_work_exhaustion_reported
+            if kernel_workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_source_kernel_projection_budget_refusal(report, name, Ast::expr_pos(expression).line, kernel_workspace)
+                return
             kernel_failure: mutable sview = ""
             kernel_formed: bool = proof_source_kernel_proposition_formed(expression, names, types, source_types, module_path, global_kernel_bindings, kernel_workspace, validation_workspace, file, &kernel_failure)
             if not kernel_formed:
-                report.proof_obligation(false)
                 source_position: Ast::Pos = Ast::expr_pos(expression)
+                if kernel_failure == "kernel source work budget exceeded":
+                    proof_source_kernel_projection_budget_refusal(report, name, source_position.line, kernel_workspace)
+                    return
+                report.proof_obligation(false)
                 diagnostic: sview = "kernel post-state result binding absent" if kernel_failure == "post-result-binding-missing" else "kernel context binding absent" if kernel_failure == "local-context-binding-missing" else "kernel context sort mismatch" if kernel_failure == "local-context-sort-mismatch" else "kernel context type-name mismatch" if kernel_failure == "local-context-name-mismatch" else "kernel context element-sort mismatch" if kernel_failure == "local-context-element-mismatch" else "kernel typing environment unrepresentable" if kernel_failure == "local-context-unrepresented" else kernel_failure if kernel_failure != "" and kernel_failure != "term-sort-or-operator-rejected" else "kernel proposition formation rejected the term or operator"
                 proof_add_finding(report, "contract-proposition-type", source_position.line, name, diagnostic) if kernel_failure != "kernel source work budget exceeded"
 
@@ -197,24 +204,50 @@ extend ElisaProof:
         # rejects its non-Boolean guard. Nested lexical scopes reuse these arrays and restore
         # their entry marks, so shadowing stays explicit without copying the outer context.
         def proof_source_validate_statement_propositions[@r](file: Ast::File&, name: sview, statements: darray[Ast::Stmt]&, names: mutable darray[sview]&, types: mutable darray[sview]&, source_types: mutable darray[Ast::Expr]&, module_path: darray[sview]&, global_kernel_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], kernel_workspace: mutable ProofSourceKernelFormationWorkspace& @r, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace& @r, table: Semantic::SymbolTable&, report: mutable ProofReport&, depth: usize) -> void can[Memory.Allocate, Abort.Panic]:
-            return if statements.count == 0
+            return if statements.count == 0 or kernel_workspace.source_work_exhaustion_reported
+            if kernel_workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_source_kernel_projection_budget_refusal(report, name, proof_statement_position(statements[0]).line, kernel_workspace)
+                return
             if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT:
                 position: Ast::Pos = proof_statement_position(statements[0])
                 report.proof_obligation(false)
                 proof_add_finding(report, "contract-proposition-type", position.line, name, "kernel proposition statement nesting exceeded its bounded representation")
                 return
             for statement in statements |file, name, names, types, source_types, module_path, global_kernel_bindings, kernel_workspace, validation_workspace, table, report, depth|:
+                if kernel_workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    proof_source_kernel_projection_budget_refusal(report, name, proof_statement_position(statement).line, kernel_workspace)
+                    return
+                if not proof_source_kernel_charge_work(1, kernel_workspace.source_work_used):
+                    position: Ast::Pos = proof_statement_position(statement)
+                    proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                    return
                 match statement:
                     Ast::Stmt.VarDecl(local_name, declared_type, initializer, _):
-                        type_name: mutable sview = proof_source_type_spelling(declared_type, 0)
-                        context_type: mutable Ast::Expr = declared_type
+                        if not proof_source_proposition_context_fits(names.count, 1):
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "contract-proposition-type", proof_statement_position(statement).line, name, "kernel proposition context exceeds its bounded name capacity")
+                            return
                         has_declared_type: bool = match declared_type:
                             Ast::Expr.Absent: false
                             _: true
+                        if has_declared_type and not proof_replay_summary_expr_repeat_charge_with_limit(declared_type, 1, kernel_workspace.source_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                            proof_source_kernel_projection_budget_refusal(report, name, proof_statement_position(statement).line, kernel_workspace)
+                            return
+                        type_name: mutable sview = proof_source_type_spelling(declared_type, 0)
+                        context_type: mutable Ast::Expr = declared_type
                         if not has_declared_type:
+                            if not proof_replay_summary_expr_repeat_charge_with_limit(initializer, 1, kernel_workspace.source_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                                proof_source_kernel_projection_budget_refusal(report, name, proof_statement_position(statement).line, kernel_workspace)
+                                return
                             inferred: Semantic::InferType = Semantic::infer_expression_type_for_proof(initializer, names, types, table)
                             type_name <- proof_source_inferred_type_spelling(inferred)
                             context_type <- proof_source_inferred_tuple_type_with_work(initializer, file.top_decls, names, kernel_workspace.source_work_used, 0) if inferred.kind == Semantic::SemTypeKind.Tuple
+                            if kernel_workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                proof_source_kernel_projection_budget_refusal(report, name, proof_statement_position(statement).line, kernel_workspace)
+                                return
+                        if not proof_source_kernel_charge_work(3, kernel_workspace.source_work_used):
+                            proof_source_kernel_projection_budget_refusal(report, name, proof_statement_position(statement).line, kernel_workspace)
+                            return
                         names.push(local_name)
                         types.push(type_name)
                         source_types.push(context_type)
@@ -225,8 +258,18 @@ extend ElisaProof:
                         # VarDecls. This grants a sort, never an executable fact.
                         local_name: sview = proof_ident_name(target)
                         if local_name != "":
+                            if not proof_source_proposition_context_fits(names.count, 1):
+                                report.proof_obligation(false)
+                                proof_add_finding(report, "contract-proposition-type", proof_statement_position(statement).line, name, "kernel proposition context exceeds its bounded name capacity")
+                                return
+                            if not proof_replay_summary_expr_repeat_charge_with_limit(initializer, 1, kernel_workspace.source_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                                proof_source_kernel_projection_budget_refusal(report, name, proof_statement_position(statement).line, kernel_workspace)
+                                return
                             inferred: Semantic::InferType = Semantic::infer_expression_type_for_proof(initializer, names, types, table)
                             declared_return: Ast::Expr = proof_source_inferred_tuple_type_with_work(initializer, file.top_decls, names, kernel_workspace.source_work_used, 0)
+                            if kernel_workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                proof_source_kernel_projection_budget_refusal(report, name, proof_statement_position(statement).line, kernel_workspace)
+                                return
                             context_type: mutable Ast::Expr = Ast::Expr.Absent
                             type_name: mutable sview = proof_source_inferred_type_spelling(inferred)
                             match declared_return:
@@ -235,6 +278,9 @@ extend ElisaProof:
                                     type_name <- "tuple"
                                 _:
                                     pass
+                            if not proof_source_kernel_charge_work(3, kernel_workspace.source_work_used):
+                                proof_source_kernel_projection_budget_refusal(report, name, proof_statement_position(statement).line, kernel_workspace)
+                                return
                             names.push(local_name)
                             types.push(type_name)
                             source_types.push(context_type)
@@ -267,7 +313,20 @@ extend ElisaProof:
                         loop_name_mark: usize = names.count
                         loop_type_mark: usize = types.count
                         loop_source_type_mark: usize = source_types.count
+                        if not proof_replay_summary_expr_repeat_charge_with_limit(iterable, 2, kernel_workspace.source_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                            proof_source_kernel_projection_budget_refusal(report, name, proof_statement_position(statement).line, kernel_workspace)
+                            return
                         element_type: sview = proof_source_for_element_type(iterable, names, types, source_types, file.top_decls, table, kernel_workspace.source_work_used)
+                        if kernel_workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                            proof_source_kernel_projection_budget_refusal(report, name, proof_statement_position(statement).line, kernel_workspace)
+                            return
+                        if not proof_source_proposition_context_fits(names.count, variables.count):
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "contract-proposition-type", proof_statement_position(statement).line, name, "kernel proposition context exceeds its bounded name capacity")
+                            return
+                        if not proof_source_kernel_charge_work(variables.count * 3, kernel_workspace.source_work_used):
+                            proof_source_kernel_projection_budget_refusal(report, name, proof_statement_position(statement).line, kernel_workspace)
+                            return
                         for variable in variables |names, types, source_types, element_type|:
                             names.push(variable)
                             types.push(element_type)
@@ -278,22 +337,47 @@ extend ElisaProof:
                         source_types <- source_types.truncate(loop_source_type_mark)
                     Ast::Stmt.Match(scrutinee, arms, position):
                         for arm in arms |file, name, names, types, source_types, module_path, global_kernel_bindings, kernel_workspace, validation_workspace, table, report, depth, scrutinee, position|:
+                            return if kernel_workspace.source_work_exhaustion_reported
+                            if kernel_workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                                return
+                            pattern_cost: mutable usize = 0
+                            if not proof_replay_summary_pattern_cost(arm.pattern, &pattern_cost, kernel_workspace.source_work_used, 0) or pattern_cost == 0 or not proof_source_kernel_charge_work(pattern_cost, kernel_workspace.source_work_used):
+                                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                                return
                             arm_name_mark: usize = names.count
                             arm_type_mark: usize = types.count
                             arm_source_type_mark: usize = source_types.count
                             binding_names: mutable darray[sview] = []
                             binding_values: mutable darray[Ast::Expr] = []
                             proof_bind_pattern(arm.pattern, position, scrutinee, &binding_names, &binding_values)
+                            if not proof_source_proposition_context_fits(names.count, binding_names.count):
+                                report.proof_obligation(false)
+                                proof_add_finding(report, "contract-proposition-type", position.line, name, "kernel proposition context exceeds its bounded name capacity")
+                                return
+                            if not proof_source_kernel_charge_work(binding_names.count * 3, kernel_workspace.source_work_used):
+                                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                                return
                             # A positional payload binder has no source place to take a type
                             # from; its declared payload field gives it one.
                             payload_types: mutable darray[Ast::Expr] = []
-                            payload_typed: bool = proof_payload_binder_types(arm.pattern, file.top_decls, file.enum_annotations, &payload_types) and payload_types.count == binding_names.count
+                            payload_typed: bool = proof_payload_binder_types(arm.pattern, file.top_decls, file.enum_annotations, &payload_types, kernel_workspace.source_work_used) and payload_types.count == binding_names.count
+                            if kernel_workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                                return
                             for binding_index in 0..<binding_names.count |binding_index, binding_names, binding_values, names, types, source_types, table, file, payload_typed, payload_types|:
+                                binding_work: usize = names.count + types.count + source_types.count + 1
+                                if not proof_source_kernel_charge_work(binding_work, kernel_workspace.source_work_used) or not proof_replay_summary_expr_repeat_charge_with_limit(binding_values[binding_index], 3, kernel_workspace.source_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                                    proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                                    return
                                 binding_source_type: Ast::Expr = payload_types[binding_index] if payload_typed else proof_source_expression_type_hint(binding_values[binding_index], names, source_types, file.top_decls, kernel_workspace.source_work_used, 0)
                                 binding_type_name: mutable sview = proof_source_type_spelling(binding_source_type, 0)
                                 if binding_type_name == "":
                                     inferred_binding: Semantic::InferType = Semantic::infer_expression_type_for_proof(binding_values[binding_index], names, types, table)
                                     binding_type_name <- proof_source_inferred_type_spelling(inferred_binding)
+                                if kernel_workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                    proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                                    return
                                 names.push(binding_names[binding_index])
                                 types.push(binding_type_name)
                                 source_types.push(binding_source_type)
@@ -322,28 +406,48 @@ extend ElisaProof:
                         pass
 
         def proof_validate_function_propositions[@r](file: Ast::File&, name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, body: darray[Ast::Stmt]&, position: Ast::Pos, module_path: darray[sview]&, global_kernel_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], kernel_workspace: mutable ProofSourceKernelFormationWorkspace& @r, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace& @r, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void can[Memory.Allocate, Abort.Panic]:
-            # Type formation is bounded per declaration: exhausting one function's allowance
-            # must not make later, independent functions uncheckable.
+            return if kernel_workspace.source_work_exhaustion_reported
             kernel_workspace.typing_work_used <- 0
             kernel_workspace.owner_declaration_line <- position.line
             kernel_workspace.type_index.scope_path.clear()
             kernel_workspace.type_index.scope_path.extend(module_path)
+            if kernel_workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                return
             names: mutable darray[sview] = []
             types: mutable darray[sview] = []
             source_types: mutable darray[Ast::Expr] = []
-            proof_source_collect_scope_constants(file.top_decls, module_path, 0, &names, &types, &source_types, 0) if module_path.count != 0
-            for parameter in parameters |names, types, source_types|:
-                names.push(parameter.name)
-                types.push(proof_source_type_spelling(parameter.type_expression, 0))
-                source_types.push(parameter.type_expression)
-            requirements: mutable darray[Ast::Expr] = proof_contracts(body, "requires")
+            constants_complete: bool = true
+            if module_path.count != 0:
+                constants_complete <- proof_source_collect_scope_constants(file.top_decls, module_path, 0, &names, &types, &source_types, kernel_workspace.source_work_used, parameters.count, 0)
+                kernel_workspace.source_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1 if not constants_complete
+                if not constants_complete:
+                    proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                    return
+            parameters_complete: bool = proof_source_proposition_parameters_with_work(parameters, names, types, source_types, kernel_workspace.source_work_used)
+            if not parameters_complete:
+                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                return
+            requirement_inventory: (complete: bool, expressions: darray[Ast::Expr]) = proof_source_proposition_contracts_with_work(body, "requires", kernel_workspace.source_work_used)
+            requirements: mutable darray[Ast::Expr] = requirement_inventory.expressions
+            if not requirement_inventory.complete:
+                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                return
             signature_contracts: (complete: bool, preconditions: darray[Ast::Expr], postconditions: darray[Ast::Expr]) = proof_signature_contracts_for_line_with_work(file, position.line, kernel_workspace.source_work_used)
-            kernel_workspace.source_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1 if not signature_contracts.complete
+            if not signature_contracts.complete:
+                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                return
+            if not proof_source_kernel_charge_work(signature_contracts.preconditions.count, kernel_workspace.source_work_used):
+                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                return
             requirements.extend(signature_contracts.preconditions)
             for requirement in requirements |names, types, source_types, module_path, global_kernel_bindings, kernel_workspace, table, file, report, name|:
                 kernel_failure: mutable sview = ""
                 kernel_formed: bool = proof_source_kernel_proposition_formed(requirement, names, types, source_types, module_path, global_kernel_bindings, kernel_workspace, validation_workspace, file, &kernel_failure)
                 if not kernel_formed:
+                    if kernel_failure == "kernel source work budget exceeded":
+                        proof_source_kernel_projection_budget_refusal(report, name, Ast::expr_pos(requirement).line, kernel_workspace)
+                        return
                     report.proof_obligation(false)
                     source_position: Ast::Pos = Ast::expr_pos(requirement)
                     diagnostic: sview = "kernel post-state result binding absent" if kernel_failure == "post-result-binding-missing" else "kernel context binding absent" if kernel_failure == "local-context-binding-missing" else "kernel context sort mismatch" if kernel_failure == "local-context-sort-mismatch" else "kernel context type-name mismatch" if kernel_failure == "local-context-name-mismatch" else "kernel context element-sort mismatch" if kernel_failure == "local-context-element-mismatch" else "kernel typing environment unrepresentable" if kernel_failure == "local-context-unrepresented" else kernel_failure if kernel_failure != "" and kernel_failure != "term-sort-or-operator-rejected" else "kernel proposition formation rejected the term or operator"
@@ -351,20 +455,48 @@ extend ElisaProof:
             post_names: mutable darray[sview] = []
             post_types: mutable darray[sview] = []
             post_source_types: mutable darray[Ast::Expr] = []
+            if not proof_source_kernel_charge_work(names.count * 3, kernel_workspace.source_work_used):
+                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                return
             post_names.extend(names)
             post_types.extend(types)
             post_source_types.extend(source_types)
             if return_type is declared_return_type:
+                if not proof_replay_summary_expr_repeat_charge_with_limit(declared_return_type, 1, kernel_workspace.source_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                    proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                    return
+                if not proof_source_proposition_context_fits(post_names.count, 1):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-proposition-type", position.line, name, "kernel proposition context exceeds its bounded name capacity")
+                    return
                 post_names.push("result")
                 post_types.push(proof_source_type_spelling(declared_return_type, 0))
                 post_source_types.push(declared_return_type)
-            postconditions: mutable darray[Ast::Expr] = proof_contracts(body, "ensure")
+            postcondition_inventory: (complete: bool, expressions: darray[Ast::Expr]) = proof_source_proposition_contracts_with_work(body, "ensure", kernel_workspace.source_work_used)
+            postconditions: mutable darray[Ast::Expr] = postcondition_inventory.expressions
+            if not postcondition_inventory.complete:
+                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                return
+            if not proof_source_kernel_charge_work(signature_contracts.postconditions.count, kernel_workspace.source_work_used):
+                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                return
             postconditions.extend(signature_contracts.postconditions)
-            postconditions.extend(proof_unfolded_ensures(parameters, body, return_type, file.top_decls, &kernel_workspace.source_work_used)) if postconditions.count == 0
+            if postconditions.count == 0:
+                unfolded_ensures: darray[Ast::Expr] = proof_unfolded_ensures(parameters, body, return_type, file.top_decls, &kernel_workspace.source_work_used)
+                if kernel_workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                    return
+                if not proof_source_kernel_charge_work(unfolded_ensures.count, kernel_workspace.source_work_used):
+                    proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                    return
+                postconditions.extend(unfolded_ensures)
             for postcondition in postconditions |post_names, post_types, post_source_types, module_path, global_kernel_bindings, kernel_workspace, table, file, report, name|:
                 kernel_failure: mutable sview = ""
                 kernel_formed: bool = proof_source_kernel_proposition_formed(postcondition, post_names, post_types, post_source_types, module_path, global_kernel_bindings, kernel_workspace, validation_workspace, file, &kernel_failure)
                 if not kernel_formed:
+                    if kernel_failure == "kernel source work budget exceeded":
+                        proof_source_kernel_projection_budget_refusal(report, name, Ast::expr_pos(postcondition).line, kernel_workspace)
+                        return
                     report.proof_obligation(false)
                     source_position: Ast::Pos = Ast::expr_pos(postcondition)
                     diagnostic: sview = "kernel post-state result binding absent" if kernel_failure == "post-result-binding-missing" else "kernel context binding absent" if kernel_failure == "local-context-binding-missing" else "kernel context sort mismatch" if kernel_failure == "local-context-sort-mismatch" else "kernel context type-name mismatch" if kernel_failure == "local-context-name-mismatch" else "kernel context element-sort mismatch" if kernel_failure == "local-context-element-mismatch" else "kernel typing environment unrepresentable" if kernel_failure == "local-context-unrepresented" else kernel_failure if kernel_failure != "" and kernel_failure != "term-sort-or-operator-rejected" else "kernel proposition formation rejected the term or operator"
@@ -372,6 +504,9 @@ extend ElisaProof:
             body_names: mutable darray[sview] = []
             body_types: mutable darray[sview] = []
             body_source_types: mutable darray[Ast::Expr] = []
+            if not proof_source_kernel_charge_work(names.count * 3, kernel_workspace.source_work_used):
+                proof_source_kernel_projection_budget_refusal(report, name, position.line, kernel_workspace)
+                return
             body_names.extend(names)
             body_types.extend(types)
             body_source_types.extend(source_types)
@@ -386,27 +521,6 @@ extend ElisaProof:
         # blocks (including extends) at that exact path contribute constants; ancestor modules
         # are not searched. Root-scope fallback is resolved separately. Parameters and locals
         # are appended later so they shadow constants in the owner module.
-        def proof_source_collect_scope_constants(declarations: darray[Ast::Decl]&, module_path: darray[sview]&, level: usize, names: mutable darray[sview]&, types: mutable darray[sview]&, source_types: mutable darray[Ast::Expr]&, depth: usize) -> void can[Memory.Allocate, Abort.Panic]:
-            return if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
-            for declaration in declarations |module_path, level, names, types, source_types, depth|:
-                match declaration:
-                    Ast::Decl.Const(constant_name, constant_type, _, _, _):
-                        if level == module_path.count:
-                            has_type: bool = match constant_type:
-                                Ast::Expr.Absent: false
-                                _: true
-                            if has_type:
-                                names.push(constant_name)
-                                types.push(proof_source_type_spelling(constant_type, 0))
-                                source_types.push(constant_type)
-                    Ast::Decl.Module(module_name, body, _):
-                        if level < module_path.count and module_name == module_path[level]:
-                            proof_source_collect_scope_constants(body, module_path, level + 1, names, types, source_types, depth + 1)
-                    Ast::Decl.Scoped(body, _):
-                        proof_source_collect_scope_constants(body, module_path, level, names, types, source_types, depth + 1)
-                    _:
-                        pass
-
         def proof_validate_propositions_in_scope[@r](file: Ast::File&, declarations: darray[Ast::Decl]&, module_path: darray[sview]&, global_kernel_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], kernel_workspace: mutable ProofSourceKernelFormationWorkspace& @r, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void can[Memory.Allocate, Abort.Panic]:
             for declaration in declarations |file, declarations, module_path, global_kernel_bindings, kernel_workspace, table, report|:
                 match declaration:
