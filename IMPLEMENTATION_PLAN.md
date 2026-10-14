@@ -25201,6 +25201,14 @@ parallel recursive implementation that could drift from branch-sort checks and i
 The source guard verifies the delegation, and focused static checks pass; runtime replay remains
 unqualified pending a source-matched Stage1.
 
+### 23.27.1434 Reuse arena validation across typed tactic-step roots (2026-10-14)
+
+Typed tactic-step replay validates the before and after states plus optional action terms against
+one immutable arena. It now reuses the arena-validation workspace across those roots and charges
+them to one transition work limit, matching the typed branch path. Repeated shared subgraphs are
+validated once while malformed roots and aggregate exhaustion still refuse the transition. Static
+diff and source-length checks pass; no tests or build were run.
+
 ### 23.27.1433 Share typing work across typed tactic transitions (2026-10-14)
 
 Typed tactic-step replay previously started the before-state and after-state proposition checks
