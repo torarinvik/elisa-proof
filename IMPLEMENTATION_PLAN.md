@@ -24970,3 +24970,11 @@ Signed fixed-width safety now handles `resource-call` using its validated arena 
 the declared argument prefix, confirms each child is a `resource-call-arg`, and recursively
 checks each argument value under the existing depth and work limits. The ordinary and cached
 goal paths agree; unsupported trailing child forms still fail closed. No tests or build were run.
+
+### 23.27.1406 Reject quantified terms in fixed-width safety walks (2026-10-14)
+
+Quantifier ranges and bodies live in scalar node fields, outside child edges. Signed fixed-width
+safety has no checked binder sort or range refinement with which to justify the quantified body;
+the ordinary and cached goal paths now reject this form instead of reaching their default-success
+path. Quantified propositions retain their separate typed replay handling. Static diff check passes;
+no build or runtime qualification was run.
