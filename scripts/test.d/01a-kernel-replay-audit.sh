@@ -6,6 +6,7 @@
 KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB="${ELISA_KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB:-4000000}"
 python3 "$ROOT_DIR/scripts/test_kernel_coverage_targets.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_audit_accounting.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_typed_transition_shared_work.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_ast_kernel_mirror_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_index_read_work_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_primitive_witness_marker_work.py" || exit 1

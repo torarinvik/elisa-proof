@@ -11,7 +11,7 @@ This is the active high-return sequence. Older toolchain snapshots and experimen
 
 4. **Verify proof/kernel soundness and high-return performance changes.** The local proof main now includes arithmetic safety leaf/shape hardening, aggregate traversal, bounded quantifier scans, and binary/unary operator arity checks. Source-only budget, width, index, AST-mirror, quantifier-premise, source-length, and diff checks pass. Runtime refusal/replay testing correctly refuses the old binary because it does not match the current proof HEAD; the Stage1 source checkout is also dirty and its product is stale. Once a clean source-matched Stage1 exists, run malformed-slice/sentinel and operator/arity mutations, goal-fact, postcondition-context, index-safety, type-bound-local, linear-certificate, structural-replay, and source-authority regressions, then the relevant proof suite. Compare work counters and adversarial scaling where available, retaining bounded accounting for walks, allocation, hashing, and probes.
 
-5. **Commit qualified source improvements and refresh this plan.** Core commits ce002c04 and f8735f58 are on main and synced to origin; f873’s focused SMT relevant-formal tests pass, while the recursive `ensure` gate remains red. Proof main is twenty-three commits ahead of origin; recent kernel and bounded-work changes are committed locally and pass focused static checks, but remain runtime-unqualified pending a source-matched compiler lane. Record exact compiler/proof revisions and commands with results. Keep timing skipped and refresh the proof pin only after Stage0 and Stage1 come from one coherent tuple.
+5. **Commit qualified source improvements and refresh this plan.** Core commits ce002c04 and f8735f58 are on main and synced to origin; f873’s focused SMT relevant-formal tests pass, while the recursive `ensure` gate remains red. Proof main is twenty-seven commits ahead of origin; recent kernel and bounded-work changes are committed locally and pass focused static checks, but remain runtime-unqualified pending a source-matched compiler lane. Record exact compiler/proof revisions and commands with results. Keep timing skipped and refresh the proof pin only after Stage0 and Stage1 come from one coherent tuple.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -25151,19 +25151,17 @@ no kernel replay verdict bypass. `git diff --check` passes; no tests or build we
 
 The proof-side alias-formal index requires every `__alias_owner` annotation to carry a
 nonzero declaration identity equal to `offset + 1`, then associates it with the AST alias
-using name, line, and byte offset. This requirement is consistent with the proof-side
-same-line ambiguity guard, but the compiler revision pinned in `ELISA_COMPILER_REV`
-(`c93a77740053fe9e9350641d095b57b3fe8bed27`) does not emit either field for
-`__alias_owner` or `__alias_param`: its parser constructs those annotations with only
-owner, name, and line. Consequently, source-conversion alias-formal index construction
-fails closed on reports from that pinned compiler whenever such metadata is present.
-The proof checker must retain the exact-identity requirement; the integration follow-up
-is to add and qualify matching identity/offset emission in the pinned compiler revision,
-then advance the pin and rebuild the proof artifact. The current sibling compiler checkout
-is at a different revision and is not evidence for the pinned source. This finding is
-source-inspected only; no tests or build were run.
+using name, line, and byte offset. The committed compiler revision named in
+`ELISA_COMPILER_REV` (`c93a77740053fe9e9350641d095b57b3fe8bed27`) does not emit either
+field for `__alias_owner` or `__alias_param`. The compiler worktree at that same HEAD now
+has an uncommitted parser change that stamps both marker kinds with the alias token offset
+and identity, matching the proof-side contract. This should resolve the metadata mismatch
+when built from that worktree, but the fix is not yet part of the pinned commit or the
+recorded compiler artifact. Preserve the exact-identity requirement; next commit and
+qualify the compiler change, update the proof pin, and rebuild the matched proof/compiler
+pair. No build or runtime qualification was run during this audit.
 
-### 23.27.1427 Guard the unsigned conditional shortcut with branch-width consistency (2026-10-14)
+### 23.27.1428 Guard the unsigned conditional shortcut with branch-width consistency (2026-10-14)
 
 The unsigned conditional-difference fast path could return before the general conditional branch
 walk checked signedness and width consistency. Move those checks ahead of the shortcut and retain
@@ -25171,16 +25169,7 @@ them under the shared goal-search work meter. The bounded-model source guard now
 ordering. Focused static checks and source-length checks pass; runtime replay remains unqualified
 until a source-matched compiler pair is available.
 
-### 23.27.1429 Share typing work across typed tactic transitions (2026-10-14)
-
-Typed tactic-step replay previously started the before-state and after-state proposition checks
-from independent copies of the typing-index cost. Typed branch replay rebuilt the index and gave
-each of its three states a fresh full typing budget. Both public transitions now build one index
-and carry one cumulative work counter through all state checks (and the step's term-sort checks).
-This bounds aggregate work per transition while avoiding repeated index construction. Static diff
-and source-length checks pass; no tests or build were run.
-
-### 23.27.1428 Align producer conditional-width guards with replay (2026-10-14)
+### 23.27.1429 Align producer conditional-width guards with replay (2026-10-14)
 
 The kernel refuses conditionals whose branches carry contradictory signedness or conflicting known
 widths, but the arithmetic producer previously walked each branch independently and could still
@@ -25188,7 +25177,7 @@ attempt a certificate that replay necessarily rejected. Producer signed and unsi
 run the same branch-sort compatibility check before branch analysis, charging all marker and width
 lookups to the existing safety budget. The legacy signed precheck applies the same rule. Focused width-safety, kernel-budget, index-budget, AST-mirror and quantifier-meter static checks pass, as do source-length and diff checks. No compiler build or runtime replay was available.
 
-### 23.27.1428 Route legacy signed safety entry through the metered walker (2026-10-14)
+### 23.27.1430 Route legacy signed safety entry through the metered walker (2026-10-14)
 
 The legacy signed safety entry recursively rescanned both branch widths at each nested conditional.
 Its caller had no shared preflight reservation, so bounded AST depth alone still allowed repeated
@@ -25196,7 +25185,7 @@ subtree work to grow with the whole input. The entry now builds the checked scal
 once and delegates to the same work-aware walker used by primary proof paths; exhaustion refuses the
 candidate. Static diff review and `git diff --check` pass; no tests or build were run.
 
-### 23.27.1429 Check producer branch sorts before the unsigned shortcut (2026-10-14)
+### 23.27.1431 Check producer branch sorts before the unsigned shortcut (2026-10-14)
 
 The unsigned producer's conditional-difference shortcut also ran before its main `If` case. Branch
 sort compatibility now runs immediately after the metered expression preflight and before width
@@ -25204,10 +25193,20 @@ shortcuts, negative-bit scans, and conditional-difference acceptance. This mirro
 and prevents the fast path from bypassing the new invariant. `git diff --check` passes; no tests or
 build were run.
 
-### 23.27.1429 Reuse metered signed arithmetic safety for legacy callers (2026-10-14)
+### 23.27.1432 Reuse metered signed arithmetic safety for legacy callers (2026-10-14)
 
 The legacy signed-safety entry point now builds its scalar marker set under the linear-safety work
 budget and delegates to the same work-aware traversal used by current producers. This removes a
 parallel recursive implementation that could drift from branch-sort checks and its bounded form.
 The source guard verifies the delegation, and focused static checks pass; runtime replay remains
 unqualified pending a source-matched Stage1.
+
+### 23.27.1433 Share typing work across typed tactic transitions (2026-10-14)
+
+Typed tactic-step replay previously started the before-state and after-state proposition checks
+from independent copies of the typing-index cost. Typed branch replay rebuilt the index and gave
+each of its three states a fresh full typing budget. Both public transitions now build one index
+and carry one cumulative work counter through all state checks (and the step's term-sort checks).
+This bounds aggregate work per transition while avoiding repeated index construction. The dedicated
+source guard is included in the kernel audit suite and passes; focused width/budget checks and source
+length also pass. Runtime replay remains unqualified pending a source-matched Stage1.
