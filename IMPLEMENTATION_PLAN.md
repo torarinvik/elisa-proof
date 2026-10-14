@@ -20004,8 +20004,14 @@ build/runtime qualification was run.
 ### 23.27.951 Reconstruct exact implicit-return substitution for source ensures (2026-10-14)
 
 Source postcondition admission previously required the parser AST to equal the emitted goal, apart
-from a narrow integer-literal special case. It now also resolves the exact owner by name, line, and
-declaration offset and substitutes the parser-owned final expression for `result` when the body
-contains only leading contract clauses and that tail expression. Parameter shadowing, unsupported
-body statements, ambiguous owners, unsafe result terms, and budget exhaustion fail closed. Static
-whitespace and source-length gates pass; no tests, build, or runtime qualification were run.
+from a narrow integer-literal special case. A single bounded parser traversal now records each
+function's return shape in a sorted immutable inventory. Admission uses binary search and resolves
+the exact owner by name, line, and declaration offset before substituting the parser-owned final
+expression for `result` when the body contains only leading contract clauses and that tail
+expression. Parameter shadowing, unsupported body statements, ambiguous owners, unsafe result terms,
+overloaded source operators, and budget
+exhaustion fail closed. The substitution preflights worst-case expression expansion against the
+shared work limit. Added an end-to-end fixture asserting both source admission and replay for
+`ensure result > value` with an implicit `value + 1` return. `git diff --check` and the source-length
+gate pass; the test, build, and runtime qualification were not run under the compiler provenance
+hold.
