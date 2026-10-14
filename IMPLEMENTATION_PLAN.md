@@ -24771,3 +24771,14 @@ source-regenerated certificate-set comparison to precede the per-owner validatio
 Marker-work, kernel-inventory, source-authority, and structural-replay guards, source-length, and
 diff checks pass. The source-admission runtime matrix refuses the installed proof binary because
 it does not match the current proof source; these changes remain unqualified at runtime.
+
+### 23.27.1389 Document structural replay's exact generic-owner dependencies
+
+A fresh kernel inventory run found two newly introduced calls from structural source-cache
+validation into the source-conversion owner indexes. Both authenticate each copied generic
+parameter row against its exact source owner offset before structural replay accepts the rebuilt
+source graph. The same inventory run exposed a package-format helper newly shared with
+correspondence matching. Added all three dependencies to their external-call inventories with
+their source-adapter roles. The workspace-cache boundary, kernel inventory, pattern-literal,
+source-authority, diff, and source-length checks pass. Compiler/runtime qualification remains
+outstanding.
