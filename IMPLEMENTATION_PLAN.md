@@ -26179,6 +26179,16 @@ typed-boundary review found no additional root-admission gap in the field-place 
 `git diff --check` passes; no tests or compiler build were run, and compiler-matched runtime
 qualification remains outstanding.
 
+### 23.27.1524 Reuse validated operator masks in report-bound analysis (2026-10-14)
+
+Report-bound branch joins, binding-range derivation, collection-pop restatement, source-bound
+tactic import, theorem suggestions, and counterexample search now read the primitive operator
+mask already built from the report's parser-origin annotation snapshot. A separate validity bit
+is reset whenever the operator index is rebuilt and set only after both masks complete; the
+cached lookup charges the shared source-work ledger and fails closed if either the index or mask
+is unavailable. Annotation-only compatibility APIs retain their bounded scan. `git diff --check`
+passes; no tests or compiler build were run.
+
 ### 23.27.1524 Gate generic same-arena reset and stale-view use (2026-10-14)
 
 Added a compiler regression fixture where a generic helper receives an arena and a view under
