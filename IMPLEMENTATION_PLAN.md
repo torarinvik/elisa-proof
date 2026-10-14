@@ -20015,3 +20015,29 @@ shared work limit. Added an end-to-end fixture asserting both source admission a
 `ensure result > value` with an implicit `value + 1` return. `git diff --check` and the source-length
 gate pass; the test, build, and runtime qualification were not run under the compiler provenance
 hold.
+
+### 23.27.952 Avoid double charging return-shape body traversal (2026-10-14)
+
+The one-time parser return-shape pass now charges each statement as it visits it, including
+functions without postconditions. The separate postcondition inventory pass charges its own
+statement visits. This meters both actual scans without a second reservation for the same scan.
+`git diff --check` and the source-length gate pass; runtime qualification remains under the matched
+compiler-product hold.
+
+### 23.27.954 Collect source return shape and ensures in one body pass (2026-10-14)
+
+The source inventory builder previously walked every function body once to determine whether its
+tail expression could justify `result` substitution, then walked it again to collect body ensures.
+These checks now share one pass: each statement is charged once, supported return shape is derived
+from the leading contract statements and expression tail, and ensure rows retain the same
+owner-local order. Parameter names remain charged and a `result` parameter disables substitution.
+`git diff --check` and the source-length gate pass; parser/build/runtime qualification remains held
+until a matched proof and compiler product is available.
+
+### 23.27.953 Remove redundant result-substitution work debits (2026-10-14)
+
+The expression repeat reservation already covers the cost extraction and substitution traversals,
+so removed an additional debit for the same source-expression cost. The return-owner lookup now
+charges both compared names and retains the exact-match result, avoiding a repeated string compare.
+`git diff --check` and the source-length gate pass; runtime qualification remains under the matched
+compiler-product hold.
