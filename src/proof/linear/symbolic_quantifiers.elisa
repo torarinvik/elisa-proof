@@ -20,6 +20,24 @@ const PROOF_SYMBOLIC_RENAME_PAIRS: usize = 8
 const PROOF_SYMBOLIC_ALIAS_CANDIDATES: usize = 4
 
 extend ElisaProof:
+    private:
+        def proof_symbolic_quantifier_kind_with_budget(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, kind: sview):
+            return (false, "") if exhausted
+            if budget >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS:
+                exhausted <- true
+                return (false, "")
+            budget <- budget + 1
+            remaining: usize = PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS - budget
+            annotation_work: mutable usize = 0
+            kind: sview = proof_quantifier_kind_with_work_limit(expression, annotations, &annotation_work, remaining, 0)
+            if annotation_work > remaining:
+                budget <- PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS
+                exhausted <- true
+                return (false, "")
+            budget <- budget + annotation_work
+            (true, kind)
+
+extend ElisaProof:
     public:
         # Split `forall binder in lower..<upper: body` (RangeLt only).
         def proof_symbolic_range(expression: Ast::Expr) -> (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr):
@@ -53,7 +71,8 @@ extend ElisaProof:
             return (proof_goal_depth(facts, goal, annotations, operator_mask, depth + 1, budget, side_split_depth, exhausted) can Global{Read,Write})
 
         def proof_symbolic_quantifier_goal(facts: darray[Ast::Expr]&, expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool can[Global.Read, Global.Write]:
-            return false if proof_quantifier_kind(expression, annotations) != "forall"
+            quantifier: (complete: bool, kind: sview) = proof_symbolic_quantifier_kind_with_budget(expression, annotations, budget, exhausted)
+            return false if not quantifier.complete or quantifier.kind != "forall"
             goal: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(expression)
             return false if not goal.known
             position: Ast::Pos = Ast::pos_at_line(0)
@@ -69,7 +88,9 @@ extend ElisaProof:
             for fact in facts |fact, facts, goal, goal_marked, marker_values, annotations, operator_mask, depth, budget, split_depth, exhausted, scanned, position|:
                 return false if scanned >= PROOF_SYMBOLIC_QUANTIFIER_MAX_FACTS
                 scanned <- scanned + 1
-                if proof_quantifier_kind(fact, annotations) == "forall":
+                fact_quantifier: (complete: bool, kind: sview) = proof_symbolic_quantifier_kind_with_budget(fact, annotations, budget, exhausted)
+                return false if not fact_quantifier.complete
+                if fact_quantifier.kind == "forall":
                     known: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
                     fact_names: darray[sview] = [known.binder]
                     fact_marked: Ast::Expr = proof_substitute(known.body, fact_names, marker_values)
@@ -179,7 +200,8 @@ extend ElisaProof:
         # PROOF_SYMBOLIC_INSTANCE_CANDIDATES of them, against at most
         # PROOF_SYMBOLIC_QUANTIFIER_MAX_FACTS facts.
         def proof_symbolic_instance_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool can[Global.Read, Global.Write]:
-            return false if proof_quantifier_kind(goal, annotations) != ""
+            goal_quantifier: (complete: bool, kind: sview) = proof_symbolic_quantifier_kind_with_budget(goal, annotations, budget, exhausted)
+            return false if not goal_quantifier.complete or goal_quantifier.kind != ""
             candidates: mutable darray[Ast::Expr] = []
             proof_symbolic_subscripts(goal, &candidates, 0)
             position: Ast::Pos = Ast::pos_at_line(0)
@@ -187,7 +209,9 @@ extend ElisaProof:
             for fact in facts |fact, facts, goal, candidates, annotations, operator_mask, depth, budget, split_depth, exhausted, scanned, position|:
                 return false if scanned >= PROOF_SYMBOLIC_QUANTIFIER_MAX_FACTS
                 scanned <- scanned + 1
-                continue if proof_quantifier_kind(fact, annotations) != "forall"
+                fact_quantifier: (complete: bool, kind: sview) = proof_symbolic_quantifier_kind_with_budget(fact, annotations, budget, exhausted)
+                return false if not fact_quantifier.complete
+                continue if fact_quantifier.kind != "forall"
                 known: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
                 continue if not known.known
                 # A scalar body such as `i <= limit` supplies its trigger from the matching
@@ -276,16 +300,19 @@ extend ElisaProof:
         # subscript of the goal that no fact subscripts is replaced, by a subscript of some fact,
         # so the rewrite never runs back; at most PROOF_SYMBOLIC_RENAME_PAIRS pairs are tried.
         def proof_symbolic_renamed_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool can[Global.Read, Global.Write]:
-            return false if proof_quantifier_kind(goal, annotations) != ""
+            goal_quantifier: (complete: bool, kind: sview) = proof_symbolic_quantifier_kind_with_budget(goal, annotations, budget, exhausted)
+            return false if not goal_quantifier.complete or goal_quantifier.kind != ""
             goal_subscripts: mutable darray[Ast::Expr] = []
             proof_symbolic_subscripts(goal, &goal_subscripts, 0)
             return false if goal_subscripts.count == 0
             fact_subscripts: mutable darray[Ast::Expr] = []
             scanned: mutable usize = 0
-            for fact in facts |fact, annotations, fact_subscripts, scanned|:
+            for fact in facts |fact, annotations, fact_subscripts, scanned, budget, exhausted|:
                 break if scanned >= PROOF_SYMBOLIC_QUANTIFIER_MAX_FACTS or fact_subscripts.count >= PROOF_SYMBOLIC_INSTANCE_CANDIDATES
                 scanned <- scanned + 1
-                continue if proof_quantifier_kind(fact, annotations) != ""
+                fact_quantifier: (complete: bool, kind: sview) = proof_symbolic_quantifier_kind_with_budget(fact, annotations, budget, exhausted)
+                return false if not fact_quantifier.complete
+                continue if fact_quantifier.kind != ""
                 proof_symbolic_subscripts(fact, &fact_subscripts, 0)
             position: Ast::Pos = Ast::pos_at_line(0)
             tried: mutable usize = 0
@@ -327,9 +354,15 @@ extend ElisaProof:
         # be read with `t` unfolded to the cell, `p <= t` as `p <= xs[e]`, which the instance rule
         # can then take at e. At most PROOF_SYMBOLIC_ALIAS_CANDIDATES aliases are tried.
         def proof_symbolic_alias_instance_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool can[Global.Read, Global.Write]:
-            return false if:
-                proof_quantifier_kind(goal, annotations) != ""
-                not (any fact in facts where proof_quantifier_kind(fact, annotations) == "forall")
+            goal_quantifier: (complete: bool, kind: sview) = proof_symbolic_quantifier_kind_with_budget(goal, annotations, budget, exhausted)
+            return false if not goal_quantifier.complete or goal_quantifier.kind != ""
+            has_universal: mutable bool = false
+            for fact in facts |fact, annotations, budget, exhausted, has_universal|:
+                fact_quantifier: (complete: bool, kind: sview) = proof_symbolic_quantifier_kind_with_budget(fact, annotations, budget, exhausted)
+                return false if not fact_quantifier.complete
+                has_universal <- true if fact_quantifier.kind == "forall"
+                break if has_universal
+            return false if not has_universal
             tried: mutable usize = 0
             scanned: mutable usize = 0
             for fact in facts |fact, facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted, tried, scanned|:
