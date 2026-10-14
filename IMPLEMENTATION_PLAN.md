@@ -24937,16 +24937,6 @@ base expressions and every stored child; `field-init` is treated as a value wrap
 node validity, depth, and the existing work limits remain enforced, and unsupported child-bearing
 forms still fail closed. `git diff --check` and the source-length gate pass; no tests or build were run.
 
-### 23.27.1404 Bind all generic side rows to parser source (2026-10-14)
-
-Structural replay intentionally authenticates ordinary generic rows against function identity
-markers and excludes high-bit bound rows from the binder index. That census does not cover every
-non-function generic parameter row. Source-bound admission now compares the complete parallel
-generic line, name, and owner-offset arrays against the retained parser-owned `Ast::File` arrays,
-including non-function declarations and encoded bound rows. Counts, row visits, and both name
-lengths are charged to the admission budget; malformed or changed snapshots refuse source
-authority. No tests or build were run.
-
 ### 23.27.1403 Bind alias-formal markers to parser-owned source (2026-10-14)
 
 Checked-view source admission now includes `__alias_owner` rows in the ordered parser-snapshot
@@ -24978,3 +24968,30 @@ safety has no checked binder sort or range refinement with which to justify the 
 the ordinary and cached goal paths now reject this form instead of reaching their default-success
 path. Quantified propositions retain their separate typed replay handling. Static diff check passes;
 no build or runtime qualification was run.
+
+### 23.27.1407 Bind all generic side rows to parser source (2026-10-14)
+
+Structural replay intentionally authenticates ordinary generic rows against function identity
+markers and excludes high-bit bound rows from the binder index. That census does not cover every
+non-function generic parameter row. Source-bound admission now compares the complete parallel
+generic line, name, and owner-offset arrays against the retained parser-owned `Ast::File` arrays,
+including non-function declarations and encoded bound rows. Counts, row visits, and both name
+lengths are charged to the admission budget; malformed or changed snapshots refuse source
+authority. No tests or build were run.
+
+### 23.27.1408 Scan quantified range and body for negative integer bit patterns (2026-10-14)
+
+The unsigned machine-word representability scan traversed quantified terms as leaves even though
+the kernel arena stores their range and body in scalar `left` and `right` edges. It now scans both
+under the same shared depth and work counters, failing closed on invalid children or exhaustion.
+This prevents a negative integer term in a quantified branch condition from escaping the
+bit-pattern gate. No tests or build were run.
+
+### 23.27.1408 Admit only known scalar leaves in arithmetic safety walks (2026-10-14)
+
+The signed and unsigned safety walkers treated any childless node as safe. Some non-expression
+nodes carry references in scalar fields, so a child-table count of zero does not prove that the
+node is a leaf or has value semantics. The ordinary signed, cached signed, and unsigned walks now
+terminate only on the canonical scalar leaf kinds; all other unhandled nodes fail closed. Explicit
+quantifier rejection remains in place because the expression-only walks lack checked binder sorts
+and range refinements. `git diff --check` and the source-length gate pass; no tests or build were run.
