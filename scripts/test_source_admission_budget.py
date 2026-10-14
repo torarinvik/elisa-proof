@@ -190,7 +190,7 @@ assert "proof_checked_view_theorem_source_admission(checked_view, theorem_index)
 assert "theorem_source_status.source_admissible and theorem_source_status.declaration_identity_unambiguous" in suggestion_body
 assert "proof_declaration_name_is_unique" not in suggestion_body
 assert "proof_checked_view_theorem_source_admissions_complete(checked_view)" in suggestion_body
-assert "goal_facts_source_admissible: bool = goal_id < report.results.goal_attempts.count and proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)" in suggestion_body
+assert "goal_facts_source_admissible: bool = goal_status_parts_complete and goal_id < report.results.goal_attempts.count and proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)" in suggestion_body
 assert 'proof_push(buffer, "true" if goal_facts_source_admissible else "false")' in suggestion_body
 assert "and goal_source_admissible and goal_facts_source_admissible:" in suggestion_body
 assert "if goal_id < report.results.goal_attempts.count and goal_source_admissible and goal_facts_source_admissible:" in suggestion_body
@@ -241,8 +241,8 @@ assert "Ast::Expr.Absent |" not in unsafe_source_shape
 assert "arm.guard != Ast::Expr.Absent and proof_report_postcondition_has_unsafe_source_shape_depth(arm.guard" in unsafe_source_shape
 unsafe_match = unsafe_source_shape.split("Ast::Expr.Match(scrutinee, arms, position):", 1)[1].split("Ast::Expr.Comprehension", 1)[0]
 assert unsafe_match.index("arm.body.count != 1") < unsafe_match.index("proof_report_postcondition_has_unsafe_source_shape_depth(arm.guard")
-result_reference_match = goal_admission.split("def proof_report_postcondition_mentions_result_variable_depth(", 1)[1].split("def proof_report_postcondition_return_lookup(", 1)[0].split("Ast::Expr.Match(scrutinee, arms, position):", 1)[1].split("Ast::Expr.GetElse", 1)[0]
-assert result_reference_match.index("arm.body.count != 1") < result_reference_match.index("proof_report_postcondition_mentions_result_variable_depth(arm.guard")
+result_reference_match = goal_admission.split("def proof_report_postcondition_source_scan_depth(", 1)[1].split("def proof_report_postcondition_return_lookup(", 1)[0].split("Ast::Expr.Match(scrutinee, arms, position):", 1)[1].split("Ast::Expr.GetElse", 1)[0]
+assert result_reference_match.index("arm.body.count != 1") < result_reference_match.index("proof_report_postcondition_source_scan_depth(arm.guard")
 pattern_binder_budget = goal_admission.split("def proof_report_postcondition_pattern_special_binders(", 1)[1].split("def proof_report_postcondition_match_binder_visibility(", 1)[0]
 for charged_text in ('sview_len(name)', 'sview_len("result")', 'sview_len("old")'):
     assert f"proof_report_source_work_charge({charged_text}, source_work)" in pattern_binder_budget
