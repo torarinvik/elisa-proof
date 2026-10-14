@@ -37,4 +37,16 @@ assert "matches > 1" in owner_lookup
 fixture = (ROOT / "examples/assignment_rhs_state.elisa").read_text(encoding="utf-8")
 assert "value <- assignment_add_one(value)" in fixture
 
+# A repeated, textually identical invocation can have different state or resolution. Rebinding
+# must therefore use the exact parser call position whenever the assigned expression is a call.
+rebinding = (ROOT / "src/proof/check/bound_call_summaries.elisa").read_text(encoding="utf-8")
+position_equal = rebinding.split("def proof_bound_call_summary_position_equal(", 1)[1].split(
+    "def proof_rebind_call_summaries(", 1
+)[0]
+for field in ("line", "column", "offset", "end_line", "end_column", "end_offset"):
+    assert f"left.{field} == right.{field}" in position_equal
+rebind = rebinding.split("def proof_rebind_call_summaries(", 1)[1]
+assert "Ast::Expr.Call(_, _, _, source_position)" in rebind
+assert "continue if direct_call and not proof_bound_call_summary_position_equal(trace.source_call_position, direct_call_position)" in rebind
+
 print("summary call source guard: assignment forms and cached exact-owner indexing are preserved")
