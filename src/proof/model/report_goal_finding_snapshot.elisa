@@ -1,4 +1,6 @@
 # A bounded hash fast path with a deterministic sorted fallback associates fatal findings.
+# Append-only arrays charge twice per push: one element write plus a conservative amortized
+# allowance for copying existing elements when geometric growth reallocates.
 const PROOF_REPORT_GOAL_FINDING_PROBE_LIMIT: usize = 64
 
 extend ElisaProof:
@@ -30,16 +32,16 @@ extend ElisaProof:
         def proof_report_goal_finding_index_create(goal_count: usize, source_work: mutable usize&) -> ProofGoalFindingIndex can[Memory.Allocate]:
             return ProofGoalFindingIndex{valid: true} if goal_count == 0
             source_work_limit: usize = proof_replay_summary_source_work_limit()
-            return ProofGoalFindingIndex{} if goal_count > source_work_limit / 7
+            return ProofGoalFindingIndex{} if goal_count > source_work_limit / 4
             relation_capacity: usize = goal_count * 2
             target_capacity: usize = relation_capacity * 2
             slot_capacity: mutable usize = 1
             while slot_capacity < target_capacity |slot_capacity, target_capacity, relation_capacity|:
-                return ProofGoalFindingIndex{} if slot_capacity > source_work_limit / 7
+                return ProofGoalFindingIndex{} if slot_capacity > source_work_limit / 9
                 slot_capacity <- slot_capacity * 2
             return ProofGoalFindingIndex{} if:
-                slot_capacity > source_work_limit / 7
-                not proof_report_source_work_charge(slot_capacity * 7, source_work)
+                slot_capacity > source_work_limit / 9
+                not proof_report_source_work_charge(slot_capacity * 9, source_work)
             index: mutable ProofGoalFindingIndex = ProofGoalFindingIndex{valid: true, empty_relation: relation_capacity}
             index.slot_used.resize(slot_capacity)
             index.slot_hashes.resize(slot_capacity)
@@ -131,6 +133,7 @@ extend ElisaProof:
                     return false if:
                         relation >= index.relation_goal_ids.count or relation >= index.relation_next.count
                         not proof_report_source_work_charge(1, source_work)
+                    return false if not proof_report_source_work_charge(2, source_work)
                     index.sorted_entries.push(ProofGoalFindingSortedEntry{name: index.slot_names[slot], line: index.slot_lines[slot], goal_id: index.relation_goal_ids[relation], refuting: false})
                     relation <- index.relation_next[relation]
             index.sorted_mode <- true
@@ -139,7 +142,7 @@ extend ElisaProof:
         def proof_report_goal_finding_index_promote(index: mutable ProofGoalFindingIndex&, name: sview, line: u32, goal_id: usize, source_work: mutable usize&) -> bool:
             return false if:
                 not proof_report_goal_finding_index_promote_existing(index, source_work)
-                not proof_report_source_work_charge(1, source_work)
+                not proof_report_source_work_charge(2, source_work)
             index.sorted_entries.push(ProofGoalFindingSortedEntry{name: name, line: line, goal_id: goal_id, refuting: false})
             return true
 
@@ -163,7 +166,7 @@ extend ElisaProof:
         def proof_report_goal_finding_index_add(index: mutable ProofGoalFindingIndex&, name: sview, line: u32, goal_id: usize, source_work: mutable usize&) -> bool:
             return false if not index.valid or index.slot_used.count == 0 or goal_id * 2 >= index.empty_relation
             if index.sorted_mode:
-                return false if not proof_report_source_work_charge(1, source_work)
+                return false if not proof_report_source_work_charge(2, source_work)
                 index.sorted_entries.push(ProofGoalFindingSortedEntry{name: name, line: line, goal_id: goal_id, refuting: false})
                 return true
             hash_result: (complete: bool, hash: u32) = proof_report_goal_finding_hash(name, line, source_work)
@@ -175,15 +178,14 @@ extend ElisaProof:
             while probes < capacity and probes < PROOF_REPORT_GOAL_FINDING_PROBE_LIMIT |probes, slot, hash, name, line, goal_id, index, capacity, source_work|:
                 return false if not proof_report_source_work_charge(1, source_work)
                 if not index.slot_used[slot]:
-                    return false if not proof_report_source_work_charge(1, source_work)
+                    relation_index: usize = index.relation_goal_ids.count
+                    return false if relation_index >= index.empty_relation or not proof_report_source_work_charge(12, source_work)
                     index.slot_used[slot] <- true
                     index.slot_hashes[slot] <- hash
                     index.slot_names[slot] <- name
                     index.slot_lines[slot] <- line
                     index.slot_refuting[slot] <- false
                     index.used_slots.push(slot)
-                    relation_index: usize = index.relation_goal_ids.count
-                    return false if relation_index >= index.empty_relation
                     index.relation_goal_ids.push(goal_id)
                     index.relation_next.push(index.empty_relation)
                     index.slot_heads[slot] <- relation_index
@@ -192,7 +194,7 @@ extend ElisaProof:
                     return false if not proof_report_source_work_charge(sview_len(name), source_work)
                     if index.slot_names[slot] == name and index.slot_lines[slot] == line:
                         relation_index: usize = index.relation_goal_ids.count
-                        return false if relation_index >= index.empty_relation
+                        return false if relation_index >= index.empty_relation or not proof_report_source_work_charge(5, source_work)
                         index.relation_goal_ids.push(goal_id)
                         index.relation_next.push(index.slot_heads[slot])
                         index.slot_heads[slot] <- relation_index
@@ -295,7 +297,7 @@ extend ElisaProof:
                     return ([], false) if finding.has_goal and finding.goal_id >= report.results.goal_attempts.count
             goal_finding_clear: mutable darray[bool] = []
             for _ in 0..<report.results.goal_attempts.count |goal_finding_clear, source_work|:
-                return ([], false) if not proof_report_source_work_charge(1, source_work)
+                return ([], false) if not proof_report_source_work_charge(2, source_work)
                 goal_finding_clear.push(true)
             return (goal_finding_clear, true) if report.results.goal_attempts.count == 0 or refutations.count == 0
 
@@ -309,7 +311,7 @@ extend ElisaProof:
 
             goal_event_seen: mutable darray[bool] = []
             for _ in 0..<report.results.goal_attempts.count |goal_event_seen, source_work|:
-                return false if not proof_report_source_work_charge(1, source_work)
+                return false if not proof_report_source_work_charge(2, source_work)
                 goal_event_seen.push(false)
             index: mutable ProofGoalFindingIndex = proof_report_goal_finding_index_create(report.results.goal_attempts.count, source_work)
             return false if not index.valid
@@ -357,7 +359,7 @@ extend ElisaProof:
                 refuting: bool = proof_report_goal_finding_is_refuting(finding.kind, source_work)
                 return ([], false) if source_work > proof_replay_summary_source_work_limit()
                 if refuting:
-                    return ([], false) if not proof_report_source_work_charge(1, source_work)
+                    return ([], false) if not proof_report_source_work_charge(2, source_work)
                     refutations.push(ProofGoalRefutation{finding_index: finding_index})
             clear_snapshot: (goal_finding_clear: darray[bool], complete: bool) = proof_report_source_goal_finding_snapshot_from_refutations(report, refutations, source_work, true)
             return clear_snapshot

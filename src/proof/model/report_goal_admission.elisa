@@ -1,12 +1,14 @@
 # Source-bound goal admission against a checked report and parser inventories.
 extend ElisaProof:
     private:
-        def proof_report_postcondition_pattern_special_binders(pattern: Ast::Pattern, position: Ast::Pos, source: Ast::Expr, source_work: mutable usize&) -> (complete: bool, binds_result: bool, binds_old: bool):
+        def proof_report_postcondition_pattern_special_binders(pattern: Ast::Pattern, position: Ast::Pos, source_work: mutable usize&) -> (complete: bool, binds_result: bool, binds_old: bool):
             names: mutable darray[sview] = []
             values: mutable darray[Ast::Expr] = []
             # The Match-arm caller reserves the recursive pattern walk and this binding
-            # collection before entering the helper. Charge the additional byte comparisons here.
-            return (false, false, false) if not proof_bind_pattern(pattern, position, source, &names, &values)
+            # collection before entering the helper. Binding values are discarded below, so seed
+            # projections with Invalid instead of copying the full scrutinee once per binder.
+            # Charge the additional byte comparisons here.
+            return (false, false, false) if not proof_bind_pattern(pattern, position, Ast::Expr.Invalid, &names, &values)
             binds_result: mutable bool = false
             binds_old: mutable bool = false
             for name in names |name, source_work, binds_result, binds_old|:
@@ -15,20 +17,21 @@ extend ElisaProof:
                 binds_old <- true if name == "old"
             (true, binds_result, binds_old)
 
-        def proof_report_postcondition_match_binder_visibility(pattern: Ast::Pattern, position: Ast::Pos, scrutinee: Ast::Expr, check_result: bool, check_old: bool, source_work: mutable usize&) -> (known: bool, check_result: bool, check_old: bool):
-            binders: (complete: bool, binds_result: bool, binds_old: bool) = proof_report_postcondition_pattern_special_binders(pattern, position, scrutinee, source_work)
+        def proof_report_postcondition_match_binder_visibility(pattern: Ast::Pattern, position: Ast::Pos, check_result: bool, check_old: bool, source_work: mutable usize&) -> (known: bool, check_result: bool, check_old: bool):
+            binders: (complete: bool, binds_result: bool, binds_old: bool) = proof_report_postcondition_pattern_special_binders(pattern, position, source_work)
             return (false, check_result, check_old) if not binders.complete
             check_result <- false if binders.binds_result
             check_old <- false if binders.binds_old
             (true, check_result, check_old)
 
-        # The pattern-cost pass below is itself charged as it runs. Reserve the two
-        # subsequent traversals: closed-pattern validation and binder collection.
+        # The cost walk below does not debit source_work itself. Charge its measured
+        # cost together with the two following traversals: closed-pattern validation
+        # and binder collection.
         def proof_report_match_pattern_closed_with_work(pattern: Ast::Pattern, source_work: mutable usize&) -> bool:
             pattern_cost: mutable usize = 0
             return false if not proof_replay_summary_pattern_cost(pattern, &pattern_cost, source_work, 0) or pattern_cost == 0
-            return false if pattern_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
-            return false if not proof_report_source_work_charge(pattern_cost * 2, source_work)
+            return false if pattern_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3
+            return false if not proof_report_source_work_charge(pattern_cost * 3, source_work)
             proof_match_closed_pattern(pattern)
 
         def proof_report_goal_owner_is_source_declaration(report: ProofReport&, name: sview, owner_line: u32, owner_offset: u32, source_work: mutable usize&) -> bool:
@@ -56,11 +59,16 @@ extend ElisaProof:
         # Fuse the two name checks and call check into one bounded AST walk. Unknown forms
         # remain unsafe, matching the fail-closed behavior of the underlying predicates.
         def proof_report_postcondition_has_unsafe_source_shape_depth(expression: Ast::Expr, depth: usize, check_result: bool, check_old: bool, allow_match_lowering: bool, source_work: mutable usize&) -> bool:
+            # This walker is called on the returned expression before substitution. Charge every
+            # visited node; the shared caller meter must bound ordinary recursion as well as the
+            # specialized pattern and substitution passes below.
+            return true if not proof_report_source_work_charge(1, source_work)
             return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _):
                     return false
                 Ast::Expr.Ident(name, _):
+                    return true if not proof_report_source_work_charge(sview_len(name), source_work) or not proof_report_source_work_charge(sview_len("result"), source_work) or not proof_report_source_work_charge(sview_len("old"), source_work)
                     return (check_result and name == "result") or (check_old and name == "old")
                 Ast::Expr.Call(_, _, _, _) | Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
                     return true
@@ -76,26 +84,31 @@ extend ElisaProof:
                     return proof_report_postcondition_has_unsafe_source_shape_depth(object, depth + 1, check_result, check_old, allow_match_lowering, source_work) or proof_report_postcondition_has_unsafe_source_shape_depth(low, depth + 1, check_result, check_old, allow_match_lowering, source_work) or proof_report_postcondition_has_unsafe_source_shape_depth(high, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                 Ast::Expr.IndexN(object, arguments, _):
                     return true if proof_report_postcondition_has_unsafe_source_shape_depth(object, depth + 1, check_result, check_old, allow_match_lowering, source_work)
-                    for argument in arguments:
+                    for argument in arguments |source_work|:
+                        return true if not proof_report_source_work_charge(1, source_work)
                         return true if proof_report_postcondition_has_unsafe_source_shape_depth(argument, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     return false
                 Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
-                    for element in elements:
+                    for element in elements |source_work|:
+                        return true if not proof_report_source_work_charge(1, source_work)
                         return true if proof_report_postcondition_has_unsafe_source_shape_depth(element, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     return false
                 Ast::Expr.DictLit(entries, _):
-                    for entry in entries:
+                    for entry in entries |source_work|:
+                        return true if not proof_report_source_work_charge(1, source_work)
                         return true if proof_report_postcondition_has_unsafe_source_shape_depth(entry.key, depth + 1, check_result, check_old, allow_match_lowering, source_work) or proof_report_postcondition_has_unsafe_source_shape_depth(entry.value, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     return false
                 Ast::Expr.Construct(_, fields, _):
                     # The constructor head is a type expression; substitution only rewrites
                     # runtime values in the fields.
-                    for field in fields:
+                    for field in fields |source_work|:
+                        return true if not proof_report_source_work_charge(1, source_work)
                         return true if proof_report_postcondition_has_unsafe_source_shape_depth(field.value, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     return false
                 Ast::Expr.RecordUpdate(base, fields, _):
                     return true if proof_report_postcondition_has_unsafe_source_shape_depth(base, depth + 1, check_result, check_old, allow_match_lowering, source_work)
-                    for field in fields:
+                    for field in fields |source_work|:
+                        return true if not proof_report_source_work_charge(1, source_work)
                         return true if proof_report_postcondition_has_unsafe_source_shape_depth(field.value, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     return false
                 Ast::Expr.If(condition, then_expression, else_expression, _):
@@ -106,10 +119,11 @@ extend ElisaProof:
                     # the caller's source-work budget.
                     return true if not allow_match_lowering
                     return true if proof_report_postcondition_has_unsafe_source_shape_depth(scrutinee, depth + 1, check_result, check_old, allow_match_lowering, source_work)
-                    for arm in arms:
+                    for arm in arms |source_work|:
+                        return true if not proof_report_source_work_charge(1, source_work)
                         return true if arm.body.count != 1
                         return true if not proof_report_match_pattern_closed_with_work(arm.pattern, source_work)
-                        arm_visibility: (known: bool, check_result: bool, check_old: bool) = proof_report_postcondition_match_binder_visibility(arm.pattern, position, scrutinee, check_result, check_old, source_work)
+                        arm_visibility: (known: bool, check_result: bool, check_old: bool) = proof_report_postcondition_match_binder_visibility(arm.pattern, position, check_result, check_old, source_work)
                         return true if not arm_visibility.known
                         return true if arm.guard != Ast::Expr.Absent and proof_report_postcondition_has_unsafe_source_shape_depth(arm.guard, depth + 1, arm_visibility.check_result, arm_visibility.check_old, allow_match_lowering, source_work)
                         match arm.body[0]:
@@ -119,6 +133,7 @@ extend ElisaProof:
                                 return true
                     return false
                 Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+                    return true if not proof_report_source_work_charge(sview_len(variable), source_work) or not proof_report_source_work_charge(sview_len("result"), source_work) or not proof_report_source_work_charge(sview_len("old"), source_work)
                     return true if proof_report_postcondition_has_unsafe_source_shape_depth(iterable, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     body_checks_result: bool = check_result and variable != "result"
                     body_checks_old: bool = check_old and variable != "old"
@@ -128,9 +143,11 @@ extend ElisaProof:
                 Ast::Expr.Block(statements, value, _, _):
                     value_checks_result: mutable bool = check_result
                     value_checks_old: mutable bool = check_old
-                    for statement in statements |value_checks_result, value_checks_old|:
+                    for statement in statements |value_checks_result, value_checks_old, source_work|:
+                        return true if not proof_report_source_work_charge(1, source_work)
                         match statement:
                             Ast::Stmt.VarDecl(local_name, _, initializer, _):
+                                return true if not proof_report_source_work_charge(sview_len(local_name), source_work) or not proof_report_source_work_charge(sview_len("result"), source_work) or not proof_report_source_work_charge(sview_len("old"), source_work)
                                 # An initializer sees shadows from earlier declarations, but
                                 # not the name introduced by this declaration itself.
                                 return true if proof_report_postcondition_has_unsafe_source_shape_depth(initializer, depth + 1, value_checks_result, value_checks_old, allow_match_lowering, source_work)
@@ -210,8 +227,9 @@ extend ElisaProof:
                     return false if not proof_report_postcondition_source_scan_depth(scrutinee, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
                     return false if has_result
                     for arm in arms |position, depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
+                        return false if not proof_report_source_work_charge(1, source_work)
                         return false if arm.body.count != 1 or not proof_report_match_pattern_closed_with_work(arm.pattern, source_work)
-                        arm_visibility: (known: bool, check_result: bool, check_old: bool) = proof_report_postcondition_match_binder_visibility(arm.pattern, position, scrutinee, result_visible, old_visible, source_work)
+                        arm_visibility: (known: bool, check_result: bool, check_old: bool) = proof_report_postcondition_match_binder_visibility(arm.pattern, position, result_visible, old_visible, source_work)
                         return false if not arm_visibility.known
                         if arm.guard != Ast::Expr.Absent:
                             return false if not proof_report_postcondition_source_scan_depth(arm.guard, depth + 1, arm_visibility.check_result, arm_visibility.check_old, has_result, has_old, has_match, source_work)
@@ -302,8 +320,6 @@ extend ElisaProof:
             attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
             work_limit: usize = proof_replay_summary_source_work_limit()
             overloaded_source_work_exhausted: mutable bool = false
-            return false if:
-                not proof_replay_summary_expr_repeat_charge_with_limit(source_expression, 1, source_work, work_limit)
             source_scan: (complete: bool, has_result: bool, has_old: bool, has_match: bool) = proof_report_postcondition_source_scan(source_expression, source_work)
             return false if not source_scan.complete or source_scan.has_old or (source_scan.has_match and source_scan.has_result)
             has_result_variable: bool = source_scan.has_result

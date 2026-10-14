@@ -1,0 +1,218 @@
+# Bounded indexing for goal fact provenance matching.
+extend ElisaProof:
+    private:
+        const PROOF_GOAL_FACT_ROOT_TAG_COUNT: usize = 33
+        def proof_goal_trace_shape_hash(expression: Ast::Expr, work: mutable usize&, ceiling: usize) -> (complete: bool, hash: u32):
+            return (false, 0) if ceiling > ElisaProofKernelCore::PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT or work > ceiling
+            remaining: usize = ceiling - work
+            if remaining < 2:
+                work <- ceiling
+                return (false, 0)
+            cost: mutable usize = 0
+            if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(expression, &cost, remaining / 2) or cost == 0 or cost > remaining / 2:
+                work <- ceiling
+                return (false, 0)
+            reserved: usize = cost * 2
+            work <- work + reserved
+            (true, proof_expr_shape_hash(expression, 0))
+
+        def proof_goal_fact_index_charge(amount: usize, work: mutable usize&, ceiling: usize) -> bool:
+            return false if work > ceiling or amount > ceiling - work
+            work <- work + amount
+            return true
+
+        # Mirrors the payload part of `proof_trace_root_may_equal`: these keys are only a
+        # prefilter. Every row reached through a matching hash is still checked exactly there.
+        def proof_goal_fact_root_key_hash(expression: Ast::Expr, work: mutable usize&) -> (complete: bool, hash: u32):
+            return (false, 0) if not proof_kernel_ast_support_charge_with_work(1, &work)
+            tag: usize = proof_trace_root_tag(expression).usize()
+            hash: mutable u32 = proof_expr_shape_mix(ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS.u32(), tag.i64())
+            match expression:
+                Ast::Expr.Binary(_, operator, _, _):
+                    hash <- proof_expr_shape_mix(hash, proof_expr_shape_operator_code(operator).i64())
+                Ast::Expr.Unary(operator, _, _):
+                    hash <- proof_expr_shape_mix(hash, proof_expr_shape_operator_code(operator).i64())
+                Ast::Expr.Ident(name, _):
+                    return (false, 0) if not proof_kernel_ast_support_charge_with_work(sview_len(name), &work)
+                    hash <- proof_expr_shape_mix(hash, proof_name_hash(name).i64())
+                Ast::Expr.IntLit(value, _):
+                    hash <- proof_expr_shape_mix(hash, value)
+                _:
+                    pass
+            return (true, hash)
+
+        # Index supported facts by shape hash, then stream traces in source order. The first
+        # exact match recorded for each fact is therefore the same earliest trace as the old scan.
+        # Probes and same-hash chains are bounded by the shared work meter, not a cluster cutoff.
+        def proof_goal_fact_index_build(facts: darray[Ast::Expr]&, trace_count: usize, work: mutable usize&, ceiling: usize, capacity_out: mutable usize&, slot_hashes: mutable darray[u32]&, slot_heads: mutable darray[usize]&, next_facts: mutable darray[usize]&, matched_traces: mutable darray[usize]&, fact_roots: mutable darray[Ast::Expr]&, root_tag_heads: mutable darray[usize]&, next_root_facts: mutable darray[usize]&, root_key_slot_hashes: mutable darray[u32]&, root_key_slot_heads: mutable darray[usize]&, next_root_key_facts: mutable darray[usize]&) -> bool can[Memory.Allocate]:
+            fact_count: usize = facts.count
+            return false if fact_count == 0 or fact_count > ElisaProofKernelCore::PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT / 2
+            capacity: usize = fact_count * 2
+            storage_work: usize = capacity * 6 + fact_count * 9 + PROOF_GOAL_FACT_ROOT_TAG_COUNT * 2
+            return false if not proof_goal_fact_index_charge(storage_work, &work, ceiling)
+            slot_hashes.resize(capacity)
+            slot_heads.resize(capacity)
+            root_key_slot_hashes.resize(capacity)
+            root_key_slot_heads.resize(capacity)
+            next_facts.resize(fact_count)
+            matched_traces.resize(fact_count)
+            fact_roots.resize(fact_count)
+            next_root_facts.resize(fact_count)
+            next_root_key_facts.resize(fact_count)
+            root_tag_heads.resize(PROOF_GOAL_FACT_ROOT_TAG_COUNT)
+            for slot in 0..<capacity |slot, slot_heads, fact_count|:
+                slot_heads[slot] <- fact_count
+            for slot in 0..<capacity |slot, root_key_slot_heads, fact_count|:
+                root_key_slot_heads[slot] <- fact_count
+            for tag in 0..<PROOF_GOAL_FACT_ROOT_TAG_COUNT |tag, root_tag_heads, fact_count|:
+                root_tag_heads[tag] <- fact_count
+            for fact_index in 0..<fact_count |fact_index, next_facts, matched_traces, next_root_facts, next_root_key_facts, trace_count, fact_count|:
+                next_facts[fact_index] <- fact_count
+                matched_traces[fact_index] <- trace_count
+                next_root_facts[fact_index] <- fact_count
+                next_root_key_facts[fact_index] <- fact_count
+            capacity_out <- capacity
+            for fact_index in 0..<fact_count |fact_index, facts, slot_hashes, slot_heads, next_facts, fact_count, capacity, work, ceiling, fact_roots, root_tag_heads, next_root_facts, root_key_slot_hashes, root_key_slot_heads, next_root_key_facts|:
+                root_result: (complete: bool, root: Ast::Expr) = proof_trace_root_with_work(facts[fact_index], 0, &work)
+                return false if not root_result.complete
+                return false if not proof_goal_fact_index_charge(1, &work, ceiling)
+                fact_roots[fact_index] <- root_result.root
+                root_tag: usize = proof_trace_root_tag(root_result.root).usize()
+                return false if root_tag >= root_tag_heads.count or not proof_goal_fact_index_charge(1, &work, ceiling)
+                next_root_facts[fact_index] <- root_tag_heads[root_tag]
+                root_tag_heads[root_tag] <- fact_index
+                if root_tag != 0:
+                    root_key: (complete: bool, hash: u32) = proof_goal_fact_root_key_hash(root_result.root, &work)
+                    return false if not root_key.complete
+                    root_slot: mutable usize = (root_key.hash.i64() % capacity.i64()).usize()
+                    root_probes: mutable usize = 0
+                    root_placed: mutable bool = false
+                    while root_probes < capacity |root_probes, root_slot, root_key, fact_index, fact_count, root_key_slot_hashes, root_key_slot_heads, next_root_key_facts, capacity, work, ceiling, root_placed|:
+                        return false if not proof_goal_fact_index_charge(1, &work, ceiling)
+                        root_head: usize = root_key_slot_heads[root_slot]
+                        if root_head == fact_count:
+                            root_key_slot_hashes[root_slot] <- root_key.hash
+                            root_key_slot_heads[root_slot] <- fact_index
+                            root_placed <- true
+                            break
+                        if root_key_slot_hashes[root_slot] == root_key.hash:
+                            next_root_key_facts[fact_index] <- root_head
+                            root_key_slot_heads[root_slot] <- fact_index
+                            root_placed <- true
+                            break
+                        root_slot <- (root_slot + 1) % capacity
+                        root_probes <- root_probes + 1
+                    return false if not root_placed
+                hashed: (complete: bool, hash: u32) = proof_goal_trace_shape_hash(facts[fact_index], &work, ceiling)
+                return false if not hashed.complete
+                slot: mutable usize = (hashed.hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hashed, fact_index, fact_count, slot_hashes, slot_heads, next_facts, capacity, work, ceiling, placed|:
+                    return false if not proof_goal_fact_index_charge(1, &work, ceiling)
+                    head: usize = slot_heads[slot]
+                    if head == fact_count:
+                        slot_hashes[slot] <- hashed.hash
+                        slot_heads[slot] <- fact_index
+                        placed <- true
+                        break
+                    if slot_hashes[slot] == hashed.hash:
+                        next_facts[fact_index] <- head
+                        slot_heads[slot] <- fact_index
+                        placed <- true
+                        break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            return true
+
+        # Root keys partition Binary/Unary operators, identifiers, and integer literals. Other
+        # roots use their tag only. Unknown roots remain wildcards; hash collisions are filtered
+        # by the exact compatibility predicate.
+        def proof_goal_fact_index_trace_root_possible(expression: Ast::Expr, facts: darray[Ast::Expr]&, fact_roots: darray[Ast::Expr]&, root_tag_heads: darray[usize]&, next_root_facts: darray[usize]&, matched_traces: darray[usize]&, wildcard_cursor: mutable usize&, root_key_capacity: usize, root_key_slot_hashes: darray[u32]&, root_key_slot_heads: darray[usize]&, next_root_key_facts: darray[usize]&, trace_count: usize, unmatched: usize, work: mutable usize&) -> (complete: bool, candidate: bool):
+            return (false, false) if fact_roots.count != facts.count or next_root_facts.count != facts.count or matched_traces.count != facts.count or root_tag_heads.count != PROOF_GOAL_FACT_ROOT_TAG_COUNT or root_key_capacity == 0 or root_key_slot_hashes.count != root_key_capacity or root_key_slot_heads.count != root_key_capacity or next_root_key_facts.count != facts.count
+            root_result: (complete: bool, root: Ast::Expr) = proof_trace_root_with_work(expression, 0, &work)
+            return (false, false) if not root_result.complete
+            root_tag: usize = proof_trace_root_tag(root_result.root).usize()
+            return (false, false) if root_tag >= root_tag_heads.count
+            return (true, unmatched > 0) if root_tag == 0
+            root_key: (complete: bool, hash: u32) = proof_goal_fact_root_key_hash(root_result.root, &work)
+            return (false, false) if not root_key.complete
+            slot: mutable usize = (root_key.hash.i64() % root_key_capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < root_key_capacity |probes, slot, root_key, root_key_capacity, root_key_slot_hashes, root_key_slot_heads, work, facts, next_root_key_facts, matched_traces, trace_count, fact_roots, root_result|:
+                return (false, false) if not proof_kernel_ast_support_charge_with_work(1, &work)
+                head: usize = root_key_slot_heads[slot]
+                break if head == facts.count
+                if root_key_slot_hashes[slot] == root_key.hash:
+                    fact_index: usize = head
+                    while fact_index < facts.count |fact_index, facts, next_root_key_facts, matched_traces, trace_count, work, fact_roots, root_result|:
+                        return (false, false) if not proof_kernel_ast_support_charge_with_work(1, &work)
+                        return (false, false) if fact_index >= next_root_key_facts.count or fact_index >= matched_traces.count or fact_index >= fact_roots.count
+                        if matched_traces[fact_index] == trace_count:
+                            return (false, false) if not proof_trace_root_names_charge(root_result.root, fact_roots[fact_index], &work)
+                            return (true, true) if proof_trace_root_may_equal(root_result.root, fact_roots[fact_index])
+                        fact_index <- next_root_key_facts[fact_index]
+                    break
+                slot <- (slot + 1) % root_key_capacity
+                probes <- probes + 1
+            # Any unknown fact root is compatible with this known root. The linked list is
+            # traversed only when its entries have already matched earlier traces.
+            while wildcard_cursor < facts.count |wildcard_cursor, facts, next_root_facts, matched_traces, trace_count, work|:
+                return (false, false) if not proof_kernel_ast_support_charge_with_work(1, &work)
+                return (false, false) if wildcard_cursor >= next_root_facts.count or wildcard_cursor >= matched_traces.count
+                break if matched_traces[wildcard_cursor] == trace_count
+                wildcard_cursor <- next_root_facts[wildcard_cursor]
+            return (true, true) if wildcard_cursor < facts.count
+            return (true, false)
+
+        def proof_goal_fact_index_match_trace(report: ProofReport&, trace_index: usize, trace: ProofFactTrace, shape_hash: u32, facts: darray[Ast::Expr]&, capacity: usize, slot_hashes: darray[u32]&, slot_heads: darray[usize]&, next_facts: darray[usize]&, matched_traces: mutable darray[usize]&, work: mutable usize&, equality_work: mutable usize&, unmatched: mutable usize&) -> bool:
+            # Hash/support/probe work uses `work`; exact expression comparisons retain the
+            # existing separate replay equality meter in `equality_work`.
+            return false if capacity == 0 or slot_hashes.count != capacity or slot_heads.count != capacity
+            slot: mutable usize = (shape_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, shape_hash, facts, slot_hashes, slot_heads, next_facts, matched_traces, work, equality_work, unmatched, trace_index, report, capacity|:
+                return false if not proof_kernel_ast_support_charge_with_work(1, &work)
+                head: usize = slot_heads[slot]
+                return true if head == facts.count
+                if slot_hashes[slot] == shape_hash:
+                    fact_index: mutable usize = head
+                    while fact_index < facts.count |fact_index, facts, next_facts, matched_traces, equality_work, unmatched, trace, trace_index, work|:
+                        break if unmatched == 0
+                        return false if not proof_kernel_ast_support_charge_with_work(1, &work)
+                        return false if fact_index >= next_facts.count or fact_index >= matched_traces.count
+                        if matched_traces[fact_index] == report.analysis_1.traces.records.count:
+                            equal: bool = proof_replay_summary_expr_proof_equal_with_limit(trace.expression, facts[fact_index], &equality_work, proof_replay_summary_source_work_limit())
+                            if equal:
+                                matched_traces[fact_index] <- trace_index
+                                unmatched <- unmatched - 1
+                            return false if equality_work >= proof_replay_summary_source_work_limit() and not equal
+                        fact_index <- next_facts[fact_index]
+                    return true
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return true
+
+        def proof_goal_fact_index_scan(report: ProofReport&, facts: darray[Ast::Expr]&, owner: sview, start: usize, capacity: usize, slot_hashes: darray[u32]&, slot_heads: darray[usize]&, next_facts: darray[usize]&, matched_traces: mutable darray[usize]&, fact_roots: darray[Ast::Expr]&, root_tag_heads: darray[usize]&, next_root_facts: darray[usize]&, root_key_slot_hashes: darray[u32]&, root_key_slot_heads: darray[usize]&, next_root_key_facts: darray[usize]&, work: mutable usize&, equality_work: mutable usize&) -> bool:
+            trace_count: usize = report.analysis_1.traces.records.count
+            return false if start > trace_count or matched_traces.count != facts.count or next_facts.count != facts.count
+            unmatched: mutable usize = facts.count
+            wildcard_cursor: mutable usize = root_tag_heads[0] if root_tag_heads.count == PROOF_GOAL_FACT_ROOT_TAG_COUNT else facts.count
+            for trace_index in start..<trace_count |trace_index, trace_count, report, owner, work, facts, capacity, slot_hashes, slot_heads, next_facts, matched_traces, fact_roots, root_tag_heads, next_root_facts, root_key_slot_hashes, root_key_slot_heads, next_root_key_facts, equality_work, unmatched, wildcard_cursor|:
+                break if unmatched == 0
+                return false if not proof_kernel_ast_support_charge_with_work(1, &work)
+                trace: ProofFactTrace = report.analysis_1.traces.records[trace_index]
+                return false if not proof_kernel_ast_support_charge_with_work(sview_len(trace.name), &work)
+                return false if not proof_kernel_ast_support_charge_with_work(sview_len(owner), &work)
+                continue if trace.name != owner
+                root_possible: (complete: bool, candidate: bool) = proof_goal_fact_index_trace_root_possible(trace.expression, facts, fact_roots, root_tag_heads, next_root_facts, matched_traces, &wildcard_cursor, capacity, root_key_slot_hashes, root_key_slot_heads, next_root_key_facts, trace_count, unmatched, &work)
+                return false if not root_possible.complete
+                continue if not root_possible.candidate
+                supported: (complete: bool, supported: bool) = proof_kernel_expression_supported_with_work(trace.expression, &work)
+                return false if not supported.complete
+                continue if not supported.supported
+                hashed: (complete: bool, hash: u32) = proof_goal_trace_shape_hash(trace.expression, &work, ElisaProofKernelCore::PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT)
+                return false if not hashed.complete
+                return false if not proof_goal_fact_index_match_trace(report, trace_index, trace, hashed.hash, facts, capacity, slot_hashes, slot_heads, next_facts, &matched_traces, &work, &equality_work, &unmatched)
+            return true

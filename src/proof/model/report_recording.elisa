@@ -35,7 +35,13 @@ extend ElisaProof:
                 report.analysis_1.kernel.children <- report.analysis_1.kernel.children.truncate(child_start)
                 proof_kernel_budget_note(report, name)
                 return (false, 0)
-            return (false, encoded) if encoded >= report.analysis_1.kernel.nodes.count
+            if encoded >= report.analysis_1.kernel.nodes.count:
+                # A work or node-cap refusal can leave a valid but incomplete term suffix in
+                # the report arena. It has no certificate root, so discard both suffixes before
+                # the next goal so failed attempts cannot consume capacity needed by later terms.
+                report.analysis_1.kernel.nodes <- report.analysis_1.kernel.nodes.truncate(node_start)
+                report.analysis_1.kernel.children <- report.analysis_1.kernel.children.truncate(child_start)
+                return (false, 0)
             return (true, proof_kernel_intern_encoded(report, node_start, child_start, encoded))
 
         def proof_kernel_encode_expression_checked(expression: Ast::Expr, report: mutable ProofReport&, name: sview) -> (known: bool, root: usize):
@@ -51,7 +57,12 @@ extend ElisaProof:
                 report.analysis_1.kernel.children <- report.analysis_1.kernel.children.truncate(child_start)
                 proof_kernel_budget_note(report, name)
                 return (false, 0)
-            return (false, encoded) if encoded >= report.analysis_1.kernel.nodes.count
+            if encoded >= report.analysis_1.kernel.nodes.count:
+                # Keep the expression-only compatibility path transactional as well; resource
+                # admission may encode several candidate values into this shared arena.
+                report.analysis_1.kernel.nodes <- report.analysis_1.kernel.nodes.truncate(node_start)
+                report.analysis_1.kernel.children <- report.analysis_1.kernel.children.truncate(child_start)
+                return (false, 0)
             return (true, proof_kernel_intern_encoded(report, node_start, child_start, encoded))
 
         # Mark the most recent goal attempt as ended by a resource limit, and reclassify its
@@ -196,6 +207,18 @@ extend ElisaProof:
 
         def proof_trace_root_names_charge(left: Ast::Expr, right: Ast::Expr, work: mutable usize&) -> bool:
             match left:
+                Ast::Expr.Binary(_, _, _, _):
+                    match right:
+                        Ast::Expr.Binary(_, _, _, _):
+                            return proof_kernel_ast_support_charge_with_work(1, &work)
+                        _:
+                            return true
+                Ast::Expr.Unary(_, _, _):
+                    match right:
+                        Ast::Expr.Unary(_, _, _):
+                            return proof_kernel_ast_support_charge_with_work(1, &work)
+                        _:
+                            return true
                 Ast::Expr.Ident(left_name, _):
                     match right:
                         Ast::Expr.Ident(right_name, _):
@@ -206,206 +229,6 @@ extend ElisaProof:
                 _:
                     return true
 
-        # The proof-expression shape hash only selects exact-equality candidates. Reserve both
-        # its AST/text traversal and the hash pass. The caller selects index versus linear scan
-        # before this work starts; a failed index preflight therefore fails closed, without
-        # restarting the same attempt after consuming a partial reserve.
-        def proof_goal_trace_shape_hash(expression: Ast::Expr, work: mutable usize&, ceiling: usize) -> (complete: bool, hash: u32):
-            return (false, 0) if ceiling > ElisaProofKernelCore::PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT or work > ceiling
-            remaining: usize = ceiling - work
-            if remaining < 2:
-                work <- ceiling
-                return (false, 0)
-            cost: mutable usize = 0
-            if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(expression, &cost, remaining / 2) or cost == 0 or cost > remaining / 2:
-                work <- ceiling
-                return (false, 0)
-            reserved: usize = cost * 2
-            work <- work + reserved
-            (true, proof_expr_shape_hash(expression, 0))
-
-        def proof_goal_fact_index_charge(amount: usize, work: mutable usize&, ceiling: usize) -> bool:
-            return false if work > ceiling or amount > ceiling - work
-            work <- work + amount
-            return true
-
-        def proof_goal_trace_root_key(root: Ast::Expr, work: mutable usize&) -> (complete: bool, key: u32):
-            tag: i64 = proof_trace_root_tag(root)
-            if tag == 3 or tag == 4:
-                hashed: (complete: bool, hash: u32) = proof_goal_trace_shape_hash(root, &work, ElisaProofKernelCore::PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT)
-                return (false, 0) if not hashed.complete
-                return (true, hashed.hash)
-            return (true, tag.u32())
-
-        # Index supported facts by shape hash, then stream traces in source order. The first
-        # exact match recorded for each fact is therefore the same earliest trace as the old scan.
-        # Probes and same-hash chains are bounded by the shared work meter, not a cluster cutoff.
-        def proof_goal_fact_index_build(facts: darray[Ast::Expr]&, trace_count: usize, work: mutable usize&, ceiling: usize, capacity_out: mutable usize&, slot_hashes: mutable darray[u32]&, slot_heads: mutable darray[usize]&, next_facts: mutable darray[usize]&, matched_traces: mutable darray[usize]&, fact_roots: mutable darray[Ast::Expr]&, root_hashes: mutable darray[u32]&, root_heads: mutable darray[usize]&, next_root_facts: mutable darray[usize]&, broad_facts: mutable darray[usize]&, broad_count_out: mutable usize&) -> bool:
-            fact_count: usize = facts.count
-            return false if fact_count == 0 or fact_count > ElisaProofKernelCore::PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT / 2
-            capacity: usize = fact_count * 2
-            storage_work: usize = capacity * 4 + fact_count * 5
-            return false if not proof_goal_fact_index_charge(storage_work, &work, ceiling)
-            slot_hashes.resize(capacity)
-            slot_heads.resize(capacity)
-            next_facts.resize(fact_count)
-            matched_traces.resize(fact_count)
-            fact_roots.resize(fact_count)
-            root_hashes.resize(capacity)
-            root_heads.resize(capacity)
-            next_root_facts.resize(fact_count)
-            broad_facts.resize(fact_count)
-            for slot in 0..<capacity |slot, slot_heads, fact_count|:
-                slot_heads[slot] <- fact_count
-                root_heads[slot] <- fact_count
-            broad_count_out <- 0
-            for fact_index in 0..<fact_count |fact_index, next_facts, matched_traces, next_root_facts, trace_count, fact_count|:
-                next_facts[fact_index] <- fact_count
-                matched_traces[fact_index] <- trace_count
-                next_root_facts[fact_index] <- fact_count
-            capacity_out <- capacity
-            for fact_index in 0..<fact_count |fact_index, facts, slot_hashes, slot_heads, next_facts, fact_count, capacity, work, ceiling, fact_roots, root_hashes, root_heads, next_root_facts, broad_facts, broad_count_out|:
-                root_result: (complete: bool, root: Ast::Expr) = proof_trace_root_with_work(facts[fact_index], 0, &work)
-                return false if not root_result.complete
-                fact_roots[fact_index] <- root_result.root
-                root_tag: i64 = proof_trace_root_tag(root_result.root)
-                if root_tag == 0:
-                    broad_facts[broad_count_out] <- fact_index
-                    broad_count_out <- broad_count_out + 1
-                else:
-                    root_key: (complete: bool, key: u32) = proof_goal_trace_root_key(root_result.root, &work)
-                    return false if not root_key.complete
-                    root_slot: mutable usize = (root_key.key.i64() % capacity.i64()).usize()
-                    root_probes: mutable usize = 0
-                    root_placed: mutable bool = false
-                    while root_probes < capacity |root_probes, root_slot, root_key, fact_index, fact_count, root_hashes, root_heads, next_root_facts, capacity, work, ceiling, root_placed|:
-                        return false if not proof_goal_fact_index_charge(1, &work, ceiling)
-                        root_head: usize = root_heads[root_slot]
-                        if root_head == fact_count:
-                            root_hashes[root_slot] <- root_key.key
-                            root_heads[root_slot] <- fact_index
-                            root_placed <- true
-                            break
-                        if root_hashes[root_slot] == root_key.key:
-                            next_root_facts[fact_index] <- root_head
-                            root_heads[root_slot] <- fact_index
-                            root_placed <- true
-                            break
-                        root_slot <- (root_slot + 1) % capacity
-                        root_probes <- root_probes + 1
-                    return false if not root_placed
-                hashed: (complete: bool, hash: u32) = proof_goal_trace_shape_hash(facts[fact_index], &work, ceiling)
-                return false if not hashed.complete
-                slot: mutable usize = (hashed.hash.i64() % capacity.i64()).usize()
-                probes: mutable usize = 0
-                placed: mutable bool = false
-                while probes < capacity |probes, slot, hashed, fact_index, fact_count, slot_hashes, slot_heads, next_facts, capacity, work, ceiling, placed|:
-                    return false if not proof_goal_fact_index_charge(1, &work, ceiling)
-                    head: usize = slot_heads[slot]
-                    if head == fact_count:
-                        slot_hashes[slot] <- hashed.hash
-                        slot_heads[slot] <- fact_index
-                        placed <- true
-                        break
-                    if slot_hashes[slot] == hashed.hash:
-                        next_facts[fact_index] <- head
-                        slot_heads[slot] <- fact_index
-                        placed <- true
-                        break
-                    slot <- (slot + 1) % capacity
-                    probes <- probes + 1
-                return false if not placed
-            return true
-
-        def proof_goal_fact_index_trace_root_candidate(expression: Ast::Expr, facts: darray[Ast::Expr]&, fact_roots: darray[Ast::Expr]&, root_hashes: darray[u32]&, root_heads: darray[usize]&, next_root_facts: darray[usize]&, matched_traces: darray[usize]&, broad_facts: darray[usize]&, broad_count: usize, capacity: usize, trace_count: usize, work: mutable usize&) -> (complete: bool, candidate: bool):
-            return (false, false) if capacity == 0 or root_hashes.count != capacity or root_heads.count != capacity
-            return (false, false) if fact_roots.count != facts.count or next_root_facts.count != facts.count or matched_traces.count != facts.count or broad_count > broad_facts.count
-            root_result: (complete: bool, root: Ast::Expr) = proof_trace_root_with_work(expression, 0, &work)
-            return (false, false) if not root_result.complete
-            root_tag: i64 = proof_trace_root_tag(root_result.root)
-            if root_tag == 0:
-                for fact_index in 0..<facts.count |fact_index, matched_traces, trace_count, work|:
-                    return (false, false) if not proof_kernel_ast_support_charge_with_work(1, &work)
-                    return (true, true) if matched_traces[fact_index] != trace_count
-                return (true, false)
-            for broad_index in 0..<broad_count |broad_index, broad_facts, matched_traces, trace_count, work|:
-                return (false, false) if not proof_kernel_ast_support_charge_with_work(1, &work)
-                fact_index: usize = broad_facts[broad_index]
-                return (false, false) if fact_index >= matched_traces.count
-                if matched_traces[fact_index] == trace_count:
-                    return (false, false) if not proof_trace_root_names_charge(root_result.root, fact_roots[fact_index], &work)
-                    return (true, true) if proof_trace_root_may_equal(root_result.root, fact_roots[fact_index])
-            root_key: (complete: bool, key: u32) = proof_goal_trace_root_key(root_result.root, &work)
-            return (false, false) if not root_key.complete
-            slot: mutable usize = (root_key.key.i64() % capacity.i64()).usize()
-            probes: mutable usize = 0
-            while probes < capacity |probes, slot, root_key, root_hashes, root_heads, capacity, fact_roots, next_root_facts, matched_traces, trace_count, facts, work, root_result|:
-                return (false, false) if not proof_kernel_ast_support_charge_with_work(1, &work)
-                head: usize = root_heads[slot]
-                return (true, false) if head == facts.count
-                if root_hashes[slot] == root_key.key:
-                    fact_index: mutable usize = head
-                    while fact_index < facts.count |fact_index, next_root_facts, matched_traces, trace_count, facts, fact_roots, work, root_result|:
-                        return (false, false) if not proof_kernel_ast_support_charge_with_work(1, &work)
-                        return (false, false) if fact_index >= next_root_facts.count or fact_index >= matched_traces.count or fact_index >= fact_roots.count
-                        if matched_traces[fact_index] == trace_count:
-                            return (false, false) if not proof_trace_root_names_charge(root_result.root, fact_roots[fact_index], &work)
-                            return (true, true) if proof_trace_root_may_equal(root_result.root, fact_roots[fact_index])
-                        fact_index <- next_root_facts[fact_index]
-                    return (true, false)
-                slot <- (slot + 1) % capacity
-                probes <- probes + 1
-            return (true, false)
-
-        def proof_goal_fact_index_match_trace(report: ProofReport&, trace_index: usize, trace: ProofFactTrace, facts: darray[Ast::Expr]&, capacity: usize, slot_hashes: darray[u32]&, slot_heads: darray[usize]&, next_facts: darray[usize]&, matched_traces: mutable darray[usize]&, work: mutable usize&, equality_work: mutable usize&, unmatched: mutable usize&) -> bool:
-            # Hash/support/probe work uses `work`; exact expression comparisons retain the
-            # existing separate replay equality meter in `equality_work`.
-            return false if capacity == 0 or slot_hashes.count != capacity or slot_heads.count != capacity
-            hashed: (complete: bool, hash: u32) = proof_goal_trace_shape_hash(trace.expression, &work, ElisaProofKernelCore::PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT)
-            return false if not hashed.complete
-            slot: mutable usize = (hashed.hash.i64() % capacity.i64()).usize()
-            probes: mutable usize = 0
-            while probes < capacity |probes, slot, hashed, facts, slot_hashes, slot_heads, next_facts, matched_traces, work, equality_work, unmatched, trace_index, report, capacity|:
-                return false if not proof_kernel_ast_support_charge_with_work(1, &work)
-                head: usize = slot_heads[slot]
-                return true if head == facts.count
-                if slot_hashes[slot] == hashed.hash:
-                    fact_index: mutable usize = head
-                    while fact_index < facts.count |fact_index, facts, next_facts, matched_traces, equality_work, unmatched, trace, trace_index, work|:
-                        break if unmatched == 0
-                        return false if not proof_kernel_ast_support_charge_with_work(1, &work)
-                        return false if fact_index >= next_facts.count or fact_index >= matched_traces.count
-                        if matched_traces[fact_index] == report.analysis_1.traces.records.count:
-                            equal: bool = proof_replay_summary_expr_proof_equal_with_limit(trace.expression, facts[fact_index], &equality_work, proof_replay_summary_source_work_limit())
-                            if equal:
-                                matched_traces[fact_index] <- trace_index
-                                unmatched <- unmatched - 1
-                            return false if equality_work >= proof_replay_summary_source_work_limit() and not equal
-                        fact_index <- next_facts[fact_index]
-                    return true
-                slot <- (slot + 1) % capacity
-                probes <- probes + 1
-            return true
-
-        def proof_goal_fact_index_scan(report: ProofReport&, facts: darray[Ast::Expr]&, owner: sview, start: usize, capacity: usize, slot_hashes: darray[u32]&, slot_heads: darray[usize]&, next_facts: darray[usize]&, matched_traces: mutable darray[usize]&, fact_roots: darray[Ast::Expr]&, root_hashes: darray[u32]&, root_heads: darray[usize]&, next_root_facts: darray[usize]&, broad_facts: darray[usize]&, broad_count: usize, work: mutable usize&, equality_work: mutable usize&) -> bool:
-            trace_count: usize = report.analysis_1.traces.records.count
-            return false if start > trace_count or matched_traces.count != facts.count or next_facts.count != facts.count
-            unmatched: mutable usize = facts.count
-            for trace_index in start..<trace_count |trace_index, trace_count, report, owner, work, facts, capacity, slot_hashes, slot_heads, next_facts, matched_traces, equality_work, unmatched|:
-                break if unmatched == 0
-                return false if not proof_kernel_ast_support_charge_with_work(1, &work)
-                trace: ProofFactTrace = report.analysis_1.traces.records[trace_index]
-                return false if not proof_kernel_ast_support_charge_with_work(sview_len(trace.name), &work)
-                return false if not proof_kernel_ast_support_charge_with_work(sview_len(owner), &work)
-                continue if trace.name != owner
-                root_candidate: (complete: bool, candidate: bool) = proof_goal_fact_index_trace_root_candidate(trace.expression, facts, fact_roots, root_hashes, root_heads, next_root_facts, matched_traces, broad_facts, broad_count, capacity, trace_count, &work)
-                return false if not root_candidate.complete
-                continue if not root_candidate.candidate
-                supported: (complete: bool, supported: bool) = proof_kernel_expression_supported_with_work(trace.expression, &work)
-                return false if not supported.complete
-                continue if not supported.supported
-                return false if not proof_goal_fact_index_match_trace(report, trace_index, trace, facts, capacity, slot_hashes, slot_heads, next_facts, &matched_traces, &work, &equality_work, &unmatched)
-            return true
 
     public:
         # False only when `proof_expr_equal` must be false: both roots (parentheses stripped, as
@@ -463,6 +286,54 @@ extend ElisaProof:
                     return 7
                 Ast::Expr.BoolLit(_, _):
                     return 8
+                Ast::Expr.Absent:
+                    return 9
+                Ast::Expr.FloatLit(_, _):
+                    return 10
+                Ast::Expr.StringLit(_, _):
+                    return 11
+                Ast::Expr.CharLit(_, _):
+                    return 12
+                Ast::Expr.Block(_, _, _, _):
+                    return 13
+                Ast::Expr.Match(_, _, _):
+                    return 14
+                Ast::Expr.Catch(_, _, _):
+                    return 15
+                Ast::Expr.Comprehension(_, _, _, _, _):
+                    return 16
+                Ast::Expr.Refinement(_, _, _):
+                    return 17
+                Ast::Expr.GetElse(_, _, _):
+                    return 18
+                Ast::Expr.Lambda(_, _, _):
+                    return 19
+                Ast::Expr.Scope(_, _, _):
+                    return 20
+                Ast::Expr.ShorthandMember(_, _):
+                    return 21
+                Ast::Expr.Slice(_, _, _, _):
+                    return 22
+                Ast::Expr.IndexN(_, _, _):
+                    return 23
+                Ast::Expr.Move(_, _):
+                    return 24
+                Ast::Expr.RegionNew(_, _, _):
+                    return 25
+                Ast::Expr.Array(_, _):
+                    return 26
+                Ast::Expr.Tuple(_, _):
+                    return 27
+                Ast::Expr.SetLit(_, _):
+                    return 28
+                Ast::Expr.DictLit(_, _):
+                    return 29
+                Ast::Expr.Construct(_, _, _):
+                    return 30
+                Ast::Expr.RecordUpdate(_, _, _):
+                    return 31
+                Ast::Expr.If(_, _, _, _):
+                    return 32
                 _:
                     return 0
             return 0
@@ -475,7 +346,7 @@ extend ElisaProof:
             if facts.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET:
                 proof_kernel_budget_note(report, name)
             if report.analysis_1.kernel.budget_exhausted:
-                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: report.analysis_1.kernel.nodes.count, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
+                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: report.analysis_1.kernel.nodes.count, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, float_mode: report.context.current_float_mode, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
                 return
             captured_facts: mutable darray[Ast::Expr] = []
             captured_kernel_roots: mutable darray[usize] = []
@@ -504,28 +375,29 @@ extend ElisaProof:
                 next_facts: mutable darray[usize] = []
                 matched_traces: mutable darray[usize] = []
                 fact_roots: mutable darray[Ast::Expr] = []
-                root_hashes: mutable darray[u32] = []
-                root_heads: mutable darray[usize] = []
+                root_tag_heads: mutable darray[usize] = []
                 next_root_facts: mutable darray[usize] = []
-                broad_facts: mutable darray[usize] = []
-                broad_count: mutable usize = 0
+                root_key_slot_hashes: mutable darray[u32] = []
+                root_key_slot_heads: mutable darray[usize] = []
+                next_root_key_facts: mutable darray[usize] = []
                 fact_capacity: mutable usize = 0
-                if proof_goal_fact_index_build(supported_facts, trace_count, &support_work, ElisaProofKernelCore::PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT, &fact_capacity, &slot_hashes, &slot_heads, &next_facts, &matched_traces, &fact_roots, &root_hashes, &root_heads, &next_root_facts, &broad_facts, &broad_count):
-                    if not proof_goal_fact_index_scan(report, supported_facts, name, trace_start, fact_capacity, slot_hashes, slot_heads, next_facts, &matched_traces, fact_roots, root_hashes, root_heads, next_root_facts, broad_facts, broad_count, &support_work, &equality_work):
-                        fact_admission_exhausted <- true
+                can Memory.Allocate:
+                    if proof_goal_fact_index_build(supported_facts, trace_count, &support_work, ElisaProofKernelCore::PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT, &fact_capacity, &slot_hashes, &slot_heads, &next_facts, &matched_traces, &fact_roots, &root_tag_heads, &next_root_facts, &root_key_slot_hashes, &root_key_slot_heads, &next_root_key_facts):
+                        if not proof_goal_fact_index_scan(report, supported_facts, name, trace_start, fact_capacity, slot_hashes, slot_heads, next_facts, &matched_traces, fact_roots, root_tag_heads, next_root_facts, root_key_slot_hashes, root_key_slot_heads, next_root_key_facts, &support_work, &equality_work):
+                            fact_admission_exhausted <- true
+                        else:
+                            for fact_index in 0..<supported_facts.count |fact_index, supported_facts, matched_traces, captured_facts, captured_kernel_roots, report, trace_count, fact_admission_exhausted|:
+                                if fact_index >= matched_traces.count:
+                                    fact_admission_exhausted <- true
+                                    break
+                                traced_index: usize = matched_traces[fact_index]
+                                continue if traced_index >= trace_count
+                                trace_root: usize = report.analysis_1.traces.records[traced_index].kernel_expression
+                                if trace_root < report.analysis_1.kernel.nodes.count:
+                                    captured_facts.push(supported_facts[fact_index])
+                                    captured_kernel_roots.push(trace_root)
                     else:
-                        for fact_index in 0..<supported_facts.count |fact_index, supported_facts, matched_traces, captured_facts, captured_kernel_roots, report, trace_count, fact_admission_exhausted|:
-                            if fact_index >= matched_traces.count:
-                                fact_admission_exhausted <- true
-                                break
-                            traced_index: usize = matched_traces[fact_index]
-                            continue if traced_index >= trace_count
-                            trace_root: usize = report.analysis_1.traces.records[traced_index].kernel_expression
-                            if trace_root < report.analysis_1.kernel.nodes.count:
-                                captured_facts.push(supported_facts[fact_index])
-                                captured_kernel_roots.push(trace_root)
-                else:
-                    fact_admission_exhausted <- true
+                        fact_admission_exhausted <- true
             else:
                 for fact in supported_facts |fact, captured_facts, captured_kernel_roots, report, name, support_work, equality_work, fact_admission_exhausted|:
                     traced: (complete: bool, index: usize) = proof_certificate_fact_trace_index_after_support(report, fact, name, &support_work, &equality_work)
@@ -540,10 +412,10 @@ extend ElisaProof:
             proof_kernel_fact_admission_budget_note(report, name) if fact_admission_exhausted
             encoded_goal: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(goal, report, name)
             if not encoded_goal.known:
-                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: report.analysis_1.kernel.nodes.count, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
+                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: report.analysis_1.kernel.nodes.count, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, float_mode: report.context.current_float_mode, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
                 return
             if not proof_kernel_report_append_allowed(report, report.analysis_1.certificate_facts.count, captured_facts.count, name):
-                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: encoded_goal.root, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
+                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: encoded_goal.root, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, float_mode: report.context.current_float_mode, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
                 return
             if not proof_kernel_report_append_allowed(report, report.analysis_1.kernel.certificate_facts.count, captured_kernel_roots.count, name):
                 report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: encoded_goal.root, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
@@ -566,5 +438,5 @@ extend ElisaProof:
             certificate_index: usize = report.analysis_1.certificates.count
             if certificate_proven and not proof_kernel_report_append_allowed(report, report.analysis_1.certificates.count, 1, name):
                 certificate_proven <- false
-            report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: report.analysis_1.kernel.budget_exhausted, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, producer_proven: certificate_proven, has_certificate: certificate_proven, certificate_index: certificate_index, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
+            report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: report.analysis_1.kernel.budget_exhausted, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, float_mode: report.context.current_float_mode, producer_proven: certificate_proven, has_certificate: certificate_proven, certificate_index: certificate_index, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
             report.analysis_1.certificates <- report.analysis_1.certificates.push(ProofGoalCertificate{goal: goal, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, replayed: false}) if certificate_proven
