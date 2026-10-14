@@ -25242,3 +25242,15 @@ metered replay now require integer-denial evidence for comparison operands befor
 including negated comparisons; this prevents float comparisons from acquiring integer strictness.
 The metered path charges the operand checks to the caller's goal-search budget. Source review and
 `git diff --check` pass; no tests or build were run.
+
+### 23.27.1438 Guard shared-work float exact containment (2026-10-14)
+
+The aggregate shared-work goal path still used the legacy exact-containment shortcut in float mode,
+which could project a conjunct from a fact containing an opaque call or overloaded operator. It now
+uses the same operator-mask-aware Boolean-fragment gate and metered containment reader as the
+ordinary path. Before scanning, it reserves `8*S^2 + 16*S` in the shared preflight ledger with
+overflow-safe scaled charges. For total fact shape `F` and goal shape `G`, candidate subtree costs
+sum to at most `F^2` and repeated goal costs to at most `F*G`, together bounded by `S^2` where
+`S = F + G`. Six metered equality passes plus input sizing, formula checks, and recursion-node
+charges fit within `8*S^2 + 16*S`. Helper exhaustion latches the aggregate ledger and skips
+propositional fallback. No compiler, build, or runtime tests were run.
