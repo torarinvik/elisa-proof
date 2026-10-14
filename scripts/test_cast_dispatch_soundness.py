@@ -22,6 +22,7 @@ custom = check(ROOT / "test/repro/audit_custom_cast_facts.elisa")
 assert custom["status"] != "proved", custom
 assert custom["replay"]["gaps"] == 0, custom["replay"]
 assert custom["replay"]["certificates"] == custom["replay"]["replayed"], custom["replay"]
+assert not custom["trust"]["trusted_assumptions"], custom["trust"]
 declarations = {item["name"]: item for item in custom["declaration_details"]
                 if item.get("kind") == "function"}
 assert declarations["__cast__"]["verified"], declarations["__cast__"]
@@ -55,8 +56,14 @@ failed_goals = {row["name"]: row for row in custom["goals"]
 for name in ("rejected_custom_cast_range", "rejected_custom_cast_identity",
              "rejected_custom_cast_monotonicity", "rejected_custom_cast_reference_write"):
     assert name in failed_goals, (name, custom["goals"])
+assert declarations["custom_cast_direct_call"]["verified"], declarations["custom_cast_direct_call"]
+assert any(row.get("name") == "custom_cast_direct_call" and row.get("rule") == "goal"
+           and row.get("proven") and row.get("replayed") for row in custom["certificates"]), custom["certificates"]
 
 external = check(ROOT / "test/repro/audit_extern_custom_cast_facts.elisa")
+assert external["replay"]["gaps"] == 0, external["replay"]
+assert external["replay"]["certificates"] == external["replay"]["replayed"], external["replay"]
+assert not external["trust"]["trusted_assumptions"], external["trust"]
 external_function = next(item for item in external["declaration_details"]
                          if item.get("name") == "rejected_extern_custom_cast_identity")
 assert not external_function["verified"], external_function
@@ -69,6 +76,7 @@ assert any(row.get("name") == "rejected_extern_custom_cast_identity"
 sibling = check(ROOT / "test/repro/audit_sibling_module_custom_cast_facts.elisa")
 assert sibling["status"] != "proved", sibling
 assert sibling["replay"]["gaps"] == 0, sibling["replay"]
+assert not sibling["trust"]["trusted_assumptions"], sibling["trust"]
 sibling_function = next(item for item in sibling["declaration_details"]
                         if item.get("name") == "rejected_sibling_custom_cast_identity")
 assert not sibling_function["verified"], sibling_function
@@ -81,6 +89,8 @@ assert any(row.get("name") == "rejected_sibling_custom_cast_identity"
 selector = check(ROOT / "test/repro/audit_numeric_cast_selector_name.elisa")
 assert selector["status"] == "proved", selector
 assert selector["replay"]["gaps"] == 0, selector["replay"]
+assert selector["replay"]["certificates"] == selector["replay"]["replayed"], selector["replay"]
+assert not selector["trust"]["trusted_assumptions"], selector["trust"]
 selector_function = next(item for item in selector["declaration_details"]
                          if item.get("name") == "ordinary_i64_selector_does_not_shadow_cast")
 assert selector_function["verified"], selector_function
@@ -95,7 +105,10 @@ for name in ("ordinary_i64_selector_does_not_shadow_cast",
 
 # Builtin control: with no custom hook, normal widening facts still prove and replay.
 builtin = check(ROOT / "examples/widening_cast.elisa")
-assert builtin["status"] in ("proved", "proved_with_replay_gaps"), builtin["status"]
+assert builtin["status"] == "proved", builtin
+assert builtin["replay"]["gaps"] == 0, builtin["replay"]
+assert builtin["replay"]["certificates"] == builtin["replay"]["replayed"], builtin["replay"]
+assert not builtin["trust"]["trusted_assumptions"], builtin["trust"]
 for name in ("bare", "unsigned_to_unsigned"):
     assert any(c["name"] == name and c["rule"] == "goal" and c["replayed"]
                for c in builtin["certificates"]), (name, builtin["certificates"])
