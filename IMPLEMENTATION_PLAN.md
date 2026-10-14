@@ -4,7 +4,7 @@
 
 This short list is the active plan. Historical experiment logs and older snapshots remain below as evidence, not as current state.
 
-1. **Restore a reproducible pinned-compiler lane.** The proof pins compiler `2a37b88c5acd5399e1653413fe58315348ae3083` and Stage0 `fa65ef625c4217cf54486821a6aa9348f5f04ec6`. The installed Stage1 provenance names compiler revision `5cda9b4e` and source tree `5cda9b4e69ff937f00ea43f0e7e4713d5ad3403b`, so it matches neither pinned compiler source. A fresh Stage0 from the pinned Stage0 source fails parsing the pinned compiler; Stage0 from clean core `4ca0e20b16cf` parses it but Stage1 seeding fails compiler ownership checks, including local-reference escape diagnostics. No source-matched Stage1 is available. Proof `main` contains committed source-admission, typed replay, and output-budget changes that still lack matched runtime qualification. The bounded owner-specific postcondition environment is now called from report replay after source goal admission and complete premise-source validation. Its contract-to-attempt binding and typed kernel behavior remain unqualified until the matched runtime gates pass. Resolve the bootstrap/compiler semantic mismatch and then run the source-matched proof runtime matrix and frozen-tuple replay gates. Timing remains skipped.
+1. **Restore a reproducible pinned-compiler lane.** The proof pins compiler `2a37b88c5acd5399e1653413fe58315348ae3083` and Stage0 `fa65ef625c4217cf54486821a6aa9348f5f04ec6`. The adjacent clean Elisa-compiler `main` is now at `c93a77740053fe9e9350641d095b57b3fe8bed27`, while the installed Stage1 provenance is schema v1 from compiler `f7b6c4a21704f4d3f1b13849d4cd0b6d9ae18b88` with source tree `ca7db88792c0bb146dc8b6495d14948ad3f42f7e8927e837f212b76b31a48787`; neither product matches the proof pin or current compiler checkout. Prior source-matched seed attempts from pinned Stage0 failed parsing the pinned compiler, and a newer Core Stage0 parsed it but Stage1 seeding failed ownership/lifetime checks. No source-matched Stage1 is available. Proof `main` contains committed source-admission, typed replay, and output-budget changes that still lack matched runtime qualification. The bounded owner-specific postcondition environment is now called from report replay after source goal admission and complete premise-source validation. Its contract-to-attempt binding and typed kernel behavior remain unqualified until the matched runtime gates pass. Resolve the bootstrap/compiler semantic mismatch and then run the source-matched proof runtime matrix and frozen-tuple replay gates. Timing remains skipped.
 
 2. **Close the explicit global-mutable authority requirement.** The static source-authority guard and exact-offset owner-identity regression pass. No grant behavior is qualified against the current proof sources: the previous runtime-matrix invocation refused its prebuilt verifier because its proof-source identity did not match the checkout. On a matching compiler product, run the existing matrix for direct reads (`Global.Read`), writes (`Global.Write`), and read-modify-write (both), including exact-grant success plus wrong-member, alias/reference, inferred-row, and transitive-call negative controls.
 
@@ -20575,14 +20575,6 @@ result type expressions, then recursively projected each expression to its type 
 reserving that second walk. Use the repeated-expression reservation to account for both passes
 before spelling the type. The bound now applies uniformly to module constants and the selected
 owner signature. `git diff --check` and the source-length gate pass; no tests or builds were run.
-
-### 23.27.1003 Skip impossible overloaded-operator scans
-
-The source overloaded-operator predicate walked every expression even when the source operator
-mask was empty, although no operator could be overloaded in that source environment. Add an early
-exit to both its metered and compatibility entry points; nonempty masks retain the same bounded
-walk and fail-closed depth behavior. `git diff --check` and the source-length gate pass; no tests
-or builds were run.
 
 ### 23.27.1003 Retry compiler self-build with the latest clean compiler candidate
 
