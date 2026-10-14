@@ -25171,6 +25171,15 @@ them under the shared goal-search work meter. The bounded-model source guard now
 ordering. Focused static checks and source-length checks pass; runtime replay remains unqualified
 until a source-matched compiler pair is available.
 
+### 23.27.1429 Share typing work across typed tactic transitions (2026-10-14)
+
+Typed tactic-step replay previously started the before-state and after-state proposition checks
+from independent copies of the typing-index cost. Typed branch replay rebuilt the index and gave
+each of its three states a fresh full typing budget. Both public transitions now build one index
+and carry one cumulative work counter through all state checks (and the step's term-sort checks).
+This bounds aggregate work per transition while avoiding repeated index construction. Static diff
+and source-length checks pass; no tests or build were run.
+
 ### 23.27.1428 Align producer conditional-width guards with replay (2026-10-14)
 
 The kernel refuses conditionals whose branches carry contradictory signedness or conflicting known
