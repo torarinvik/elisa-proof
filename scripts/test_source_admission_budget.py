@@ -589,12 +589,11 @@ assert "proof_goal_tactic_preflight_charge_scaled(&preflight_work, float_square_
 assert "proof_goal_tactic_preflight_charge_scaled(&preflight_work, shape_cost, 16)" in shared_float
 assert "proof_float_goal_with_work(facts, goal, operator_mask, &float_work, &float_exhausted)" in shared_float
 assert "proof_float_goal(facts, goal)" not in shared_float
-assert "if float_exhausted:" in shared_float
+assert "proof_float_propositional_goal_with_shared_work(facts, goal, operator_mask, &preflight_work, PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT)" in shared_float
 goal_replay = kernel_resource_model.split("def proof_kernel_replay_goal_depth_remaining_with_work(", 1)[1]
 goal_root_gate = goal_replay.index("if not (proof_kernel_replay_unsigned_safe_closing_with_goal_work(nodes, children, goal_root")
 binary_solver = goal_replay.index("proof_kernel_replay_goal_binary_with_work(nodes, children, facts")
-assert goal_root_gate < binary_solver
-assert "proof_kernel_replay_signed_expression_safe_with_bounds_goal_work(nodes, children, goal_root" in goal_replay[goal_root_gate:binary_solver]
+assert goal_root_gate < binary_solver and "proof_kernel_replay_signed_expression_safe_with_bounds_goal_work(nodes, children, goal_root" in goal_replay[goal_root_gate:binary_solver]
 unsafe_goal_fallback = goal_replay[goal_root_gate:].split("linear_certificate_closed:", 1)[0]
 assert "return (proof_kernel_replay_nested_conditional_goal(" in unsafe_goal_fallback
 assert "proof_kernel_replay_goal_binary_with_work(" not in unsafe_goal_fallback
