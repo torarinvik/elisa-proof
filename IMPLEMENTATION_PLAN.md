@@ -24936,3 +24936,20 @@ children live in the arena child table. Both the ordinary and cached safety path
 base expressions and every stored child; `field-init` is treated as a value wrapper. Child ranges,
 node validity, depth, and the existing work limits remain enforced, and unsupported child-bearing
 forms still fail closed. `git diff --check` and the source-length gate pass; no tests or build were run.
+
+### 23.27.1402 Bind alias-formal markers to parser-owned source (2026-10-14)
+
+Checked-view source admission now includes `__alias_owner` rows in the ordered parser-snapshot
+comparison alongside generic-bound and generic-identity markers. Replay uses these rows to decide
+whether source type aliases have generic formals, so omission or rewriting could change alias
+expansion after checking. The scan charges row visits and owner bytes; selected rows compare their
+full annotation payload and arguments. Static diff check passes; no build or runtime qualification
+was run.
+
+### 23.27.1402 Scan every child for negative integer bit patterns (2026-10-14)
+
+The unsigned negative-bit-pattern walk returned `false` from inside its child loop after the
+first safe child, so a later child could contain an unchecked negative literal. The success case
+still exits early when a negative value is found; the no-match result now occurs only after all
+children have been inspected. Each child keeps the existing recursive depth and work accounting.
+Static diff and source-length checks pass; no runtime check was run.
