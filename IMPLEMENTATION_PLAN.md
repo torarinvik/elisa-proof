@@ -24713,6 +24713,9 @@ prefixes and transactional refusals, so later appends cannot turn a failure into
 The report suffix interner is private because caller-selected start indices could truncate a prior
 prefix; checked report encoders remain its only callers. The independent audit found no checked-view
 verdict bypass. `git diff --check` passes; no tests or builds were run.
+The standalone interning fixture now invokes the private helper through a fixture-only wrapper in
+the owning module, preserving direct collision and compaction coverage without exporting the
+unchecked interner. The wrapper change is statically reviewed only; no build was run.
 
 ### 23.27.1384 Keep resource availability histories lexical
 
@@ -24875,9 +24878,52 @@ remains outstanding.
 ### 23.27.1396 Exclude generic-bound rows from function identity census
 
 Parser generic metadata arrays contain both ordinary generic parameters and generic-bound rows.
-The latter encode the source line with the high bit set and are associated with `__generic`
-bound metadata, not `__generic_param_identity` function-binder markers. Structural replay now
-keeps these rows in the generic owner/name index but excludes them from the function binder row
-census after validating their indexed owner/name presence. This prevents bounded function or
-protocol parameters from being mistaken for missing function identity markers. Runtime replay
-qualification remains outstanding; no test or build was run for this correction.
+The latter encode the source line with the high bit set and are associated with `__generic` bound
+metadata, not `__generic_param_identity` binder markers. The exact owner/name index now contains
+only ordinary binder rows, so an unauthenticated bound spelling cannot affect generic-name or
+type-shadow lookup. Its count and compacting passes charge each visited row. Structural replay
+excludes bound rows from both that index check and the function binder marker census; ordinary
+rows still require exact owner/name and marker agreement. After the first build, exact lookups
+validate and reuse the cached compact shape before recounting source rows, avoiding a full scan
+per lookup.
+This avoids mistaking bounded function or protocol declarations for missing identity markers while
+keeping bound spellings out of kernel-adjacent name resolution. Runtime replay qualification remains
+outstanding; no test or build was run for this correction.
+
+### 23.27.1397 Meter only variable-length comparisons in arena shape checks
+
+Arena shape validation compares most name fields only with empty text or fixed protocol literals;
+charging their full source-controlled lengths would reject valid large labels without accounting
+for work those checks perform. Full name-byte work remains charged where shape admission compares
+two arbitrary names (bound-variable distinctness and structural-argument identity). Static diff
+and source-length checks pass; no runtime replay was run.
+
+### 23.27.1398 Traverse calls in fixed-width safety admission
+
+The unsigned-expression safety walker previously returned success from inside the call-argument
+loop after validating only the first argument. It now validates every `call_arg` child and returns
+success only after the loop completes. Both signed-width safety walkers previously accepted calls
+through their default-success path; they now validate the callee and every argument. All three
+walkers reject unsupported child-bearing forms, while the call branches check child ranges and
+recurse under the existing depth and work limits. Static review, `git diff --check`, and the
+source-length gate pass; no tests or builds were run.
+
+### 23.27.1399 Bind generic-bound annotations to parser-owned source (2026-10-14)
+
+Generic-bound annotations affect overloaded-operator purity and structural-safety replay, while
+ordinary generic identity markers affect generic-name and local-type resolution. Source-bound
+admission now compares both ordered row classes, including owner, spelling, declaration/module
+identity, source position, and metadata payload, against the retained parser-owned `Ast::File`
+snapshot. The comparison charges row visits and variable text lengths to the shared
+source-admission budget; omission, duplication, reordering, rewriting, or budget exhaustion fails
+closed before receipt source authority is issued. The typed-postcondition replay route applies the
+same boundary check. Source review only; no tests or build were run, and runtime qualification
+remains blocked by the compiler provenance mismatch.
+
+### 23.27.1400 Reuse empty generic-binder indexes with bound rows
+
+The exact function-binder index omits generic-bound rows. A cache with zero ordinary binders was
+reused only when the parser table itself had zero rows, causing bound-only tables to be recounted
+on every lookup. The cache now records the source-row count independently from the indexed-binder
+count and reuses a validated empty index when those extents match. Reset and clear paths invalidate
+both counts. Static diff and source-length checks pass; no runtime qualification was run.
