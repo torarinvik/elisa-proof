@@ -4,7 +4,7 @@
 
 This is the active high-return sequence. Use the newest clean Elisa compiler revision that can produce a source-matched Stage1; preserve expression-based Elisa and its safety/effect checks in every source change. Keep timing skipped until a source-matched proof product passes correctness gates.
 
-1. **Restore a source-matched Stage1 lane.** Proof `main` is `c99b8caf6`, pins Elisa-compiler `c5a6616a` and Core stage0 `4fadc2c0`, and is 40 commits ahead of origin. Core stage0 was rebuilt from a clean worktree; its embedded revision is `4fadc2c0` with `vcs.modified=false`. The first Stage1 seed was killed at about 3.5 GiB RSS without an object while a separate O0 compiler run was active. That run has since terminated; its log shows a peak footprint of 8.56 GiB, 770 postcondition failures and 641 call-may-store failures, making resource contention a likely contributor, though not a proven sole cause. One isolated retry is the next gate. If it succeeds, build the current proof HEAD and verify manifest/compiler pins before runtime tests. If it fails, use the first hard diagnostics and peak-memory record to select the next fix.
+1. **Restore a source-matched Stage1 lane.** Proof `main` is currently `bc0bc0c62`, pins Elisa-compiler `c5a6616a` and Core stage0 `4fadc2c0`, and is 53 commits ahead of origin. Core stage0 was rebuilt from a clean worktree; its embedded revision is `4fadc2c0` with `vcs.modified=false`. Two Stage1 seed attempts ended in SIGKILL/status 137 during object emission without publishing an object or reporting Elisa source errors. The isolated retry was killed by macOS for low swap after crossing a compressed-memory threshold; the earlier run overlapped an unrelated O0 compiler. The retry log is `/private/tmp/elisa-stage1-seed-c5a-core4fadc-retry-20261014.log`. No maximum-RSS or peak-footprint record exists; the highest live sample was about 3.4 GiB and is not the peak. A current host snapshot shows 10.30 GiB of 11 GiB swap in use, with another Claude scratch O0 `elisac` compile active; this confirms that the local host still lacks safe headroom. Defer another full seed until memory headroom is available and capture process-tree RSS during any retry. Then require a successful source-matched Stage1 and verify manifest/compiler pins before runtime tests.
 
 2. **Close the indexed-char SMT proof gap.** Core commit `4fadc2c0` adds narrow `char`→`u8` truncation modeling, justified by runtime lowering and focused positive SView/index tests, a wrapping negative, and a control showing `char` is not globally byte-sized. Those focused Core tests pass. The recursive `sview_fnv1a_fold_from` and `ctx_cstr_eq_sview` proof obligations remain unverified until a matching proof product exists. Then run those exact obligations, preserve sign-changing and wrapping negatives, and keep solver work bounded.
 
@@ -25882,3 +25882,86 @@ Comparison-chain replay capped lower and upper middle candidates but continued c
 collected prefixes. It now refuses when either candidate list reaches its cap, including while
 collecting equality hops, so a truncated search cannot return `proven`. `git diff --check` and
 source-length validation pass. No tests or builds were run.
+
+### 23.27.1496 Authenticate equality hops in comparison-chain replay (2026-10-14)
+
+Comparison-chain replay accepted an equality hop based on matching operands and a scalar witness
+for the other side, without admitting the equality root itself or checking that both operands
+were primitive scalar terms. Equality hops now reject incomplete or untrusted operator metadata
+and require the same primitive-comparison validation used by direct order hops. `git diff --check`
+and source-length validation pass. No tests or builds were run.
+
+### 23.27.1497 Restore positive comparison bound collection (2026-10-14)
+
+Source review found the positive comparison collector unreachable: its call was indented after an
+unconditional return in the conjunction branch. Moved it to the generic binary-node path, so
+ordinary comparison facts again contribute bounds while conjunctions still recurse into both
+children. `git diff --check` and source-length validation pass. No tests or builds were run.
+
+### 23.27.1498 Share source pattern-binding work across nested scans (2026-10-14)
+
+Nested-local loop validation and summary-local alias analysis already carried cumulative source
+work counters, but pattern-binder reconstruction used the compatibility wrapper, resetting its
+own meter on every match arm. Added a work-aware source binder query that charges the pattern
+walk, queried name, and each binder comparison to the caller's existing counter, and migrated
+those shared-meter scans. A focused static regression rejects reintroduction of the fresh-meter
+calls. The compatibility wrapper now also delegates to the metered implementation, so binder
+comparisons are charged even when legacy visitors use that API. Source-authority and structural
+guards pass. The pinned Stage1 seed process was killed with status 137 during compiler emission,
+so current runtime qualification remains unavailable.
+
+### 23.27.1499 Authenticate linear comparison roots (2026-10-14)
+
+Linear fact normalization and disjunct pruning validated scalar operands but lacked the explicit
+root-level untrusted-operator check used by other arithmetic replay paths. Both paths now require
+complete, trusted comparison-root admission before interpreting a relation as a linear
+constraint. A focused static guard now also checks root admission on equality transport and
+requires the producer's unsigned type markers to use an exact supported-width set. The guard,
+kernel index-read guard, source-length check, and `git diff --check` pass. Runtime qualification
+is still pending.
+
+### 23.27.1500 Authenticate strict-order consequence premises (2026-10-14)
+
+Strict-order consequence replay derived disequality from `<` and `>` facts after checking only
+that their operands were primitive scalars. It now checks complete comparison-root admission
+and skips untrusted relation facts before using their order. `git diff --check` and source-length
+validation pass. No tests or builds were run.
+
+### 23.27.1501 Reject unsupported unsigned marker widths in replay (2026-10-14)
+
+Three replay-side unsigned type marker readers accepted any width from 8 through machine-word
+width, while the producer admits only the supported widths. Replaced those range checks with the
+shared `proof_kernel_unsigned_width_valid` predicate, aligning interval and linear replay with
+producer metadata and rejecting forged widths such as 9 or 31. Static diff and source-length
+checks pass. No tests or builds were run.
+
+### 23.27.1502 Reuse witness-marker cache during linear fact extraction (2026-10-14)
+
+Linear fact extraction rebuilt the full witness-marker cache for every comparison leaf, creating
+quadratic repeated scans across conjunction-heavy hypotheses. Added a marker-aware comparison-root
+admission path and build the cache once per linear fact-collection pass; leaves reuse it for both
+operator admission and primitive-scalar checks. `git diff --check` and source-length validation
+pass. No tests or builds were run.
+
+### 23.27.1503 Reuse marker cache during linear disjunct pruning (2026-10-14)
+
+Linear disjunct pruning recursively checked comparison leaves and rebuilt the full marker cache at
+each leaf. The pruning pass now builds one cache for the shared fact set and threads it through
+the recursive walk, reusing it for root admission and primitive-operand checks. `git diff --check`
+and source-length validation pass. No tests or builds were run.
+
+### 23.27.1504 Preserve source-work exhaustion on proof attempts (2026-10-14)
+
+Assert-by work-budget refusals now mark the just-recorded goal attempt as exhausted, including
+seed-fact, substitution, goal-purity, premise-snapshot, and tactic-preflight failures. Added a
+static regression checking those source refusal paths and the attempt recorder's exact update.
+The guard passes; end-to-end receipt behavior still needs a source-matched runtime build.
+
+### 23.27.1505 Reuse marker cache in arithmetic contradiction scans (2026-10-14)
+
+Arithmetic contradiction checks rebuilt witness-marker caches for each candidate relation, and
+complementary-order scans repeated that work while collecting facts. Both passes now share one
+metered cache across candidate roots; primitive-comparison and operator-trust queries use that
+cache. The linear-admission guard verifies the cache-aware calls, and the kernel inventory,
+focused arithmetic guards, source-length check, and `git diff --check` pass. Runtime timing and
+semantic qualification remain pending a source-matched compiler product.
