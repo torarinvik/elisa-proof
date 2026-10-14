@@ -1,11 +1,12 @@
 """A conditional postcondition must never be admitted with a replay gap."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 CASES = (
     (ROOT / "test/repro/minimal_conditional_ensure_replay_gap.elisa", {"certificates": 2, "replayed": 2, "gaps": 0}),
     (ROOT / "test/repro/minimal_conditional_positive_conjunct_replay.elisa", {"certificates": 2, "replayed": 2, "gaps": 0}),

@@ -4,12 +4,13 @@ fixtures pin that a missing, undone, conditional or unrecognised push, a push to
 collection, a user function named `push`, a wrong or later-overwritten element, a value
 reassigned after the push and a value read from the receiver all leave the claim unproven."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(path):

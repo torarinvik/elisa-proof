@@ -1,12 +1,13 @@
 """An unrelated record capture does not erase fresh scalar entry evidence."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = (ROOT / "test/repro/read_only_search_field_bound.elisa").read_text()
 CONDITIONAL = (ROOT / "test/repro/conditional_search_field_bound.elisa").read_text()
 for name, source, accepted in (

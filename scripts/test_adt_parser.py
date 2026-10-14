@@ -3,12 +3,13 @@ projected by position from the returned tuple, and a label of a pure call's resu
 value. Each broken counterpart is refused, and replay withholds the only unproven function's own
 summary from its proofs."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(name):

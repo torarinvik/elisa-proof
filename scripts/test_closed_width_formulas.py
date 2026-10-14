@@ -1,13 +1,14 @@
 """Closed width-independent OR formulas prove; width-dependent controls remain open."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 if not __debug__:
     raise SystemExit("closed width checks must run without Python -O")
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 for fixture, expected in (("closed_goal_width_uniform", 0),
                           ("rejected_closed_goal_width_uniform", 1)):

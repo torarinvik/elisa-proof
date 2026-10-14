@@ -1,12 +1,13 @@
 """Branch locals do not erase unchanged outer loop atoms."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = (ROOT / "test/repro/branch_local_loop_atom.elisa").read_text()
 for name, source, accepted in (
     ("both-arms-local", BASE, True),

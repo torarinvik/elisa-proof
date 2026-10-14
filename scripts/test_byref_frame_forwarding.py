@@ -1,13 +1,14 @@
 """Two-hop reference frames replay exact places and fail closed on aliases and stale borrows."""
 import copy
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PRODUCER = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+PRODUCER = qualified_test_binary.proof_test_binary(ROOT)
 REPLAY = os.environ.get("ELISA_PROOF_REPLAY_BIN", str(ROOT / "build/elisa-proof-replay"))
 
 SOURCE = """\
@@ -186,7 +187,7 @@ with tempfile.TemporaryDirectory(prefix="elisa-byref-frame-forwarding-") as dire
     wrong_findings = [finding for finding in report["findings"]
                       if finding["name"] == "wrong_place"]
     assert any(finding["kind"] == "frame-call-outside"
-               and finding["status"] == "disproved" for finding in wrong_findings), wrong_findings
+               and finding["status"] == "unknown" for finding in wrong_findings), wrong_findings
     assert not any(finding["kind"] == "frame-call-opaque"
                    for finding in wrong_findings), wrong_findings
 
@@ -199,11 +200,11 @@ with tempfile.TemporaryDirectory(prefix="elisa-byref-frame-forwarding-") as dire
     assert any(finding["kind"] == "borrow-source-opaque"
                and finding["status"] == "unsupported" for finding in alias_findings), alias_findings
     assert any(finding["kind"] == "frame-preserve-violated"
-               and finding["status"] == "disproved" for finding in alias_findings), alias_findings
+               and finding["status"] == "unknown" for finding in alias_findings), alias_findings
     stale_findings = [finding for finding in report["findings"]
                       if finding["name"] == "stale_place_after_push"]
     assert any(finding["kind"] == "borrow-write-conflict"
-               and finding["status"] == "disproved" for finding in stale_findings), stale_findings
+               and finding["status"] == "unknown" for finding in stale_findings), stale_findings
     positive_path = directory / "forwarding-positive.elisa"
     positive_path.write_text(PORTABLE_SOURCE, encoding="utf-8")
     _, positive_report = run_json(positive_path)

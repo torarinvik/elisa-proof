@@ -1,14 +1,14 @@
 """Check safe, explicitly unsafe, opaque and returned-reference alias boundaries."""
 import json
-import os
 from pathlib import Path
 import subprocess
+from qualified_test_binary import proof_test_binary
 
 if not __debug__:
     raise SystemExit("alias-boundary checks must run without Python -O")
 
 ROOT = Path(__file__).resolve().parents[1]
-BIN = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+BIN = Path(proof_test_binary(ROOT))
 
 
 def check_function(source_name, function_name, expected_exit, status,

@@ -48,6 +48,7 @@ assert unproven(data) == [
     ("ensure-unproven", 36, "off_by_one"),
     ("ensure-unproven", 41, "direct_call_off_by_one"),
     ("ensure-unproven", 48, "impure_call_untyped"),
+    ("ensure-unproven", 175, "deep_qualified_alias_wrong_width"),
 ], unproven(data)
 
 code, data = check("rejected_returned_call_local.elisa")
@@ -102,6 +103,10 @@ assert any(row["name"] == "module_alias_type_path_precedence_positive" and row["
 assert any(row["name"] == "module_alias_parameter_type_path_precedence_positive" and row["proved"]
            for row in data["functions"]), data["functions"]
 assert any(row["name"] == "root_overload_after_incompatible_generic" and row["proved"]
+           for row in data["functions"]), data["functions"]
+assert any(row["name"] == "deep_qualified_alias_parameter" and row["proved"]
+           for row in data["functions"]), data["functions"]
+assert any(row["name"] == "deep_qualified_alias_call_result" and row["proved"]
            for row in data["functions"]), data["functions"]
 
 code, data = check("rejected_call_result_shadowed_u32.elisa")

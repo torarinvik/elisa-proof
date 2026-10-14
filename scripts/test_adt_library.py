@@ -2,12 +2,13 @@
 and replay withholds a function's own summary from its proofs while that function has an
 unproven goal."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(name):
@@ -77,5 +78,17 @@ declarations = {row["name"]: row for row in data["declaration_details"]
                 if row.get("kind") == "function"}
 for name in ("field_callback_bounce", "field_callback_reenter"):
     assert name in declarations and not declarations[name]["verified"], declarations.get(name)
+
+code, data = run("rejected_structural_bare_binding.elisa")
+assert code == 1 and data["status"] == "failed", (code, data.get("status"))
+assert data["summary"]["semantic_errors"] == 0, data["semantic_diagnostics"]
+assert data["replay"]["gaps"] == 0, data["replay"]
+bare_binding_findings = [f for f in data["findings"]
+                         if f["kind"] == "structural-decreases-unproven"
+                         and f["name"] == "rejected_bare_binding"]
+assert bare_binding_findings, data["findings"]
+declarations = {row["name"]: row for row in data["declaration_details"]
+                if row.get("kind") == "function"}
+assert "rejected_bare_binding" in declarations and not declarations["rejected_bare_binding"]["verified"]
 
 print("adt library: lists, trees and token streams proved by structural induction, replayed; broken variants refused")

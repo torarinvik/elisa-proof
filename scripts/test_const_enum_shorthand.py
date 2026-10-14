@@ -2,13 +2,14 @@
 """Owner-aware const-enum shorthand proof and independent portable replay gates."""
 import copy
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PROOF = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+PROOF = Path(qualified_test_binary.proof_test_binary(ROOT))
 REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
 if not __debug__:
     raise SystemExit("test_const_enum_shorthand.py must run without Python -O")

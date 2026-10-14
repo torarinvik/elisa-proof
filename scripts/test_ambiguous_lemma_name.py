@@ -1,6 +1,6 @@
 """Two lemmas with one name must fail closed without crashing the checker."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
@@ -8,7 +8,8 @@ if not __debug__:
     raise SystemExit("ambiguous-lemma checks must run without Python -O")
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 run = subprocess.run([str(BINARY), "--json", str(ROOT / "examples/rejected_ambiguous_lemma_name.elisa")],
                      capture_output=True, text=True, timeout=120)
 # Exit 1 is a verdict; a signal (negative) or trap status is the regression this guards.
@@ -71,4 +72,32 @@ assert len(shared_declarations) == 2 and all(
 ), shared_declarations
 assert any(f["name"] == "shared" and f["proved"]
            for f in executable_report["functions"]), executable_report["functions"]
+
+# A function and a lemma may share a leaf name across modules. Their source owners remain
+# distinct: the unrelated function's failed postcondition must not enter the lemma's proof-goal
+# list or turn the otherwise valid theorem into a source/replay gap.
+cross_kind = subprocess.run([str(BINARY), "--json",
+    str(ROOT / "examples/cross_module_lemma_function_name.elisa")],
+    capture_output=True, text=True, timeout=120)
+assert cross_kind.returncode == 1, (cross_kind.returncode, cross_kind.stderr[-2000:])
+cross_kind_report = json.loads(cross_kind.stdout)
+assert cross_kind_report["status"] == "failed", cross_kind_report["status"]
+same_name_rows = [d for d in cross_kind_report["declaration_details"]
+                  if d["name"] == "shared_owner"]
+lemma_rows = [d for d in same_name_rows if d["kind"] == "lemma"]
+function_rows = [d for d in same_name_rows if d["kind"] == "function"]
+assert len(lemma_rows) == 1 and lemma_rows[0]["verified"], same_name_rows
+assert len(function_rows) == 1 and not function_rows[0]["verified"], same_name_rows
+theorem_rows = [t for t in cross_kind_report["theorems"] if t["name"] == "shared_owner"]
+assert len(theorem_rows) == 1, theorem_rows
+theorem = theorem_rows[0]
+assert theorem["verified"] and theorem["source_claim_admissible"] and theorem["proof_goals_valid"], theorem
+goals_by_id = {goal["goal_id"]: goal for goal in cross_kind_report["goals"]}
+theorem_goals = [goals_by_id[goal["goal_id"]] for goal in theorem["proof_goals"]]
+assert theorem_goals and all(goal["line"] == theorem["line"] and goal["proven"]
+                             for goal in theorem_goals), (theorem, theorem_goals)
+failed_sibling_goals = [goal for goal in cross_kind_report["goals"]
+                        if goal["name"] == "shared_owner" and not goal["proven"]]
+assert failed_sibling_goals and all(goal["line"] != theorem["line"]
+                                    for goal in failed_sibling_goals), failed_sibling_goals
 print("ambiguous lemmas fail closed; unique lemmas and duplicate executable names remain verified")

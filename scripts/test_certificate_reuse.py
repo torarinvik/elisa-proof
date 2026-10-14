@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exercise actual cache hits and premise invalidation through the public report."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
@@ -9,9 +9,10 @@ import subprocess
 ROOT = Path(__file__).resolve().parent.parent
 
 
+
 def report_for(name, expected_exit):
     process = subprocess.run(
-        [os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof")), "--json", str(ROOT / "examples" / (name + ".elisa"))],
+        [qualified_test_binary.proof_test_binary(ROOT), "--json", str(ROOT / "examples" / (name + ".elisa"))],
         capture_output=True, text=True, timeout=60,
     )
     assert process.returncode == expected_exit, (name, process.stderr)

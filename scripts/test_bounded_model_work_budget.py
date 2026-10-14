@@ -1,11 +1,12 @@
 """The bounded model evaluator refuses frames above its measured work cap."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 FIXTURE = ROOT / "examples/bounded_model_work_budget.elisa"
 STRESS_CLAUSE = "requires ModelBudgetConstants::C == ModelBudgetConstants::C"
 UNDER_BUDGET_STRESS_COUNT = 12

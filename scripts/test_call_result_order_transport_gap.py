@@ -1,12 +1,13 @@
 """Check named conditional-summary transport and adversarial mapping controls."""
 import json
-import os
+import os, qualified_test_binary
 from collections import Counter
 from pathlib import Path
 import subprocess
 
 root = Path(__file__).resolve().parents[1]
-binary = os.environ.get("ELISA_PROOF_BIN", str(root / "build/elisa-proof"))
+
+binary = qualified_test_binary.proof_test_binary(root)
 run = subprocess.run([binary, "--json", str(root / "examples/call_result_order_transport_gap.elisa")],
                      capture_output=True, text=True, timeout=30)
 assert run.returncode == 1, run.stderr

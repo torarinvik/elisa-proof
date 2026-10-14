@@ -1,12 +1,13 @@
 """Authenticate captured-loop entry inside a local initializer, never exit state."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get('ELISA_PROOF_BIN', str(ROOT/'build/elisa-proof'))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = '''def captured_initializer(limit: usize) -> usize:
     requires limit <= 32
     found: usize =

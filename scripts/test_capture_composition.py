@@ -5,17 +5,18 @@ known baseline while developing a bounded producer/replay search improvement.
 """
 import argparse
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--expect-open", action="store_true")
 args = parser.parse_args()
 if not __debug__:
     raise SystemExit("run without Python -O: regression assertions must remain enabled")
-binary = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+binary = qualified_test_binary.proof_test_binary(ROOT)
 result = subprocess.run(
     [binary, "--function-json", "capture_composition",
      str(ROOT / "examples/capture_composition_probe.elisa")],

@@ -4,12 +4,13 @@ rejected fixtures pin that an overstated count, the popped slot, a conditional p
 another collection, a pop then push, a value-position pop, a pop with an argument and a user
 function named `pop` all leave the claim unproven; a run of 40 pops stays one sum deep."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(path):

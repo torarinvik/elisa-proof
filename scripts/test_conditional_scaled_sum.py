@@ -1,12 +1,13 @@
 """Source-exact immutable conditional bounds must replay without trusting calls."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import sys
 
 root = Path(__file__).resolve().parents[1]
-prover = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(os.environ.get('ELISA_PROOF_BIN', root / 'build/elisa-proof'))
+
+prover = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(qualified_test_binary.proof_test_binary(root))
 for name, accepted in (
         ('conditional_scaled_sum_bound', True),
         ('conditional_computed_local_bound', True),

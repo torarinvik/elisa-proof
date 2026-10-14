@@ -1,11 +1,12 @@
 """OR elimination may discard only explicitly refuted alternatives."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 for fixture, expected in (("disjunction_domain_probe", 0),
                           ("rejected_disjunction_domain_probe", 1)):
     run = subprocess.run([str(BINARY), "--json", str(ROOT / "examples" / (fixture + ".elisa"))],

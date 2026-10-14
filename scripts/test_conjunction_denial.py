@@ -1,13 +1,14 @@
 """Exact conjunction contradictions replay; disjunctions do not imply operands."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 if not __debug__:
     raise SystemExit("run without Python -O")
 root = Path(__file__).resolve().parents[1]
-binary = os.environ.get("ELISA_PROOF_BIN", str(root / "build/elisa-proof"))
+
+binary = qualified_test_binary.proof_test_binary(root)
 for example, code in (("conjunction_denial_probe", 0), ("rejected_disjunction_denial", 1)):
     process = subprocess.run([binary, "--json", str(root / "examples" / (example + ".elisa"))],
                              capture_output=True, text=True, timeout=120)

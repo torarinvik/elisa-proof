@@ -1,14 +1,15 @@
 """Closed constant alternatives eliminate without admitting true/symbolic ones."""
 import collections
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 if not __debug__:
     raise SystemExit("run without Python -O")
 ROOT = Path(__file__).resolve().parents[1]
-binary = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+binary = qualified_test_binary.proof_test_binary(ROOT)
 p = subprocess.run([binary, "--json", str(ROOT / "test/constant_disjunction_denial.elisa")],
                    capture_output=True, text=True, timeout=60)
 r = json.loads(p.stdout)

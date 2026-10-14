@@ -1,11 +1,12 @@
 """Boolean locals preserve their initializer facts until reassigned."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BIN = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BIN = qualified_test_binary.proof_test_binary(ROOT)
 
 
 def run(fixture):

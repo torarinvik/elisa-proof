@@ -1,6 +1,6 @@
 """A bare call named like a builtin scalar type is a conversion and must not use a contract."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
@@ -8,7 +8,8 @@ if not __debug__:
     raise SystemExit("builtin-type call checks must run without Python -O")
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 run = subprocess.run([str(BINARY), "--json", str(ROOT / "examples/rejected_builtin_type_named_function.elisa")],
                      capture_output=True, text=True, timeout=120)
 assert run.returncode == 1, (run.returncode, run.stderr[-2000:], run.stdout[-2000:])

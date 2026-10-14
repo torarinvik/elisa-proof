@@ -1,6 +1,6 @@
 """The same conditional result is split under its guard and negation, fail-closed."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
@@ -8,7 +8,8 @@ if not __debug__:
     raise SystemExit("conditional-result regression must run without Python -O")
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 SOURCE = ROOT / "examples/conditional_result_branchwise_probe.elisa"
 
 run = subprocess.run([str(BINARY), "--json", str(SOURCE)], capture_output=True, text=True, timeout=60)

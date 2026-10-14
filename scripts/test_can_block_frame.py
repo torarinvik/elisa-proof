@@ -3,12 +3,13 @@ its writes and calls havoc what they reach inside the block, and facts over its 
 with its scope. The rejected fixture pins that a mutably passed collection, an assigned local
 and a block-local relation are all forgotten."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(path):

@@ -109,6 +109,7 @@ constants += "const GLOBAL_QUALIFIED_WRITE_API_SOURCE: sview = " + json.dumps("m
 constants += "const PARAMETER_RETURN_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    requires value == 7\n    ensure result == 7\n    return value\n") + "\n"
 constants += "const PARAMETER_OPEN_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    ensure result == 7\n    return value\n") + "\n"
 constants += "const SOURCE_ASSERT_BY_POSITIVE_API_SOURCE: sview = " + json.dumps((ROOT / "examples/source_obligation_assert_by_positive.elisa").read_text()) + "\n"
+constants += "const SOURCE_ASSERT_BY_SIBLING_API_SOURCE: sview = " + json.dumps((ROOT / "examples/source_obligation_assert_by_positive.elisa").read_text() + "\nmodule SiblingOwner:\n    def source_assert_by_inventory_positive() -> void:\n        pass\n") + "\n"
 constants += "const SOURCE_ASSERT_BY_NESTED_API_SOURCE: sview = " + json.dumps((ROOT / "examples/source_obligation_assert_by_module.elisa").read_text()) + "\n"
 constants += "const PARAMETER_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    requires value == 7\n    ensure result == 7\n    return value\n") + "\n"
 constants += "const GENERIC_BUILTIN_NUMERIC_API_SOURCE: sview = " + json.dumps("def generic_i64_parameter[i64](value: i64) -> i64:\n    requires value >= 0\n    ensure result >= value\n    return value\n") + "\n"
@@ -182,19 +183,6 @@ def api_parameter_goal_attempt_index(report: ProofReport&) -> usize:
         return index if attempt.name == "checked" and attempt.rule == "goal"
     return report.goal_attempts.count
 
-def api_source_assert_by_attempt_index(report: ProofReport&, inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&) -> usize:
-    return report.goal_attempts.count if inventory.count == 0
-    expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool) = inventory[0]
-    for index in 0..<report.goal_attempts.count |index, report, expected|:
-        attempt: ProofGoalAttempt = report.goal_attempts[index]
-        if attempt.name == expected.name and attempt.line == expected.attempt_line and attempt.rule == "goal":
-            match attempt.goal:
-                Ast::Expr.BoolLit(value, position):
-                    return index if value == expected.expected_value and position.line == expected.goal_line and position.offset == expected.goal_offset
-                _:
-                    pass
-    return report.goal_attempts.count
-
 def api_parameter_goal_probe(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, route: usize, tamper: usize) -> void can Memory.Allocate, Abort.Panic:
     source.clear()
     for index in 0..<sview_len(text) |index, text, source|:
@@ -228,7 +216,7 @@ def api_parameter_goal_probe(text: sview, source: mutable darray[u8]&, report: m
         original_attempt: ProofGoalAttempt = report.goal_attempts[source_attempt_index]
         contract_position: Ast::Pos = Ast::pos_at_line(3)
         forged_goal: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("other", contract_position), TokenKind.EqEq, Ast::Expr.IntLit(7, contract_position), contract_position)
-        report.goal_attempts[source_attempt_index] <- ProofGoalAttempt{goal: forged_goal, budget_exhausted: original_attempt.budget_exhausted, facts_start: original_attempt.facts_start, facts_count: original_attempt.facts_count, kernel_goal: original_attempt.kernel_goal, kernel_facts_start: original_attempt.kernel_facts_start, kernel_facts_count: original_attempt.kernel_facts_count, line: original_attempt.line, name: original_attempt.name, rule: original_attempt.rule, proven: original_attempt.proven, has_certificate: original_attempt.has_certificate, certificate_index: original_attempt.certificate_index}
+        report.goal_attempts[source_attempt_index] <- ProofGoalAttempt{goal: forged_goal, budget_exhausted: original_attempt.budget_exhausted, facts_start: original_attempt.facts_start, facts_count: original_attempt.facts_count, kernel_goal: original_attempt.kernel_goal, kernel_facts_start: original_attempt.kernel_facts_start, kernel_facts_count: original_attempt.kernel_facts_count, line: original_attempt.line, name: original_attempt.name, rule: original_attempt.rule, producer_proven: original_attempt.producer_proven, has_certificate: original_attempt.has_certificate, certificate_index: original_attempt.certificate_index, owner_function_line: original_attempt.owner_function_line, owner_function_offset: original_attempt.owner_function_offset}
     elif tamper == 3:
         return if source_attempt_index >= report.goal_attempts.count
         source_attempt: ProofGoalAttempt = report.goal_attempts[source_attempt_index]
@@ -275,6 +263,28 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
             (proof_replay_certificates(&report) can Global{Read,Write})
             return 248 if report.replay_gaps != 0 or not proof_source_assert_by_coverage(source_assert_by_goals, report) or not proof_report_source_admission_invariants_consistent(report)
             if route == 0:
+                source_attempt_index: usize = api_source_assert_by_attempt_index(report, source_assert_by_goals)
+                return 281 if source_attempt_index >= report.goal_attempts.count
+                original_attempt: ProofGoalAttempt = report.goal_attempts[source_attempt_index]
+                return 288 if not api_source_owner_mutation_roundtrip(SOURCE_ASSERT_BY_POSITIVE_API_SOURCE, &source, &report, &diagnostics, route, original_attempt.owner_function_line + 1, original_attempt.owner_function_offset, false)
+                return 282 if not api_source_owner_mutation_roundtrip(SOURCE_ASSERT_BY_POSITIVE_API_SOURCE, &source, &report, &diagnostics, route, original_attempt.owner_function_line + 1, original_attempt.owner_function_offset, true)
+                return 283 if not api_source_owner_mutation_roundtrip(SOURCE_ASSERT_BY_POSITIVE_API_SOURCE, &source, &report, &diagnostics, route, original_attempt.owner_function_line + 1, original_attempt.owner_function_offset + 1, true)
+                (api_probe_before_replay(SOURCE_ASSERT_BY_SIBLING_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+                source_assert_by_goals <- proof_source_assert_by_inventory(report.source_declarations)
+                (proof_replay_certificates(&report) can Global{Read,Write})
+                return 284 if source_assert_by_goals.count != 2 or report.replay_gaps != 0 or not proof_source_assert_by_coverage(source_assert_by_goals, report) or not proof_report_source_admission_invariants_consistent(report)
+                sibling_owner_line: mutable u32 = 0
+                sibling_owner_offset: mutable u32 = 0
+                for declaration in report.analysis_1.declaration_details |declaration, sibling_owner_line, sibling_owner_offset, original_attempt|:
+                    if declaration.kind == "function" and declaration.name == original_attempt.name and declaration.source_offset != original_attempt.owner_function_offset:
+                        sibling_owner_line <- declaration.line
+                        sibling_owner_offset <- declaration.source_offset
+                return 285 if sibling_owner_offset == 0
+                return 286 if not api_source_owner_mutation_roundtrip(SOURCE_ASSERT_BY_SIBLING_API_SOURCE, &source, &report, &diagnostics, route, sibling_owner_line, sibling_owner_offset, true)
+                (api_probe_before_replay(SOURCE_ASSERT_BY_POSITIVE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+                source_assert_by_goals <- proof_source_assert_by_inventory(report.source_declarations)
+                (proof_replay_certificates(&report) can Global{Read,Write})
+                return 287 if report.replay_gaps != 0 or not proof_source_assert_by_coverage(source_assert_by_goals, report) or not proof_report_source_admission_invariants_consistent(report)
                 report.goal_attempts.clear()
                 return 255 if proof_source_assert_by_attempt_coverage(source_assert_by_goals, report)
                 (api_probe_before_replay(SOURCE_ASSERT_BY_POSITIVE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
@@ -305,7 +315,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
             (api_probe(INVALID_API_SOURCES[index], &source, &report, &diagnostics, route) can Global{Read,Write})
             return 171 if report.certificates.count != 0 or report.goal_attempts.count != 0 or report.proven != 0
             return 172 if report.source_declarations.count != 0 or report.traces.records.count != 0 or report.kernel.nodes.count != 0
-            expected_kind: sview = "semantic-source-inadmissible" if index < 3 or index >= 7 else "arithmetic-safety-refuted"
+            expected_kind: sview = "semantic-source-inadmissible" if index < 3 else ("semantic-permission-ungranted" if index >= 7 else "arithmetic-safety-refuted")
             return 173 if not any finding in report.findings where finding.kind == expected_kind
             if route != 0 and (index < 3 or index >= 7):
                 return 174 if not any diagnostic in diagnostics where Semantic::diagnostic_severity(diagnostic) == 1
@@ -457,7 +467,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     return 242 if forged_outside_attempt_index >= report.goal_attempts.count
     saved_outside_attempt: ProofGoalAttempt = report.goal_attempts[forged_outside_attempt_index]
     saved_outside_certificate: ProofGoalCertificate = report.certificates[outside_loop_certificate]
-    report.goal_attempts[forged_outside_attempt_index] <- ProofGoalAttempt{goal: saved_outside_attempt.goal, budget_exhausted: saved_outside_attempt.budget_exhausted, facts_start: saved_outside_attempt.facts_start, facts_count: saved_outside_attempt.facts_count, kernel_goal: saved_outside_attempt.kernel_goal, kernel_facts_start: saved_outside_attempt.kernel_facts_start, kernel_facts_count: saved_outside_attempt.kernel_facts_count, line: report.certificates[inside_loop_certificate].line, name: saved_outside_attempt.name, rule: saved_outside_attempt.rule, proven: saved_outside_attempt.proven, has_certificate: saved_outside_attempt.has_certificate, certificate_index: saved_outside_attempt.certificate_index}
+    report.goal_attempts[forged_outside_attempt_index] <- ProofGoalAttempt{goal: saved_outside_attempt.goal, budget_exhausted: saved_outside_attempt.budget_exhausted, facts_start: saved_outside_attempt.facts_start, facts_count: saved_outside_attempt.facts_count, kernel_goal: saved_outside_attempt.kernel_goal, kernel_facts_start: saved_outside_attempt.kernel_facts_start, kernel_facts_count: saved_outside_attempt.kernel_facts_count, line: report.certificates[inside_loop_certificate].line, name: saved_outside_attempt.name, rule: saved_outside_attempt.rule, producer_proven: saved_outside_attempt.producer_proven, has_certificate: saved_outside_attempt.has_certificate, certificate_index: saved_outside_attempt.certificate_index, owner_function_line: saved_outside_attempt.owner_function_line, owner_function_offset: saved_outside_attempt.owner_function_offset}
     report.certificates[outside_loop_certificate] <- ProofGoalCertificate{goal: saved_outside_certificate.goal, facts_start: saved_outside_certificate.facts_start, facts_count: saved_outside_certificate.facts_count, kernel_goal: saved_outside_certificate.kernel_goal, kernel_facts_start: saved_outside_certificate.kernel_facts_start, kernel_facts_count: saved_outside_certificate.kernel_facts_count, line: report.certificates[inside_loop_certificate].line, name: saved_outside_certificate.name, rule: saved_outside_certificate.rule, replayed: saved_outside_certificate.replayed}
     report.trace_owner_line <- report.certificates[inside_loop_certificate].line
     report.trace_consumer_certificate_index <- outside_loop_certificate + 1
@@ -551,15 +561,21 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
 '''
 structural_mutations = (ROOT / "scripts/tests/fixtures/structural_replay_mutations.elisa").read_text()
 arena_mutations = (ROOT / "scripts/tests/fixtures/replay_arena_admission_mutations.elisa").read_text()
-marker = "def api_global_array_replay_probe("
+goal_finding_mutations = (ROOT / "scripts/tests/fixtures/goal_finding_link_mutations.elisa").read_text()
+marker = "def api_parameter_goal_probe("
 if harness.count(marker) != 1:
     raise AssertionError("replay mutation fixture insertion point is missing or ambiguous")
-harness = harness.replace(marker, structural_mutations + "\n" + arena_mutations + "\n" + marker, 1)
+harness = harness.replace(marker, structural_mutations + "\n" + arena_mutations + "\n" + goal_finding_mutations + "\n" + marker, 1)
+harness = harness.replace(
+    "def main() -> i64 can Memory.Allocate, Abort.Panic:\n",
+    "def main() -> i64 can Memory.Allocate, Abort.Panic:\n    return 280 if not (api_goal_finding_link_mutations_rejected() can Global{Read,Write})\n",
+    1,
+)
 ast_nodes = (ROOT / "build/snapshot/Elisa-compiler/src/parser/ast_nodes.elisa").read_text()
 statement_nodes = ast_nodes.split("    enum Stmt is Node:", 1)[1].split("    enum Decl is Node:", 1)[0]
 statement_variants = set(re.findall(r"^        ([A-Z][A-Za-z0-9_]*)\b", statement_nodes, re.MULTILINE))
 type_bound_source = (ROOT / "src/proof/replay/type_bound_loop_scope.elisa").read_text()
-consumer_visitor = type_bound_source.split("def proof_replay_type_bound_consumer_source_site_in_body(", 1)[1].split("def proof_replay_type_bound_loop_consumer_in_scope(", 1)[0]
+consumer_visitor = type_bound_source.split("def proof_replay_type_bound_consumer_source_site_in_body_bounded(", 1)[1].split("def proof_replay_type_bound_consumer_source_site_in_body(", 1)[0]
 visited_statement_variants = set(re.findall(r"Ast::Stmt\.([A-Z][A-Za-z0-9_]*)", consumer_visitor))
 unvisited_statement_variants = sorted(statement_variants - visited_statement_variants)
 if unvisited_statement_variants:

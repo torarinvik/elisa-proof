@@ -39,6 +39,15 @@ def manifest_fixture(directory: Path) -> dict:
 
 with tempfile.TemporaryDirectory(prefix="elisa-declaration-identity-") as temporary:
     root = Path(temporary)
+    # Artifact reuse is authorized only against a complete, empty incident inventory. Keep this
+    # identity regression deterministic and independent of the repository's open incident ledger.
+    incident_registry = root / "soundness_incidents.json"
+    incident_registry.write_text(json.dumps({
+        "schema": "elisa-proof-soundness-incident-registry-v2",
+        "incidents": [],
+        "unclassified_reports": [],
+    }), encoding="utf-8")
+    identity.SOUNDNESS_INCIDENT_REGISTRY = incident_registry
     manifest = manifest_fixture(root)
     manifest_path = root / "proof.manifest.json"
     manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
