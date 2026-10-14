@@ -15,7 +15,6 @@ hosts with the same checkout path can split one run (scripts/remote/farm.sh).
 """
 import concurrent.futures
 import glob
-import hashlib
 import os
 import re
 import subprocess
@@ -23,7 +22,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from report_cache import cache_key, effective_cpus, heavy_slot, heavy_slots  # noqa: E402
+from report_cache import (MAX_CACHED_REPORT_BYTES, MAX_VERIFIER_SECONDS,
+                          CacheIdentityUnavailable, _run_bounded_stdout, _sha256_regular_file,
+                          cache_key, effective_cpus, heavy_slot, heavy_slots,
+                          soundness_registry_allows_report_reuse)  # noqa: E402
 
 
 def matrix_text(test_script: str) -> str:
@@ -65,7 +67,12 @@ def run_py(root: str, cache: str, name: str) -> None:
 
 
 def run_one(binary: str, cache: str, path: str) -> None:
-    key = cache_key(path, binary)
+    try:
+        key = cache_key(path, binary)
+    except CacheIdentityUnavailable:
+        # An incomplete identity must never be published as a reusable report. The serial
+        # runner will invoke the verifier directly when it reaches this fixture.
+        return
     # Marks a fixture in progress so a reader waits for it instead of running it twice.
     pending = os.path.join(cache, "pending", key)
     out_path = os.path.join(cache, key + ".json")
@@ -74,8 +81,27 @@ def run_one(binary: str, cache: str, path: str) -> None:
     open(pending, "w").close()
     try:
         with open(out_path + ".tmp", "wb") as out, heavy_slot(path, cache):
-            status = subprocess.run([binary, "--json", path], stdout=out, stderr=subprocess.DEVNULL).returncode
-        payload_digest = hashlib.sha256(Path(out_path + ".tmp").read_bytes()).hexdigest()
+            status, _, exceeded, write_failed, timed_out = _run_bounded_stdout(
+                [binary, "--json", path], out, MAX_CACHED_REPORT_BYTES,
+                MAX_VERIFIER_SECONDS,
+            )
+        if exceeded or write_failed or timed_out:
+            return
+        try:
+            verified_key = cache_key(path, binary)
+        except CacheIdentityUnavailable:
+            # Inputs changed or became unreadable during verification; never associate the
+            # resulting report with the pre-run identity.
+            return
+        if verified_key != key:
+            return
+        try:
+            payload_digest = _sha256_regular_file(
+                Path(out_path + ".tmp"), max_bytes=MAX_CACHED_REPORT_BYTES
+            )
+        except OSError:
+            # The normal cache reader would reject this output; do not allocate it or publish it.
+            return
         with open(digest_path + ".tmp", "w", encoding="ascii") as digest:
             digest.write(f"{payload_digest}\n")
         with open(status_path + ".tmp", "w", encoding="ascii") as rc:
@@ -101,9 +127,10 @@ def main() -> int:
     jobs = int(sys.argv[5]) if len(sys.argv) > 5 else effective_cpus()
     os.makedirs(os.path.join(cache, "pending"), exist_ok=True)
     paths = fixtures(test_script, root)
+    reusable_paths = paths if soundness_registry_allows_report_reuse() else []
     scripts = py_tests(test_script, root)
     # Large fixtures first, then the Python tests, then the many small fixtures.
-    big, small = paths[:len(paths) // 8], paths[len(paths) // 8:]
+    big, small = reusable_paths[:len(reusable_paths) // 8], reusable_paths[len(reusable_paths) // 8:]
     # ELISA_PROOF_PREFETCH_PHASE=fixtures|tests runs one half (scripts/remote/farm.sh runs the
     # Python tests only after every host's fixtures are gathered, so they never re-run one).
     phase = os.environ.get("ELISA_PROOF_PREFETCH_PHASE", "all")
@@ -121,7 +148,7 @@ def main() -> int:
         work = [job for index, job in enumerate(work) if index % int(total) in keep]
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
         list(pool.map(lambda job: job(), work))
-    print(f"prefetched {len(paths)} reports and {len(scripts)} tests with {jobs} jobs "
+    print(f"prefetched {len(reusable_paths)} reports and {len(scripts)} tests with {jobs} jobs "
           f"({heavy_slots()} heavy slots)", file=sys.stderr)
     return 0
 

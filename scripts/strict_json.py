@@ -20,16 +20,22 @@ def _reject_constant(value: str) -> object:
 
 
 def loads(raw: str | bytes) -> object:
-    return json.loads(
-        raw,
-        object_pairs_hook=_unique_object,
-        parse_constant=_reject_constant,
-    )
+    try:
+        return json.loads(
+            raw,
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_constant,
+        )
+    except RecursionError as error:
+        raise ValueError("JSON nesting exceeds the parser limit") from error
 
 
 def load(stream: TextIO) -> object:
-    return json.load(
-        stream,
-        object_pairs_hook=_unique_object,
-        parse_constant=_reject_constant,
-    )
+    try:
+        return json.load(
+            stream,
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_constant,
+        )
+    except RecursionError as error:
+        raise ValueError("JSON nesting exceeds the parser limit") from error

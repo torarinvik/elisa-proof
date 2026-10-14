@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Validate the versioned registry of confirmed proof soundness incidents.
+"""Validate confirmed incidents and unresolved soundness reports.
 
-This gate validates declarations and exact product identities. It does not decide which
-products were affected; each incident requires an explicit, evidence-backed classification.
+Confirmed incidents require evidence-backed exact product identities. Reports missing those
+identities stay visible and block product reuse classification until resolved.
 """
 import argparse
-import json
 import re
 import sys
 from pathlib import Path
+from strict_json import loads as strict_json_loads
 
-SCHEMA = "elisa-proof-soundness-incident-registry-v1"
+SCHEMA = "elisa-proof-soundness-incident-registry-v2"
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+GIT_COMMIT = re.compile(r"[0-9a-fA-F]{7,64}\Z")
 PRODUCT_KINDS = {"proof-product", "portable-package", "report-cache", "declaration-artifact"}
 
 
@@ -24,8 +25,11 @@ def _object(value, required, optional=()):
 def validate(registry):
     """Return a list of validation errors; unknown fields fail closed."""
     errors = []
-    if not _object(registry, {"schema", "incidents"}) or registry.get("schema") != SCHEMA:
-        return [f"registry must use schema {SCHEMA} and contain only schema/incidents"]
+    if not isinstance(registry, dict):
+        return ["registry must be a JSON object"]
+    if not _object(registry, {"schema", "incidents", "unclassified_reports"}) \
+            or registry.get("schema") != SCHEMA:
+        return [f"registry must use schema {SCHEMA} and contain schema/incidents/unclassified_reports"]
     incidents = registry["incidents"]
     if not isinstance(incidents, list):
         return ["incidents must be an array"]
@@ -81,21 +85,65 @@ def validate(registry):
             for key in ("commit", "rule_semantics_version")
         ):
             errors.append(f"{prefix}.fix must name a commit and new rule semantics version")
+        else:
+            if not GIT_COMMIT.fullmatch(fix["commit"]):
+                errors.append(f"{prefix}.fix.commit must be a hexadecimal Git commit ID")
+            if isinstance(semantics, dict) and isinstance(semantics.get("version"), str) \
+                    and fix["rule_semantics_version"] == semantics["version"]:
+                errors.append(f"{prefix}.fix must advance the affected rule semantics version")
+    unclassified = registry["unclassified_reports"]
+    if not isinstance(unclassified, list):
+        errors.append("unclassified_reports must be an array")
+    else:
+        for index, report in enumerate(unclassified):
+            prefix = f"unclassified_reports[{index}]"
+            if not _object(report, {"id", "status", "summary", "reference"}):
+                errors.append(f"{prefix} has missing or unknown fields")
+                continue
+            report_id = report["id"]
+            if not isinstance(report_id, str) or not IDENTIFIER.fullmatch(report_id):
+                errors.append(f"{prefix}.id is invalid")
+            elif report_id in seen:
+                errors.append(f"{prefix}.id is duplicated")
+            else:
+                seen.add(report_id)
+            if report["status"] != "exact-product-identity-incomplete":
+                errors.append(f"{prefix}.status is unsupported")
+            for field in ("summary", "reference"):
+                if not isinstance(report[field], str) or not report[field].strip():
+                    errors.append(f"{prefix}.{field} is required")
     return errors
 
 
-def product_is_semantically_affected(registry, product):
-    """Return whether a confirmed incident invalidates this exact product under its rule IDs.
+def registry_allows_unqualified_reuse(registry) -> bool:
+    """Whether a registry fully clears products lacking per-rule semantic metadata.
 
-    Product presentation/schema fields are deliberately excluded from matching: only the exact
-    product kind, identity and digest plus the rule's semantic version establish impact. Invalid
-    registry or product metadata raises rather than allowing a cache/artifact hit.
+    This deliberately authorizes reuse only for an explicitly complete, empty ledger. A caller
+    with exact product/rule identity should instead use ``product_is_semantically_affected``.
+    """
+    return not validate(registry) and isinstance(registry, dict) \
+        and "unclassified_reports" in registry and not registry["incidents"] \
+        and not registry["unclassified_reports"]
+
+
+def product_is_semantically_affected(registry, product):
+    """Return whether a confirmed incident invalidates this exact product.
+
+    Product presentation/schema fields and caller-supplied rule lists cannot clear an exact
+    affected-product match. A binary or artifact digest identifies the whole product; per-rule
+    metadata is useful for triage but must not be an incomplete escape hatch. Invalid registry or
+    product metadata raises rather than allowing a cache/artifact hit. Any unresolved incident
+    report also blocks this decision until exact impact or a reviewed exclusion is recorded.
     """
     errors = validate(registry)
     if errors:
         raise ValueError("invalid soundness incident registry: " + "; ".join(errors))
-    required = {"kind", "identity", "sha256", "rule_semantics"}
-    optional = {"schema", "label"}
+    if "unclassified_reports" not in registry:
+        raise ValueError("soundness registry lacks unresolved-report coverage; reuse is not authorized")
+    if registry.get("unclassified_reports"):
+        raise ValueError("unclassified soundness reports prevent product reuse classification")
+    required = {"kind", "identity", "sha256"}
+    optional = {"schema", "label", "rule_semantics"}
     if not _object(product, required, optional):
         raise ValueError("product semantic identity has missing or unknown fields")
     if not isinstance(product["kind"], str) or product["kind"] not in PRODUCT_KINDS \
@@ -103,25 +151,23 @@ def product_is_semantically_affected(registry, product):
             or not product["identity"].strip() or not isinstance(product["sha256"], str) \
             or not SHA256.fullmatch(product["sha256"]):
         raise ValueError("product semantic identity is malformed")
-    rules = product["rule_semantics"]
-    if not isinstance(rules, list) or not all(
-        _object(rule, {"rule", "version"})
-        and isinstance(rule["rule"], str) and rule["rule"].strip()
-        and isinstance(rule["version"], str) and rule["version"].strip()
-        for rule in rules
-    ):
-        raise ValueError("product rule_semantics must be an array of exact rule/version identities")
+    if "rule_semantics" in product:
+        rules = product["rule_semantics"]
+        if not isinstance(rules, list) or not all(
+            _object(rule, {"rule", "version"})
+            and isinstance(rule["rule"], str) and rule["rule"].strip()
+            and isinstance(rule["version"], str) and rule["version"].strip()
+            for rule in rules
+        ):
+            raise ValueError("product rule_semantics must contain exact rule/version identities")
 
     product_identity = (product["kind"], product["identity"], product["sha256"])
-    product_rules = {(rule["rule"], rule["version"]) for rule in rules}
     for incident in registry["incidents"]:
         incident_products = {
             (item["kind"], item["identity"], item["sha256"])
             for item in incident["affected_products"]
         }
-        semantics = incident["rule_semantics"]
-        if product_identity in incident_products \
-                and (semantics["rule"], semantics["version"]) in product_rules:
+        if product_identity in incident_products:
             return True
     return False
 
@@ -131,9 +177,8 @@ def main():
     parser.add_argument("registry", nargs="?", default=str(Path(__file__).with_name("soundness_incidents.json")))
     args = parser.parse_args()
     try:
-        with open(args.registry, encoding="utf-8") as source:
-            registry = json.load(source)
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        registry = strict_json_loads(Path(args.registry).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
         print(f"soundness incident registry: cannot read JSON: {error}", file=sys.stderr)
         return 2
     errors = validate(registry)
@@ -141,7 +186,8 @@ def main():
         for error in errors:
             print(f"soundness incident registry: {error}", file=sys.stderr)
         return 1
-    print(f"soundness incident registry valid: {len(registry['incidents'])} confirmed incidents")
+    print(f"soundness incident registry valid: {len(registry['incidents'])} confirmed incidents, "
+          f"{len(registry['unclassified_reports'])} reports awaiting exact product identity")
     return 0
 
 
