@@ -1,6 +1,45 @@
 # Recursive expression replacement used by the checked rewrite transitions.
 extend ElisaProof:
     private:
+        # Mirror the source-neutral kernel rewrite width rule. Integer literals are closed
+        # constants, but the encoder currently emits them without a resolved width, so they
+        # contribute no standalone key. Calls, conditionals, and non-arithmetic operators also
+        # stay unknown here, matching strict_signed_width in kernel replay.
+        def proof_tactic_rewrite_width_scan(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> (width: i64, constant: bool, value: i64):
+            empty: (width: i64, constant: bool, value: i64) = (0, false, 0)
+            return empty if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return (0, true, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_tactic_rewrite_width_scan(inner, facts, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    inner: (width: i64, constant: bool, value: i64) = proof_tactic_rewrite_width_scan(operand, facts, depth + 1)
+                    folded: (known: bool, value: i64) = proof_constant_unary(operator, inner.constant, inner.value)
+                    width: i64 = inner.width if operator == TokenKind.Plus or operator == TokenKind.Minus else 0
+                    return (width, folded.known, folded.value)
+                Ast::Expr.Binary(left, operator, right, _):
+                    left_scan: (width: i64, constant: bool, value: i64) = proof_tactic_rewrite_width_scan(left, facts, depth + 1)
+                    right_scan: (width: i64, constant: bool, value: i64) = proof_tactic_rewrite_width_scan(right, facts, depth + 1)
+                    folded: (known: bool, value: i64) = proof_constant_binary(operator, left_scan.constant, left_scan.value, right_scan.constant, right_scan.value)
+                    arithmetic: bool = operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent
+                    return (0, folded.known, folded.value) if not arithmetic or (left_scan.constant and right_scan.constant)
+                    left_width: i64 = 0 if left_scan.constant else left_scan.width
+                    right_width: i64 = 0 if right_scan.constant else right_scan.width
+                    return (0, folded.known, folded.value) if:
+                        (not left_scan.constant and left_width == 0) or (not right_scan.constant and right_width == 0)
+                        left_width != 0 and right_width != 0 and left_width != right_width
+                    width: i64 = left_width if left_width != 0 else right_width
+                    return (width, folded.known, folded.value)
+                Ast::Expr.Ident(_, _) or Ast::Expr.Field(_, _, _) or Ast::Expr.Index(_, _, _) or Ast::Expr.IndexN(_, _, _):
+                    constant: (known: bool, value: i64) = proof_constant_int(expression)
+                    return (proof_strict_signed_width(expression, facts, depth), constant.known, constant.value)
+                _:
+                    return empty
+
+        def proof_tactic_rewrite_integer_width_key(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> i64:
+            proof_tactic_rewrite_width_scan(expression, facts, 0).width
+
         # Replace one exact subexpression at every supported expression node. The equality
         # itself must be an explicit fact; this keeps rewrite provenance visible and avoids
         # treating an arbitrary caller-supplied pair as a theorem.
