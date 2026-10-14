@@ -205,7 +205,7 @@ extend ElisaProof:
             empty_parameters: darray[Ast::ParamDecl] = []
             return proof_replay_type_bound_local_scalar_consumer_available_with_work(report, trace, empty_parameters, body, false, &work)
 
-        def proof_replay_type_bound_local_scalar_consumer_available_with_work(report: ProofReport&, trace: ProofFactTrace, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, allow_implicit_result_substitution: bool, work: mutable usize&) -> bool:
+        def proof_replay_type_bound_local_scalar_consumer_available_with_work(report: ProofReport&, trace: ProofFactTrace, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, allow_result_substitution: bool, work: mutable usize&) -> bool:
             return true if report.analysis_2.trace_consumer_certificate_index == 0
             return false if report.analysis_2.trace_consumer_certificate_index > report.analysis_1.certificates.count or report.analysis_2.trace_owner_line == 0
             certificate: ProofGoalCertificate = report.analysis_1.certificates[report.analysis_2.trace_consumer_certificate_index - 1]
@@ -216,13 +216,13 @@ extend ElisaProof:
                 not proof_replay_summary_expr_charge_with_work(certificate.goal, work)
                 not proof_replay_type_bound_extent_preflight_with_work(body, trace.expression, true, certificate.goal, true, work)
             source_matches: mutable usize = 0
-            implicit_result_consumer: mutable bool = false
+            result_substitution_consumer: mutable bool = false
             proof_replay_type_bound_consumer_source_site_in_body_with_work(body, certificate, &source_matches, work, 0)
-            if source_matches == 0 and allow_implicit_result_substitution:
+            if source_matches == 0 and allow_result_substitution:
                 return false if not proof_replay_type_bound_body_charge_with_work(body, work)
-                if proof_replay_type_bound_implicit_result_consumer_matches(report, trace, certificate, parameters, body, work):
+                if proof_replay_type_bound_result_consumer_matches(report, trace, certificate, parameters, body, work):
                     source_matches <- 1
-                    implicit_result_consumer <- true
+                    result_substitution_consumer <- true
             return false if:
                 source_matches != 1
                 report.results.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
@@ -254,18 +254,34 @@ extend ElisaProof:
             return false if declarations != 1
             # The contract appears before the body that computes `result`; the exact tail
             # substitution above supplies the source-order link for this narrow case.
-            return true if implicit_result_consumer
+            return true if result_substitution_consumer
             goal_position: Ast::Pos = Ast::expr_pos(certificate.goal)
             if declaration_extent.offsets_complete and goal_position.offset != 0:
                 return goal_position.offset > declaration_extent.end_offset
             return goal_position.line > declaration_extent.end_line
 
         # A postcondition over `result` can consume a local scalar bound through the exact
-        # function tail expression. Reconstruct only the straight-line implicit-return case:
-        # the source ensure, after replay-side result substitution, must be the certificate goal.
-        # Branches, explicit returns, result shadowing, unsupported expressions, and ambiguous
-        # ensures remain outside this source witness.
-        def proof_replay_type_bound_implicit_result_consumer_matches(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, work: mutable usize&) -> bool:
+        # final return expression, whether it is written as an implicit tail or `return expr`.
+        # The source ensure, after replay-side result substitution, must equal the certificate
+        # goal. Branches, result shadowing, unsupported expressions, and ambiguous ensures remain
+        # outside this source witness.
+        def proof_replay_type_bound_equal_span_return_valid(returned: Ast::Expr, return_position: Ast::Pos, work: mutable usize&) -> bool:
+            match returned:
+                Ast::Expr.If(condition, then_expression, else_expression, if_position):
+                    return false if not proof_replay_type_bound_local_work_charge(4, work)
+                    return false if:
+                        else_expression == Ast::Expr.Absent
+                        not proof_replay_source_position_equal(if_position, return_position)
+                    return_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_extent_from_position(return_position)
+                    return false if:
+                        not proof_replay_type_bound_position_after_extent(Ast::expr_pos(condition), return_extent)
+                        not proof_replay_type_bound_position_after_extent(Ast::expr_pos(then_expression), return_extent)
+                        not proof_replay_type_bound_position_after_extent(Ast::expr_pos(else_expression), return_extent)
+                    return true
+                _:
+                    return true
+
+        def proof_replay_type_bound_result_consumer_matches(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, work: mutable usize&) -> bool:
             return false if:
                 body.count < 2 or body.count > 4096 or trace.kind != "type-bound"
                 not proof_replay_type_bound_local_text_compare_charge(certificate.name, trace.name, work)
@@ -277,13 +293,32 @@ extend ElisaProof:
 
             returned: mutable Ast::Expr = Ast::Expr.Absent
             return_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            explicit_return: mutable bool = false
             match body[body.count - 1]:
                 Ast::Stmt.Expr(expression, position):
                     returned <- expression
                     return_position <- position
+                Ast::Stmt.Return(expression, position):
+                    returned <- expression
+                    return_position <- position
+                    explicit_return <- true
                 _:
                     return false
-            return false if return_position.line == 0 or not proof_replay_source_position_equal(Ast::expr_pos(returned), return_position)
+            returned_position: Ast::Pos = Ast::expr_pos(returned)
+            return false if return_position.line == 0 or returned_position.line == 0 or return_position.offset > return_position.end_offset or returned_position.offset > returned_position.end_offset
+            # The pinned parser rewrites a block-bodied implicit tail into `Stmt.Return` and
+            # gives the statement the same full span as its expression. The parser also anchors
+            # `return if ...` at the `return` token, so validate the condition and branch spans
+            # before treating that equal-span value as source-position complete.
+            if explicit_return and proof_replay_source_position_equal(returned_position, return_position):
+                return false if not proof_replay_type_bound_equal_span_return_valid(returned, return_position, work)
+                explicit_return <- false
+            if explicit_return:
+                # The parser owns both spans. Require a same-line expression strictly after the
+                # `return` keyword span; multiline block returns remain outside this witness.
+                return false if return_position.line != returned_position.line or return_position.offset >= returned_position.offset or return_position.end_offset > returned_position.offset
+            else:
+                return false if not proof_replay_source_position_equal(returned_position, return_position)
             returned_search_cost: mutable usize = 0
             return false if not proof_replay_summary_expr_cost_with_limit(returned, &returned_search_cost, work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT)
             if returned_search_cost > (PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work) / 5:

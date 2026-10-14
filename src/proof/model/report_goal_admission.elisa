@@ -1,6 +1,27 @@
 # Source-bound goal admission against a checked report and parser inventories.
 extend ElisaProof:
     private:
+        def proof_report_postcondition_pattern_special_binders(pattern: Ast::Pattern, position: Ast::Pos, source: Ast::Expr, source_work: mutable usize&) -> (complete: bool, binds_result: bool, binds_old: bool):
+            names: mutable darray[sview] = []
+            values: mutable darray[Ast::Expr] = []
+            # Both callers precharge the enclosing expression, including this pattern walk and
+            # binding collection. Charge only the extra special-name comparisons below.
+            return (false, false, false) if not proof_bind_pattern(pattern, position, source, &names, &values)
+            binds_result: mutable bool = false
+            binds_old: mutable bool = false
+            for name in names |name, source_work, binds_result, binds_old|:
+                return (false, false, false) if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(name), source_work) or not proof_report_source_work_charge(sview_len("result"), source_work) or not proof_report_source_work_charge(sview_len("old"), source_work)
+                binds_result <- true if name == "result"
+                binds_old <- true if name == "old"
+            (true, binds_result, binds_old)
+
+        def proof_report_postcondition_match_binder_visibility(pattern: Ast::Pattern, position: Ast::Pos, scrutinee: Ast::Expr, check_result: bool, check_old: bool, source_work: mutable usize&) -> (known: bool, check_result: bool, check_old: bool):
+            binders: (complete: bool, binds_result: bool, binds_old: bool) = proof_report_postcondition_pattern_special_binders(pattern, position, scrutinee, source_work)
+            return (false, check_result, check_old) if not binders.complete
+            check_result <- false if binders.binds_result
+            check_old <- false if binders.binds_old
+            (true, check_result, check_old)
+
         def proof_report_goal_owner_is_source_declaration(report: ProofReport&, name: sview, owner_line: u32, owner_offset: u32, source_work: mutable usize&) -> bool:
             low: mutable usize = 0
             high: mutable usize = report.analysis_1.declaration_details.count
@@ -25,7 +46,7 @@ extend ElisaProof:
 
         # Fuse the two name checks and call check into one bounded AST walk. Unknown forms
         # remain unsafe, matching the fail-closed behavior of the underlying predicates.
-        def proof_report_postcondition_has_unsafe_source_shape_depth(expression: Ast::Expr, depth: usize, check_result: bool, check_old: bool) -> bool:
+        def proof_report_postcondition_has_unsafe_source_shape_depth(expression: Ast::Expr, depth: usize, check_result: bool, check_old: bool, allow_match_lowering: bool, source_work: mutable usize&) -> bool:
             return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _):
@@ -35,74 +56,184 @@ extend ElisaProof:
                 Ast::Expr.Call(_, _, _, _) | Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
                     return true
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
-                    return proof_report_postcondition_has_unsafe_source_shape_depth(inner, depth + 1, check_result, check_old)
+                    return proof_report_postcondition_has_unsafe_source_shape_depth(inner, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                 Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
-                    return proof_report_postcondition_has_unsafe_source_shape_depth(left, depth + 1, check_result, check_old) or proof_report_postcondition_has_unsafe_source_shape_depth(right, depth + 1, check_result, check_old)
+                    return proof_report_postcondition_has_unsafe_source_shape_depth(left, depth + 1, check_result, check_old, allow_match_lowering, source_work) or proof_report_postcondition_has_unsafe_source_shape_depth(right, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                 Ast::Expr.Field(object, _, _):
-                    return proof_report_postcondition_has_unsafe_source_shape_depth(object, depth + 1, check_result, check_old)
-                Ast::Expr.Scope(object, scoped_name, _):
-                    return true if (check_result and scoped_name == "result") or (check_old and scoped_name == "old")
-                    return proof_report_postcondition_has_unsafe_source_shape_depth(object, depth + 1, check_result, check_old)
+                    return proof_report_postcondition_has_unsafe_source_shape_depth(object, depth + 1, check_result, check_old, allow_match_lowering, source_work)
+                Ast::Expr.Scope(object, _, _):
+                    return proof_report_postcondition_has_unsafe_source_shape_depth(object, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                 Ast::Expr.Slice(object, low, high, _):
-                    return proof_report_postcondition_has_unsafe_source_shape_depth(object, depth + 1, check_result, check_old) or proof_report_postcondition_has_unsafe_source_shape_depth(low, depth + 1, check_result, check_old) or proof_report_postcondition_has_unsafe_source_shape_depth(high, depth + 1, check_result, check_old)
+                    return proof_report_postcondition_has_unsafe_source_shape_depth(object, depth + 1, check_result, check_old, allow_match_lowering, source_work) or proof_report_postcondition_has_unsafe_source_shape_depth(low, depth + 1, check_result, check_old, allow_match_lowering, source_work) or proof_report_postcondition_has_unsafe_source_shape_depth(high, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                 Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_report_postcondition_has_unsafe_source_shape_depth(object, depth + 1, check_result, check_old)
+                    return true if proof_report_postcondition_has_unsafe_source_shape_depth(object, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     for argument in arguments:
-                        return true if proof_report_postcondition_has_unsafe_source_shape_depth(argument, depth + 1, check_result, check_old)
+                        return true if proof_report_postcondition_has_unsafe_source_shape_depth(argument, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     return false
                 Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
                     for element in elements:
-                        return true if proof_report_postcondition_has_unsafe_source_shape_depth(element, depth + 1, check_result, check_old)
+                        return true if proof_report_postcondition_has_unsafe_source_shape_depth(element, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     return false
                 Ast::Expr.DictLit(entries, _):
                     for entry in entries:
-                        return true if proof_report_postcondition_has_unsafe_source_shape_depth(entry.key, depth + 1, check_result, check_old) or proof_report_postcondition_has_unsafe_source_shape_depth(entry.value, depth + 1, check_result, check_old)
+                        return true if proof_report_postcondition_has_unsafe_source_shape_depth(entry.key, depth + 1, check_result, check_old, allow_match_lowering, source_work) or proof_report_postcondition_has_unsafe_source_shape_depth(entry.value, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     return false
-                Ast::Expr.Construct(type_expression, fields, _):
-                    return true if proof_report_postcondition_has_unsafe_source_shape_depth(type_expression, depth + 1, check_result, check_old)
+                Ast::Expr.Construct(_, fields, _):
+                    # The constructor head is a type expression; substitution only rewrites
+                    # runtime values in the fields.
                     for field in fields:
-                        return true if proof_report_postcondition_has_unsafe_source_shape_depth(field.value, depth + 1, check_result, check_old)
+                        return true if proof_report_postcondition_has_unsafe_source_shape_depth(field.value, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     return false
                 Ast::Expr.RecordUpdate(base, fields, _):
-                    return true if proof_report_postcondition_has_unsafe_source_shape_depth(base, depth + 1, check_result, check_old)
+                    return true if proof_report_postcondition_has_unsafe_source_shape_depth(base, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     for field in fields:
-                        return true if proof_report_postcondition_has_unsafe_source_shape_depth(field.value, depth + 1, check_result, check_old)
+                        return true if proof_report_postcondition_has_unsafe_source_shape_depth(field.value, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     return false
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_report_postcondition_has_unsafe_source_shape_depth(condition, depth + 1, check_result, check_old) or proof_report_postcondition_has_unsafe_source_shape_depth(then_expression, depth + 1, check_result, check_old) or proof_report_postcondition_has_unsafe_source_shape_depth(else_expression, depth + 1, check_result, check_old)
-                Ast::Expr.Match(scrutinee, arms, _):
-                    return true if proof_report_postcondition_has_unsafe_source_shape_depth(scrutinee, depth + 1, check_result, check_old)
+                    return proof_report_postcondition_has_unsafe_source_shape_depth(condition, depth + 1, check_result, check_old, allow_match_lowering, source_work) or proof_report_postcondition_has_unsafe_source_shape_depth(then_expression, depth + 1, check_result, check_old, allow_match_lowering, source_work) or proof_report_postcondition_has_unsafe_source_shape_depth(else_expression, depth + 1, check_result, check_old, allow_match_lowering, source_work)
+                Ast::Expr.Match(scrutinee, arms, position):
+                    # Plain substitution invokes an unmetered lowerer that can duplicate the
+                    # scrutinee once per arm. Admission rejects this path until lowering shares
+                    # the caller's source-work budget.
+                    return true if not allow_match_lowering
+                    return true if proof_report_postcondition_has_unsafe_source_shape_depth(scrutinee, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     for arm in arms:
-                        return true if proof_report_postcondition_has_unsafe_source_shape_depth(arm.guard, depth + 1, check_result, check_old) or arm.body.count != 1
+                        return true if arm.body.count != 1
+                        return true if not proof_match_closed_pattern(arm.pattern)
+                        arm_visibility: (known: bool, check_result: bool, check_old: bool) = proof_report_postcondition_match_binder_visibility(arm.pattern, position, scrutinee, check_result, check_old, source_work)
+                        return true if not arm_visibility.known
+                        return true if arm.guard != Ast::Expr.Absent and proof_report_postcondition_has_unsafe_source_shape_depth(arm.guard, depth + 1, arm_visibility.check_result, arm_visibility.check_old, allow_match_lowering, source_work)
                         match arm.body[0]:
                             Ast::Stmt.Expr(value, _):
-                                return true if proof_report_postcondition_has_unsafe_source_shape_depth(value, depth + 1, check_result, check_old)
+                                return true if proof_report_postcondition_has_unsafe_source_shape_depth(value, depth + 1, arm_visibility.check_result, arm_visibility.check_old, allow_match_lowering, source_work)
                             _:
                                 return true
                     return false
                 Ast::Expr.Comprehension(variable, iterable, condition, body, _):
-                    return true if proof_report_postcondition_has_unsafe_source_shape_depth(iterable, depth + 1, check_result, check_old)
+                    return true if proof_report_postcondition_has_unsafe_source_shape_depth(iterable, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     body_checks_result: bool = check_result and variable != "result"
                     body_checks_old: bool = check_old and variable != "old"
-                    return proof_report_postcondition_has_unsafe_source_shape_depth(condition, depth + 1, body_checks_result, body_checks_old) or proof_report_postcondition_has_unsafe_source_shape_depth(body, depth + 1, body_checks_result, body_checks_old)
+                    return proof_report_postcondition_has_unsafe_source_shape_depth(condition, depth + 1, body_checks_result, body_checks_old, allow_match_lowering, source_work) or proof_report_postcondition_has_unsafe_source_shape_depth(body, depth + 1, body_checks_result, body_checks_old, allow_match_lowering, source_work)
                 Ast::Expr.Refinement(base, predicate, _):
-                    return proof_report_postcondition_has_unsafe_source_shape_depth(base, depth + 1, check_result, check_old) or proof_report_postcondition_has_unsafe_source_shape_depth(predicate, depth + 1, check_result, check_old)
+                    return proof_report_postcondition_has_unsafe_source_shape_depth(base, depth + 1, check_result, check_old, allow_match_lowering, source_work) or proof_report_postcondition_has_unsafe_source_shape_depth(predicate, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                 Ast::Expr.Block(statements, value, _, _):
                     value_checks_result: mutable bool = check_result
                     value_checks_old: mutable bool = check_old
                     for statement in statements |value_checks_result, value_checks_old|:
                         match statement:
                             Ast::Stmt.VarDecl(local_name, _, initializer, _):
-                                # Existing name scanning checks each initializer before applying
-                                # this block's final-value shadow rule.
-                                return true if proof_report_postcondition_has_unsafe_source_shape_depth(initializer, depth + 1, check_result, check_old)
+                                # An initializer sees shadows from earlier declarations, but
+                                # not the name introduced by this declaration itself.
+                                return true if proof_report_postcondition_has_unsafe_source_shape_depth(initializer, depth + 1, value_checks_result, value_checks_old, allow_match_lowering, source_work)
                                 value_checks_result <- false if local_name == "result"
                                 value_checks_old <- false if local_name == "old"
                             _:
                                 return true
-                    proof_report_postcondition_has_unsafe_source_shape_depth(value, depth + 1, value_checks_result, value_checks_old)
+                    proof_report_postcondition_has_unsafe_source_shape_depth(value, depth + 1, value_checks_result, value_checks_old, allow_match_lowering, source_work)
                 _:
                     return true
+
+        # Inspect result/old visibility and Match lowering eligibility together. The Match
+        # subset and binder projection checks are shared with substitution, so perform them once
+        # per arm while retaining the same fail-closed result for unsupported forms.
+        def proof_report_postcondition_source_scan(expression: Ast::Expr, source_work: mutable usize&) -> (complete: bool, has_result: bool, has_old: bool, has_match: bool):
+            has_result: mutable bool = false
+            has_old: mutable bool = false
+            has_match: mutable bool = false
+            complete: bool = proof_report_postcondition_source_scan_depth(expression, 0, true, true, &has_result, &has_old, &has_match, source_work)
+            (complete, has_result, has_old, has_match)
+
+        def proof_report_postcondition_source_scan_depth(expression: Ast::Expr, depth: usize, result_visible: bool, old_visible: bool, has_result: mutable bool&, has_old: mutable bool&, has_match: mutable bool&, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            return true if has_old or (has_result and has_match)
+            match expression:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    has_result <- true if result_visible and name == "result"
+                    has_old <- true if old_visible and name == "old"
+                    return true
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    return proof_report_postcondition_source_scan_depth(inner, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return false if not proof_report_postcondition_source_scan_depth(left, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    proof_report_postcondition_source_scan_depth(right, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    return proof_report_postcondition_source_scan_depth(object, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_report_postcondition_source_scan_depth(object, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    return false if not proof_report_postcondition_source_scan_depth(low, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    proof_report_postcondition_source_scan_depth(high, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_report_postcondition_source_scan_depth(object, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    for argument in arguments |depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
+                        return false if not proof_report_postcondition_source_scan_depth(argument, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    return true
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
+                        return false if not proof_report_postcondition_source_scan_depth(element, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
+                        return false if not proof_report_postcondition_source_scan_depth(entry.key, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        return false if not proof_report_postcondition_source_scan_depth(entry.value, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    return true
+                Ast::Expr.Construct(_, fields, _):
+                    # The constructor head is a type expression; substitution only rewrites
+                    # runtime values in the fields.
+                    for field in fields |depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
+                        return false if not proof_report_postcondition_source_scan_depth(field.value, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    return true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_report_postcondition_source_scan_depth(base, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    for field in fields |depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
+                        return false if not proof_report_postcondition_source_scan_depth(field.value, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    return true
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return false if not proof_report_postcondition_source_scan_depth(condition, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    return false if not proof_report_postcondition_source_scan_depth(then_expression, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    proof_report_postcondition_source_scan_depth(else_expression, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                Ast::Expr.Match(scrutinee, arms, position):
+                    has_match <- true
+                    return false if has_result
+                    return false if not proof_report_postcondition_source_scan_depth(scrutinee, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    return false if has_result
+                    for arm in arms |position, depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
+                        return false if arm.body.count != 1 or not proof_match_closed_pattern(arm.pattern)
+                        arm_visibility: (known: bool, check_result: bool, check_old: bool) = proof_report_postcondition_match_binder_visibility(arm.pattern, position, scrutinee, result_visible, old_visible, source_work)
+                        return false if not arm_visibility.known
+                        if arm.guard != Ast::Expr.Absent:
+                            return false if not proof_report_postcondition_source_scan_depth(arm.guard, depth + 1, arm_visibility.check_result, arm_visibility.check_old, has_result, has_old, has_match, source_work)
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return false if not proof_report_postcondition_source_scan_depth(value, depth + 1, arm_visibility.check_result, arm_visibility.check_old, has_result, has_old, has_match, source_work)
+                            _:
+                                return false
+                    return true
+                Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+                    return false if not proof_report_postcondition_source_scan_depth(iterable, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    body_result_visible: bool = result_visible and variable != "result"
+                    body_old_visible: bool = old_visible and variable != "old"
+                    return false if not proof_report_postcondition_source_scan_depth(condition, depth + 1, body_result_visible, body_old_visible, has_result, has_old, has_match, source_work)
+                    proof_report_postcondition_source_scan_depth(body, depth + 1, body_result_visible, body_old_visible, has_result, has_old, has_match, source_work)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_report_postcondition_source_scan_depth(base, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                    proof_report_postcondition_source_scan_depth(predicate, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                Ast::Expr.Block(statements, value, _, _):
+                    value_result_visible: mutable bool = result_visible
+                    value_old_visible: mutable bool = old_visible
+                    for statement in statements |value_result_visible, value_old_visible, depth, has_result, has_old, has_match, source_work|:
+                        match statement:
+                            Ast::Stmt.VarDecl(local_name, _, initializer, _):
+                                return false if not proof_report_postcondition_source_scan_depth(initializer, depth + 1, value_result_visible, value_old_visible, has_result, has_old, has_match, source_work)
+                                value_result_visible <- false if local_name == "result"
+                                value_old_visible <- false if local_name == "old"
+                            _:
+                                return false
+                    proof_report_postcondition_source_scan_depth(value, depth + 1, value_result_visible, value_old_visible, has_result, has_old, has_match, source_work)
+                _:
+                    # Calls, recovery expressions, and unknown syntax remain inadmissible.
+                    return false
 
         # The frozen parser inventory is sorted by declaration offset. Duplicate offsets remain
         # visible and fail closed, while ordinary owner lookup is logarithmic in function count.
@@ -147,7 +278,7 @@ extend ElisaProof:
             return false if:
                 not proof_replay_summary_expr_cost_with_limit(source_expression, &source_expression_cost, source_work, work_limit)
                 not proof_replay_summary_expr_repeat_charge_with_limit(returned, source_expression_cost + 1, source_work, work_limit)
-                proof_report_postcondition_has_unsafe_source_shape_depth(returned, 0, true, true)
+                proof_report_postcondition_has_unsafe_source_shape_depth(returned, 0, true, true, true, source_work)
                 proof_source_expression_has_overloaded_operator_with_work(returned, report.source.source_primitive_operator_mask, source_work, overloaded_return_work_exhausted)
                 overloaded_return_work_exhausted
             names: mutable darray[sview] = ["result"]
@@ -164,13 +295,18 @@ extend ElisaProof:
             work_limit: usize = proof_replay_summary_source_work_limit()
             overloaded_source_work_exhausted: mutable bool = false
             return false if:
-                not proof_replay_summary_expr_repeat_charge_with_limit(source_expression, 2, source_work, work_limit)
-                proof_report_postcondition_has_unsafe_source_shape_depth(source_expression, 0, false, true)
+                not proof_replay_summary_expr_repeat_charge_with_limit(source_expression, 1, source_work, work_limit)
+            source_scan: (complete: bool, has_result: bool, has_old: bool, has_match: bool) = proof_report_postcondition_source_scan(source_expression, source_work)
+            return false if not source_scan.complete or source_scan.has_old or (source_scan.has_match and source_scan.has_result)
+            has_result_variable: bool = source_scan.has_result
+            return false if:
                 proof_source_expression_has_overloaded_operator_with_work(source_expression, report.source.source_primitive_operator_mask, source_work, overloaded_source_work_exhausted)
                 overloaded_source_work_exhausted
-            if proof_expr_mentions_name(source_expression, "result"):
+            if has_result_variable:
                 return false if not proof_report_postcondition_result_substitution_matches(source_expression, return_inventory, report, attempt, source_work)
             else:
+                # Without a result variable, compare the parser-owned expression directly; the
+                # equality walk is already bounded by the shared source-work limit.
                 return false if not proof_replay_summary_expr_equal_with_limit(source_expression, attempt.goal, source_work, work_limit)
             if attempt.producer_proven:
                 return false if not attempt.has_certificate or attempt.certificate_index >= report.analysis_1.certificates.count

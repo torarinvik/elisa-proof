@@ -138,17 +138,14 @@ extend ElisaProof:
                     # predicate as an admission guard, so new syntax must fail closed.
                     return true
 
-        # Lower the proof-safe value-match fragment to the kernel's existing conditional form.
-        # This is deliberately narrower than Elisa's runtime matcher: every arm must be a single
-        # value expression, patterns may not bind payloads, and the final arm must be an unguarded
-        # wildcard. That gives the kernel an exact decision tree instead of treating a match as an
-        # opaque oracle. The richer pattern forms stay rejected until their projections and
-        # exhaustiveness evidence have a certificate representation.
+        # Lower only single-expression arms with an unguarded final wildcard. Non-final patterns
+        # need exact conditions and modeled payload projections; other forms need richer kernel
+        # evidence before they can be admitted.
         def proof_match_closed_pattern(pattern: Ast::Pattern) -> bool:
             work: mutable usize = 0
-            return proof_match_closed_pattern_depth(pattern, 0, &work)
+            return proof_match_closed_pattern_depth(pattern, 0, false, &work)
 
-        def proof_match_closed_pattern_depth(pattern: Ast::Pattern, depth: usize, work: mutable usize&) -> bool:
+        def proof_match_closed_pattern_depth(pattern: Ast::Pattern, depth: usize, or_alternative: bool, work: mutable usize&) -> bool:
             return false if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or work >= PROOF_PATTERN_WALK_WORK_LIMIT
             work <- work + 1
             match pattern:
@@ -176,7 +173,7 @@ extend ElisaProof:
                                     Ast::Pattern.Wildcard:
                                         pass
                                     Ast::Pattern.Binding(binding):
-                                        return false if binding == ""
+                                        return false if binding == "" or or_alternative
                                     _:
                                         return false
                             _:
@@ -185,7 +182,9 @@ extend ElisaProof:
                 Ast::Pattern.Or(options):
                     return false if options.count == 0
                     for option in options |depth, work|:
-                        return false if not proof_match_closed_pattern_depth(option, depth + 1, work)
+                        # Alternative-specific binders cannot be represented by `proof_bind_pattern`;
+                        # rejecting them prevents substituting an outer name for a branch-local one.
+                        return false if not proof_match_closed_pattern_depth(option, depth + 1, true, work)
                     return true
                 _:
                     return false
@@ -223,13 +222,16 @@ extend ElisaProof:
         def proof_lower_value_match(expression: Ast::Expr) -> (known: bool, value: Ast::Expr):
             match expression:
                 Ast::Expr.Match(scrutinee, arms, position):
-                    return (false, Ast::Expr.Invalid) if:
-                        arms.count == 0
-                        proof_expr_has_call(scrutinee) or proof_expr_has_move(scrutinee)
-                        not proof_expr_supported(scrutinee)
+                    guard_work: mutable usize = 0
+                    return (false, Ast::Expr.Invalid) if arms.count == 0 or not proof_match_guard_shape_supported(scrutinee, &guard_work)
+                    scrutinee_cost: usize = 0
+                    return (false, Ast::Expr.Invalid) if not proof_replay_summary_expr_cost_with_limit(scrutinee, &scrutinee_cost, guard_work, PROOF_PATTERN_WALK_WORK_LIMIT)
+                    return (false, Ast::Expr.Invalid) if scrutinee_cost > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / 4
+                    guard_work <- guard_work + scrutinee_cost * 4
+                    return (false, Ast::Expr.Invalid) if proof_expr_has_call(scrutinee) or proof_expr_has_move(scrutinee) or not proof_expr_supported(scrutinee)
                     fallback: mutable Ast::Expr = Ast::Expr.Invalid
                     index: mutable usize = arms.count
-                    while index > 0 |index, arms, position, fallback|:
+                    while index > 0 |index, arms, position, fallback, guard_work, scrutinee_cost|:
                         index <- index - 1
                         arm: Ast::MatchArm = arms[index]
                         return (false, Ast::Expr.Invalid) if arm.body.count != 1
@@ -239,9 +241,46 @@ extend ElisaProof:
                                 arm_value <- value
                             _:
                                 return (false, Ast::Expr.Invalid)
+                        pattern_cost: mutable usize = 0
+                        return (false, Ast::Expr.Invalid) if not proof_replay_summary_pattern_cost(arm.pattern, &pattern_cost, guard_work, 0) or pattern_cost == 0
+                        return (false, Ast::Expr.Invalid) if pattern_cost > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / 2
+                        guard_work <- guard_work + pattern_cost * 2
                         arm_names: mutable darray[sview] = []
                         arm_values: mutable darray[Ast::Expr] = []
                         return (false, Ast::Expr.Invalid) if not proof_bind_pattern(arm.pattern, position, scrutinee, &arm_names, &arm_values)
+                        return (false, Ast::Expr.Invalid) if not proof_match_guard_shape_supported(arm_value, &guard_work)
+                        arm_value_cost: usize = 0
+                        return (false, Ast::Expr.Invalid) if not proof_replay_summary_expr_cost_with_limit(arm_value, &arm_value_cost, guard_work, PROOF_PATTERN_WALK_WORK_LIMIT)
+                        return (false, Ast::Expr.Invalid) if arm_value_cost == 0 or arm_value_cost > PROOF_PATTERN_WALK_WORK_LIMIT - guard_work
+                        guard_work <- guard_work + arm_value_cost
+                        arm_replacement_cost: mutable usize = 1
+                        for replacement in arm_values |replacement, arm_replacement_cost, guard_work|:
+                            replacement_size: mutable usize = 0
+                            return (false, Ast::Expr.Invalid) if not proof_replay_summary_expr_cost_with_limit(replacement, &replacement_size, guard_work, PROOF_PATTERN_WALK_WORK_LIMIT)
+                            return (false, Ast::Expr.Invalid) if replacement_size > PROOF_PATTERN_WALK_WORK_LIMIT - guard_work
+                            guard_work <- guard_work + replacement_size
+                            arm_replacement_cost <- replacement_size if replacement_size > arm_replacement_cost
+                        arm_binding_probe_cost: mutable usize = 0
+                        for binding_name in arm_names |binding_name, arm_binding_probe_cost|:
+                            probe_size: usize = 1 + sview_len(binding_name)
+                            return (false, Ast::Expr.Invalid) if probe_size > PROOF_PATTERN_WALK_WORK_LIMIT - arm_binding_probe_cost
+                            arm_binding_probe_cost <- arm_binding_probe_cost + probe_size
+                        return (false, Ast::Expr.Invalid) if arm_binding_probe_cost > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / arm_value_cost
+                        guard_work <- guard_work + arm_value_cost * arm_binding_probe_cost
+                        # Every nested comprehension adds one lexical mapping. Account for
+                        # repeated lookup across its body and capture scans over active
+                        # replacement values before substitution enters those scopes.
+                        return (false, Ast::Expr.Invalid) if arm_value_cost > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / arm_value_cost
+                        guard_work <- guard_work + arm_value_cost * arm_value_cost
+                        arm_scope_slots: usize = arm_names.count + arm_value_cost
+                        return (false, Ast::Expr.Invalid) if arm_scope_slots > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / arm_value_cost
+                        arm_scope_capture_base: usize = arm_value_cost * arm_scope_slots
+                        return (false, Ast::Expr.Invalid) if arm_scope_capture_base > 0 and arm_replacement_cost > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / arm_scope_capture_base
+                        guard_work <- guard_work + arm_scope_capture_base * arm_replacement_cost
+                        return (false, Ast::Expr.Invalid) if arm_replacement_cost > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / arm_value_cost
+                        arm_substitution_bound: usize = arm_value_cost * arm_replacement_cost
+                        return (false, Ast::Expr.Invalid) if arm_substitution_bound > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / 3
+                        guard_work <- guard_work + arm_substitution_bound * 3
                         arm_value <- proof_substitute(arm_value, arm_names, arm_values)
                         # Calls in a value arm are admitted syntactically here. The statement
                         # boundary applies the stronger transitive-purity gate, and the return
@@ -266,6 +305,9 @@ extend ElisaProof:
                             fallback <- arm_value
                         else:
                             return (false, Ast::Expr.Invalid) if not proof_match_closed_pattern(arm.pattern)
+                            condition_bound: usize = pattern_cost * (scrutinee_cost + 3)
+                            return (false, Ast::Expr.Invalid) if condition_bound > PROOF_PATTERN_WALK_WORK_LIMIT - guard_work
+                            guard_work <- guard_work + condition_bound
                             condition: Ast::Expr? = proof_match_pattern_condition(arm.pattern, scrutinee, position)
                             resolved_condition: mutable Ast::Expr = Ast::Expr.Invalid
                             if condition is match_condition:
@@ -276,10 +318,45 @@ extend ElisaProof:
                                 Ast::Expr.Absent:
                                     pass
                                 _:
+                                    return (false, Ast::Expr.Invalid) if not proof_match_guard_shape_supported(arm.guard, &guard_work)
+                                    # Bound projection substitution growth, then reserve the
+                                    # substitution and admission walks before doing them.
+                                    guard_cost: usize = 0
+                                    return (false, Ast::Expr.Invalid) if not proof_replay_summary_expr_cost_with_limit(arm.guard, &guard_cost, guard_work, PROOF_PATTERN_WALK_WORK_LIMIT)
+                                    return (false, Ast::Expr.Invalid) if guard_cost == 0
+                                    return (false, Ast::Expr.Invalid) if guard_cost > PROOF_PATTERN_WALK_WORK_LIMIT - guard_work
+                                    guard_work <- guard_work + guard_cost
+                                    guard_replacement_cost: mutable usize = 1
+                                    for replacement in arm_values |replacement, guard_work, guard_replacement_cost|:
+                                        replacement_size: mutable usize = 0
+                                        return (false, Ast::Expr.Invalid) if not proof_replay_summary_expr_cost_with_limit(replacement, &replacement_size, guard_work, PROOF_PATTERN_WALK_WORK_LIMIT)
+                                        return (false, Ast::Expr.Invalid) if replacement_size > PROOF_PATTERN_WALK_WORK_LIMIT - guard_work
+                                        guard_work <- guard_work + replacement_size
+                                        guard_replacement_cost <- replacement_size if replacement_size > guard_replacement_cost
+                                    binding_probe_cost: mutable usize = 0
+                                    for binding_name in arm_names |binding_name, binding_probe_cost|:
+                                        probe_size: usize = 1 + sview_len(binding_name)
+                                        return (false, Ast::Expr.Invalid) if probe_size > PROOF_PATTERN_WALK_WORK_LIMIT - binding_probe_cost
+                                        binding_probe_cost <- binding_probe_cost + probe_size
+                                    return (false, Ast::Expr.Invalid) if binding_probe_cost > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / guard_cost
+                                    binding_probe_work: usize = guard_cost * binding_probe_cost
+                                    guard_work <- guard_work + binding_probe_work
+                                    return (false, Ast::Expr.Invalid) if guard_cost > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / guard_cost
+                                    guard_work <- guard_work + guard_cost * guard_cost
+                                    guard_scope_slots: usize = arm_names.count + guard_cost
+                                    return (false, Ast::Expr.Invalid) if guard_scope_slots > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / guard_cost
+                                    guard_scope_capture_base: usize = guard_cost * guard_scope_slots
+                                    return (false, Ast::Expr.Invalid) if guard_scope_capture_base > 0 and guard_replacement_cost > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / guard_scope_capture_base
+                                    guard_work <- guard_work + guard_scope_capture_base * guard_replacement_cost
+                                    return (false, Ast::Expr.Invalid) if guard_replacement_cost > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / guard_cost
+                                    substituted_guard_bound: usize = guard_cost * guard_replacement_cost
+                                    return (false, Ast::Expr.Invalid) if substituted_guard_bound > (PROOF_PATTERN_WALK_WORK_LIMIT - guard_work) / 4
+                                    guard_work <- guard_work + substituted_guard_bound * 4
+                                    substituted_guard: Ast::Expr = proof_substitute(arm.guard, arm_names, arm_values)
                                     return (false, Ast::Expr.Invalid) if:
-                                        proof_expr_has_call(arm.guard) or proof_expr_has_move(arm.guard)
-                                        not proof_expr_supported(arm.guard)
-                                    resolved_condition <- Ast::Expr.Binary(resolved_condition, TokenKind.And, arm.guard, position)
+                                        proof_expr_has_call(substituted_guard) or proof_expr_has_move(substituted_guard)
+                                        not proof_expr_supported(substituted_guard)
+                                    resolved_condition <- Ast::Expr.Binary(resolved_condition, TokenKind.And, substituted_guard, position)
                             fallback <- Ast::Expr.If(resolved_condition, arm_value, fallback, position)
                     return (true, fallback)
                 _:

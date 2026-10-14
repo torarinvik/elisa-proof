@@ -193,8 +193,7 @@ assert "proof_output_checked_view_goal_status_with_work(checked_view, goal_id, w
 assert "proof_checked_view_source_admissible(checked_view) and proof_checked_view_source_admissions_complete(checked_view)" in serialized_functions
 assert 'source_authority_complete and open_goals[index] == 0 and findings[index] == 0' in serialized_functions
 single_goal_snapshot = function_body(status_helpers, "proof_output_checked_view_goal_status_with_work")
-assert "proof_checked_view_goal_source_admissible(checked_view, goal_id)" in single_goal_snapshot
-assert "proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)" in single_goal_snapshot
+assert "source_admitted: bool = proof_checked_view_goal_source_admissible(checked_view, goal_id) and proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)" in single_goal_snapshot
 
 explain_output = ROOT / "src/app/explain_output.elisa"
 explained_goal = function_body(explain_output, "proof_push_goal_explanation_with_replayed")

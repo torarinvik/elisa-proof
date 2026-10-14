@@ -16,56 +16,62 @@ extend ElisaProof:
             expressions: mutable darray[Ast::Expr] = []
             valid: bool = false
 
-        def proof_source_postcondition_return_shape(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, source_work: mutable usize&) -> (supported: bool, expression: Ast::Expr):
-            absent: Ast::Expr = Ast::Expr.Absent
-            return (false, absent) if body.count == 0
-            for parameter in parameters |source_work|:
-                return (false, absent) if not proof_report_source_postcondition_work_charge(1, source_work) or not proof_report_source_postcondition_work_charge(sview_len(parameter.name), source_work) or parameter.name == "result"
-            for index in 0..<body.count |index, body, source_work|:
-                return (false, absent) if not proof_report_source_postcondition_work_charge(1, source_work)
-                if index + 1 == body.count:
-                    match body[index]:
-                        Ast::Stmt.Expr(expression, _):
-                            return (true, expression)
-                        _:
-                            return (false, absent)
-                else:
-                    match body[index]:
-                        Ast::Stmt.Contract(kind, _, _):
-                            return (false, absent) if not proof_report_source_postcondition_work_charge(sview_len(kind), source_work) or kind != "requires" and kind != "ensure" and kind != "ensures"
-                        _:
-                            return (false, absent)
-            (false, absent)
-
-        def proof_source_postcondition_return_inventory_valid(inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, source_work: mutable usize&) -> bool:
-            return false if not proof_report_source_postcondition_work_charge(inventory.count, source_work)
-            for index in 1..<inventory.count |index, inventory, source_work|:
-                return false if inventory[index - 1].offset > inventory[index].offset
-            true
-
-        def proof_source_postcondition_ast_inventory_collect(declarations: darray[Ast::Decl]&, inventory: mutable darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)]&, return_inventory: mutable darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate]:
+        def proof_source_postcondition_ast_inventory_collect(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, inventory: mutable darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)]&, return_inventory: mutable darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, type_index: mutable ProofSourceKernelTypeIndex&, module_path: darray[sview]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if depth >= PROOF_SOURCE_POSTCONDITION_AST_INDEX_DEPTH_LIMIT
             for declaration in declarations |inventory, source_work, depth|:
                 return false if not proof_report_source_postcondition_work_charge(1, source_work)
                 match declaration:
-                    Ast::Decl.Func(name, parameters, _, body, _, _, position):
-                        return_shape: (supported: bool, expression: Ast::Expr) = proof_source_postcondition_return_shape(parameters, body, source_work)
-                        return_inventory.push((name, position.line, position.offset, return_shape.supported, return_shape.expression))
+                    Ast::Decl.Func(name, parameters, return_type, body, _, _, position):
+                        return false if not proof_source_kernel_charge_work(module_path.count, source_work)
+                        type_index.scope_path.clear()
+                        type_index.scope_path.extend(module_path)
+                        return_expression: mutable Ast::Expr = Ast::Expr.Absent
+                        return_supported: mutable bool = body.count > 0
+                        if return_type is declared_return_type:
+                            return_sort: (known: bool, sort: sview, type_name: sview, element_sort: sview, element_type_name: sview, type_identity: usize, element_type_identity: usize) = proof_source_kernel_type_sort(declared_return_type, "", all_declarations, type_index, source_work, 0)
+                            return_supported <- false if not return_sort.known or return_sort.sort == "void"
+                        else:
+                            # No declared return type is the language's unit return.
+                            return_supported <- false
+                        for parameter in parameters |source_work, return_supported|:
+                            return false if not proof_report_source_postcondition_work_charge(1, source_work) or not proof_report_source_postcondition_work_charge(sview_len(parameter.name), source_work)
+                            return_supported <- false if parameter.name == "result"
                         source_index: mutable usize = 0
-                        for statement in body |name, position, source_index, inventory, source_work|:
+                        for body_index in 0..<body.count |body_index, body, name, position, source_index, inventory, source_work, return_supported, return_expression|:
                             return false if not proof_report_source_postcondition_work_charge(1, source_work)
-                            match statement:
+                            match body[body_index]:
                                 Ast::Stmt.Contract(kind, expression, contract_position):
+                                    return false if not proof_report_source_postcondition_work_charge(sview_len(kind), source_work)
+                                    if body_index + 1 == body.count:
+                                        return_supported <- false
+                                    else:
+                                        return_supported <- false if kind != "requires" and kind != "ensure" and kind != "ensures"
                                     if kind in {"ensure", "ensures"}:
                                         return false if not proof_report_source_postcondition_work_charge(sview_len(name), source_work)
                                         inventory.push((name, position.offset, position.line, source_index, contract_position.line, expression))
                                         source_index <- source_index + 1
+                                Ast::Stmt.Expr(expression, _):
+                                    if body_index + 1 == body.count:
+                                        return_expression <- expression
+                                        return_supported <- false if expression == Ast::Expr.Absent
+                                    else:
+                                        return_supported <- false
+                                Ast::Stmt.Return(expression, _):
+                                    if body_index + 1 == body.count:
+                                        return_expression <- expression
+                                        return_supported <- false if expression == Ast::Expr.Absent
+                                    else:
+                                        return_supported <- false
                                 _:
-                                    pass
-                    Ast::Decl.Module(_, nested, _):
-                        return false if not proof_source_postcondition_ast_inventory_collect(nested, inventory, return_inventory, source_work, depth + 1)
+                                    return_supported <- false
+                        return false if return_inventory.count > 0 and return_inventory[return_inventory.count - 1].offset > position.offset
+                        return_inventory.push((name, position.line, position.offset, return_supported, return_expression))
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if not proof_source_kernel_charge_work(sview_len(module_name) + module_path.count, source_work)
+                        nested_path: darray[sview] = proof_global_constant_scope_with_module(module_path, module_name)
+                        return false if not proof_source_postcondition_ast_inventory_collect(nested, all_declarations, inventory, return_inventory, type_index, nested_path, source_work, depth + 1)
                     Ast::Decl.Scoped(nested, _):
-                        return false if not proof_source_postcondition_ast_inventory_collect(nested, inventory, return_inventory, source_work, depth + 1)
+                        return false if not proof_source_postcondition_ast_inventory_collect(nested, all_declarations, inventory, return_inventory, type_index, module_path, source_work, depth + 1)
                     _:
                         pass
             return true
@@ -97,17 +103,22 @@ extend ElisaProof:
                         pass
             return true
 
-        def proof_source_postcondition_ast_inventory_with_status(declarations: darray[Ast::Decl]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_exprs: darray[Ast::Expr]&) -> (inventory: darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)], return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)], complete: bool, work_limited: bool) can[Memory.Allocate]:
+        def proof_source_postcondition_ast_inventory_with_status(declarations: darray[Ast::Decl]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_exprs: darray[Ast::Expr]&) -> (inventory: darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)], return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)], complete: bool, work_limited: bool) can[Memory.Allocate, Abort.Panic]:
             source_work: mutable usize = 0
             proof_source_postcondition_ast_inventory_with_work(declarations, signature_lines, signature_kinds, signature_exprs, &source_work)
 
-        def proof_source_postcondition_ast_inventory_with_work(declarations: darray[Ast::Decl]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_exprs: darray[Ast::Expr]&, source_work: mutable usize&) -> (inventory: darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)], return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)], complete: bool, work_limited: bool) can[Memory.Allocate]:
+        def proof_source_postcondition_ast_inventory_with_work(declarations: darray[Ast::Decl]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_exprs: darray[Ast::Expr]&, source_work: mutable usize&) -> (inventory: darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)], return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)], complete: bool, work_limited: bool) can[Memory.Allocate, Abort.Panic]:
             inventory: mutable darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)] = []
             return_inventory: mutable darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)] = []
             complete: mutable bool = proof_structural_signature_contract_table_valid(signature_lines, signature_kinds, signature_exprs, source_work)
-            complete <- proof_source_postcondition_ast_inventory_collect(declarations, inventory, return_inventory, source_work, 0) if complete
+            type_entries: mutable darray[ProofSourceKernelTypeEntry] = []
+            module_path: darray[sview] = []
+            owner_path_segments: mutable usize = 0
+            type_index_known: bool = proof_source_kernel_collect_type_index(declarations, &type_entries, module_path, source_work, &owner_path_segments, 0) if complete
+            type_index: mutable ProofSourceKernelTypeIndex = proof_source_kernel_build_type_index(type_entries, source_work, false) if type_index_known
+            complete <- false if complete and (not type_index_known or not type_index.complete)
+            complete <- proof_source_postcondition_ast_inventory_collect(declarations, declarations, inventory, return_inventory, type_index, module_path, source_work, 0) if complete
             complete <- proof_source_signature_postcondition_ast_inventory_collect(declarations, signature_lines, signature_kinds, signature_exprs, inventory, source_work, 0) if complete
-            complete <- proof_source_postcondition_return_inventory_valid(return_inventory, source_work) if complete
             complete <- false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             work_limited: bool = source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             if not complete:

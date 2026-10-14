@@ -57,6 +57,9 @@ structural_replay_cache = (ROOT / "src/proof/replay/structural_source_cache_vali
 output_helpers = (ROOT / "src/app/report_output_integrated_helpers.elisa").read_text(encoding="utf-8")
 cli_source = (ROOT / "src/app/cli.elisa").read_text(encoding="utf-8")
 theorem_suggestions = (ROOT / "src/app/theorem_output_suggestions.elisa").read_text(encoding="utf-8")
+goal_admission = (ROOT / "src/proof/model/report_goal_admission.elisa").read_text(encoding="utf-8")
+postcondition_inventory = (ROOT / "src/proof/model/report_postcondition_ast_inventory.elisa").read_text(encoding="utf-8")
+type_bound_local = (ROOT / "src/proof/replay/type_bound_local_availability.elisa").read_text(encoding="utf-8")
 return_matches = (ROOT / "src/proof/check/returns/matches.elisa").read_text(encoding="utf-8")
 assert "source_work: mutable usize&" in termination_body.splitlines()[2]
 assert "proof_replay_summary_expr_cost_body(body, &body_cost, source_work, 0)" in termination_body
@@ -187,6 +190,10 @@ assert "proof_checked_view_theorem_source_admission(checked_view, theorem_index)
 assert "theorem_source_status.source_admissible and theorem_source_status.declaration_identity_unambiguous" in suggestion_body
 assert "proof_declaration_name_is_unique" not in suggestion_body
 assert "proof_checked_view_theorem_source_admissions_complete(checked_view)" in suggestion_body
+assert "goal_facts_source_admissible: bool = goal_id < report.results.goal_attempts.count and proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)" in suggestion_body
+assert 'proof_push(buffer, "true" if goal_facts_source_admissible else "false")' in suggestion_body
+assert "and goal_source_admissible and goal_facts_source_admissible:" in suggestion_body
+assert "if goal_id < report.results.goal_attempts.count and goal_source_admissible and goal_facts_source_admissible:" in suggestion_body
 identity_status = theorem_source_admission.split("def proof_report_declaration_identity_statuses(", 1)[1].split("private:", 1)[0]
 assert 'if declaration.kind == "lemma":' in identity_status
 assert 'if declaration.kind in {"function", "lemma"}:' not in identity_status
@@ -229,6 +236,41 @@ assert '"output-work-limit" if replay_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LI
 assert "proof_goal_fingerprint_with_limit(report, report.results.goal_attempts[goal_id], &replay_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)" in suggestion_body
 assert "suggestions_complete <- false if replay_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT" in suggestion_body
 assert "proof_goal_fingerprint(report, report.results.goal_attempts[goal_id])" not in suggestion_body
+unsafe_source_shape = goal_admission.split("def proof_report_postcondition_has_unsafe_source_shape_depth(", 1)[1].split("# Find unqualified result variables", 1)[0]
+assert "Ast::Expr.Absent |" not in unsafe_source_shape
+assert "arm.guard != Ast::Expr.Absent and proof_report_postcondition_has_unsafe_source_shape_depth(arm.guard" in unsafe_source_shape
+unsafe_match = unsafe_source_shape.split("Ast::Expr.Match(scrutinee, arms, position):", 1)[1].split("Ast::Expr.Comprehension", 1)[0]
+assert unsafe_match.index("arm.body.count != 1") < unsafe_match.index("proof_report_postcondition_has_unsafe_source_shape_depth(arm.guard")
+result_reference_match = goal_admission.split("def proof_report_postcondition_mentions_result_variable_depth(", 1)[1].split("def proof_report_postcondition_return_lookup(", 1)[0].split("Ast::Expr.Match(scrutinee, arms, position):", 1)[1].split("Ast::Expr.GetElse", 1)[0]
+assert result_reference_match.index("arm.body.count != 1") < result_reference_match.index("proof_report_postcondition_mentions_result_variable_depth(arm.guard")
+pattern_binder_budget = goal_admission.split("def proof_report_postcondition_pattern_special_binders(", 1)[1].split("def proof_report_postcondition_match_binder_visibility(", 1)[0]
+for charged_text in ('sview_len(name)', 'sview_len("result")', 'sview_len("old")'):
+    assert f"proof_report_source_work_charge({charged_text}, source_work)" in pattern_binder_budget
+result_consumer = type_bound_local.split("def proof_replay_type_bound_result_consumer_matches(", 1)[1].split(
+    "# Later straight-line locals are harmless", 1
+)[0]
+assert "Ast::Stmt.Return(expression, position):" in result_consumer
+assert "proof_replay_type_bound_equal_span_return_valid(returned, return_position, work)" in result_consumer
+assert "return_position.line != returned_position.line" in result_consumer
+assert "return_position.offset >= returned_position.offset" in result_consumer
+assert "return_position.end_offset > returned_position.offset" in result_consumer
+assert "return_position.offset > return_position.end_offset" in result_consumer
+assert "proof_replay_source_position_equal(returned_position, return_position)" in result_consumer
+equal_span_return = type_bound_local.split("def proof_replay_type_bound_equal_span_return_valid(", 1)[1].split(
+    "def proof_replay_type_bound_result_consumer_matches(", 1
+)[0]
+for parser_owned_check in (
+    "proof_replay_source_position_equal(if_position, return_position)",
+    "proof_replay_type_bound_local_work_charge(4, work)",
+    "proof_replay_type_bound_position_after_extent(Ast::expr_pos(condition), return_extent)",
+    "proof_replay_type_bound_position_after_extent(Ast::expr_pos(then_expression), return_extent)",
+    "proof_replay_type_bound_position_after_extent(Ast::expr_pos(else_expression), return_extent)",
+):
+    assert parser_owned_check in equal_span_return
+assert "proof_source_kernel_collect_type_index(declarations" in postcondition_inventory
+assert "proof_source_kernel_type_sort(declared_return_type" in postcondition_inventory
+assert 'return_sort.sort == "void"' in postcondition_inventory
+assert "not return_sort.known or return_sort.sort == \"void\"" in postcondition_inventory
 runtime_fingerprint = (ROOT / "src/app/runtime.elisa").read_text(encoding="utf-8")
 fingerprint_limit_body = runtime_fingerprint.split("def proof_goal_fingerprint_with_limit(", 1)[1].split("def proof_theorem_identity_work_charge(", 1)[0]
 fingerprint_preflight = runtime_fingerprint.split("def proof_goal_identity_work_preflight(", 1)[1].split("def proof_goal_fingerprint(", 1)[0]
