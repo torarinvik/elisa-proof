@@ -21,7 +21,7 @@ assert "owner_offset_valid" in generic_walk
 assert "|argument, declaration_line, owner_offset, owner_offset_valid, report, source_work, depth|" in generic_walk
 assert "|element, declaration_line, owner_offset, owner_offset_valid, report, source_work, depth|" in generic_walk
 assert "position.offset.usize(), true" in threaded
-assert "report.analysis_2.replay_owner_offset, report.analysis_2.replay_owner_offset_valid" in threaded
+assert "source_report.analysis_2.replay_owner_offset, source_report.analysis_2.replay_owner_offset_valid" in threaded
 assert "proof_resource_type_marker_summary_for_owner_at_offset_with_work" in threaded
 
 print("threaded summary generic checks use exact owner offsets and shared work")
