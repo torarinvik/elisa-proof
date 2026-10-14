@@ -7,6 +7,16 @@
 # small term language is represented as `unsupported` and can never replay successfully.
 include "./replay/numeric_literal_sort.elisa"
 extend ElisaProof:
+    private:
+        const PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT: usize = 1048576
+
+        def proof_kernel_ast_support_charge(amount: usize, work: mutable usize&) -> bool:
+            if work > PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT or amount > PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT - work:
+                work <- PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT + 1
+                return false
+            work <- work + amount
+            return true
+
     public:
         def proof_kernel_operator(operator: TokenKind) -> sview:
             return "+" if operator == TokenKind.Plus
@@ -60,61 +70,91 @@ extend ElisaProof:
         # the richer AST language accepted by the main prover. This mirrors the encoder's shape
         # boundary so an unsupported child cannot be smuggled into an otherwise supported parent.
         def proof_kernel_expression_supported(expression: Ast::Expr) -> bool:
-            return proof_kernel_expression_supported_depth(expression, 0)
+            work: mutable usize = 0
+            result: (complete: bool, supported: bool) = proof_kernel_expression_supported_with_work(expression, &work)
+            result.complete and result.supported
+
+        # Batch callers pass one counter across multiple facts so a collection of individually
+        # bounded terms cannot multiply the work limit without bound.
+        def proof_kernel_expression_supported_with_work(expression: Ast::Expr, work: mutable usize&) -> (complete: bool, supported: bool):
+            return (false, false) if work > PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT
+            supported: bool = proof_kernel_expression_supported_depth_with_work(expression, 0, &work)
+            (work <= PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT, supported)
+
+        def proof_kernel_ast_support_charge_with_work(amount: usize, work: mutable usize&) -> bool:
+            proof_kernel_ast_support_charge(amount, &work)
 
     private:
+        # Contract quantifier binders are lowered by the parser to i64. Their annotation is
+        # erased from the neutral arena, so admit only that parser-authentic type rather than
+        # allowing an unrepresented annotation to disagree with the range-inferred kernel sort.
+        def proof_kernel_quantifier_integer_type(type_expression: Ast::Expr) -> bool:
+            match type_expression:
+                Ast::Expr.Ident(name, _):
+                    return name == "i64"
+                _:
+                    return false
+
         # Checked-get nodes intentionally erase their recovery body from the source-neutral
         # arena, but that body still belongs to the source term being admitted. Validate its
         # shape before erasure so an Invalid statement or an unsupported child cannot hide behind
         # an otherwise valid guarded index. The statement semantics remain the responsibility of
         # the source checker; this boundary only guarantees that the imported AST is well formed.
-        def proof_kernel_recovery_supported(statements: darray[Ast::Stmt], depth: usize) -> bool:
+        def proof_kernel_recovery_supported_with_work(statements: darray[Ast::Stmt], depth: usize, work: mutable usize&) -> bool:
             return false if not ElisaProofKernelCore::depth_valid(depth)
-            for statement in statements |statement, depth|:
+            for statement in statements |statement, depth, work|:
+                return false if not proof_kernel_ast_support_charge(1, &work)
                 match statement:
                     Ast::Stmt.Invalid:
                         return false
                     Ast::Stmt.Expr(expression, _):
-                        return false if not proof_kernel_expression_supported_depth(expression, depth + 1)
+                        return false if not proof_kernel_expression_supported_depth_with_work(expression, depth + 1, &work)
                     Ast::Stmt.Block(_, _, _, body, _):
-                        return false if not proof_kernel_recovery_supported(body, depth + 1)
+                        return false if not proof_kernel_recovery_supported_with_work(body, depth + 1, &work)
                     Ast::Stmt.VarDecl(binder, type_expression, value, _):
                         return false if:
                             binder == ""
-                            not proof_kernel_expression_supported_depth(type_expression, depth + 1) or not proof_kernel_expression_supported_depth(value, depth + 1)
+                            not proof_kernel_expression_supported_depth_with_work(type_expression, depth + 1, &work) or not proof_kernel_expression_supported_depth_with_work(value, depth + 1, &work)
                     Ast::Stmt.Assign(target, _, value, _):
-                        return false if not proof_kernel_expression_supported_depth(target, depth + 1) or not proof_kernel_expression_supported_depth(value, depth + 1)
+                        return false if not proof_kernel_expression_supported_depth_with_work(target, depth + 1, &work) or not proof_kernel_expression_supported_depth_with_work(value, depth + 1, &work)
                     Ast::Stmt.If(condition, then_body, else_body, _):
                         return false if:
-                            not proof_kernel_expression_supported_depth(condition, depth + 1)
-                            not proof_kernel_recovery_supported(then_body, depth + 1) or not proof_kernel_recovery_supported(else_body, depth + 1)
+                            not proof_kernel_expression_supported_depth_with_work(condition, depth + 1, &work)
+                            not proof_kernel_recovery_supported_with_work(then_body, depth + 1, &work) or not proof_kernel_recovery_supported_with_work(else_body, depth + 1, &work)
                     Ast::Stmt.While(condition, body, _):
-                        return false if not proof_kernel_expression_supported_depth(condition, depth + 1) or not proof_kernel_recovery_supported(body, depth + 1)
+                        return false if not proof_kernel_expression_supported_depth_with_work(condition, depth + 1, &work) or not proof_kernel_recovery_supported_with_work(body, depth + 1, &work)
                     Ast::Stmt.For(_, variables, iterable, body, _):
                         return false if variables.count == 0
-                        for variable in variables:
+                        for variable in variables |work|:
+                            return false if not proof_kernel_ast_support_charge(1, &work)
                             return false if variable == ""
-                        return false if not proof_kernel_expression_supported_depth(iterable, depth + 1) or not proof_kernel_recovery_supported(body, depth + 1)
+                        return false if not proof_kernel_expression_supported_depth_with_work(iterable, depth + 1, &work) or not proof_kernel_recovery_supported_with_work(body, depth + 1, &work)
                     Ast::Stmt.Return(value, _):
                         if value is returned:
-                            return false if not proof_kernel_expression_supported_depth(returned, depth + 1)
+                            return false if not proof_kernel_expression_supported_depth_with_work(returned, depth + 1, &work)
                     Ast::Stmt.Break(_, _):
                         pass
                     Ast::Stmt.Continue(_, _):
                         pass
                     Ast::Stmt.Match(scrutinee, arms, _):
-                        return false if not proof_kernel_expression_supported_depth(scrutinee, depth + 1)
-                        for arm in arms |arm, depth|:
-                            return false if not proof_kernel_expression_supported_depth(arm.guard, depth + 1) or not proof_kernel_recovery_supported(arm.body, depth + 1)
+                        return false if not proof_kernel_expression_supported_depth_with_work(scrutinee, depth + 1, &work)
+                        for arm in arms |arm, depth, work|:
+                            return false if not proof_kernel_ast_support_charge(1, &work)
+                            return false if not proof_kernel_expression_supported_depth_with_work(arm.guard, depth + 1, &work) or not proof_kernel_recovery_supported_with_work(arm.body, depth + 1, &work)
                     Ast::Stmt.Contract(_, expression, _):
-                        return false if not proof_kernel_expression_supported_depth(expression, depth + 1)
+                        return false if not proof_kernel_expression_supported_depth_with_work(expression, depth + 1, &work)
             return true
 
         # Keep the producer-side AST walk bounded just like the encoder and replay matcher. A
         # compiler-owned AST can still be malformed at an import boundary; rejecting it before
         # descending further is safer than relying on the host call stack to reject it.
         def proof_kernel_expression_supported_depth(expression: Ast::Expr, depth: usize) -> bool:
+            work: mutable usize = 0
+            proof_kernel_expression_supported_depth_with_work(expression, depth, &work)
+
+        def proof_kernel_expression_supported_depth_with_work(expression: Ast::Expr, depth: usize, work: mutable usize&) -> bool:
             return false if not ElisaProofKernelCore::depth_valid(depth)
+            return false if not proof_kernel_ast_support_charge(1, &work)
             match expression:
                 Ast::Expr.IntLit(_, _):
                     return true
@@ -137,90 +177,100 @@ extend ElisaProof:
                     # Keep enum shorthand distinct from an ordinary identifier. Only the
                     # one-segment value form is admitted until qualified type identity is carried
                     # by the source-neutral term language.
-                    return parts.count == 1 and parts[0] != ""
+                    return false if parts.count != 1 or not proof_kernel_ast_support_charge(1, &work)
+                    return parts[0] != ""
                 Ast::Expr.Paren(inner, _):
-                    return proof_kernel_expression_supported_depth(inner, depth + 1)
+                    return proof_kernel_expression_supported_depth_with_work(inner, depth + 1, &work)
                 # `get collection[index] else fallback` is represented in the compiler AST as
                 # an Else binary around an Index. Keep this source form explicit in the arena so
                 # the replay kernel can validate the checked-access primitive instead of treating
                 # it as an unknown arithmetic operator.
                 Ast::Expr.Binary(Ast::Expr.Index(object, index, _), TokenKind.Else, fallback, _):
-                    return proof_kernel_expression_supported_depth(object, depth + 1) and proof_kernel_expression_supported_depth(index, depth + 1) and proof_kernel_expression_supported_depth(fallback, depth + 1)
+                    return proof_kernel_expression_supported_depth_with_work(object, depth + 1, &work) and proof_kernel_expression_supported_depth_with_work(index, depth + 1, &work) and proof_kernel_expression_supported_depth_with_work(fallback, depth + 1, &work)
                 # A statement-level `get collection[index] else recovery` has no value-shaped
                 # fallback to encode. Its control recovery is checked by the AST proof pass;
                 # this source-neutral term records only the guarded load boundary so replay can
                 # validate that boundary independently.
                 Ast::Expr.GetElse(Ast::Expr.Index(object, index, _), recovery, _):
-                    return false if recovery.count == 0 or not proof_kernel_recovery_supported(recovery, depth + 1)
-                    return proof_kernel_expression_supported_depth(object, depth + 1) and proof_kernel_expression_supported_depth(index, depth + 1)
+                    return false if recovery.count == 0 or not proof_kernel_recovery_supported_with_work(recovery, depth + 1, &work)
+                    return proof_kernel_expression_supported_depth_with_work(object, depth + 1, &work) and proof_kernel_expression_supported_depth_with_work(index, depth + 1, &work)
                 Ast::Expr.Unary(operator, operand, _):
-                    return proof_kernel_operator_supported(operator) and proof_kernel_expression_supported_depth(operand, depth + 1)
+                    return proof_kernel_operator_supported(operator) and proof_kernel_expression_supported_depth_with_work(operand, depth + 1, &work)
                 Ast::Expr.Binary(left, operator, right, _):
-                    return proof_kernel_operator_supported(operator) and proof_kernel_expression_supported_depth(left, depth + 1) and proof_kernel_expression_supported_depth(right, depth + 1)
+                    return proof_kernel_operator_supported(operator) and proof_kernel_expression_supported_depth_with_work(left, depth + 1, &work) and proof_kernel_expression_supported_depth_with_work(right, depth + 1, &work)
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_kernel_expression_supported_depth(condition, depth + 1) and proof_kernel_expression_supported_depth(then_expression, depth + 1) and proof_kernel_expression_supported_depth(else_expression, depth + 1)
+                    return proof_kernel_expression_supported_depth_with_work(condition, depth + 1, &work) and proof_kernel_expression_supported_depth_with_work(then_expression, depth + 1, &work) and proof_kernel_expression_supported_depth_with_work(else_expression, depth + 1, &work)
                 Ast::Expr.Move(operand, _):
-                    return proof_kernel_expression_supported_depth(operand, depth + 1)
+                    return proof_kernel_expression_supported_depth_with_work(operand, depth + 1, &work)
                 Ast::Expr.Call(callee, arguments, argument_names, _):
                     # The parser uses either an empty name vector for all-positional calls or a
                     # slot aligned with every argument. A partial vector would make the
                     # source-neutral call arena assign names to the wrong arguments.
                     return false if:
                         argument_names.count != 0 and argument_names.count != arguments.count
-                        not proof_kernel_expression_supported_depth(callee, depth + 1)
-                    for argument in arguments:
-                        return false if not proof_kernel_expression_supported_depth(argument, depth + 1)
+                        not proof_kernel_expression_supported_depth_with_work(callee, depth + 1, &work)
+                    for argument in arguments |work|:
+                        return false if not proof_kernel_ast_support_charge(1, &work)
+                        return false if not proof_kernel_expression_supported_depth_with_work(argument, depth + 1, &work)
                     return true
                 Ast::Expr.Field(object, field, _):
-                    return field != "" and proof_kernel_expression_supported_depth(object, depth + 1)
+                    return field != "" and proof_kernel_expression_supported_depth_with_work(object, depth + 1, &work)
                 Ast::Expr.Scope(base, field, _):
-                    return field != "" and proof_kernel_expression_supported_depth(base, depth + 1)
+                    return field != "" and proof_kernel_expression_supported_depth_with_work(base, depth + 1, &work)
                 Ast::Expr.Index(object, index, _):
-                    return proof_kernel_expression_supported_depth(object, depth + 1) and proof_kernel_expression_supported_depth(index, depth + 1)
+                    return proof_kernel_expression_supported_depth_with_work(object, depth + 1, &work) and proof_kernel_expression_supported_depth_with_work(index, depth + 1, &work)
                 Ast::Expr.Slice(object, low, high, _):
-                    return proof_kernel_expression_supported_depth(object, depth + 1) and proof_kernel_expression_supported_depth(low, depth + 1) and proof_kernel_expression_supported_depth(high, depth + 1)
+                    return proof_kernel_expression_supported_depth_with_work(object, depth + 1, &work) and proof_kernel_expression_supported_depth_with_work(low, depth + 1, &work) and proof_kernel_expression_supported_depth_with_work(high, depth + 1, &work)
                 Ast::Expr.IndexN(object, arguments, _):
                     # Multi-argument indexing/generic application is a structural term here.
                     # It remains outside the memory-bound engine, but losing its argument list
                     # at the certificate boundary would make equal source terms indistinguishable.
                     return false if:
                         arguments.count == 0
-                        not proof_kernel_expression_supported_depth(object, depth + 1)
-                    for argument in arguments:
-                        return false if not proof_kernel_expression_supported_depth(argument, depth + 1)
+                        not proof_kernel_expression_supported_depth_with_work(object, depth + 1, &work)
+                    for argument in arguments |work|:
+                        return false if not proof_kernel_ast_support_charge(1, &work)
+                        return false if not proof_kernel_expression_supported_depth_with_work(argument, depth + 1, &work)
                     return true
                 Ast::Expr.Array(elements, _):
-                    for element in elements:
-                        return false if not proof_kernel_expression_supported_depth(element, depth + 1)
+                    for element in elements |work|:
+                        return false if not proof_kernel_ast_support_charge(1, &work)
+                        return false if not proof_kernel_expression_supported_depth_with_work(element, depth + 1, &work)
                     return true
                 Ast::Expr.Tuple(elements, _):
-                    for element in elements:
-                        return false if not proof_kernel_expression_supported_depth(element, depth + 1)
+                    for element in elements |work|:
+                        return false if not proof_kernel_ast_support_charge(1, &work)
+                        return false if not proof_kernel_expression_supported_depth_with_work(element, depth + 1, &work)
                     return true
                 Ast::Expr.SetLit(elements, _):
-                    for element in elements:
-                        return false if not proof_kernel_expression_supported_depth(element, depth + 1)
+                    for element in elements |work|:
+                        return false if not proof_kernel_ast_support_charge(1, &work)
+                        return false if not proof_kernel_expression_supported_depth_with_work(element, depth + 1, &work)
                     return true
                 Ast::Expr.DictLit(entries, _):
-                    for entry in entries:
-                        return false if not proof_kernel_expression_supported_depth(entry.key, depth + 1) or not proof_kernel_expression_supported_depth(entry.value, depth + 1)
+                    for entry in entries |work|:
+                        return false if not proof_kernel_ast_support_charge(1, &work)
+                        return false if not proof_kernel_expression_supported_depth_with_work(entry.key, depth + 1, &work) or not proof_kernel_expression_supported_depth_with_work(entry.value, depth + 1, &work)
                     return true
                 Ast::Expr.Construct(type_expression, fields, _):
-                    return false if not proof_kernel_expression_supported_depth(type_expression, depth + 1)
-                    for field in fields:
+                    return false if not proof_kernel_expression_supported_depth_with_work(type_expression, depth + 1, &work)
+                    for field in fields |work|:
+                        return false if not proof_kernel_ast_support_charge(1, &work)
                         return false if:
                             field.name == ""
-                            not proof_kernel_expression_supported_depth(field.value, depth + 1)
+                            not proof_kernel_expression_supported_depth_with_work(field.value, depth + 1, &work)
                     return true
                 Ast::Expr.RecordUpdate(base, fields, _):
-                    return false if not proof_kernel_expression_supported_depth(base, depth + 1)
-                    for field in fields:
+                    return false if not proof_kernel_expression_supported_depth_with_work(base, depth + 1, &work)
+                    for field in fields |work|:
+                        return false if not proof_kernel_ast_support_charge(1, &work)
                         return false if:
                             field.name == ""
-                            not proof_kernel_expression_supported_depth(field.value, depth + 1)
+                            not proof_kernel_expression_supported_depth_with_work(field.value, depth + 1, &work)
                     return true
                 Ast::Expr.Block(statements, value, captures, _):
                     return false if captures.count != 0 or statements.count == 0 or statements.count > ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS
+                    return false if not proof_kernel_ast_support_charge(statements.count, &work)
                     match statements[0]:
                         Ast::Stmt.VarDecl(binder, type_expression, range_expression, _):
                             # Quantifier binders are names in a source-level binding
@@ -229,7 +279,9 @@ extend ElisaProof:
                             # collapse both bindings onto one name.
                             return false if:
                                 binder == ""
-                                not proof_kernel_expression_supported_depth(type_expression, depth + 1) or not proof_kernel_expression_supported_depth(range_expression, depth + 1) or not proof_kernel_expression_supported_depth(value, depth + 1)
+                                not proof_kernel_ast_support_charge(1, &work)
+                                not proof_kernel_quantifier_integer_type(type_expression)
+                                not proof_kernel_expression_supported_depth_with_work(range_expression, depth + 1, &work) or not proof_kernel_expression_supported_depth_with_work(value, depth + 1, &work)
                             if statements.count == ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS:
                                 # The second binder is meaningful only for dictionary ranges;
                                 # accepting it beside an array/range would encode a shape that
@@ -249,7 +301,8 @@ extend ElisaProof:
                                     Ast::Stmt.VarDecl(value_binder, value_type, Ast::Expr.IntLit(value, _), _):
                                         return false if:
                                             value_binder == "" or value_binder == binder
-                                            not proof_kernel_expression_supported_depth(value_type, depth + 1)
+                                            not proof_kernel_ast_support_charge(1, &work)
+                                            not proof_kernel_quantifier_integer_type(value_type)
                                             value != 0
                                     _:
                                         return false
@@ -426,8 +479,8 @@ extend ElisaProof:
                     # Preserve the source kind at every nesting level, including hypotheses.
                     return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "") if statements.count == 0 or statements.count > ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS
                     match statements[0]:
-                        Ast::Stmt.VarDecl(binder, _, range_expression, _):
-                            return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "") if binder == ""
+                        Ast::Stmt.VarDecl(binder, type_expression, range_expression, _):
+                            return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "") if binder == "" or not proof_kernel_quantifier_integer_type(type_expression)
                             if statements.count == ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS:
                                 match range_expression:
                                     Ast::Expr.DictLit(_, _):
@@ -448,9 +501,10 @@ extend ElisaProof:
                                     # Keep this in lockstep with the support predicate above:
                                     # the erased dictionary value binder must carry the parser's
                                     # exact zero placeholder, never an unencoded expression.
-                                    Ast::Stmt.VarDecl(value_binder, _, Ast::Expr.IntLit(value, _), _):
+                                    Ast::Stmt.VarDecl(value_binder, value_type, Ast::Expr.IntLit(value, _), _):
                                         return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "") if:
                                             value_binder == "" or value_binder == binder
+                                            not proof_kernel_quantifier_integer_type(value_type)
                                             value != 0
                                         secondary <- value_binder
                                     _:

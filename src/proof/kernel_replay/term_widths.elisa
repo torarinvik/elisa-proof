@@ -1,5 +1,23 @@
 extend ElisaProofKernelReplay:
     private:
+        def proof_kernel_replay_width_work_charge(work_used: mutable usize&, amount: usize, work_limit: usize) -> bool:
+            return false if work_used > work_limit
+            if amount > work_limit - work_used:
+                work_used <- work_limit + 1
+                return false
+            work_used <- work_used + amount
+            return true
+
+        # Width dispatch copies and compares arena text. Bound that cost alongside recursive
+        # visits so long serialized spellings cannot bypass the fixed-width replay ceiling.
+        def proof_kernel_replay_width_work_charge_node(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, work_used: mutable usize&, work_limit: usize) -> bool:
+            return false if root >= nodes.count or not proof_kernel_replay_width_work_charge(work_used, 1, work_limit)
+            return false if:
+                not proof_kernel_replay_width_work_charge(work_used, sview_len(nodes[root].kind), work_limit)
+                not proof_kernel_replay_width_work_charge(work_used, sview_len(nodes[root].operator), work_limit)
+                not proof_kernel_replay_width_work_charge(work_used, sview_len(nodes[root].name), work_limit)
+            proof_kernel_replay_width_work_charge(work_used, sview_len(nodes[root].secondary_name), work_limit)
+
         def proof_kernel_replay_unsigned_marker_info(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> (known: bool, name_root: usize, width: i64):
             return (false, 0, 0) if:
                 depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not ElisaProofKernelCore::depth_valid(depth)
@@ -99,6 +117,18 @@ extend ElisaProofKernelReplay:
                 width <- marker.width if width == 0 or marker.width < width
             return width
 
+        def proof_kernel_replay_unsigned_marker_width_for_name_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], name: sview, work_used: mutable usize&, work_limit: usize) -> i64:
+            width: mutable i64 = 0
+            for fact in facts |fact, nodes, name, width, work_used, work_limit|:
+                return 0 if not proof_kernel_replay_width_work_charge(work_used, 1, work_limit)
+                marker: (known: bool, name_root: usize, width: i64) = proof_kernel_replay_unsigned_marker_info_with_work(nodes, children, fact, 0, work_used, work_limit)
+                return 0 if work_used > work_limit
+                continue if not marker.known
+                matches: bool = proof_kernel_replay_scalar_witness_ident_matches_with_work(nodes, marker.name_root, name, work_used, work_limit)
+                return 0 if work_used > work_limit
+                width <- marker.width if matches and (width == 0 or marker.width < width)
+            return width
+
         def proof_kernel_replay_unsigned_indexed_element_path(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> (known: bool, container: usize, subscripts: i64):
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
@@ -137,17 +167,16 @@ extend ElisaProofKernelReplay:
         def proof_kernel_replay_unsigned_width_in_expression_with_work_limit(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], work_used: mutable usize&, work_limit: usize, depth: usize) -> i64:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
-            return 0 if work_used >= work_limit
-            work_used <- work_used + 1
             return 0 if:
                 depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not ElisaProofKernelCore::depth_valid(depth)
                 root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+                not proof_kernel_replay_width_work_charge_node(nodes, root, work_used, work_limit)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             if node.kind == "typed-int":
                 literal = ElisaProofKernelCore::typed_literal_value(node)
                 return literal.width if literal.known and literal.unsigned else 0
             if node.kind == "ident":
-                return proof_kernel_replay_unsigned_marker_width_for_name(nodes, children, facts, node.name)
+                return proof_kernel_replay_unsigned_marker_width_for_name_with_work(nodes, children, facts, node.name, work_used, work_limit)
             if node.kind == "field":
                 return proof_kernel_replay_place_marker_width(nodes, children, facts, root)
             if node.kind in {"index", "index-n"}:

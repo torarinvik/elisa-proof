@@ -1,5 +1,22 @@
 extend ElisaProofKernelReplay:
     private:
+        # Arena admission has its own conservative ceiling for general replay. When a report
+        # adapter already carries a goal meter, debit the arena validator's measured work to that
+        # same counter so repeated congruence queries cannot restart a second graph-scan budget.
+        def proof_kernel_replay_arena_valid_with_goal_work_and_workspace(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize, work_used: mutable usize&, exhausted: mutable bool&, workspace: mutable ProofKernelReplayValidationWorkspace&) -> bool:
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            remaining: usize = PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT - work_used
+            arena_limit: usize = remaining if remaining < PROOF_KERNEL_REPLAY_ARENA_WORK_BUDGET else PROOF_KERNEL_REPLAY_ARENA_WORK_BUDGET
+            valid: bool = proof_kernel_replay_arena_valid_with_workspace_limit(nodes, children, facts, goal_root, workspace, arena_limit, false)
+            arena_work: usize = workspace.work_used
+            if not proof_kernel_replay_goal_search_charge_amount(work_used, arena_work):
+                exhausted <- true
+                return false
+            if not valid and arena_work >= arena_limit:
+                exhausted <- true
+                return false
+            return valid
+
         # A public checked fast path may skip repeated per-root graph walks only after it
         # independently admits the complete immutable arena and every supplied root in the
         # same call. No caller-supplied `already_validated` flag is accepted at this boundary.
@@ -200,53 +217,76 @@ extend ElisaProofKernelReplay:
             # or closure term/round budget cuts this tier short, but preserves earlier exhaustion.
             # A refusal may be undecided rather than "no rule applies"; this flag never changes the verdict.
             def proof_kernel_replay_congruence_report_status[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize, exhausted: mutable bool&) -> bool:
+                work_used: mutable usize = 0
+                return proof_kernel_replay_congruence_report_status_with_work(nodes, children, facts, goal_root, exhausted, &work_used)
+
+            # Bounded variant for adapters that share one report budget across several searches.
+            # `work_used` is cumulative for the caller and the kernel's hard ceiling remains in
+            # force. Callers may seed it near that ceiling to reserve only their remaining budget.
+            def proof_kernel_replay_congruence_report_status_with_work[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: darray[usize]& @r, facts: darray[usize], goal_root: usize, exhausted: mutable bool&, work_used: mutable usize&) -> bool:
+                workspace: mutable ProofKernelReplayValidationWorkspace = proof_kernel_replay_validation_workspace_new()
+                return proof_kernel_replay_congruence_report_status_with_work_and_workspace(nodes, children, facts, goal_root, exhausted, work_used, &workspace)
+
+            # Reuse validation scratch across a batch while rechecking every supplied root each
+            # time. The workspace retains capacity only; its cached graph verdict is not reused.
+            def proof_kernel_replay_congruence_report_status_with_work_and_workspace[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: darray[usize]& @r, facts: darray[usize], goal_root: usize, exhausted: mutable bool&, work_used: mutable usize&, workspace: mutable ProofKernelReplayValidationWorkspace&) -> bool:
                 # Congruence only handles equality. Read and meter the root first so an
                 # unrelated goal can be rejected before validating its entire premise graph.
-                goal_work: mutable usize = 0
-                if not proof_kernel_replay_goal_search_charge_node_text(nodes, goal_root, goal_work) or goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
-                    exhausted <- true if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                if not proof_kernel_replay_goal_search_charge_node_text(nodes, goal_root, work_used) or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
+                    exhausted <- true if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     return false
                 goal: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
                 return false if:
                     not goal.known or goal.node.kind != "binary" or goal.node.operator != "=="
-                    not proof_kernel_replay_arena_valid(nodes, children, facts, goal_root)
+                    not proof_kernel_replay_arena_valid_with_goal_work_and_workspace(nodes, children, facts, goal_root, work_used, exhausted, workspace)
                 # Proposition shape and literal safety also walk attacker supplied DAGs. Keep
                 # them on the same report budget as the later width checks and closure search.
-                proposition_valid: bool = proof_kernel_replay_proposition_state_valid_with_goal_work(nodes, children, facts, goal_root, goal_work)
+                proposition_valid: bool = proof_kernel_replay_proposition_state_valid_with_goal_work(nodes, children, facts, goal_root, work_used)
                 if not proposition_valid:
-                    exhausted <- true if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    exhausted <- true if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     return false
                 # Equality congruence preserves deterministic fixed-width operations under wrap.
                 # A status call checks one goal; its premises and goal share this report budget.
                 if goal.known and goal.node.kind == "binary" and goal.node.operator == "==":
-                    goal_width: i64 = proof_kernel_replay_unsigned_width_in_expression_with_goal_work(nodes, children, goal_root, facts, goal_work, 0)
-                    if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
+                    goal_width: i64 = proof_kernel_replay_unsigned_width_in_expression_with_goal_work(nodes, children, goal_root, facts, work_used, 0)
+                    if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
                         exhausted <- true
                         return false
                     unsigned_free: mutable bool = goal_width == 0
-                    for fact in facts |fact, nodes, children, unsigned_free, goal_work|:
-                        if not proof_kernel_replay_goal_search_charge(goal_work):
+                    for fact in facts |fact, nodes, children, unsigned_free, work_used|:
+                        if not proof_kernel_replay_goal_search_charge(work_used):
                             exhausted <- true
                             return false
-                        fact_width: i64 = proof_kernel_replay_unsigned_width_in_expression_with_goal_work(nodes, children, fact, facts, goal_work, 0)
-                        if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
+                        fact_width: i64 = proof_kernel_replay_unsigned_width_in_expression_with_goal_work(nodes, children, fact, facts, work_used, 0)
+                        if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
                             exhausted <- true
                             return false
                         unsigned_free <- false if fact_width != 0
                     if unsigned_free:
                         # Safety bounds cannot change a congruence closure. Return its result
                         # directly instead of rebuilding them and running the same closure again.
-                        return proof_kernel_replay_congruence_goal_with_goal_work(nodes, children, facts, goal_root, goal_work, exhausted)
+                        return proof_kernel_replay_congruence_goal_with_goal_work(nodes, children, facts, goal_root, work_used, exhausted)
                 # The following fact and goal checks build unsigned and signed safety contexts,
                 # then validate every premise and the goal against them. Running the older
                 # arithmetic_state_safe precheck here repeated those graph walks with fresh local
                 # meters and left this report boundary's work unbounded across the precheck.
-                unsigned_safe: bool = proof_kernel_replay_unsigned_report_safe_with_goal_work(nodes, children, facts, goal_root, goal_work)
-                if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
+                unsigned_safe: bool = proof_kernel_replay_unsigned_report_safe_with_goal_work(nodes, children, facts, goal_root, work_used)
+                if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
                     exhausted <- true
                     return false
                 return false if not unsigned_safe
-                return proof_kernel_replay_congruence_goal_with_goal_work(nodes, children, facts, goal_root, goal_work, exhausted)
+                return proof_kernel_replay_congruence_goal_with_goal_work(nodes, children, facts, goal_root, work_used, exhausted)
+
+            # Reserve a caller-selected amount of the kernel's report work for this query and
+            # return the units consumed. The offset keeps every internal helper on its existing
+            # hard ceiling while making the ceiling cumulative with the caller's own report meter.
+            def proof_kernel_replay_congruence_report_status_with_budget[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: darray[usize]& @r, facts: darray[usize], goal_root: usize, work_budget: usize, exhausted: mutable bool&) -> (proven: bool, work_used: usize):
+                allowance: usize = work_budget if work_budget < PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT else PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                work_base: usize = PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT - allowance
+                cumulative_work: mutable usize = work_base
+                proven: bool = proof_kernel_replay_congruence_report_status_with_work(nodes, children, facts, goal_root, exhausted, &cumulative_work)
+                consumed: usize = cumulative_work - work_base if cumulative_work <= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT else allowance + 1
+                return (proven, consumed)
 
             # Declared effect containment. The claim is about declared rows: every resolved
             # callee's `can[...]` row is contained in the caller's. It says nothing about effects

@@ -117,6 +117,11 @@ and the source producer is `check/kernel_proposition_environment.elisa`.
 | `enum-underlying` | the backing integer sort of a const enum | owner is the enum; `type_name` is a fixed-width integer sort; owner type identity is nonzero |
 | `module-context` | lexical module identity for qualified lookup | all spelling/type fields empty; owner type identity is nonzero |
 | `module-owner-segment` | one authenticated module path segment for a qualified enum name | owner type identity is nonzero; parameter index/count encode the complete path |
+| `bare-call-owner` | owner marker used to resolve a bare call against declarations | name is nonempty; type, owner, signature, and parameter fields are empty |
+| `local-call-shadow` | lexical value marker that shadows a same-named callable | name is nonempty; all owner, type, signature, and parameter fields are empty |
+| `function-incomplete` | callable identity whose parameter declaration is incomplete | name is nonempty; signature identity is nonzero; parameter count is zero |
+| `raw-reference-value` | by-reference value whose raw-pointer interpretation must be preserved | no owner/signature; marked `parameter_by_reference` |
+| `type-scope-segment` | one authenticated owner-qualified type path segment | owner and named sort agree; type identity is nonzero; parameter index/count encode the complete path |
 <!-- /inventory:typing-kinds -->
 
 ## Certificate rules
@@ -301,6 +306,7 @@ call requires reviewing and updating this closed inventory.
 | `push` | collection mutation |
 | `resize` | collection mutation |
 | `truncate` | collection mutation |
+| `u32` | integer conversion |
 | `u64` | integer conversion |
 | `usize` | integer conversion |
 <!-- /inventory:kernel-member-calls -->
@@ -308,13 +314,26 @@ call requires reviewing and updating this closed inventory.
 ### Host-side soundness-incident registry
 
 `scripts/soundness_incident_registry.py` validates the confirmed-incident ledger and can determine
-whether an exact persisted product is named by an incident for the exact semantic rule/version it
-used. The match requires product kind, identity and SHA-256 as well as rule and semantic version;
+whether an exact persisted product is named by an incident. The match requires product kind,
+identity and SHA-256; caller-supplied rule lists cannot clear an exact digest match, while
 cache/artifact schema labels do not participate. Invalid registries or malformed product metadata
-raise an error, so callers must refuse reuse. This Python policy is not part of kernel replay and
-does not currently gate the report-cache reader, declaration-artifact store reader, or portable
-package replay path; those integrations and a complete rule-version inventory remain open R-009
-work. The focused host-side regression is `scripts/tests/test_soundness_incident_registry.py`.
+raise an error, so callers must refuse reuse. Reports without exact affected-product identities
+are recorded separately as unclassified; their presence blocks product reuse classification rather
+than behaving like an empty incident set. Registry schema v2 requires this field even when its
+array is empty, so a legacy v1 ledger without explicit report coverage is invalid. The report-cache
+reader and prefetcher now fail closed unless the registry explicitly has no confirmed or
+unclassified reports, and cache identity binds both the registry data and policy implementation.
+Declaration-artifact reads and publication use
+the same fail-closed empty-ledger policy because their records lack per-rule semantic identities.
+Portable package admission and a complete rule-version inventory remain open R-009 work. The
+standalone package checker intentionally establishes only kernel replay under its own rules: its
+result marks hypotheses and source correspondence as adapter trust and always sets
+`source_authenticated` false. It rejects rules requiring authenticated source. Direct invocation
+therefore does not bypass a source-authentication claim that the checker never makes. A downstream
+consumer that upgrades `replayed` into a current-product or source-verification claim must bind the
+checker product identity and validate the adapter/source separately. No such production consumer
+has been identified in this checkout. The focused host-side regression is
+`scripts/tests/test_soundness_incident_registry.py`.
 
 ## Guarded arithmetic completeness rules
 
@@ -356,63 +375,153 @@ classification and depth-bounded parenthesis normalization with the producer. A 
 can affect source authentication and must be audited with source mutations and alias/lifetime
 controls. Their presence is a remaining common-mode trust dependency, not a verification claim.
 
+2. **Caller-supplied typing contexts are not source-authenticated by the typed kernel API.**
+   `proof_kernel_replay_goal_report_typed` checks proposition formation against the supplied
+   `ProofKernelTypeEnvironment`, then runs the same source-neutral goal replay as the untyped API.
+   The API validates context structure, not the context's provenance; a source-level adapter must
+   bind type rows to authenticated declarations before treating its result as source evidence.
+   Indexed-read equality transport remains disabled in producer and kernel replay until replay can
+   establish both that the receiver is a built-in indexable type and that this evidence is tied to
+   the checked source. Merely passing the caller-supplied environment into congruence would cross
+   that trust boundary.
+
 <!-- inventory:replay-external-calls -->
 | Function | Defined in | Tier |
 |---|---|---|
-| `proof_safe_comparison_constant` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
-| `proof_has_ambiguous_integer_constant` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
-| `proof_has_ambiguous_integer_constant_in` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
-| `proof_signed_constant_at_width` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared); evaluates a typed returned constant at the declared return width |
+| `proof_add_finding` | `proof/model/report_recording.elisa` | report model |
+| `proof_add_latest_goal_finding` | `proof/model/report_recording.elisa` | report model |
+| `proof_bind_pattern` | `proof/check/pattern_binding.elisa` | source adapter |
+| `proof_build_enum_index` | `proof/check/enum_index.elisa` | source adapter |
+| `proof_build_module_alias_index` | `proof/check/module_alias_resolution.elisa` | source adapter |
+| `proof_build_operator_impl_index` | `proof/check/operator_impl_index_build.elisa` | source adapter |
+| `proof_builtin_index_marker` | `proof/check/operator_witness_markers.elisa` | source adapter; builtin index marker construction |
+| `proof_builtin_operator_marker` | `proof/check/operator_witness_markers.elisa` | source adapter |
+| `proof_builtin_operator_protocol` | `proof/check/operator_witness_markers.elisa` | source adapter |
+| `proof_builtin_scalar_type_name` | `proof/expr/ast_equal.elisa` | source adapter |
+| `proof_builtin_unary_operator_protocol` | `proof/check/operator_witness_markers.elisa` | source adapter |
+| `proof_callable_name` | `proof/expr/ast_equal.elisa` | source adapter; extracts callable spelling for threaded-summary source matching |
+| `proof_check_core` | `proof/check/api.elisa` | untrusted producer |
+| `proof_check_structural_function` | `proof/check/function_termination.elisa` | source adapter |
+| `proof_check_with_source_analysis` | `proof/check/api.elisa` | source adapter |
+| `proof_checked_view_create` | `proof/model/checked_view.elisa` | report model |
 | `proof_closed_formula_at_width` | `proof/linear/closed_width_formulas.elisa` | untrusted search (shared) |
 | `proof_closed_formula_width_uniform` | `proof/linear/closed_width_formulas.elisa` | untrusted search (shared) |
-| `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
-| `proof_expr_has_call` | `proof/expr/constant_arithmetic.elisa` | source adapter; fail-closed syntax effect scan for captured-loop entry iterable |
-| `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
-| `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
-| `proof_callable_name` | `proof/expr/ast_equal.elisa` | source adapter; extracts callable spelling for threaded-summary source matching |
-| `proof_resource_is_reference_type` | `proof/resources/state_and_regions.elisa` | shared source adapter; syntactic reference marker classification |
-| `proof_resource_is_mutable_reference_type` | `proof/resources/state_and_regions.elisa` | shared source adapter; mutable/lmut reference marker classification |
-| `proof_strip_parens` | `proof/check/alias_stability.elisa` | shared source adapter; depth-bounded place/name normalization |
-| `proof_scalar_reference_parameter_type_in_declarations` | `proof/check/operator_witnesses.elisa` | shared source adapter; depth-bounded unique parameter type lookup for pop scalar snapshots; source identity and builtin semantics remain trust assumptions |
-| `proof_type_head_name` | `proof/check/flow_and_type_model.elisa` | source adapter; module/type head lookup, not callable contract resolution |
-| `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
-| `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |
-| `proof_kernel_report_append_allowed` | `proof/model/report_recording.elisa` | report model |
-| `proof_internal_rebind_name` | `proof/check/internal_name_safety.elisa` | source adapter |
 | `proof_closed_integer_arithmetic` | `proof/linear/fixed_width_arithmetic_integrated_helpers.elisa` | untrusted search (shared) |
-| `proof_count_named_aggregates` | `proof/check/enum_value_types.elisa` | source adapter; aggregate identity lookup |
-| `proof_ident_name` | `proof/expr/ast_equal.elisa` | source adapter |
-| `proof_is_comparison` | `proof/expr/constant_arithmetic.elisa` | source adapter |
-| `proof_loop_binder_value` | `proof/check/loop_range_facts.elisa` | source adapter; loop binder expression |
-| `proof_payload_binder_types` | `proof/check/enum_value_types.elisa` | source adapter; pattern binder types |
-| `proof_report_builtin_operator_impl_exists` | `proof/check/operator_witnesses.elisa` | source adapter; builtin operator override guard |
-| `proof_signed_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter; signed machine width |
-| `proof_source_expression_has_overloaded_operator` | `proof/check/source_operator_guard.elisa` | source adapter; overloaded operator audit |
-| `proof_unsigned_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter; unsigned machine width |
-| `proof_add_latest_goal_finding` | `proof/model/report_recording.elisa` | report model |
-| `proof_check_core` | `proof/check/api.elisa` | untrusted producer |
-| `proof_prepare_semantic_source_with_diagnostics` | `proof/check/api.elisa` | source formation |
-| `proof_expr_has_move` | `proof/expr/constant_arithmetic.elisa` | source adapter; depth-bounded move syntax scan fails closed |
-| `proof_statement_position` | `proof/check/runtime_support_and_calls.elisa` | source adapter; statement span projection |
-| `proof_expression_is_terminal` | `proof/check/runtime_support_and_calls.elisa` | source adapter; reserved raise/panic expression classification |
-| `proof_unsigned_place_marker_width` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); bounded marker-width lookup |
-| `proof_builtin_index_marker` | `proof/check/operator_witness_markers.elisa` | source adapter; builtin index marker construction |
 | `proof_constant_int` | `proof/expr/constant_arithmetic.elisa` | source adapter; bounded integer constant extraction |
+| `proof_decreases_components` | `proof/check/bounds_and_facts.elisa` | source adapter |
+| `proof_empty_report` | `proof/model.elisa` | shared proof dependency |
+| `proof_enum_parameter_position` | `proof/check/bounds_and_facts.elisa` | source adapter |
+| `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
+| `proof_expr_has_call` | `proof/expr/constant_arithmetic.elisa` | source adapter; fail-closed syntax effect scan for captured-loop entry iterable |
+| `proof_expr_has_executable_call` | `proof/expr/pattern_support.elisa` | source adapter |
+| `proof_expr_has_move` | `proof/expr/constant_arithmetic.elisa` | source adapter; depth-bounded move syntax scan fails closed |
+| `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
+| `proof_expr_shape_mix` | `proof/expr/ast_equal_prefilter.elisa` | source adapter |
+| `proof_expr_shape_operator_code` | `proof/expr/ast_equal_prefilter.elisa` | source adapter |
+| `proof_expression_is_terminal` | `proof/check/runtime_support_and_calls.elisa` | source adapter; reserved raise/panic expression classification |
+| `proof_has_ambiguous_integer_constant` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
+| `proof_has_ambiguous_integer_constant_in` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
+| `proof_head_name` | `proof/expr/ast_equal.elisa` | source adapter |
+| `proof_ident_name` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_index_operator_marker` | `proof/check/operator_witness_markers.elisa` | source adapter; builtin index operator marker construction |
+| `proof_infer_structural_decrease` | `proof/check/bounds_and_facts.elisa` | source adapter |
+| `proof_internal_rebind_name` | `proof/check/internal_name_safety.elisa` | source adapter |
+| `proof_index_capacity` | `proof/check/name_index_build.elisa` | source adapter; checked power-of-two table sizing |
+| `proof_is_comparison` | `proof/expr/constant_arithmetic.elisa` | source adapter |
+| `proof_is_ensure_kind` | `proof/check/symbol_and_move_state.elisa` | source adapter |
+| `proof_is_type_cast_index` | `proof/check/index_checks.elisa` | source adapter |
+| `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |
+| `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
+| `proof_kernel_report_append_allowed` | `proof/model/report_recording.elisa` | report model |
+| `proof_linear_certificate_marker` | `proof/linear/linear_certificates.elisa` | untrusted search (shared) |
 | `proof_literal_argument_fits` | `proof/check/literal_call_arguments.elisa` | source adapter; signed literal fit check for an exact call parameter |
+| `proof_loop_binder_value` | `proof/check/loop_range_facts.elisa` | source adapter; loop binder expression |
 | `proof_loop_range_base` | `proof/check/loop_range_facts.elisa` | source adapter; canonical loop range base expression |
+| `proof_lower_static_effect_call` | `proof/expr/static_effects.elisa` | source adapter |
 | `proof_marker_argument` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); bounded marker argument extraction |
+| `proof_match_closed_pattern` | `proof/expr/pattern_support.elisa` | source adapter |
+| `proof_module_alias_lookup_global` | `proof/check/module_alias_resolution.elisa` | source adapter |
+| `proof_module_alias_target` | `proof/check/module_alias_resolution.elisa` | source adapter |
+| `proof_module_alias_targets_compatible` | `proof/check/module_alias_resolution.elisa` | source adapter |
+| `proof_module_function_index_for_callee` | `proof/check/module_alias_resolution.elisa` | source adapter |
+| `proof_name_hash` | `proof/check/call_graph_and_lemmas.elisa` | source adapter |
+| `proof_name_index_capacity` | `proof/check/name_index_build.elisa` | source adapter |
+| `proof_name_index_cluster_status` | `proof/check/name_index_build.elisa` | source adapter |
 | `proof_name_is_reserved_internal` | `proof/check/internal_name_safety.elisa` | source adapter; reserved compiler-generated name check |
+| `proof_pattern_condition` | `proof/check/pattern_lowering.elisa` | source adapter |
+| `proof_pattern_condition_exact` | `proof/expr/pattern_support.elisa` | source adapter |
+| `proof_pattern_condition_exact_typed` | `proof/check/pattern_lowering.elisa` | source adapter |
+| `proof_pattern_condition_typed` | `proof/check/pattern_lowering.elisa` | source adapter |
+| `proof_pattern_is_char_type` | `proof/check/pattern_lowering.elisa` | source adapter |
+| `proof_pattern_is_string_type` | `proof/check/pattern_lowering.elisa` | source adapter |
+| `proof_pattern_type_name` | `proof/check/pattern_lowering.elisa` | source adapter |
+| `proof_pattern_unambiguous_char_literal` | `proof/check/pattern_lowering.elisa` | source adapter |
+| `proof_pattern_unambiguous_string_literal` | `proof/check/pattern_lowering.elisa` | source adapter |
+| `proof_payload_binder_types` | `proof/check/enum_value_types.elisa` | source adapter; pattern binder types |
+| `proof_prepare_semantic_source_with_diagnostics` | `proof/check/api.elisa` | source formation |
+| `proof_qualified_path_segments` | `proof/check/module_alias_resolution.elisa` | source adapter |
+| `proof_report_source_work_charge` | `proof/model/report_theorem_source_admission.elisa` | report model; bounded source-work accounting |
+| `proof_report_theorem_source_status_snapshot` | `proof/model/report_theorem_source_admission.elisa` | report model |
+| `proof_resource_pure_conversion` | `proof/resources/places_and_calls.elisa` | shared source adapter |
+| `proof_resource_type_marker_summary_for_owner_with_work` | `proof/resources/type_markers.elisa` | shared source adapter |
+| `proof_safe_comparison_constant` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
 | `proof_scalar_element_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); scalar element type marker construction |
+| `proof_scalar_primitive_type_name` | `proof/check/flow_and_type_model.elisa` | source adapter |
+| `proof_scalar_reference_parameter_type_in_declarations_with_work` | `proof/check/operator_witnesses.elisa` | source adapter |
 | `proof_scalar_term_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); scalar term marker construction |
-| `proof_scalar_type_kind` | `proof/check/flow_and_type_model.elisa` | source adapter; scalar sort classification |
 | `proof_scalar_type_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); scalar type marker construction |
+| `proof_semantic_diagnostic_counts_with_work` | `proof/model/checked_view.elisa` | report model |
+| `proof_signed_constant_at_width` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared); evaluates a typed returned constant at the declared return width |
 | `proof_signed_place_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); signed place marker construction |
 | `proof_signed_primitive_width` | `proof/check/flow_and_type_model.elisa` | source adapter; fixed-width signed primitive classification |
 | `proof_signed_type_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); signed type marker construction |
+| `proof_signed_type_width_with_work` | `proof/check/operator_witness_container_work.elisa` | source adapter |
+| `proof_source_analysis_charge_work` | `proof/model/checked_view.elisa` | report model |
+| `proof_source_analysis_focused_obligations_bound` | `proof/model/checked_view.elisa` | report model |
+| `proof_source_analysis_goal_admission_snapshot` | `proof/model/checked_view.elisa` | report model |
+| `proof_source_analysis_indexes_reset` | `proof/check/source_effect_index_reset.elisa` | source adapter |
+| `proof_source_analysis_report_admission_snapshot` | `proof/model/checked_view.elisa` | report model |
+| `proof_source_analysis_report_structure_bound_failure` | `proof/model/checked_view.elisa` | report model |
+| `proof_source_callable_extern_contract_index_build` | `proof/check/extern_contract_effect_index.elisa` | source adapter |
+| `proof_source_conversion_generic_indexes_build` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
+| `proof_source_conversion_indexes_build` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
+| `proof_source_conversion_root_alias_visibility_scan` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
+| `proof_source_conversion_scope_expression_key_hash` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
+| `proof_source_conversion_scope_key_hash` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
+| `proof_source_conversion_scope_matches_owner` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
+| `proof_source_drop_type_index_with_work` | `proof/check/drop_type_index.elisa` | source adapter |
+| `proof_source_effect_callable_index_build` | `proof/check/implicit_effect_guard.elisa` | source adapter |
+| `proof_source_effect_index_build` | `proof/check/implicit_effect_guard.elisa` | source adapter |
+| `proof_source_expression_has_overloaded_operator` | `proof/check/source_operator_guard.elisa` | source adapter; overloaded operator audit |
+| `proof_source_expression_has_unsafe_runtime_index` | `proof/check/source_runtime_index.elisa` | source adapter |
+| `proof_source_expression_is_int_literal` | `proof/check/source_scope_guard.elisa` | source adapter |
+| `proof_source_extern_contract_unsafe_with_work` | `proof/check/extern_contract_effect_index.elisa` | source adapter |
+| `proof_source_field_conversion_index_build` | `proof/check/field_conversion_index.elisa` | source adapter |
+| `proof_source_function_has_drop_risk` | `proof/check/implicit_effect_guard.elisa` | source adapter |
+| `proof_source_literal_ensure_binding_coverage` | `proof/model/report_focused_source_ensures.elisa` | report model |
+| `proof_source_literal_ensure_inventory_has_unsupported_with_work` | `proof/model/report_focused_source_ensures.elisa` | report model; bounded source-inventory scan |
+| `proof_source_operator_masks_from_index` | `proof/check/source_operator_guard.elisa` | source adapter |
+| `proof_source_primitive_operator_mask_has` | `proof/check/source_operator_guard.elisa` | source adapter |
+| `proof_source_statements_have_unsafe_runtime_index` | `proof/check/source_runtime_statements.elisa` | source adapter |
+| `proof_stage1_annotation_builtin_type_name` | `proof/expr/ast_equal.elisa` | source adapter; mirrors compiler annotation-name precedence |
+| `proof_statement_position` | `proof/check/runtime_support_and_calls.elisa` | source adapter; statement span projection |
+| `proof_strip_parens` | `proof/check/alias_stability.elisa` | shared source adapter; depth-bounded place/name normalization |
+| `proof_structural_function_has_implicit_dispatch_risk_range` | `proof/check/function_termination.elisa` | source adapter |
+| `proof_structural_name_index_build` | `proof/check/structural_name_index.elisa` | source adapter |
+| `proof_structural_signature_contract_range_for_line` | `proof/check/function_termination.elisa` | source adapter |
+| `proof_structural_signature_contract_table_valid` | `proof/check/function_termination.elisa` | source adapter |
+| `proof_structural_typed_operator_defaults_have_overload` | `proof/check/structural_operator_statements.elisa` | source adapter |
+| `proof_structural_typed_operator_expression_has_overload` | `proof/check/structural_operator_statements.elisa` | source adapter |
+| `proof_structural_typed_operator_statements_have_overload` | `proof/check/structural_operator_statements.elisa` | source adapter |
+| `proof_type_audit_work_charge` | `proof/check/struct_members.elisa` | source adapter |
+| `proof_type_contains_borrowed_view_with_work` | `proof/check/flow_and_type_model.elisa` | source adapter |
+| `proof_type_is_reference_free_with_work` | `proof/check/flow_and_type_model.elisa` | source adapter |
+| `proof_type_strip_reference` | `proof/check/flow_and_type_model.elisa` | source adapter |
 | `proof_unsigned_place_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); unsigned place marker construction |
+| `proof_unsigned_place_marker_width` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); bounded marker-width lookup |
 | `proof_unsigned_primitive_width` | `proof/check/flow_and_type_model.elisa` | source adapter; fixed-width unsigned primitive classification |
 | `proof_unsigned_type_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); unsigned type marker construction |
+| `proof_unsigned_type_width_with_work` | `proof/check/operator_witness_container_work.elisa` | source adapter |
 | `proof_unsigned_width_max` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); maximum value for a bounded unsigned width |
 <!-- /inventory:replay-external-calls -->
 
@@ -436,21 +545,23 @@ controls. Their presence is a remaining common-mode trust dependency, not a veri
 <!-- inventory:correspondence-external-calls -->
 | Function | Defined in | Tier |
 |---|---|---|
+| `proof_ident_name` | `proof/expr/ast_equal.elisa` | shared source adapter; identifier spelling extraction |
 | `proof_package_array_field` | `portable/package_reader.elisa` | package reader |
 | `proof_package_build_nodes` | `portable/package_reader.elisa` | package reader |
 | `proof_package_check_theorem` | `portable/package_checker.elisa` | package reader |
 | `proof_package_index` | `portable/package_reader.elisa` | package reader |
 | `proof_package_index_field` | `portable/package_reader.elisa` | package reader |
+| `proof_package_input_preflight` | `portable/package_reader.elisa` | package reader |
 | `proof_package_malformed` | `portable/package_reader.elisa` | package reader |
 | `proof_package_ok` | `portable/package_reader.elisa` | package reader |
 | `proof_package_over_budget` | `portable/package_reader.elisa` | package reader |
 | `proof_package_read_header` | `portable/package_reader.elisa` | package reader |
 | `proof_package_read_kernel` | `portable/package_reader.elisa` | package reader |
 | `proof_package_rejected` | `portable/package_reader.elisa` | package reader |
+| `proof_package_source_text_field` | `portable/package_reader.elisa` | package reader |
 | `proof_package_string_field` | `portable/package_reader.elisa` | package reader |
+| `proof_package_string_value` | `portable/package_reader.elisa` | package reader |
 | `proof_push` | `app/portable_io.elisa` | output |
 | `proof_push_json_i64` | `app/portable_io.elisa` | output |
 | `proof_push_json_string` | `app/portable_io.elisa` | output |
-| `proof_package_input_preflight` | `portable/package_reader.elisa` | package reader |
-| `proof_ident_name` | `proof/expr/ast_equal.elisa` | shared source adapter; identifier spelling extraction |
 <!-- /inventory:correspondence-external-calls -->
