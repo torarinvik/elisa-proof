@@ -77,7 +77,7 @@ def source_false_foreign_variant(option: AuditOption) -> bool:
 # tests reseal the statement and fingerprint so replay, not package integrity, decides.
 SCALAR_KINDS = {
     "absent", "bool", "char", "effect", "effect-call", "effect-containment", "effect-row",
-    "field-init", "float", "ident", "int", "resource-bind", "resource-call",
+    "field-init", "float", "ident", "int", "resource-alternatives", "resource-bind", "resource-call",
     "resource-call-arg", "resource-call-formal", "resource-call-lend", "resource-call-region",
     "resource-call-result", "resource-disjoint", "resource-join-move", "resource-move",
     "resource-region-alloc", "resource-region-alloc-discard", "resource-region-assign",

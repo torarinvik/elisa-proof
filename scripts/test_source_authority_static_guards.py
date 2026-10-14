@@ -72,6 +72,7 @@ for gate in (
     assert gate in view_create, gate
 diagnostic_report = function_body(checked_view, "proof_checked_view_diagnostic_report")
 assert "ProofReport& @view" in diagnostic_report
+assert "mutable ProofReport&" not in diagnostic_report
 assert visibility_before(checked_view, "proof_checked_view_diagnostic_report") == "public"
 
 source_complete = function_body(checked_view, "proof_checked_view_source_complete")
@@ -80,12 +81,26 @@ for gate in (
     "view.receipt.source_admission_snapshot_complete",
     "view.receipt.source_goal_statuses_complete",
     "view.receipt.source_claims_admissible",
+    "view.receipt.theorem_source_admissions_complete",
+    "view.receipt.theorem_source_admissions.count != view.report.analysis_1.theorems.summaries.count",
     "view.receipt.source_report_complete",
 ):
     assert gate in source_complete, gate
 source_admissible = function_body(checked_view, "proof_checked_view_source_admissible")
 assert "proof_checked_view_source_complete(view)" in source_admissible
 assert "view.receipt.source_report_admissible" in source_admissible
+target_admission = function_body(checked_view, "proof_checked_view_target_admission_base")
+for gate in (
+    "view.receipt.theorem_source_admissions_complete",
+    "view.receipt.theorem_source_admissions.count != view.report.analysis_1.theorems.summaries.count",
+):
+    assert gate in target_admission, gate
+source_checks = function_body(checked_view, "proof_checked_view_source_checks_complete")
+for gate in (
+    "view.receipt.theorem_source_admissions_complete",
+    "view.receipt.theorem_source_admissions.count == view.report.analysis_1.theorems.summaries.count",
+):
+    assert gate in source_checks, gate
 attempt_proven = function_body(checked_view, "proof_checked_view_attempt_is_proven")
 for gate in (
     "proof_checked_view_source_validated(view)",
@@ -106,13 +121,20 @@ for gate in ("receipt.source_bound", "receipt.source_validated", "attempt_index 
 standalone_replay = function_body(replay_api, "proof_replay_certificates")
 assert "proof_replay_receipt_from_report(report, false)" in standalone_replay
 receipt_complete = function_body(receipt_status, "proof_replay_receipt_is_complete")
-for gate in ("receipt.issued", "receipt.source_bound", "receipt.source_validated", "receipt.complete"):
+for gate in (
+    "receipt.issued",
+    "receipt.source_bound",
+    "receipt.source_validated",
+    "receipt.complete",
+    "receipt.theorem_source_admissions.count != receipt.source_theorem_count",
+):
     assert gate in receipt_complete, gate
 assert visibility_before(replay_api, "proof_replay_receipt_from_report") == "private"
 receipt_issuer = function_body(replay_api, "proof_replay_receipt_from_report")
 assert "source_validated: bool" in receipt_issuer
 checked_transaction = function_body(replay_api, "proof_check_and_replay_with_source")
 assert "proof_replay_receipt_from_report(report, false)" in checked_transaction
+assert "receipt.source_theorem_count <- report.analysis_1.theorems.summaries.count" in checked_transaction
 binding = checked_transaction.split("if source_structure_failure == \"\":", 1)[1].split("goal_finding_clear:", 1)[0]
 for gate in (
     "receipt.source_identity <- source_identity",
@@ -139,6 +161,14 @@ for gate in ("proof_checked_view_goal_source_admissions_complete(view)",
 # conjoined with replay and source-admission snapshots, and those snapshots come from the checked
 # view rather than report counters or producer flags.
 status_helpers = ROOT / "src/app/output_replay_status.elisa"
+finding_counts = function_body(status_helpers, "proof_output_finding_counts_with_work")
+assert "source_admitted_goals" not in finding_counts
+assert "proof_checked_view_goal_source_admissible(checked_view, finding.goal_id)" in finding_counts
+assert "proof_checked_view_goal_facts_source_admissible(checked_view, finding.goal_id)" in finding_counts
+assert "proof_output_reserve_status_snapshot_work(work_used, 2)" in finding_counts
+finding_summary = function_body(status_helpers, "proof_output_checked_view_finding_summary_with_work")
+assert "source_admitted_goals" not in finding_summary
+assert "proof_output_finding_counts_with_work(checked_view, work_used)" in finding_summary
 goal_snapshot = function_body(status_helpers, "proof_output_checked_view_goal_statuses_with_work")
 for gate in (
     "proof_checked_view_attempt_status(checked_view, goal_id)",
@@ -200,5 +230,16 @@ explain_output = ROOT / "src/app/explain_output.elisa"
 explained_goal = function_body(explain_output, "proof_push_goal_explanation_with_replayed")
 assert "producer_claim: bool = goal_status.producer_claimed" in explained_goal
 assert 'goal_state_result.state == "proved" and producer_claim and replayed and source_admitted' in explained_goal
+
+# Proof-text export is an artifact boundary. Keep its `proof` / `qed` marker tied directly
+# to replay plus selected-goal and premise source admission, rather than relying on a
+# transitive promise about the status helper's current implementation.
+proof_output = ROOT / "src/app/proof_output.elisa"
+proof_export = function_body(proof_output, "proof_push_elisa_proof_with_replayed")
+assert 'goal_verified: bool = goal_state == "proved" and certificate_replayed and goal_source_admissible' in proof_export
+assert 'keyword <- "proof" if goal_verified' in proof_export
+assert 'if goal_verified:' in proof_export
+focused_goal_json = function_body(proof_output, "proof_push_json_focused_goal_with_replayed")
+assert 'replay_proven: bool = attempt_status == "proved" and attempt_replayed and goal_source_admissible' in focused_goal_json
 
 print("source authority guards: opaque receipt, source admission, and low-trust replay paths stay distinct")

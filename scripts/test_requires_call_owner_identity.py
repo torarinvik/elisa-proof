@@ -14,9 +14,9 @@ GENERIC_CALLERS = (
 assert "owner_offset: usize" in SOURCE
 assert "position.offset.usize() == owner_offset" in SOURCE
 assert "owner_offset: usize = report.analysis_2.replay_owner_offset" in SOURCE
-assert "owner_offset == 0" in SOURCE
+assert "not report.analysis_2.replay_owner_offset_valid" in SOURCE
 assert "trace.name, owner_line, owner_offset, call" in SOURCE
-assert "owner_line != 0 and owner_offset == 0" in SOURCE
+assert "owner_line == 0" in SOURCE
 assert "position.line == owner_line and position.offset.usize() == owner_offset" in SOURCE
 signature_check = SOURCE.split("def proof_replay_summary_signature_requires_call_source_site(", 1)[1].split("\n        def ", 1)[0]
 assert "proof_replay_trace_owner_source_position_for_trace_with_work(report, trace, work)" in signature_check

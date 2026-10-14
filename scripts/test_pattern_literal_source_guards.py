@@ -52,8 +52,15 @@ assert "proof_replay_control_pattern_builtin_import_shadowed(report.source.sourc
 string_guard = function_body(producer, "proof_pattern_unambiguous_string_literal_with_work")
 assert "PROOF_PATTERN_STRING_LITERAL_SCAN_LIMIT" in string_guard
 assert "length * 4 + 1" in string_guard
-assert '"true" | "false" | "null"' in string_guard
 assert "character == 34 or character == PROOF_ASCII_BACKSLASH" in string_guard
+assert "first_letter" not in string_guard
+assert "reserved_literal_spelling" not in string_guard
+collision_tests = (ROOT / "scripts/test_pattern_literal_collisions.py").read_text(encoding="utf-8")
+assert "AMBIGUOUS_SPELLING_STRING_PATTERN_CONTROLS" in collision_tests
+assert "sview_escaped_newline_pattern_refused" in collision_tests
+assert '"line\\\\n"' in collision_tests
+for literal_text in ('"01"', '"0x1"', '"true"', '"null"'):
+    assert literal_text in collision_tests
 char_guard = function_body(producer, "proof_pattern_unambiguous_char_literal")
 assert "length < 3" in char_guard
 assert "character >= 32 and character <= 126" in char_guard

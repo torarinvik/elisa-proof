@@ -31,7 +31,8 @@ def export_package(example):
     result = run([str(PRODUCER), "--package", str(ROOT / "examples" / (example + ".elisa"))])
     assert result.returncode == 0, (example, result.returncode, result.stderr)
     package = json.loads(result.stdout)
-    assert package["format"] == "elisa-proof-package-v2", example
+    assert package["format"] == "elisa-proof-package-v3", example
+    assert package["trust"]["logic_mode"] == "classical_propositional", example
     assert package["source"]["admissible"] is True, example
     assert package["theorems"], f"{example} must export at least one certificate"
     return package
@@ -51,7 +52,7 @@ def get_at_path(value, path):
 
 
 def check_result_shape(result):
-    assert result.get("format") == "elisa-proof-replay-result-v1", result
+    assert result.get("format") == "elisa-proof-replay-result-v2", result
     assert result.get("trust") == {
         "kernel": "checked",
         "package_reader": "trusted",
@@ -59,9 +60,12 @@ def check_result_shape(result):
         "source_correspondence": "adapter",
         "fingerprints": "identity-hint",
         "source_authenticated": False,
+        "logic_mode": "classical_propositional",
     }, result
     assert isinstance(result.get("summary"), dict), result
     assert set(result["summary"]) == {"theorems", "replayed", "not_replayed"}, result
+    assert all(theorem.get("logic_mode") == "classical_propositional"
+               for theorem in result.get("theorems", [])), result
 
 
 def write_and_replay(directory, label, payload):
@@ -165,6 +169,7 @@ def main():
         ("trust-hypothesis-upgrade", ("trust", "hypotheses"), "kernel"),
         ("trust-correspondence-upgrade", ("trust", "source_correspondence"), "checked"),
         ("trust-fingerprint-upgrade", ("trust", "fingerprints"), "cryptographic"),
+        ("trust-logic-mode-upgrade", ("trust", "logic_mode"), "intuitionistic"),
         ("theorem-checksum-bitflip", ("theorems", 0, "goal_fingerprint"),
          theorem["goal_fingerprint"] ^ 1),
         ("theorem-rule-tag", ("theorems", 0, "rule"), "untrusted-oracle"),
@@ -285,6 +290,7 @@ def main():
         schema_cases = [
             ("missing-source-authenticated", ("source", "authenticated")),
             ("missing-fingerprint-value", ("source", "fingerprint", "value")),
+            ("missing-logic-mode", ("trust", "logic_mode")),
             ("missing-node-kind", ("kernel", "nodes", theorem["conclusion"], "kind")),
             ("missing-theorem-statement", ("theorems", 0, "statement")),
         ]
@@ -301,7 +307,7 @@ def main():
         # A one-byte discriminator corruption remains parseable; truncation separately exercises
         # incomplete-token handling.
         encoded = json.dumps(base, separators=(",", ":"))
-        marker = '"format":"elisa-proof-package-v2"'
+        marker = '"format":"elisa-proof-package-v3"'
         marker_start = encoded.index(marker) + len('"format":"')
         byte_changed = encoded[:marker_start] + "X" + encoded[marker_start + 1:]
         assert_refused(directory, "single-byte-format-tag", byte_changed.encode("utf-8"))

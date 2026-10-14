@@ -1,5 +1,6 @@
 # shellcheck shell=bash
 # Part 4 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
+python3 "$ROOT_DIR/scripts/test_frame_write_work_budget.py"
 "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_nested_disjoint_fields.elisa" >/dev/null
 borrow_nested_disjoint_fields_status=$?
 "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_four_nested_fields.elisa" >/dev/null
@@ -228,6 +229,7 @@ rejected_slice_bounds_status=$?
 rejected_fixed_array_slice_bounds_status=$?
 run_json_report "$ROOT_DIR/examples/captured_structural_accumulator.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert all(goal["proven"] for goal in report["goals"] if goal["rule"] == "structural-safety"); assert report["replay"]["gaps"] == 0'
 captured_structural_accumulator_status=${PIPESTATUS[1]}
+if [[ "$captured_structural_accumulator_status" -ne 0 ]]; then printf 'structural positive control failed: builtin iteration/arithmetic=%s\n' "$captured_structural_accumulator_status" >&2; exit 1; fi
 "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_field_alias.elisa" >/dev/null
 rejected_field_alias_status=$?
 "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_header_frame.elisa" >/dev/null
@@ -402,7 +404,7 @@ run_json_report "$ROOT_DIR/examples/rejected_catch_impure_arm_call.elisa" | pyth
 rejected_catch_impure_arm_call_probe_status=${PIPESTATUS[1]}
 run_json_report "$ROOT_DIR/examples/nested_frame.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "resource-call" and node["name"] == "set_inner_value" for node in report["kernel"]["nodes"]); assert any(node["kind"] == "resource-call" and node["name"] == "set_inner_ref" for node in report["kernel"]["nodes"]); assert any(node["kind"] == "resource-call-arg" and node["operator"] == "borrow" and node["name"] == "inner" for node in report["kernel"]["nodes"])'
 nested_frame_resource_probe_status=${PIPESTATUS[1]}
-run_json_report "$ROOT_DIR/examples/resource_branch_join.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "resource-join-move" and node["name"] == "x" for node in report["kernel"]["nodes"])'
+run_json_report "$ROOT_DIR/examples/resource_branch_join.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; nodes = report["kernel"]["nodes"]; assert sum(node["kind"] == "resource-alternatives" for node in nodes) == 3; assert sum(node["kind"] == "resource-join-move" and node["name"] == "x" for node in nodes) == 3'
 resource_branch_join_probe_status=${PIPESTATUS[1]}
 run_json_report "$ROOT_DIR/examples/rejected_borrow_write.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "borrow-write-conflict" and finding["status"] == "unknown" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
 rejected_borrow_write_probe_status=${PIPESTATUS[1]}

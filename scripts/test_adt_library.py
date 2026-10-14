@@ -62,6 +62,20 @@ declarations = {row["name"]: row for row in data["declaration_details"]
 for name in ("callback_bounce", "reenter_at_same_measure"):
     assert name in declarations and not declarations[name]["verified"], declarations.get(name)
 
+code, data = run("rejected_structural_local_function_value.elisa")
+assert code == 1 and data["status"] == "failed", (code, data.get("status"))
+assert data["summary"]["semantic_errors"] == 0, data["semantic_diagnostics"]
+assert data["replay"]["gaps"] == 0, data["replay"]
+assert data["trust"]["trusted_assumptions"] == [], data["trust"]
+local_callback_findings = [f for f in data["findings"]
+                          if f["kind"] == "structural-decreases-unproven"
+                          and f["name"] == "local_callback_bounce"]
+assert local_callback_findings, data["findings"]
+declarations = {row["name"]: row for row in data["declaration_details"]
+                if row.get("kind") == "function"}
+assert "local_callback_bounce" in declarations
+assert not declarations["local_callback_bounce"]["verified"]
+
 code, data = run("rejected_structural_field_callback.elisa")
 assert code == 1 and data["status"] == "failed", (code, data.get("status"))
 assert data["summary"]["semantic_errors"] == 0, data["semantic_diagnostics"]

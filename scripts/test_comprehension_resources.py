@@ -23,7 +23,7 @@ def resource_events(rep, function):
         index, depth = stack.pop()
         node = nodes[index]
         seen.append((node["kind"], node["name"], depth))
-        if node["kind"] in ("resource-safety", "resource-scope"):
+        if node["kind"] in ("resource-safety", "resource-scope", "resource-alternatives"):
             start = node["children_start"]
             stack.extend((child, depth + 1) for child in children[start:start + node["children_count"]])
     return goal, seen

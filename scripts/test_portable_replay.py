@@ -44,7 +44,8 @@ packages = {}
 for example, rules in POSITIVE.items():
     package = export(example)
     packages[example] = package
-    assert package["format"] == "elisa-proof-package-v2" and package["source"]["admissible"], example
+    assert package["format"] == "elisa-proof-package-v3" and package["source"]["admissible"], example
+    assert package["trust"]["logic_mode"] == "classical_propositional", example
     assert package["source"]["authenticated"] is False, example
     seen = {theorem["rule"] for theorem in package["theorems"]}
     assert rules <= seen, (example, rules, seen)
@@ -53,8 +54,18 @@ for example, rules in POSITIVE.items():
         assert theorem["goal_fingerprint"] == fnv1a32(theorem["statement"]), (example, theorem["name"])
     code, result = replay(package, example)
     assert code == 0 and result["status"] == "replayed", (example, result)
+    assert result["trust"]["logic_mode"] == "classical_propositional", result
+    assert all(theorem["logic_mode"] == "classical_propositional" for theorem in result["theorems"]), result
     assert result["summary"] == {"theorems": len(package["theorems"]),
                                  "replayed": len(package["theorems"]), "not_replayed": 0}, result
+    # Existing v2 packages have no logic-mode field. Preserve their exact schema while making
+    # the current replay semantics explicit in the checker result.
+    legacy_v2 = copy.deepcopy(package)
+    legacy_v2["format"] = "elisa-proof-package-v2"
+    legacy_v2["trust"].pop("logic_mode")
+    legacy_code, legacy_result = replay(legacy_v2, example + "-v2-compat")
+    assert legacy_code == 0 and legacy_result["status"] == "replayed", (example, legacy_result)
+    assert legacy_result["trust"]["logic_mode"] == "classical_propositional", legacy_result
     report = json.loads(subprocess.run([str(BINARY), "--json", str(ROOT / "examples" / (example + ".elisa"))],
                                        capture_output=True, text=True, timeout=120).stdout)
     replayed_goals = [goal for goal in report["goals"] if goal["proven"] and goal.get("replay_status") == "replayed"]

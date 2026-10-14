@@ -103,7 +103,7 @@ def bounded_replay(raw, label, expect_replay=False):
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ChildFailure("invalid-output", "%s: no structured replay result (%s): %s" %
                            (label, digest, error)) from error
-    if result.get("format") != "elisa-proof-replay-result-v1" or result.get("trust") != TRUST:
+    if result.get("format") != "elisa-proof-replay-result-v2" or result.get("trust") != TRUST:
         raise ChildFailure("invalid-result", "%s: replay result identity/trust mismatch (%s)" %
                            (label, digest))
     summary = result.get("summary", {})

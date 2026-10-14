@@ -101,7 +101,7 @@ class SemanticPreflightTests(unittest.TestCase):
                    "source": {"admissible": True, "authenticated": False},
                    "theorems": [{"statement": "true"}]}
         replay_data = {
-            "format": "elisa-proof-replay-result-v1", "status": "replayed",
+            "format": "elisa-proof-replay-result-v2", "status": "replayed",
             "summary": {"theorems": 1, "not_replayed": 0},
             "trust": {"kernel": "checked", "source_authenticated": False},
         }

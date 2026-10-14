@@ -17,7 +17,7 @@ valid = {
     "replay": {"certificates": 270, "replayed": 270, "gaps": 0},
     "declaration_details": [{"kind": "function", "name": name, "verified": True}
                             for name in validator["REQUIRED_VERIFIED_DECLARATIONS"]],
-    "findings": [], "trust": {"trusted_assumptions": []},
+    "findings": [], "trust": {"trusted_assumptions": [], "logic_mode": "classical_propositional"},
     "measurements": {"kernel_nodes": 1, "kernel_nodes_shared": 3},
     "kernel": {"nodes": [{}]},
 }

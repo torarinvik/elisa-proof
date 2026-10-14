@@ -91,6 +91,30 @@ control_code, control_result = replay(dict_control, "dictionary-quantifier-captu
 assert control_code == 0 and control_result["status"] == "replayed", control_result
 
 base = packages["verified"]
+# A recognized type marker is a domain restriction when used as a premise; it is not
+# an automatically true proposition. Keep this source-neutral sequent from proving an
+# unsigned marker as a consequence of an unrelated signed-width marker, even when hidden
+# inside a larger Boolean goal.
+marker_goal = copy.deepcopy(base)
+marker_goal["kernel"] = {"nodes": [], "children": []}
+marker_subject = append_node(marker_goal, "ident", name="x")
+marker_width = append_node(marker_goal, "int", value="8")
+signed_bound = marker_call(marker_goal, "__elisa_signed_type_bound", [marker_subject, marker_width])
+unsigned_bound = marker_call(marker_goal, "__elisa_unsigned_type_bound", [marker_subject, marker_width])
+marker_one = append_node(marker_goal, "int", value="1")
+marker_zero = append_node(marker_goal, "int", value="0")
+subject_is_one = append_node(marker_goal, "binary", "==", marker_subject, marker_one)
+subject_is_zero = append_node(marker_goal, "binary", "==", marker_subject, marker_zero)
+forged_disjunction = append_node(marker_goal, "binary", "or", unsigned_bound, subject_is_zero)
+marker_theorem = {
+    "goal_id": 0, "name": "type-marker-is-not-a-proposition", "line": 1,
+    "rule": "goal", "hypotheses": [signed_bound, subject_is_one],
+    "hypothesis_origins": [{"kind": "forged"}, {"kind": "forged"}], "conclusion": forged_disjunction,
+    "statement": "", "goal_fingerprint": 0,
+}
+marker_goal["theorems"] = [reseal(marker_goal, marker_theorem)]
+refused(marker_goal, "type-marker-goal-not-tautological", "rejected", "kernel-rejected")
+
 assumption = next(t for t in base["theorems"] if t["rule"] == "goal" and t["conclusion"] in t["hypotheses"])
 code, result = replay(with_theorem(base, assumption), "assumption")
 assert code == 0, result

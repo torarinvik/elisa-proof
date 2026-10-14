@@ -8,12 +8,32 @@ python3 "$ROOT_DIR/scripts/test_kernel_coverage_targets.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_audit_accounting.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_ast_kernel_mirror_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_index_read_work_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_primitive_witness_marker_work.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_kernel_bound_work_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_kernel_difference_closure_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_kernel_bounded_model_width_safety.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_kernel_workspace_cache_boundary.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_index_read_operator_parity.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_global_mutable_array_owner_identity.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_global_constant_owner_identity.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_requires_call_owner_identity.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_source_owner_offset.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_source_admission_inventory_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_source_admission_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_source_return_work_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_quantified_call_work_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_pure_call_witness_marker_reuse.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_index_safety_shared_work.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_linear_certificate_search_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_postcondition_context_index.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_goal_fact_index_broad_candidates.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_type_bound_local_work_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_drop_type_generic_owner.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_summary_call_assignment_source_guard.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_typed_enum_member_index.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_threaded_summary_exact_generic_owner.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_pop_snapshot_exact_parameter_owner.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_replay_parameter_shadow_owner.py" || exit 1
 kernel_replay_audit_dir="$standalone_probe_dir/kernel-replay-audit"
 kernel_replay_audit_summary="$standalone_probe_dir/kernel-replay-audit-summary.json"
 ELISA_FULL_AUDIT_SOURCE="$ROOT_DIR/examples/kernel_replay_standalone.elisa" \
@@ -52,6 +72,11 @@ fi
 if ! ELISA_PROOF_BIN="${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" \
     python3 "$ROOT_DIR/scripts/test_typed_literal_summary_coverage.py"; then
     printf 'proof test matrix failed: typed-literal admission summary coverage regressed\n' >&2
+    exit 1
+fi
+if ! ELISA_PROOF_BIN="${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" \
+    python3 "$ROOT_DIR/scripts/test_index_read_equality.py"; then
+    printf 'proof test matrix failed: source-typed indexed-read congruence regressed\n' >&2
     exit 1
 fi
 if ! ELISA_PROOF_BIN="${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" \

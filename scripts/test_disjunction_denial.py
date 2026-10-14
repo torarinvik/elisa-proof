@@ -20,6 +20,7 @@ assert code == 0 and positive["status"] == "proved", positive["findings"]
 assert positive["summary"]["semantic_errors"] == 0, positive["summary"]
 assert positive["replay"]["certificates"] == positive["replay"]["replayed"] > 0
 assert positive["replay"]["gaps"] == 0 and not positive["trust"]["trusted_assumptions"]
+assert positive["trust"]["logic_mode"] == "classical_propositional"
 code, negative = run("disjunction_denial_rejected.elisa")
 assert code == 1 and negative["status"] == "failed", negative
 assert negative["summary"]["semantic_errors"] == 0, negative["summary"]
@@ -30,4 +31,5 @@ assert any(f["name"] == "disjunction_denial_float_order" and f["kind"] in
            ("ensure-unproven", "contract-proposition-type")
            for f in negative["findings"]), negative["findings"]
 assert negative["replay"]["gaps"] == 0 and not negative["trust"]["trusted_assumptions"]
+assert negative["trust"]["logic_mode"] == "classical_propositional"
 print("bounded denial replays integer product order; false Boolean/null claims and total float order rejected")

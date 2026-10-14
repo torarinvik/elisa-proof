@@ -490,7 +490,7 @@ class SamplingTests(unittest.TestCase):
                 "theorems": [],
             }).encode()
             replay_bytes = json.dumps({
-                "format": "elisa-proof-replay-result-v1", "status": "rejected",
+                "format": "elisa-proof-replay-result-v2", "status": "rejected",
                 "reason": "no-theorems",
                 "trust": {"kernel": "checked", "source_authenticated": False},
             }).encode()

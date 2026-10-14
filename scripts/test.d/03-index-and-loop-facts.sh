@@ -556,6 +556,14 @@ if [[ "$signed_overflow_bounded_model_status" -ne 0 ]]; then
     exit 1
 fi
 set +e
+run_json_report "$ROOT_DIR/examples/rejected_bounded_model_overloaded_equality.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed" and report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0 and report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["name"] == "rejected_bounded_model_overloaded_equality" and f["kind"] == "ensure-unproven" and f["status"] == "unknown" and not f["counterexample_found"] for f in report["findings"]); assert not any(d["name"] == "rejected_bounded_model_overloaded_equality" and d["verified"] for d in report["declaration_details"])'
+overloaded_bounded_model_status=${PIPESTATUS[1]}
+set -e
+if [[ "$overloaded_bounded_model_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: bounded model used built-in semantics for overloaded equality\n' >&2
+    exit 1
+fi
+set +e
 run_json_report "$ROOT_DIR/examples/rejected_dogfood_kernel_core.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unknown"; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; assert [goal["goal_id"] for goal in report["goals"]] == list(range(len(report["goals"]))); assert [certificate["certificate_id"] for certificate in report["certificates"]] == list(range(len(report["certificates"]))); assert any(goal["certificate_id"] is None and not goal["proven"] for goal in report["goals"]); assert any(finding["kind"] == "ensure-unproven" and finding["status"] == "unknown" for finding in report["findings"])'
 dogfood_kernel_core_probe_statuses=("${PIPESTATUS[@]}")
 if [[ "${dogfood_kernel_core_probe_statuses[0]}" -ne 1 || "${dogfood_kernel_core_probe_statuses[1]}" -ne 0 ]]; then

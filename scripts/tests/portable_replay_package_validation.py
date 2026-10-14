@@ -51,6 +51,9 @@ def duplicate_object_member(serialized, object_marker, key_token):
 
 # Header, trust and schema: nothing is inferred, over-claimed or accepted twice.
 text = json.dumps(with_theorem(base, assumption))
+oversized_index = text.replace('"goal_id": 0', '"goal_id": 99999999999999999', 1)
+assert oversized_index != text, "numeric token regression must replace a theorem index"
+refused(oversized_index, "oversized-json-index-token", "malformed", "number-format")
 valid_header = with_theorem(base, assumption)
 code, result = replay(valid_header, "required-header-positive")
 assert code == 0 and result["status"] == "replayed", result

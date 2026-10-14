@@ -364,6 +364,71 @@ def main() -> int:
     shapes = read(PROOF / "kernel_replay" / "arena_shapes.elisa")
     if "return false" not in function_body(shapes, "proof_kernel_replay_arena_float_scalar_shape").strip().splitlines()[-1]:
         failures.append("float scalar shape is no longer unconditionally rejected; update the inventory")
+    structural_protocol = {
+        PROOF / "check" / "flow_and_type_model.elisa",
+        PROOF / "certificate_admission.elisa",
+        PROOF / "replay" / "structural_source_cache_validation.elisa",
+    }
+    for path in structural_protocol:
+        source = read(path)
+        if '"structural-v2"' not in source or '"structural-v1"' in source:
+            failures.append(f"structural-safety protocol version drift in {path.relative_to(ROOT)}")
+    structural_row = next((line for line in doc.splitlines() if "| `structural-safety` | structural |" in line), "")
+    structural_certificate_row = next((line for line in doc.splitlines() if "| `structural-safety` | `proof_kernel_replay_structural_report_with_workspace`" in line), "")
+    if "`structural-v2`" not in structural_row or "`structural-v2`" not in structural_certificate_row:
+        failures.append("structural-safety version is missing or stale in the inventory")
+    encoder = read(PROOF / "kernel_encode.elisa")
+    encoder_wrapper = function_body(encoder, "proof_kernel_encode_annotated_depth")
+    if "nodes.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET" not in encoder_wrapper or "children.count > ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET" not in encoder_wrapper:
+        failures.append("kernel encoder does not reject an oversized shared arena before using its invalid-root sentinel")
+    if "nodes <- nodes.truncate(node_start)" not in encoder_wrapper or "children <- children.truncate(child_start)" not in encoder_wrapper:
+        failures.append("kernel encoder refusal no longer rolls back both shared-arena suffixes")
+    resource_events = read(PROOF / "kernel_replay" / "resource_events.elisa")
+    resource_history = read(PROOF / "kernel_replay" / "resource_scope_history.elisa")
+    resource_copy = read(PROOF / "kernel_replay" / "resource_state_copy.elisa")
+    alternative_merge = function_body(resource_history, "proof_kernel_replay_resource_scope_event_history_merge_alternative")
+    history_adopt = function_body(resource_history, "proof_kernel_replay_resource_scope_event_history_adopt")
+    if "proof_kernel_replay_resource_scope_history_append_ids_tracked(&target.scope.resource_call_events, &child.scope.resource_call_events" not in alternative_merge or "proof_kernel_replay_resource_scope_history_intersect_ids_tracked(&target.scope.resource_call_events, baseline.scope.resource_call_events, child.scope.resource_call_events" not in alternative_merge:
+        failures.append("alternative call-result availability does not preserve sequential append and path intersection")
+    if "proof_kernel_replay_resource_scope_history_validate_prefix_ids(target.scope.resource_call_allocations, child.scope.resource_call_allocations" not in alternative_merge or "proof_kernel_replay_resource_scope_history_validate_prefix_ids(baseline.scope.resource_call_allocations, child.scope.resource_call_allocations" not in alternative_merge:
+        failures.append("child-local call allocations escape alternative arms")
+    if "proof_kernel_replay_resource_scope_history_validate_prefix_ids(target.scope.resource_return_witnesses, child.scope.resource_return_witnesses" not in alternative_merge or "proof_kernel_replay_resource_scope_history_validate_prefix_ids(baseline.scope.resource_return_witnesses, child.scope.resource_return_witnesses" not in alternative_merge:
+        failures.append("child-local return witnesses escape alternative arms")
+    if 'proof_kernel_replay_resource_scope_history_union_ids_tracked(&target.scope.resource_call_events_seen,' not in alternative_merge:
+        failures.append("alternative duplicate-call history does not include events seen on any arm")
+    if "proof_kernel_replay_resource_scope_history_append_ids_tracked(&parent.scope.resource_call_events, &child.scope.resource_call_events" not in history_adopt or "proof_kernel_replay_resource_scope_history_validate_prefix_ids(parent.scope.resource_call_allocations, child.scope.resource_call_allocations" not in history_adopt or "proof_kernel_replay_resource_scope_history_validate_prefix_ids(parent.scope.resource_return_witnesses, child.scope.resource_return_witnesses" not in history_adopt or "&parent.scope.resource_call_events_seen, &child.scope.resource_call_events_seen" not in history_adopt:
+        failures.append("nested scope adoption does not separate call history from lexical allocation and return availability")
+    call_transitions = function_body(resource_events, "proof_kernel_replay_resource_events_remaining")
+    if call_transitions.count("proof_kernel_replay_resource_usize_sorted_membership(state.scope.resource_call_events_seen") < 2 or call_transitions.count("proof_kernel_replay_resource_record_call_event(state, root)") < 2:
+        failures.append("call and lend transitions do not reject and record repeated event roots")
+    if "resource_call_events_seen.count" not in resource_copy or "source.scope.resource_call_events_seen |seen_call_event" not in resource_copy:
+        failures.append("resource state copies do not meter and preserve the duplicate-call history")
+    congruence = read(PROOF / "kernel_replay" / "goal_metered_congruence.elisa")
+    congruence_collect = function_body(congruence, "proof_kernel_replay_congruence_collect_with_goal_work")
+    congruence_seed = function_body(congruence, "proof_kernel_replay_congruence_seed_with_goal_work")
+    congruence_driver = read(PROOF / "kernel_replay" / "resource_model_integrated_helpers.elisa")
+    congruence_goal = function_body(congruence_driver, "proof_kernel_replay_congruence_goal_with_goal_work")
+    for body, label in ((congruence_collect, "term collection"), (congruence_seed, "equality seeding")):
+        if "proof_kernel_replay_primitive_comparison_with_markers_with_work" not in body:
+            failures.append(f"congruence {label} does not reject source-marked untrusted comparison operators")
+    if congruence_collect.find("primitive_relation:") < 0 or congruence_collect.find("primitive_relation:") > congruence_collect.find("proof_kernel_replay_congruence_lookup_with_goal_work"):
+        failures.append("congruence term collection reaches lookup before checking comparison operators")
+    if congruence_seed.find("primitive_relation:") < 0 or congruence_seed.find("primitive_relation:") > congruence_seed.find("proof_kernel_replay_congruence_union_with_goal_work"):
+        failures.append("congruence equality seeding reaches class union before checking comparison operators")
+    if "proof_kernel_replay_witness_marker_cache_fill_with_work" not in congruence_goal or "proof_kernel_replay_congruence_seed_with_goal_work(nodes, children, markers," not in congruence_goal:
+        failures.append("congruence does not share validated operator markers across collection and seeding")
+    congruence_fixture = read(ROOT / "examples" / "kernel_congruence_runtime.elisa")
+    for regression in ("UNTRUSTED_EQUALITY_SEEDED", "UNTRUSTED_EQUALITY_GOAL_ADMITTED"):
+        if regression not in congruence_fixture:
+            failures.append(f"direct-kernel congruence fixture is missing {regression}")
+    resource_fixtures = ROOT / "examples" / "kernel_arena_runtime"
+    stale_resource_roots = []
+    for path in resource_fixtures.glob("*.elisa"):
+        for line_number, line in enumerate(read(path).splitlines(), 1):
+            if '"resource-safety"' in line and 'ElisaProofKernelCore::add_node' in line and not re.search(r'add_node\([^,]+,\s*"resource-safety",\s*"resource-v2",', line):
+                stale_resource_roots.append(f"{path.relative_to(ROOT)}:{line_number}")
+    if stale_resource_roots:
+        failures.append(f"resource runtime fixtures use a stale resource-safety schema: {stale_resource_roots[:8]}")
     leaked = kernel_external_calls()
     if leaked:
         failures.append(f"kernel calls functions defined outside the kernel: {sorted(leaked)}")

@@ -1,8 +1,7 @@
-"""Pin the context-local, read-only marker decode cache used by scalar-witness queries.
+"""Static regression for metered, fail-closed scalar witness marker decoding.
 
-This source-level query-plan guard is not a runtime timing claim. Proof reports,
-proven/replay outcomes, and adversarial forged-marker refusals remain the runtime
-acceptance criteria.
+This deliberately checks source structure only. Runtime refusal still requires a proof
+binary built from the current proof/compiler source revisions.
 """
 from pathlib import Path
 import re
@@ -10,12 +9,10 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 REPLAY = ROOT / "src/proof/kernel_replay"
-if not __debug__:
-    raise SystemExit("run without Python -O; operation-count assertions are acceptance checks")
 
 
 def function_body(path: Path, name: str) -> str:
-    lines = path.read_text().splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     signature = re.compile(rf"^\s*def {re.escape(name)}\s*\(")
     for start, line in enumerate(lines):
         if signature.match(line):
@@ -23,77 +20,70 @@ def function_body(path: Path, name: str) -> str:
             end = start + 1
             while end < len(lines):
                 current = lines[end]
-                if current.strip():
-                    current_indent = len(current) - len(current.lstrip())
-                    if current_indent <= indent and not current.lstrip().startswith("#"):
-                        break
+                if current.strip() and len(current) - len(current.lstrip()) <= indent:
+                    break
                 end += 1
             return "\n".join(lines[start:end])
     raise AssertionError(f"missing function {name} in {path}")
 
 
 def main() -> None:
-    integrated = REPLAY / "order_and_sign_integrated_helpers.elisa"
-    congruence = REPLAY / "congruence.elisa"
-    marker_source = REPLAY / "witness_marker_facts.elisa"
-    primitive = function_body(integrated, "proof_kernel_replay_primitive_comparison")
-    scalar_wrapper = function_body(congruence, "proof_kernel_replay_scalar_term_witnessed")
-    cache_builder = function_body(congruence, "proof_kernel_replay_witness_marker_cache")
-    candidate = function_body(marker_source, "proof_kernel_replay_witness_marker_candidate")
-    marker_names = function_body(marker_source, "proof_kernel_replay_witness_marker_name")
-    budget = function_body(congruence, "proof_kernel_replay_scalar_term_witnessed_budget")
-    element_budget = function_body(congruence, "proof_kernel_replay_scalar_element_remaining_budget")
+    facts = REPLAY / "witness_marker_facts.elisa"
+    scalar = REPLAY / "scalar_witness_work.elisa"
+    candidate = function_body(facts, "proof_kernel_replay_witness_marker_candidate_with_work")
+    classify = function_body(facts, "proof_kernel_replay_witness_marker_kind_with_work")
+    fill = function_body(scalar, "proof_kernel_replay_witness_marker_cache_fill_with_work")
+    comparison = function_body(
+        REPLAY / "order_and_sign_integrated_helpers.elisa",
+        "proof_kernel_replay_primitive_comparison_with_markers_with_work",
+    )
+    root_classification = function_body(
+        REPLAY / "order_and_sign_integrated_helpers.elisa",
+        "proof_kernel_replay_comparison_root_untrusted_with_work",
+    )
 
-    # Decode each candidate through the existing strict readers once, then pass this
-    # query-local immutable record array through recursion and both comparison operands.
-    assert len(re.findall(r"proof_kernel_replay_witness_marker_cache\s*\(", scalar_wrapper)) == 1
-    assert len(re.findall(r"proof_kernel_replay_witness_marker_cache\s*\(", primitive)) == 1
-    assert "for fact in facts" in cache_builder
-    assert "proof_kernel_replay_witness_marker_candidate(nodes, fact)" in cache_builder
-    for reader in (
-        "proof_kernel_replay_untrusted_operator_marker",
-        "proof_kernel_replay_marker_argument",
-        "proof_kernel_replay_unsigned_marker_info",
-        "proof_kernel_replay_element_marker",
-    ):
-        assert len(re.findall(rf"{reader}\s*\(", cache_builder)) == 1, reader
-        assert reader not in budget and reader not in element_budget
-    assert "fact >= nodes.count" in candidate and 'nodes[fact].kind != "call"' in candidate
-    assert "callee >= nodes.count" in candidate and 'nodes[callee].kind == "ident"' in candidate
-    expected_markers = {
+    # Invalid fact/callee references and exhausted name scans are incomplete, never
+    # interpreted as an ordinary non-marker fact.
+    assert "return (false, 0) if fact >= nodes.count" in candidate
+    assert "return (false, 0) if callee >= nodes.count" in candidate
+    assert "proof_kernel_replay_witness_marker_kind_with_work(nodes[callee].name" in candidate
+    assert "return false if not marker_candidate.complete" in fill
+    assert "return false if not proof_kernel_replay_scalar_witness_charge" in fill
+
+    markers = (
         "__elisa_untrusted_operator_type",
         "__elisa_primitive_scalar_type",
+        "__elisa_primitive_integer_type",
         "__elisa_unsigned_type_bound",
         "__elisa_primitive_scalar_element",
-    }
-    assert set(re.findall(r'"(__elisa_[a-z_]+)"', marker_names)) == expected_markers
-
-    # The cache carries parsed payloads only, not a proof result, and its lifetime
-    # is the local query: recursive calls reuse it; no cache lives in a workspace.
-    assert "darray[ProofKernelReplayWitnessMarker]" in scalar_wrapper
-    assert "darray[ProofKernelReplayWitnessMarker]" in primitive
-    assert "markers" in budget and "for fact in facts" not in budget
-    assert "markers" in element_budget and "for fact in facts" not in element_budget
-    assert "proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, markers" in budget
-    assert "proof_kernel_replay_scalar_element_remaining_budget(nodes, children, markers" in budget
-
-    # The paired path retains the independent per-operand depth budget and the
-    # left-to-right `and` short circuit while sharing only decoded marker records.
-    assert "not ElisaProofKernelCore::depth_valid(0)" in primitive
-    assert "PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH == 0" in primitive
-    assert "budget: usize = PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH" in primitive
-    pair_calls = re.findall(
-        r"proof_kernel_replay_scalar_term_witnessed_budget\(nodes, children, markers, "
-        r"(left|right), 0, budget\)", primitive)
-    assert pair_calls == ["left", "right"], pair_calls
-    assert re.search(r"witnessed_budget\([^\n]+left[^\n]+\)\s+and\s+"
-                     r"proof_kernel_replay_scalar_term_witnessed_budget\([^\n]+right",
-                     primitive), primitive
-
-    # Early depth/budget rejection occurs before cache construction.
-    assert "return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH" in scalar_wrapper
-    assert "return false if not ElisaProofKernelCore::depth_valid(0) or PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH == 0" in primitive
-    print("scalar witness query cache: exact marker readers are decoded once per immutable query context")
+    )
+    for marker in markers:
+        assert marker in classify
+    for reader in (
+        "proof_kernel_replay_untrusted_operator_marker_with_work",
+        "proof_kernel_replay_marker_argument_with_work",
+        "proof_kernel_replay_unsigned_marker_info_with_work",
+        "proof_kernel_replay_element_marker_with_work",
+    ):
+        assert reader in fill
+    # Each reserved marker parser rejects malformed payloads instead of silently
+    # dropping them from the query-local cache.
+    assert fill.count("return false if not marker.known") >= 5
+    assert "markers.push" in fill
+    # Every cached marker is visited for every primitive comparison. Charge before
+    # skipping trusted marker kinds so repeated comparisons cannot hide O(markers)
+    # scans outside the caller's shared replay budget.
+    marker_loop = comparison.index("for marker in markers")
+    marker_charge = comparison.index("proof_kernel_replay_goal_search_charge(work_used)", marker_loop)
+    marker_skip = comparison.index("continue if marker.kind", marker_loop)
+    assert marker_loop < marker_charge < marker_skip
+    assert "or work_used > work_limit" in comparison[marker_charge:marker_skip]
+    root_loop = root_classification.index("for marker in markers")
+    root_charge = root_classification.index("proof_kernel_replay_goal_search_charge(work_used)", root_loop)
+    root_skip = root_classification.index("continue if marker.kind", root_loop)
+    assert root_loop < root_charge < root_skip
+    assert "or work_used > work_limit" in root_classification[root_charge:root_skip]
+    print("scalar witness markers: metered classification and malformed-marker refusal are guarded")
 
 
 if __name__ == "__main__":

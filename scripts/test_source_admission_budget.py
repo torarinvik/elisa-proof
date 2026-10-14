@@ -1,47 +1,8 @@
-"""Keep source admission and structural-termination scans inside shared work budgets."""
+"""Keep termination, replay, and solver source scans inside shared work budgets."""
 
 from pathlib import Path
-import re
-
 
 ROOT = Path(__file__).resolve().parents[1]
-source = (ROOT / "src/proof/replay/api.elisa").read_text(encoding="utf-8")
-lines = source.splitlines()
-start = next(i for i, line in enumerate(lines) if "def proof_check_and_replay_with_source[" in line)
-indent = len(lines[start]) - len(lines[start].lstrip())
-body = []
-for line in lines[start + 1:]:
-    if line.strip() and len(line) - len(line.lstrip()) <= indent:
-        break
-    body.append(line)
-body_text = "\n".join(body)
-scan = re.search(
-    r"for finding_index in 0\.\.\<report\.results\.findings\.count.*?(?=\n\s{28}if source_binding_finding ==)",
-    body_text,
-    re.S,
-)
-assert scan is not None, "source-obligation finding lookup disappeared"
-scan_text = scan.group()
-comparison = scan_text.index('finding.kind == "source-obligation-inventory"')
-for charge in (
-    "proof_replay_source_work_charge(1, source_work)",
-    "proof_replay_source_work_charge(sview_len(finding.kind), source_work)",
-    'proof_replay_source_work_charge(sview_len("source-obligation-inventory"), source_work)',
-    "proof_replay_source_work_charge(sview_len(finding.name), source_work)",
-    "proof_replay_source_work_charge(sview_len(finding.message), source_work)",
-    'proof_replay_source_work_charge(sview_len("a supported source postcondition has no distinct source-bound proof attempt"), source_work)',
-):
-    assert charge in scan_text[:comparison], charge
-assert scan_text.count("return ProofCheckedView{") == 6, "budget exhaustion must refuse the checked view"
-assert body_text.count("source_work: mutable usize = 0") == 1, "one shared meter must cover lookup and admission"
-unsupported_helper = (ROOT / "src/proof/model/report_focused_source_ensures.elisa").read_text(encoding="utf-8")
-assert "def proof_source_literal_ensure_inventory_has_unsupported_with_work(" in unsupported_helper
-assert "proof_report_source_work_charge(1, source_work)" in unsupported_helper
-assert "proof_report_source_work_charge(sview_len(expected.name), source_work)" in unsupported_helper
-assert "proof_source_literal_ensure_inventory_has_unsupported(" not in source
-assert "proof_source_literal_ensure_inventory_has_unsupported_with_work(literal_inventory, source_work)" in body_text
-assert "if not unsupported_inventory.complete" in body_text
-
 termination_body = (ROOT / "src/proof/check/function_termination.elisa").read_text(encoding="utf-8")
 termination_expression = (ROOT / "src/proof/check/lemma_application_and_termination.elisa").read_text(encoding="utf-8")
 termination_helpers = (ROOT / "src/proof/check/structural_termination_helpers.elisa").read_text(encoding="utf-8")
@@ -238,6 +199,12 @@ assert "suggestions_complete <- false if replay_work > PROOF_REPLAY_SUMMARY_SOUR
 assert "proof_goal_fingerprint(report, report.results.goal_attempts[goal_id])" not in suggestion_body
 unsafe_source_shape = goal_admission.split("def proof_report_postcondition_has_unsafe_source_shape_depth(", 1)[1].split("# Find unqualified result variables", 1)[0]
 assert "Ast::Expr.Absent |" not in unsafe_source_shape
+assert "proof_report_source_work_charge(1, source_work)" in unsafe_source_shape
+assert "proof_report_source_work_charge(sview_len(name), source_work)" in unsafe_source_shape
+assert "for element in elements |source_work|" in unsafe_source_shape
+assert "for entry in entries |source_work|" in unsafe_source_shape
+assert "for arm in arms |source_work|" in unsafe_source_shape
+assert "for statement in statements |value_checks_result, value_checks_old, source_work|" in unsafe_source_shape
 assert "arm.guard != Ast::Expr.Absent and proof_report_postcondition_has_unsafe_source_shape_depth(arm.guard" in unsafe_source_shape
 unsafe_match = unsafe_source_shape.split("Ast::Expr.Match(scrutinee, arms, position):", 1)[1].split("Ast::Expr.Comprehension", 1)[0]
 assert unsafe_match.index("arm.body.count != 1") < unsafe_match.index("proof_report_postcondition_has_unsafe_source_shape_depth(arm.guard")
@@ -431,10 +398,185 @@ summary_cost = (ROOT / "src/proof/replay/summary_source_cost.elisa").read_text(e
 equal_helper = summary_cost.split("def proof_replay_summary_expr_equal_with_limit(", 1)[1].split(
     "def proof_replay_summary_expr_proof_equal_with_limit(", 1
 )[0]
-assert "cost: mutable usize = 0" in equal_helper
-assert "proof_replay_summary_expr_cost_with_limit(left, &cost, work, work_limit)" in equal_helper
-assert "proof_replay_summary_expr_cost_with_limit(right, &cost, work, work_limit)" in equal_helper
-assert "cost > remaining / 2" in equal_helper
-assert "work <- work + cost * 2" in equal_helper
+assert "left_cost: mutable usize = 0" in equal_helper
+assert "right_cost: mutable usize = 0" in equal_helper
+assert "proof_replay_summary_expr_cost_with_limit(left, &left_cost, work, work_limit)" in equal_helper
+assert "right_work: usize = work + left_cost" in equal_helper
+assert "proof_replay_summary_expr_cost_with_limit(right, &right_cost, right_work, work_limit)" in equal_helper
+assert "combined_cost: usize = left_cost + right_cost" in equal_helper
+assert "combined_cost > remaining / 2" in equal_helper
+assert "work <- work + combined_cost * 2" in equal_helper
 assert "proof_replay_expr_equal_depth(left, right, 0)" in equal_helper
+
+# Source goal shortcuts must use the shared witness index and meter recursive primitive
+# comparisons before they can establish disequality or unsigned reflexivity.
+goal_shortcuts = (ROOT / "src/proof/linear/disequality_goal_work.elisa").read_text(encoding="utf-8")
+strict_progress_work = (ROOT / "src/proof/linear/strict_progress_work.elisa").read_text(encoding="utf-8")
+disequality = goal_shortcuts.split("def proof_scalar_disequality_goal_with_work(", 1)[1].split(
+    "def proof_unsigned_goal_identity_with_work(", 1
+)[0]
+assert "proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)" in disequality
+assert "proof_linear_safety_marker_scale_with_work(markers.witnesses, budget, exhausted)" in disequality
+assert "proof_linear_search_expr_equal_with_work" in disequality
+literal_term = goal_shortcuts.split("def proof_disequality_literal_term_with_work(", 1)[1].split(
+    "def proof_signed_disequality_literal_with_work(", 1
+)[0]
+assert "proof_linear_safety_comparison_with_work" in literal_term
+equality_scan = goal_shortcuts.split("def proof_disequality_from_equality_with_work(", 1)[1].split(
+    "def proof_unsigned_goal_identity_with_work(", 1
+)[0]
+assert "proof_linear_safety_comparison_with_work" in equality_scan
+for legacy in (
+    "proof_signed_disequality_from_equality_fact(goal, facts)",
+    "proof_signed_distinct_disequality_disjunction(goal, facts)",
+    "proof_unsigned_disequality_from_equality_fact(goal, facts)",
+    "proof_unsigned_distinct_disequality_disjunction(goal, facts)",
+):
+    assert legacy not in disequality
+unsigned_identity = goal_shortcuts.split("def proof_unsigned_goal_identity_with_work(", 1)[1].split(
+    "def proof_signed_product_growth_with_work(", 1
+)[0]
+assert "proof_linear_safety_comparison_with_work" in unsigned_identity
+assert "proof_linear_safety_work_charge_product4_with_work" in unsigned_identity
+assert "proof_unsigned_goal_identity(goal, facts)" not in unsigned_identity
+legacy_shape_adapter = goal_shortcuts.split("def proof_unsigned_legacy_goal_shapes_with_work(", 1)[1].split(
+    "def proof_signed_product_factor_with_work(", 1
+)[0]
+metered_sum_upper = goal_shortcuts.split("def proof_unsigned_sum_upper_shape_with_work(", 1)[1].split(
+    "def proof_unsigned_legacy_goal_shapes_with_work(", 1
+)[0]
+metered_unit_increment = goal_shortcuts.split("def proof_unsigned_unit_increment_order_shape_with_work(", 1)[1].split(
+    "def proof_unsigned_legacy_goal_shapes_with_work(", 1
+)[0]
+metered_strict_progress = strict_progress_work.split("def proof_unsigned_strict_progress_shape_with_work(", 1)[1]
+metered_sum_progress = strict_progress_work.split("def proof_unsigned_nonwrapping_sum_progress_with_work(", 1)[1].split(
+    "def proof_unsigned_strict_progress_shape_with_work(", 1
+)[0]
+for charged_helper in (
+    "proof_linear_strip_parens_with_work",
+    "proof_unsigned_width_in_expression_with_work",
+    "proof_sum_upper_witness_with_work",
+    "proof_unsigned_witness_terms_equal_with_work",
+    "proof_unsigned_peer_nameable_with_work",
+    "proof_unsigned_peer_width_matches_with_work",
+):
+    assert charged_helper in metered_sum_upper, charged_helper
+for charged_helper in (
+    "proof_unsigned_unit_increment_base_with_work",
+    "proof_unsigned_witness_terms_equal_with_work",
+    "proof_unsigned_width_in_expression_with_work",
+    "proof_unsigned_expression_safe_with_facts_work",
+):
+    assert charged_helper in metered_unit_increment, charged_helper
+for charged_helper in (
+    "proof_unsigned_nonwrapping_sum_progress_with_work",
+):
+    assert charged_helper in metered_strict_progress, charged_helper
+assert "proof_unsigned_sum_range_safe_with_work" in metered_sum_progress
+assert "proof_unsigned_progress_positive_with_work" in metered_sum_progress
+for raw_reader in (
+    "proof_unsigned_progress_positive(",
+    "proof_sum_upper_witness(",
+    "proof_sum_range_safe(",
+    "proof_unsigned_width_in_expression(",
+    "proof_peer_unsigned_width(",
+    "proof_expr_equal(",
+):
+    assert raw_reader not in strict_progress_work, raw_reader
+assert "proof_unsigned_strict_progress_shape_with_work(goal, facts, markers.witnesses, marker_scale.scale, budget, exhausted)" in legacy_shape_adapter
+assert "proof_unsigned_strict_progress_shape(facts, goal)" not in legacy_shape_adapter
+assert "proof_unsigned_literal_progress(facts, goal, annotations)" not in legacy_shape_adapter
+assert "proof_unsigned_maximum_equality(facts, goal, annotations)" not in legacy_shape_adapter
+numeric_literal_sort = (ROOT / "src/proof/replay/numeric_literal_sort.elisa").read_text(encoding="utf-8")
+literal_sort_reader = numeric_literal_sort.split("def proof_replay_numeric_literal_sort(", 1)[1].split("\n        def ", 1)[0]
+assert "return (false, 0, false, 0)" in literal_sort_reader
+assert "proof_unsigned_sum_upper_shape_with_work(goal, facts, markers.witnesses, budget, exhausted)" in legacy_shape_adapter
+assert "proof_unsigned_unit_increment_order_shape_with_work(goal, facts, markers.witnesses, budget, exhausted)" in legacy_shape_adapter
+assert "proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)" in legacy_shape_adapter
+assert "reservation" not in legacy_shape_adapter
+goal_depth = (ROOT / "src/proof/linear/congruence_goal_depth.elisa").read_text(encoding="utf-8")
+assert "proof_unsigned_legacy_goal_shapes_with_work(goal, facts, annotations, budget, exhausted)" in goal_depth
+assert "proof_closed_signed_literal_comparison_with_work(stripped_goal.expression, budget, exhausted)" in goal_depth
+assert "proof_closed_signed_literal_comparison(goal)" not in goal_depth
+assert "proof_closed_literal_comparison_with_work(stripped_goal.expression, budget, exhausted)" in goal_depth
+assert "proof_closed_literal_comparison(goal)" not in goal_depth
+fixed_width_helpers = (ROOT / "src/proof/linear/fixed_width_arithmetic_integrated_helpers.elisa").read_text(encoding="utf-8")
+signed_literal_reader = fixed_width_helpers.split("def proof_signed_literal_comparison_constant_with_work(", 1)[1].split(
+    "def proof_closed_signed_literal_comparison_with_work(", 1
+)[0]
+assert "proof_linear_safety_work_charge(budget, exhausted, 1)" in signed_literal_reader
+assert "proof_nonnegative_literal_constant_with_work" in signed_literal_reader
+signed_literal_comparison = fixed_width_helpers.split("def proof_closed_signed_literal_comparison_with_work(", 1)[1].split(
+    "def proof_closed_literal_comparison_with_work(", 1
+)[0]
+assert "proof_linear_strip_parens_with_work" in signed_literal_comparison
+assert "proof_signed_literal_comparison_constant_with_work" in signed_literal_comparison
+closed_literal = fixed_width_helpers.split("def proof_closed_literal_comparison_with_work(", 1)[1].split(
+    "def proof_closed_integer_arithmetic(", 1
+)[0]
+assert "proof_linear_strip_parens_with_work" in closed_literal
+assert "proof_linear_safety_work_charge(budget, exhausted, sview_len(left_value))" in closed_literal
+assert "proof_linear_safety_work_charge(budget, exhausted, sview_len(right_text))" in closed_literal
+for raw_call in (
+    "proof_unsigned_sum_upper_shape(facts, goal)",
+    "proof_unsigned_strict_progress_shape(facts, goal)",
+    "proof_unsigned_literal_progress(facts, goal, annotations)",
+    "proof_unsigned_maximum_equality(facts, goal, annotations)",
+):
+    assert raw_call not in goal_depth
+bounded_receiver = (ROOT / "src/proof/linear/unsigned_widening.elisa").read_text(encoding="utf-8")
+safe_receiver = bounded_receiver.split("def proof_bounded_u8_receiver_with_work(", 1)[1]
+for metered_helper in (
+    "proof_scalar_witness_markers_with_work",
+    "proof_linear_safety_marker_scale_with_work",
+    "proof_signed_width_in_expression_with_scale_work",
+    "proof_linear_safety_scalar_witness_with_work",
+    "proof_collect_fact_bounds_with_work",
+    "proof_close_equalities_with_work",
+    "proof_signed_safety_bounds_from_base_with_work",
+    "proof_signed_expression_safe_with_bounds_work",
+    "proof_interval_with_work",
+):
+    assert metered_helper in safe_receiver, metered_helper
+for unmetered_helper in (
+    "proof_scalar_term_witnessed(",
+    "proof_signed_width_in_expression(",
+    "proof_signed_expression_safe(",
+    "proof_collect_bounds(",
+    "proof_interval(",
+):
+    assert unmetered_helper not in safe_receiver, unmetered_helper
+
+# Result postconditions may flow through one source-local integer only when its checked sort and
+# type identity match the function return type and the final return names that unique local.
+# Extra locals, shadowing, and changed returns stay unsupported.
+postcondition_returns = postcondition_inventory.split(
+    "def proof_source_postcondition_ast_inventory_collect(", 1
+)[1].split("def proof_source_signature_postcondition_ast_inventory_collect(", 1)[0]
+for requirement in (
+    "local_return_count: mutable usize = 0",
+    "local_return_count <- local_return_count + 1",
+    'local_name == "result" or local_name == "old"',
+    "initializer == Ast::Expr.Absent or initializer == Ast::Expr.Invalid",
+    'sview_len("result") + sview_len("old") + sview_len(return_type_name)',
+    "local_sort.type_name != return_type_name",
+    "parameter.name == local_name",
+    "Ast::Stmt.VarDecl(local_name, Ast::Expr.Ident(local_type, local_type_position), initializer, local_position)",
+    'local_sort.sort != "integer" or return_type_sort != "integer"',
+    "local_sort.type_identity != return_type_identity",
+    "initializer_scan: (complete: bool, has_result: bool, has_old: bool, has_match: bool)",
+    "initializer_scan.has_result or initializer_scan.has_old",
+    "initializer_position: Ast::Pos = Ast::expr_pos(initializer)",
+    "initializer_position.offset <= local_position.offset",
+    "initializer_position.end_offset <= initializer_position.offset",
+    "local_return_end_offset <- initializer_position.end_offset",
+    "Ast::Expr.Ident(returned_name, return_position)",
+    "returned_name != local_return_name",
+    "return_position.offset <= local_return_end_offset",
+):
+    assert requirement in postcondition_returns, requirement
+assert "local_return_count != 1" in postcondition_returns
+assert "return_supported <- false" in postcondition_returns.split("_:", 1)[1]
+local_return_fixture = (ROOT / "scripts/test_direct_api_semantic_admission.py").read_text(encoding="utf-8")
+assert 'ensure result == 7\\n    status: u8 = 7\\n    return status' in local_return_fixture
 print("source admission budget: fallback scans and structural termination traversal refuse when shared work is exhausted")

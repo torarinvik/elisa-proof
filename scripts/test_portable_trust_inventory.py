@@ -13,6 +13,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 READER = ROOT / "src/portable/package_reader.elisa"
 CHECKER = ROOT / "src/portable/package_checker.elisa"
+REPORT_OUTPUT = ROOT / "src/app/report_output_integrated_helpers.elisa"
+PROPOSITION_RUNTIME = ROOT / "examples/kernel_proposition_admission_runtime.elisa"
+KERNEL_DOGFOOD = ROOT / "scripts/dogfood.d/07-kernel-runtimes.sh"
 
 
 def body(source: str, name: str) -> str:
@@ -34,15 +37,41 @@ def require(condition: bool, message: str) -> None:
 
 reader = READER.read_text(encoding="utf-8")
 checker = CHECKER.read_text(encoding="utf-8")
+report_output = REPORT_OUTPUT.read_text(encoding="utf-8")
+proposition_runtime = PROPOSITION_RUNTIME.read_text(encoding="utf-8")
+kernel_dogfood = KERNEL_DOGFOOD.read_text(encoding="utf-8")
 header = body(reader, "proof_package_read_header")
+json_preflight = body(reader, "proof_package_json_preflight")
+input_preflight = body(reader, "proof_package_input_preflight")
 check_theorem = body(checker, "proof_package_check_theorem")
 replay = body(checker, "proof_package_replay")
 push_result = body(checker, "proof_package_push_result")
 
+# Every admitted JSON number is an exact nonnegative index below 2^53. Bound its lexical
+# length before the DOM parser converts attacker-controlled numeric tokens to binary64.
+require("JSON_INTEGER_DIGITS: usize = 16" in reader,
+        "portable JSON integer token length no longer matches the exact-index range")
+require("digits: mutable usize = 0" in json_preflight
+        and "digits >= ProofPackageLimit::JSON_INTEGER_DIGITS" in json_preflight,
+        "portable JSON preflight no longer caps integer tokens before DOM construction")
+require("json_preflight: (numbers_canonical: bool, within_scan_budget: bool) = proof_package_json_preflight(text)" in input_preflight,
+        "portable input reader bypassed canonical JSON preflight")
+preflight_position = replay.index("proof_package_input_preflight(input_text)")
+parse_position = replay.index("json_parse_checked(&arena, input_text)")
+require(preflight_position < parse_position
+        and replay.index("if sview_len(preflight.status) > 0:") < parse_position,
+        "portable replay parses its JSON DOM before ingress preflight succeeds")
+numeric_regressions = (ROOT / "scripts/tests/portable_replay_package_validation.py").read_text(encoding="utf-8")
+require('"oversized-json-index-token"' in numeric_regressions
+        and '"malformed", "number-format"' in numeric_regressions,
+        "portable oversized-number token regression is missing")
+
 # The format only accepts adapter-supplied hypotheses/correspondence and an identity-hint digest;
 # source authentication must remain false. These are exactly the labels the result may report.
-require('trust_keys: darray[sview] = ["hypotheses", "source_correspondence", "fingerprints"]' in header,
+require('trust_keys: darray[sview] = ["logic_mode", "hypotheses", "source_correspondence", "fingerprints"] if format_v3 else ["hypotheses", "source_correspondence", "fingerprints"]' in header,
         "portable input trust schema changed; review and inventory the new fields")
+require('(format_v3 and not proof_package_string_is(proof_package_string_field(trust.value, "logic_mode"), "classical_propositional"))' in header,
+        "v3 package reader no longer requires the current kernel logic mode")
 for field in ("hypotheses", "source_correspondence"):
     require(f'proof_package_string_is(proof_package_string_field(trust.value, "{field}"), "adapter")' in header,
             f"portable reader no longer restricts {field} to adapter trust")
@@ -54,6 +83,23 @@ for label in ('\\"kernel\\":\\"checked\\"', '\\"package_reader\\":\\"trusted\\"'
               '\\"hypotheses\\":\\"adapter\\"', '\\"source_correspondence\\":\\"adapter\\"',
               '\\"fingerprints\\":\\"identity-hint\\"', '\\"source_authenticated\\":false'):
     require(label in push_result, f"portable output trust classification changed: {label}")
+
+# Human and machine report modes must identify the classical calculus independently from the
+# user-level assumptions ledger; an empty ledger does not imply constructive logic.
+for serializer in ("proof_push_json_report_summary_with_replay", "proof_push_json_report_with_replay"):
+    serialized_body = body(report_output, serializer)
+    require('\\"logic_mode\\":\\"classical_propositional\\"' in serialized_body,
+            f"{serializer} omitted the kernel logic mode")
+    require('\\"trusted_assumptions\\":[]' in serialized_body,
+            f"{serializer} changed the user-assumption ledger")
+
+# Keep the declared classical mode tied to a typed source-neutral replay fixture that is actually
+# built and run by the kernel dogfood gate.
+require("typed_abstract_double_negation" in proposition_runtime
+        and "facts_one(abstract_not_not_p), abstract_proposition" in proposition_runtime,
+        "typed abstract-Prop double-negation acceptance case is missing")
+require("kernel_proposition_admission_runtime" in kernel_dogfood,
+        "kernel dogfood no longer runs the classical-mode proposition fixture")
 
 # A theorem's successful status is emitted only for an empty verdict from the checker, whose
 # final success follows range/schema/identity checks and kernel replay of the supplied roots.
@@ -84,4 +130,4 @@ require("if theorem_list.count == 0:" in replay and failure_return > theorem_loo
 require("return 1" in replay[failure_return:success_return],
         "portable package failure branch no longer exits unsuccessfully")
 
-print("portable trust inventory: adapter trust labels and admitted-root success gate: ok")
+print("portable and report trust inventory: adapter labels, logic mode, and admitted-root gate: ok")

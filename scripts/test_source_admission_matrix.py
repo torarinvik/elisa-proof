@@ -139,6 +139,37 @@ def main():
                 if name == "correspondence":
                     assert json.loads(process.stdout)["source_admissible"] is True, process.stdout[:500]
 
+        # A straight-line scalar local can carry a result postcondition to the exact returned
+        # binder. The admission exception is deliberately narrow: a different returned value or
+        # a local that shadows a parameter must not become source-authorized by name alone.
+        local_return = directory / "local_return_postcondition.elisa"
+        local_return.write_text(
+            "def local_return_postcondition() -> u8:\n"
+            "    ensure result == 7\n"
+            "    status: u8 = 7\n"
+            "    return status\n",
+            encoding="utf-8",
+        )
+        local_return_run = run("--json", local_return)
+        local_return_report = json.loads(local_return_run.stdout)
+        assert local_return_run.returncode == 0 and local_return_report["status"] == "proved", local_return_report
+        assert local_return_report["source"]["admissible"] is True and local_return_report["source"]["complete"] is True, local_return_report["source"]
+        local_return_goal = next(goal for goal in local_return_report["goals"] if goal["name"] == "local_return_postcondition")
+        assert local_return_goal["proven"] is True and local_return_goal["replay_status"] == "replayed", local_return_goal
+        assert local_return_goal["source_admission"] == "admitted", local_return_goal
+
+        for case_name, source_text in (
+            ("changed_return_postcondition", "def changed_return_postcondition(fallback: u8) -> u8:\\n    ensure result == 7\\n    status: u8 = 7\\n    return fallback\\n"),
+            ("shadowed_local_return_postcondition", "def shadowed_local_return_postcondition(status: u8) -> u8:\\n    ensure result == 7\\n    status: u8 = 7\\n    return status\\n"),
+        ):
+            rejected = directory / (case_name + ".elisa")
+            rejected.write_text(source_text.replace("\\n", "\n"), encoding="utf-8")
+            rejected_run = run("--json", rejected)
+            rejected_report = json.loads(rejected_run.stdout)
+            assert rejected_run.returncode != 0, (case_name, rejected_report)
+            assert rejected_report["source"]["admissible"] is False, (case_name, rejected_report["source"])
+            assert rejected_report["summary"]["semantic_errors"] == 0 or case_name.startswith("shadowed_"), rejected_report["summary"]
+
         # An admissible source with an unrelated open obligation remains incomplete. A replayed
         # certificate is visible as evidence, but source completeness is required to publish proof.
         target = ROOT / "examples/tactic_repair_target.elisa"

@@ -110,6 +110,17 @@ def sview_null_spelling_collision(value: sview) -> i64:
         _:
             return 0
 ''',
+    # Escapes are deliberately outside the admitted literal subset until the parser's
+    # decoded string value is authenticated by replay. The bad arm must not yield a fact.
+    'sview_escaped_newline_pattern_refused': '''
+def sview_escaped_newline_pattern_refused(value: sview) -> i64:
+    ensure result > 0
+    match value:
+        "line\\n":
+            return 0
+        _:
+            return 1
+''',
     'cstr_or_boolean_spelling_collision': '''
 def cstr_or_boolean_spelling_collision(value: cstr) -> i64:
     ensure result == 0
@@ -214,9 +225,8 @@ def u64_max_literal_collision(value: u64) -> i64:
 }
 PATTERN_COLLISIONS.update(FIXED_WIDTH_PATTERN_COLLISIONS)
 
-# A distinct identifier spelling is inside the checker/replay pair's deliberately narrow string
-# literal subset. The branch assertion depends on the pattern fact, so blanket string-pattern
-# refusal fails this positive control.
+# Typed string-pattern controls require the exact source literal text to flow into proof facts;
+# blanket string-pattern refusal fails these positive controls.
 STRING_PATTERN_CONTROL = '''
 def sview_identifier_pattern_control(value: sview) -> i64:
     ensure result == 0
@@ -280,6 +290,48 @@ def cstr_empty_string_pattern_control(value: cstr) -> i64:
         "":
             assert value == "" by:
                 assert value == ""
+            return 0
+        _:
+            return 0
+'''
+
+AMBIGUOUS_SPELLING_STRING_PATTERN_CONTROLS = '''
+def sview_numeric_text_pattern_control(value: sview) -> i64:
+    ensure result == 0
+    match value:
+        "01":
+            assert value == "01" by:
+                assert value == "01"
+            return 0
+        _:
+            return 0
+
+def cstr_numeric_text_pattern_control(value: cstr) -> i64:
+    ensure result == 0
+    match value:
+        "0x1":
+            assert value == "0x1" by:
+                assert value == "0x1"
+            return 0
+        _:
+            return 0
+
+def sview_keyword_text_pattern_control(value: sview) -> i64:
+    ensure result == 0
+    match value:
+        "true":
+            assert value == "true" by:
+                assert value == "true"
+            return 0
+        _:
+            return 0
+
+def cstr_keyword_text_pattern_control(value: cstr) -> i64:
+    ensure result == 0
+    match value:
+        "null":
+            assert value == "null" by:
+                assert value == "null"
             return 0
         _:
             return 0
@@ -422,7 +474,7 @@ with tempfile.TemporaryDirectory() as folder:
     path.write_text('\n'.join(PATTERN_COLLISIONS.values()) + '\n' + THEOREM_PATTERN_COLLISION + '\n' + THEOREM_FIXED_WIDTH_PATTERN_COLLISION)
 
     control_path = Path(folder) / 'string-pattern-control.elisa'
-    control_path.write_text(STRING_PATTERN_CONTROL + '\n' + CSTR_PATTERN_CONTROL + '\n' + PUNCTUATED_STRING_PATTERN_CONTROLS + '\n' + EMPTY_STRING_PATTERN_CONTROLS + '\n' + CHAR_PATTERN_CONTROL + '\n' + GROUPED_STRING_PATTERN_CONTROL + '\n' + '\n'.join(FIXED_WIDTH_RANGE_CONTROLS.values()))
+    control_path.write_text(STRING_PATTERN_CONTROL + '\n' + CSTR_PATTERN_CONTROL + '\n' + PUNCTUATED_STRING_PATTERN_CONTROLS + '\n' + EMPTY_STRING_PATTERN_CONTROLS + '\n' + AMBIGUOUS_SPELLING_STRING_PATTERN_CONTROLS + '\n' + CHAR_PATTERN_CONTROL + '\n' + GROUPED_STRING_PATTERN_CONTROL + '\n' + '\n'.join(FIXED_WIDTH_RANGE_CONTROLS.values()))
     control = run([BINARY, '--json', str(control_path)], 'pattern positive controls')
     control_report = json.loads(control.stdout)
     assert control.returncode == 0 and control_report['status'] == 'proved', control_report
@@ -453,6 +505,10 @@ with tempfile.TemporaryDirectory() as folder:
         'cstr_punctuated_string_pattern_control': 'ready.now/2',
         'sview_empty_string_pattern_control': '',
         'cstr_empty_string_pattern_control': '',
+        'sview_numeric_text_pattern_control': '01',
+        'cstr_numeric_text_pattern_control': '0x1',
+        'sview_keyword_text_pattern_control': 'true',
+        'cstr_keyword_text_pattern_control': 'null',
     }
     for name, expected_text in expected_string_controls.items():
         pattern_goals = [goal for goal in control_report['goals']
@@ -532,4 +588,4 @@ with tempfile.TemporaryDirectory() as folder:
                                     (THEOREM_PATTERN_COLLISION_NAME,
                                      THEOREM_FIXED_WIDTH_PATTERN_COLLISION_NAME))
 
-print('pattern literals: string and char controls prove; string, char-code, and fixed-width collisions fail closed')
+print('pattern literals: typed string and char controls prove; string, char-code, and fixed-width collisions fail closed')

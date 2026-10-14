@@ -100,7 +100,7 @@ def _replay_fresh(raw, path):
     stderr = stderr_path.read_bytes()
     assert not stderr, (path.name, stderr[:512])
     result = json.loads(stdout)
-    assert result.get("format") == "elisa-proof-replay-result-v1", (path.name, result)
+    assert result.get("format") == "elisa-proof-replay-result-v2", (path.name, result)
     assert result.get("trust") == TRUST, (path.name, result)
     return exit_code, result
 

@@ -92,6 +92,18 @@ with tempfile.TemporaryDirectory(prefix="elisa-prebuilt-qualification-") as dire
     assert digest == proof_manifest["proof"]["source_tree_sha256"]
     assert validate_frontend_metadata(pair, "b" * 40, "b" * 40, "c" * 40, "e" * 40) == "stage1"
 
+    mixed_stage_pair = {role: deepcopy(value) for role, value in pair.items()}
+    mixed_stage_pair["elisa-proof-replay"]["compiler"] = {
+        "stage": "stage0", "stage1_revision": None,
+        "source_revision": "c" * 40, "source_dirty": False,
+    }
+    try:
+        validate_frontend_metadata(mixed_stage_pair, "b" * 40, "b" * 40, "c" * 40, "e" * 40)
+    except ValueError as error:
+        assert "different compiler stages" in str(error)
+    else:
+        raise AssertionError("prebuilt gate accepted proof and replay binaries built by different compiler stages")
+
     source_link = source / "linked.elisa"
     source_link.symlink_to("main.elisa")
     try:

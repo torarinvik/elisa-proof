@@ -17,8 +17,8 @@ REQUIRED_VERIFIED_DECLARATIONS = {
     "proof_kernel_replay_direct_literal_comparison",
     "proof_kernel_replay_order_atom",
     "proof_kernel_replay_peer_is_nameable",
-    "proof_kernel_replay_zero_literal",
-    "proof_kernel_replay_product_operands",
+    "proof_kernel_replay_zero_literal_with_work",
+    "proof_kernel_replay_product_operands_with_work",
     "proof_kernel_replay_binary_operands",
     "proof_kernel_replay_negated_operand",
     "proof_kernel_replay_integer_literal",
@@ -136,6 +136,7 @@ def main() -> None:
         f"typed pinned-comparison contract formation regressed: {pinned_proposition_type_findings}",
     )
     require(report["trust"]["trusted_assumptions"] == [], "standalone audit gained trusted assumptions")
+    require(report["trust"]["logic_mode"] == "classical_propositional", "standalone audit omitted the kernel logic mode")
     # Certificates re-encode the same facts; before terms were shared this arena held 379,288
     # nodes, over 8 times its shared size. Losing most of the sharing is a memory regression.
     measured = report["measurements"]

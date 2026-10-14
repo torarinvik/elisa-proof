@@ -22,31 +22,88 @@ def function_body(path: Path, name: str) -> str:
 
 dispatch = (ROOT / "src/proof/linear/congruence_goals.elisa").read_text(encoding="utf-8")
 assert "proof_index_read_equality_goal(facts, goal" not in dispatch
-assert "resolved receiver-type witness" in dispatch
 replay_dispatch = (ROOT / "src/proof/kernel_replay/resource_model.elisa").read_text(encoding="utf-8")
 assert "proof_kernel_replay_index_read_equality(nodes, children, facts, goal_root" not in replay_dispatch
-assert "resolved receiver-type witness" in replay_dispatch
 producer_rule = function_body(ROOT / "src/proof/linear/index_read_equalities.elisa", "proof_index_read_equality_goal")
 kernel_rule = function_body(ROOT / "src/proof/kernel_replay/index_read_equalities.elisa", "proof_kernel_replay_index_read_equality")
+typed_rule = function_body(ROOT / "src/proof/kernel_replay/index_read_equalities.elisa", "proof_kernel_replay_typed_index_read_equality_with_work")
 assert producer_rule.splitlines()[-1] == "return false"
 assert kernel_rule.splitlines()[-1] == "return false"
+assert "not same_receiver" in typed_rule
+assert 'left_receiver.family not in {"container", "string"}' in typed_rule
+assert "proof_kernel_replay_term_sort(nodes, children, environment, typing_index, goal.left" in typed_rule
+assert "current <- proof_kernel_replay_index_element_sort(current, environment, typing_index, work)" in (
+    ROOT / "src/proof/kernel_replay/proposition_typing.elisa"
+).read_text(encoding="utf-8")
+assert "return proof_kernel_replay_unknown_sort() if not receiver.known or receiver.family != \"container\"" in (
+    ROOT / "src/proof/kernel_replay/proposition_typing.elisa"
+).read_text(encoding="utf-8")
+assert "proof_kernel_replay_integral_sort(left_index_sort)" in typed_rule
+assert 'left_result_sort.family not in {"integer", "boolean", "character"}' in typed_rule
+assert "reachable: mutable darray[usize] = [left.right]" in typed_rule
+assert "edge_sort_states[fact_index]" in typed_rule
+assert 'candidate.operator != "=="' in typed_rule
+assert "proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, candidate.left, candidate.right" in typed_rule
+assert "edge_primitive_states.push(1 if primitive else 2)" in typed_rule
+assert "continue if edge_primitive_states[fact_index] != 1" in typed_rule
+producer_markers = (ROOT / "src/proof/check/operator_impl_queries.elisa").read_text(encoding="utf-8")
+scalar_gate = (ROOT / "src/proof/check/operator_witness_queries.elisa").read_text(encoding="utf-8")
+kernel_scalar_gate = (ROOT / "src/proof/kernel_replay/scalar_witness_work.elisa").read_text(encoding="utf-8")
+assert 'proof_untrusted_operator_marker(root, "All", position)' in producer_markers
+assert "proof_untrusted_operator_marker_info(fact)" in scalar_gate
+assert "proof_kernel_replay_untrusted_operator_marker_with_work" in kernel_scalar_gate
+assert "proof_kernel_replay_untrusted_operator_applies_with_work" in kernel_scalar_gate
+operator_marker_match = function_body(
+    ROOT / "src/proof/kernel_replay/scalar_witness_work.elisa",
+    "proof_kernel_replay_untrusted_operator_applies_with_work",
+)
+depth_refusal = operator_marker_match.split(
+    "if depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH:", 1
+)[1].split("return true if", 1)[0]
+assert "work_used <- work_limit + 1" in depth_refusal and "return false" in depth_refusal
+indexed_path = function_body(
+    ROOT / "src/proof/kernel_replay/scalar_witness_work.elisa",
+    "proof_kernel_replay_indexed_container_path_with_work",
+)
+indexed_depth_refusal = indexed_path.split(
+    "if not ElisaProofKernelCore::depth_valid(depth) or depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH:", 1
+)[1].split("return false if not proof_kernel_replay_valid", 1)[0]
+assert "work_used <- work_limit + 1" in indexed_depth_refusal and "return false" in indexed_depth_refusal
 assert "proof_expr_equal" not in producer_rule
 assert "proof_kernel_replay_expr_equal" not in kernel_rule
 assert not any(line.startswith("for ") for line in producer_rule.splitlines() + kernel_rule.splitlines())
 
 positive = (ROOT / "examples/index_read_equality.elisa").read_text(encoding="utf-8")
 negative = (ROOT / "examples/rejected_index_read_equality.elisa").read_text(encoding="utf-8")
+typed_positive = (ROOT / "examples/typed_index_read_congruence.elisa").read_text(encoding="utf-8")
+overloaded_negative = (ROOT / "examples/rejected_typed_index_read_overloaded_equality.elisa").read_text(encoding="utf-8")
+overloaded_index_negative = (ROOT / "examples/rejected_typed_index_read_overloaded_index.elisa").read_text(encoding="utf-8")
 assert "def indexed_disequality_at_equal_index" in positive
 assert "requires rows[cursor] != 64\n    ensure rows[3] != 64" in positive
 assert "def indexed_disequality_from_negated_equality" in positive
+assert "def indexed_read_at_transitively_equal_index" in positive
+assert "requires first == middle\n    requires middle == last\n    ensure rows[first] == rows[last]" in typed_positive
 assert "requires not (rows[cursor] == 64)\n    ensure rows[3] != 64" in positive
 assert "def rejected_disequality_different_index" in negative
+assert "def rejected_index_read_through_cross_sort_edges" in negative
+assert "impl Eq for i64:" in overloaded_negative
+assert "return self != other" in overloaded_negative
+assert "requires first == middle\n    requires middle == last\n    ensure rows[first] == rows[last]" in overloaded_negative
+assert "impl Index for Box:" in overloaded_index_negative
+assert "def __index__(self: Box&, index: i64) -> i64&:" in overloaded_index_negative
+assert "ensure box[first] == box[last]" in overloaded_index_negative
 assert "requires rows[cursor] != 64\n    ensure rows[3] != 64" in negative
 runtime = (ROOT / "scripts/test_index_read_equality.py").read_text(encoding="utf-8")
 assert '"index_read_equality.elisa", "failed"' in runtime
+assert '"typed_index_read_congruence.elisa", "proved"' in runtime
 assert '"open_indexed_prefix_reasoning.elisa", "failed"' in runtime
 assert '"open_index_window_disjunctions.elisa", "failed"' in runtime
 assert '"rejected_index_read_equality.elisa", "failed"' in runtime
+assert '"rejected_typed_index_read_overloaded_equality.elisa", "failed"' in runtime
+assert '"rejected_typed_index_read_overloaded_index.elisa", "failed"' in runtime
+assert '"rejected_index_read_through_overloaded_equality"' in runtime
+assert '"rejected_custom_index_congruence"' in runtime
 assert '"rejected_disequality_different_index"' in runtime
+assert '"rejected_index_read_through_cross_sort_edges"' in runtime
 
-print("indexed-read transport stays disabled in both producer and replay without builtin-type evidence")
+print("indexed-read transport is source-typed, transitive for exact-sort premises, and rejects coercive edges")

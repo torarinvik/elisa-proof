@@ -65,7 +65,7 @@ def replay_bytes(payload, path):
         and output_bytes <= OUTPUT_LIMIT_BYTES, (path.name, elapsed, peak_rss, output_bytes)
     assert returncode in (0, 1), (path.name, returncode, stderr_path.read_bytes())
     result = json.loads(stdout_path.read_bytes())
-    assert result.get("format") == "elisa-proof-replay-result-v1", (path.name, result)
+    assert result.get("format") == "elisa-proof-replay-result-v2", (path.name, result)
     assert result.get("trust") == TRUST, (path.name, result)
     return returncode, result
 

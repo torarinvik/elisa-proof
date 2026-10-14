@@ -77,7 +77,7 @@ def run_fresh(data, label, must_refuse=True):
         raise AssertionError("replay emitted no structured result: %s (%d, %r)" %
                              (label, child.returncode, stdout[:300])) from error
     valid = (child.returncode in (0, 1) and
-             result.get("format") == "elisa-proof-replay-result-v1" and
+             result.get("format") == "elisa-proof-replay-result-v2" and
              result.get("trust") == TRUST)
     summary = result.get("summary", {})
     valid = valid and summary.get("theorems", 0) == summary.get("replayed", 0) + summary.get("not_replayed", 0)
@@ -196,7 +196,7 @@ def failure_signature(raw, label):
         result = json.loads(stdout)
     except (UnicodeDecodeError, json.JSONDecodeError):
         return "invalid-output"
-    if result.get("format") != "elisa-proof-replay-result-v1" or result.get("trust") != TRUST:
+    if result.get("format") != "elisa-proof-replay-result-v2" or result.get("trust") != TRUST:
         return "invalid-result"
     if result.get("status") == "replayed":
         return "accepted"

@@ -23,11 +23,11 @@ WORK = Path(tempfile.mkdtemp(prefix="elisa-proof-linear-"))
 MARKER = "__elisa_linear_certificate"
 TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapter",
          "source_correspondence": "adapter", "fingerprints": "identity-hint",
-         "source_authenticated": False}
+         "source_authenticated": False, "logic_mode": "classical_propositional"}
 # Kinds whose identity is scalar; mirrors `proof_push_kernel_identity`.
 SCALAR_KINDS = {
     "absent", "bool", "char", "effect", "effect-call", "effect-containment", "effect-row",
-    "field-init", "float", "opaque-float-literal", "ident", "int", "resource-bind", "resource-call", "resource-call-arg",
+    "field-init", "float", "opaque-float-literal", "ident", "int", "resource-alternatives", "resource-bind", "resource-call", "resource-call-arg",
     "resource-call-formal", "resource-call-lend", "resource-call-region", "resource-call-result",
     "resource-disjoint", "resource-join-move", "resource-move", "resource-region-alloc",
     "resource-region-alloc-discard", "resource-region-assign", "resource-region-bind",
@@ -123,7 +123,7 @@ def replay_text(text, name):
     path.write_text(text)
     run = subprocess.run([str(REPLAY), str(path)], capture_output=True, text=True, timeout=120)
     result = json.loads(run.stdout)
-    assert result["format"] == "elisa-proof-replay-result-v1", result
+    assert result["format"] == "elisa-proof-replay-result-v2", result
     if run.returncode == 2:
         return run.returncode, result
     assert result["trust"] == TRUST, result
