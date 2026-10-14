@@ -73,6 +73,7 @@ require('trust_keys: darray[sview] = ["logic_mode", "hypotheses", "source_corres
 require('((format_v3 or format_v4) and not proof_package_string_is(proof_package_string_field(trust.value, "logic_mode"), "classical_propositional"))' in header,
         "v3/v4 package reader no longer requires the current kernel logic mode")
 require('format_v4: bool = format.known and format.value == PROOF_PACKAGE_INPUT_FORMAT' in header
+        and '"files_complete"' in header
         and '"goal_status_snapshot_complete"' in header
         and '"origin_metadata_complete"' in header
         and '"hypothesis_origins_complete"' in reader,
