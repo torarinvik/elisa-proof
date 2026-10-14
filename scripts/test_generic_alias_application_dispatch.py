@@ -73,6 +73,13 @@ assert "owner_target.blocks_parent" in replay_builtin_head
 assert "root_target.blocks_parent" in replay_builtin_head
 shape = function_body("proof_replay_call_conversion_type_argument_shape_safe")
 assert shape.count("proof_replay_call_conversion_builtin_generic_type_head(head, resolution_owner, resolution_owner_known, call_target, work)") == 3
+single_argument_alias = shape.split("Ast::Expr.Index(head, argument, _):", 1)[1].split("Ast::Expr.IndexN(head, arguments, _):", 1)[0]
+assert "field_conversion_alias_generic_application_valid[application.row]" in single_argument_alias
+assert "field_conversion_alias_generic_formal_counts[application.row] != 1" in single_argument_alias
+multi_argument_alias = shape.split("Ast::Expr.IndexN(head, arguments, _):", 1)[1]
+assert "field_conversion_alias_has_formals[application.row]" in multi_argument_alias
+assert "field_conversion_alias_generic_application_valid[application.row]" in multi_argument_alias
+assert "arguments.count != call_target.aliases.field_conversion_alias_generic_formal_counts[application.row]" in multi_argument_alias
 
 source_builtin_head = function_body("proof_source_conversion_builtin_generic_type_head")
 assert "owner_target.blocks_parent" in source_builtin_head
