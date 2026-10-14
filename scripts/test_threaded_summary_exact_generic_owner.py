@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 index = (ROOT / "src/proof/replay/source_generic_parameter_index.elisa").read_text(encoding="utf-8")
 generic_walk = (ROOT / "src/proof/replay/threaded_type_generics.elisa").read_text(encoding="utf-8")
 threaded = (ROOT / "src/proof/replay/threaded_summaries.elisa").read_text(encoding="utf-8")
+structural_cache = (ROOT / "src/proof/replay/structural_source_cache_validation.elisa").read_text(encoding="utf-8")
 
 exact_lookup = index.split(
     "def proof_replay_source_generic_param_owner_name_count_with_work(", 1
@@ -23,5 +24,15 @@ assert "|element, declaration_line, owner_offset, owner_offset_valid, report, so
 assert "position.offset.usize(), true" in threaded
 assert "source_report.analysis_2.replay_owner_offset, source_report.analysis_2.replay_owner_offset_valid" in threaded
 assert "proof_resource_type_marker_summary_for_owner_at_offset_with_work" in threaded
+
+# The function generic-row census must ignore compiler generic-identity markers for
+# non-function declarations while still requiring every function marker to have a row.
+generic_auth = structural_cache.split(
+    "def proof_replay_structural_generic_rows_authenticate(", 1
+)[1].split("def proof_replay_structural_validation_cache_build(", 1)[0]
+assert 'annotation.name != "__generic_param_identity" or annotation.line != 3900000131' in generic_auth
+assert "proof_source_conversion_generic_function_owner_lookup(annotation.detail_line, annotation.offset.usize(), report)" in generic_auth
+assert "function_rows != function_markers" in generic_auth
+assert "generic_owner_index_entries != function_rows" not in generic_auth
 
 print("threaded summary generic checks use exact owner offsets and shared work")
