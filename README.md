@@ -57,17 +57,19 @@ goals exit `1`; a missing goal exits `2`. For `--check-proof`, `status` describe
 (`matches` or `diverges`) while `verification_state` describes proof status. A matching open block
 therefore reports `matches` with a non-proved verification state and exits `1`; only an exact
 matching block for a proved goal exits `0`. Unreadable blocks and missing goal IDs exit `2`.
-`engine_state` is diagnostic only: it reports obligation counters and kernel replay, but does not
-include parser, semantic, or source-admission results. It can be `proved` while source diagnostics
-make the overall report inadmissible; never use it by itself as an acceptance verdict. JSON
-consumers should require `status` and `verification_state` to be `proved` and all source-admission
-fields to be true; the CLI exit code also reflects source admission.
-At the library level, `proof_report_source_has_unresolved_checks` is a legacy report diagnostic. It
-checks aggregate report invariants and producer-marked obligation closure on the supplied
-`ProofReport`; a `false` result carries no replay receipt or parser-origin source capability.
-Likewise, `proof_report_all_obligations_proven` compares only the report's mutable `proven` and
-`obligations` counters. A `true` result does not establish replay, source correspondence, or proof
-admission.
+`engine_state` is diagnostic only. Its `proved` value requires complete kernel replay, complete
+source checks, report-level source admissibility, and complete goal and theorem source-admission
+snapshots, in addition to closed obligation counters and no failed findings. An unavailable or
+incomplete checked-view snapshot cannot produce `proved`. It summarizes the report's proof
+obligations; each theorem catalog row still has its own `source_admissible` result, which consumers
+must check before accepting that declaration. JSON consumers should still require `status` and
+`verification_state` to be `proved` and all relevant source-admission fields to be true; the CLI
+exit code also reflects source admission.
+At the library level, `proof_report_source_has_unresolved_checks` remains a legacy report
+diagnostic. It checks mutable report invariants and producer-marked obligation closure; a `false`
+result carries no replay receipt or parser-origin source capability. The counter-only helper
+`proof_report_all_obligations_proven` is internal to report consistency checks and is not a public
+proof verdict. Neither helper establishes replay, source correspondence, or proof admission.
 Consumers making an acceptance decision should use a validated `ProofCheckedView` and require
 `proof_checked_view_source_admissible` together with the relevant replay status.
 Full and summary JSON reports expose `admission_invariant_failure`, the first failed
