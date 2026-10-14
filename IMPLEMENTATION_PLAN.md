@@ -20768,3 +20768,12 @@ global bindings could repeat O(F x G) index construction. The source replay pass
 index and threads it through each owner environment build, while proposition formation reuses its
 workspace index. Exact owner and module-path resolution remains intact. Static checks pass; tests
 and builds were not run.
+
+### 23.27.1025 Share solver fuel across index-safety certificates
+
+Index bounds proofs included lower, upper, fixed-extent, slice-order, and call-requires goals, but
+each certificate helper could start a fresh solver allowance. Route these goals through the
+shared-work certificate path, including conditional case splits, and retain exact goal-cache hits.
+Intermediate fixed-bound probes use the same per-function solver and tactic-preflight counters.
+Fact-context scans are reserved before each certificate or probe; exhausted work emits a failed
+obligation and a budget finding. Static source checks pass; no tests or builds were run.
