@@ -1,0 +1,243 @@
+extend ElisaProof:
+    private:
+        const PROOF_REPLAY_AST_DEPTH_LIMIT: usize = 96
+        # Independently check the untrusted AST mirror against the source-neutral kernel term.
+        # Do not call the producer's encoder here: replay must detect, rather than reproduce, a
+        # lowering bug. Parentheses and type annotations are intentionally semantic erasures.
+        def proof_replay_operator_name(operator: TokenKind) -> sview:
+            return "+" if operator == TokenKind.Plus
+            return "-" if operator == TokenKind.Minus
+            return "*" if operator == TokenKind.Star
+            return "/" if operator == TokenKind.Slash
+            return "%" if operator == TokenKind.Percent
+            return "==" if operator == TokenKind.EqEq
+            return "!=" if operator == TokenKind.BangEq
+            return "<" if operator == TokenKind.Lt
+            return ">" if operator == TokenKind.Gt
+            return "<=" if operator == TokenKind.LtEq
+            return ">=" if operator == TokenKind.GtEq
+            return "and" if operator == TokenKind.And
+            return "or" if operator == TokenKind.Or
+            return "=>" if operator == TokenKind.FatArrow
+            return "not" if operator == TokenKind.Not
+            return "in" if operator == TokenKind.In
+            return "is" if operator == TokenKind.Is
+            return "as" if operator == TokenKind.As
+            return "|" if operator == TokenKind.Pipe
+            return "^" if operator == TokenKind.Caret
+            return "&" if operator == TokenKind.Ampersand
+            return "<<" if operator == TokenKind.LShift
+            return ">>" if operator == TokenKind.RShift
+            return "range_lt" if operator == TokenKind.RangeLt
+            return "range_le" if operator == TokenKind.RangeLe
+            return "else" if operator == TokenKind.Else
+            return ""
+
+        # Recompute the parser's contract-quantifier binder type independently of the
+        # producer. The neutral quantifier node derives binder sorts from its range and carries
+        # no annotation field, so a different source type cannot be allowed to disappear here.
+        def proof_replay_quantifier_integer_type(type_expression: Ast::Expr) -> bool:
+            match type_expression:
+                Ast::Expr.Ident(name, _):
+                    return name == "i64"
+                _:
+                    return false
+
+        def proof_replay_quantifier_kind_with_work(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&, depth: usize) -> sview:
+            return "" if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_quantifier_kind_with_work(inner, annotations, source_work, depth + 1)
+                Ast::Expr.Block(_, _, _, position):
+                    found: mutable sview = ""
+                    count: mutable usize = 0
+                    for annotation in annotations |found, count, source_work|:
+                        return "" if:
+                            not proof_report_source_work_charge(1, source_work)
+                            not proof_report_source_work_charge(sview_len(annotation.owner), source_work)
+                            not proof_report_source_work_charge(sview_len(annotation.name), source_work)
+                        if annotation.owner == "__contract_quantifier":
+                            return "" if not proof_report_source_work_charge(6, source_work)
+                            continue if annotation.offset != position.offset or not proof_replay_source_position_equal(annotation.pos, position)
+                            return "" if annotation.name != "forall" and annotation.name != "exists"
+                            found <- annotation.name
+                            count <- count + 1
+                    return found if count == 1
+                    return ""
+                _:
+                    return ""
+
+        def proof_replay_ast_matches_kernel_checked(report: ProofReport&, expression: Ast::Expr, root: usize, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count
+            node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
+            return false if not proof_report_source_work_charge(1, source_work)
+            return false if not proof_report_source_work_charge(sview_len(node.kind), source_work)
+            return false if not proof_report_source_work_charge(sview_len(node.name), source_work)
+            return false if not proof_report_source_work_charge(sview_len(node.secondary_name), source_work)
+            return false if not proof_report_source_work_charge(sview_len(node.operator), source_work)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_ast_matches_kernel_checked(report, inner, root, source_work, depth + 1)
+                Ast::Expr.IntLit(value, position):
+                    literal = proof_replay_numeric_literal_sort(report.source.source_annotations, position.line, position.column, value)
+                    if literal.known:
+                        sort: sview = proof_numeric_literal_sort_name(literal.unsigned, literal.width)
+                        return node.kind == "typed-int" and node.value == value and node.name == sort and ElisaProofKernelCore::typed_literal_value(node).known
+                    return node.kind == "int" and node.value == value
+                Ast::Expr.Absent:
+                    return node.kind == "absent"
+                Ast::Expr.BoolLit(value, _):
+                    return node.kind == "bool" and node.value == (1 if value else 0)
+                Ast::Expr.FloatLit(value, _):
+                    return node.kind == "opaque-float-literal" and node.name == value
+                Ast::Expr.StringLit(value, _):
+                    return node.kind == "string" and node.name == value
+                Ast::Expr.CharLit(value, _):
+                    return node.kind == "char" and node.name == value
+                Ast::Expr.Ident(name, _):
+                    return node.kind == "ident" and node.name == name
+                Ast::Expr.ShorthandMember(parts, _):
+                    return parts.count == 1 and parts[0] != "" and node.kind == "shorthand" and node.name == parts[0]
+                Ast::Expr.Unary(operator, operand, _):
+                    expected: sview = proof_replay_operator_name(operator)
+                    return expected != "" and node.kind == "unary" and node.operator == expected and proof_replay_ast_matches_kernel_checked(report, operand, node.left, source_work, depth + 1)
+                Ast::Expr.Binary(Ast::Expr.Index(object, index, _), TokenKind.Else, fallback, _):
+                    return false if node.kind != "checked-index" or node.left >= report.analysis_1.kernel.nodes.count
+                    index_node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[node.left]
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    return false if not proof_report_source_work_charge(sview_len(index_node.kind), source_work)
+                    return index_node.kind == "index" and proof_replay_ast_matches_kernel_checked(report, object, index_node.left, source_work, depth + 1) and proof_replay_ast_matches_kernel_checked(report, index, index_node.right, source_work, depth + 1) and proof_replay_ast_matches_kernel_checked(report, fallback, node.right, source_work, depth + 1)
+                Ast::Expr.GetElse(Ast::Expr.Index(object, index, _), recovery, _):
+                    # The kernel node intentionally erases recovery control flow, so validate the
+                    # complete source expression here before accepting the erased mirror. This
+                    # prevents a forged report from pairing a valid checked-get root with an
+                    # Invalid or otherwise unsupported recovery body.
+                    return false if recovery.count == 0 or node.kind != "checked-get" or node.left >= report.analysis_1.kernel.nodes.count
+                    index_node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[node.left]
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    return false if not proof_report_source_work_charge(sview_len(index_node.kind), source_work)
+                    return index_node.kind == "index" and proof_replay_ast_matches_kernel_checked(report, object, index_node.left, source_work, depth + 1) and proof_replay_ast_matches_kernel_checked(report, index, index_node.right, source_work, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    expected: sview = proof_replay_operator_name(operator)
+                    return expected != "" and node.kind == "binary" and node.operator == expected and proof_replay_ast_matches_kernel_checked(report, left, node.left, source_work, depth + 1) and proof_replay_ast_matches_kernel_checked(report, right, node.right, source_work, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return node.kind == "if" and proof_replay_ast_matches_kernel_checked(report, condition, node.left, source_work, depth + 1) and proof_replay_ast_matches_kernel_checked(report, then_expression, node.right, source_work, depth + 1) and proof_replay_ast_matches_kernel_checked(report, else_expression, node.auxiliary, source_work, depth + 1)
+                Ast::Expr.Move(operand, _):
+                    return node.kind == "move" and proof_replay_ast_matches_kernel_checked(report, operand, node.left, source_work, depth + 1)
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return false if:
+                        node.kind != "call" or node.auxiliary != argument_names.count or node.children_count != arguments.count
+                        node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
+                        not proof_replay_ast_matches_kernel_checked(report, callee, node.left, source_work, depth + 1)
+                    for index in 0..<arguments.count |index, report, node, arguments, argument_names, source_work, depth|:
+                        argument_root: usize = report.analysis_1.kernel.children[node.children_start + index]
+                        return false if argument_root >= report.analysis_1.kernel.nodes.count
+                        argument_node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[argument_root]
+                        expected_name: sview = argument_names[index] if index < argument_names.count else ""
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        return false if not proof_report_source_work_charge(sview_len(argument_node.kind), source_work)
+                        return false if not proof_report_source_work_charge(sview_len(argument_node.name), source_work)
+                        return false if not proof_report_source_work_charge(sview_len(expected_name), source_work)
+                        return false if argument_node.kind != "call_arg" or argument_node.name != expected_name or not proof_replay_ast_matches_kernel_checked(report, arguments[index], argument_node.left, source_work, depth + 1)
+                    return true
+                Ast::Expr.Field(object, field, _):
+                    return node.kind == "field" and node.name == field and proof_replay_ast_matches_kernel_checked(report, object, node.left, source_work, depth + 1)
+                Ast::Expr.Scope(base, field, _):
+                    return node.kind == "scope" and node.name == field and proof_replay_ast_matches_kernel_checked(report, base, node.left, source_work, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return node.kind == "index" and proof_replay_ast_matches_kernel_checked(report, object, node.left, source_work, depth + 1) and proof_replay_ast_matches_kernel_checked(report, index, node.right, source_work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return node.kind == "slice" and proof_replay_ast_matches_kernel_checked(report, object, node.left, source_work, depth + 1) and proof_replay_ast_matches_kernel_checked(report, low, node.right, source_work, depth + 1) and proof_replay_ast_matches_kernel_checked(report, high, node.auxiliary, source_work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if:
+                        arguments.count == 0 or node.kind != "index-n" or node.children_count != arguments.count
+                        node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
+                        not proof_replay_ast_matches_kernel_checked(report, object, node.left, source_work, depth + 1)
+                    for index in 0..<arguments.count |index, report, node, arguments, source_work, depth|:
+                        return false if not proof_replay_ast_matches_kernel_checked(report, arguments[index], report.analysis_1.kernel.children[node.children_start + index], source_work, depth + 1)
+                    return true
+                Ast::Expr.Array(elements, _):
+                    return proof_replay_ast_list_matches_kernel(report, elements, node, "array", source_work, depth)
+                Ast::Expr.Tuple(elements, _):
+                    return proof_replay_ast_list_matches_kernel(report, elements, node, "tuple", source_work, depth)
+                Ast::Expr.SetLit(elements, _):
+                    return proof_replay_ast_list_matches_kernel(report, elements, node, "set", source_work, depth)
+                Ast::Expr.DictLit(entries, _):
+                    return false if node.kind != "dict" or node.children_count != entries.count or node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
+                    for index in 0..<entries.count |index, report, node, entries, source_work, depth|:
+                        entry_root: usize = report.analysis_1.kernel.children[node.children_start + index]
+                        return false if entry_root >= report.analysis_1.kernel.nodes.count
+                        entry_node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[entry_root]
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        return false if not proof_report_source_work_charge(sview_len(entry_node.kind), source_work)
+                        return false if entry_node.kind != "dict_entry" or not proof_replay_ast_matches_kernel_checked(report, entries[index].key, entry_node.left, source_work, depth + 1) or not proof_replay_ast_matches_kernel_checked(report, entries[index].value, entry_node.right, source_work, depth + 1)
+                    return true
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return proof_replay_ast_fields_match_kernel(report, type_expression, fields, node, "construct", source_work, depth)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return proof_replay_ast_fields_match_kernel(report, base, fields, node, "record-update", source_work, depth)
+                Ast::Expr.Block(statements, value, captures, block_position):
+                    return false if captures.count != 0 or statements.count == 0 or statements.count > ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS or node.kind != "quantifier" or node.auxiliary != statements.count
+                    source_kind: sview = proof_replay_quantifier_kind_with_work(expression, report.source.source_annotations, source_work, 0)
+                    return false if source_kind == "" or node.operator != source_kind
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, type_expression, range_expression, binder_position):
+                            return false if:
+                                binder == "" or node.name != binder or not proof_replay_source_position_equal(block_position, binder_position)
+                                not proof_replay_quantifier_integer_type(type_expression)
+                                not proof_replay_ast_matches_kernel_checked(report, range_expression, node.left, source_work, depth + 1)
+                                not proof_replay_ast_matches_kernel_checked(report, value, node.right, source_work, depth + 1)
+                        _:
+                            return false
+                    if statements.count == ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS:
+                        match statements[1]:
+                            # The second dictionary binder is parser-synthesized with an
+                            # unencoded zero initializer. Require that exact placeholder so the
+                            # source mirror cannot agree with a kernel term that erased a hidden
+                            # call or other initializer.
+                            Ast::Stmt.VarDecl(binder, type_expression, Ast::Expr.IntLit(initializer, _), binder_position):
+                                return initializer == 0 and binder != "" and binder != node.name and node.secondary_name == binder and proof_replay_quantifier_integer_type(type_expression) and proof_replay_source_position_equal(block_position, binder_position)
+                            _:
+                                return false
+                    return node.secondary_name == ""
+                _:
+                    return false
+
+        def proof_replay_ast_list_matches_kernel(report: ProofReport&, elements: darray[Ast::Expr]&, node: ElisaProofKernelCore::ProofKernelNode, kind: sview, source_work: mutable usize&, depth: usize) -> bool:
+            return false if node.kind != kind or node.children_count != elements.count or node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
+            for index in 0..<elements.count |index, report, node, elements, source_work, depth|:
+                return false if not proof_replay_ast_matches_kernel_checked(report, elements[index], report.analysis_1.kernel.children[node.children_start + index], source_work, depth + 1)
+            return true
+
+        def proof_replay_ast_fields_match_kernel(report: ProofReport&, base: Ast::Expr, fields: darray[Ast::FieldInit]&, node: ElisaProofKernelCore::ProofKernelNode, kind: sview, source_work: mutable usize&, depth: usize) -> bool:
+            return false if:
+                node.kind != kind or node.children_count != fields.count or node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
+                not proof_replay_ast_matches_kernel_checked(report, base, node.left, source_work, depth + 1)
+            for index in 0..<fields.count |index, report, node, fields, source_work, depth|:
+                field_root: usize = report.analysis_1.kernel.children[node.children_start + index]
+                return false if field_root >= report.analysis_1.kernel.nodes.count
+                field_node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[field_root]
+                return false if not proof_report_source_work_charge(1, source_work)
+                return false if not proof_report_source_work_charge(sview_len(field_node.kind), source_work)
+                return false if not proof_report_source_work_charge(sview_len(field_node.name), source_work)
+                return false if not proof_report_source_work_charge(sview_len(fields[index].name), source_work)
+                return false if field_node.kind != "field-init" or field_node.name != fields[index].name or not proof_replay_ast_matches_kernel_checked(report, fields[index].value, field_node.left, source_work, depth + 1)
+            return true
+
+        # Reserve three expression passes (cost accounting, supported-form validation, and exact AST/kernel
+        # mirror comparison) before recursion; cost includes collections and text, under one trace work ceiling.
+        def proof_replay_ast_matches_kernel_with_work(report: ProofReport&, expression: Ast::Expr, root: usize, source_work: mutable usize&, depth: usize) -> bool:
+            return false if not proof_replay_summary_expr_repeat_charge_with_limit(expression, 2, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            return false if not proof_kernel_expression_supported(expression)
+            proof_replay_ast_matches_kernel_checked(report, expression, root, source_work, depth)
+
+        # Preserve the narrow audit entry point while giving it the same bounded semantics as
+        # certificate replay.
+        def proof_replay_ast_matches_kernel(report: ProofReport&, expression: Ast::Expr, root: usize, depth: usize) -> bool:
+            source_work: mutable usize = 0
+            proof_replay_ast_matches_kernel_with_work(report, expression, root, source_work, depth)
+
+        # The source-neutral trace validator mirrors the source trace policy, but its logical
+        # step check is performed entirely by kernel_replay.elisa. Runtime and summary facts are
+        # explicit semantic boundaries; they are still required to have a well-formed lowered
+        # term and summary dependencies are recursively checked by the existing SCC-aware path.

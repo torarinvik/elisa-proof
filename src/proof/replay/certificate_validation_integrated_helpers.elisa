@@ -208,6 +208,24 @@ extend ElisaProof:
             cache.dependency_certificate_index_complete <- true
             return true
 
+        # Executable summaries are consulted once per summary trace during batch replay. Keep
+        # every row (including duplicate spellings) in a batch-local name index so exact owner
+        # resolution stays collision-safe without rescanning the whole summary table each time.
+        def proof_replay_executable_summary_index_build(report: ProofReport&, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return cache.executable_summary_index_complete if cache.executable_summary_index_attempted
+            cache.executable_summary_index_attempted <- true
+            summary_count: usize = report.analysis_1.executables.summaries.count
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or summary_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            names: mutable darray[sview] = []
+            for summary in report.analysis_1.executables.summaries |summary, names, source_work|:
+                return false if not proof_replay_dependency_work_charge(1, source_work)
+                names.push(summary.name)
+            indexed: (complete: bool, rows: ProofReplayDependencyRowIndex) = proof_replay_dependency_row_index_build(names, source_work)
+            return false if not indexed.complete
+            cache.executable_summary_rows <- indexed.rows
+            cache.executable_summary_index_complete <- true
+            return true
+
         def proof_replay_dependency_row_lookup(index: ProofReplayDependencyRowIndex, wanted: sview, source_work: mutable usize&) -> (complete: bool, head: usize):
             missing: usize = index.names.count
             return (false, missing) if:
@@ -230,6 +248,9 @@ extend ElisaProof:
                     return (true, head) if name == wanted
                 slot <- (slot + 1) % capacity
                 probes <- probes + 1
+            # A full table or local probe-cluster refusal cannot prove absence. Surface that
+            # bounded lookup refusal through the shared meter so replay reports a work limit.
+            source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
             return (false, missing)
 
         def proof_replay_dependency_row_matches(index: ProofReplayDependencyRowIndex, row: usize, actual_name: sview, wanted: sview, source_work: mutable usize&) -> bool:
@@ -298,7 +319,7 @@ extend ElisaProof:
                 return false if owner_line != 0 and attempt_owner_line == 0
                 if owner_line == 0 or attempt_owner_line == owner_line:
                     found_goal <- true
-                    all_goals_proven <- false if not attempt.proven
+                    all_goals_proven <- false if not attempt.producer_proven
                 next_attempt: usize = structural_cache.dependency_attempt_rows.next_indices[attempt_index]
                 return false if next_attempt != report.results.goal_attempts.count and (next_attempt <= attempt_index or next_attempt >= report.results.goal_attempts.count)
                 attempt_index <- next_attempt
@@ -375,7 +396,7 @@ extend ElisaProof:
             matches: mutable usize = 0
             owners: mutable usize = 0
             return false if:
-                not proof_replay_summary_call_exact_span_in_declarations(report.source.source_declarations, trace.name, owner_line, expected_call, &source_call, &source_owner_line, &matches, &owners, source_work, 0)
+                not proof_replay_summary_call_exact_span_in_declarations(report.source.source_declarations, trace.name, owner_line, report.analysis_2.replay_owner_offset, report.analysis_2.replay_owner_offset_valid, expected_call, &source_call, &source_owner_line, &matches, &owners, source_work, 0)
                 matches != 1 or owners != 1 or source_owner_line == 0
             match source_call:
                 Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), _, _, call_position):
@@ -454,7 +475,7 @@ extend ElisaProof:
                 return false if sview_len(trace.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
                 validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + sview_len(trace.name)
                 return false if:
-                    attempt.name != trace.name or not attempt.proven or not attempt.has_certificate or attempt.certificate_index >= report.analysis_1.certificates.count
+                    attempt.name != trace.name or not attempt.producer_proven or not attempt.has_certificate or attempt.certificate_index >= report.analysis_1.certificates.count
                     attempt.line != call_position.line or not proof_replay_source_position_equal(attempt.source_call_position, call_position)
                 require_certificate: ProofGoalCertificate = report.analysis_1.certificates[attempt.certificate_index]
                 return false if:

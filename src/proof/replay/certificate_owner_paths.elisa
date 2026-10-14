@@ -44,53 +44,6 @@ extend ElisaProof:
             return false if caller_length < owner_prefix_length + 2
             return sview_at(caller_owner, owner_prefix_length) == 58 and sview_at(caller_owner, owner_prefix_length + 1) == 58
 
-        def proof_replay_function_owner_module(declarations: darray[Ast::Decl]&, name: sview, line: u32, current: sview, owner: mutable sview&, count: mutable usize&, depth: usize) -> void:
-            if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT:
-                count <- 2
-                return
-            for declaration in declarations |name, line, current, owner, count, depth|:
-                match declaration:
-                    Ast::Decl.Func(candidate_name, _, _, _, _, _, candidate_position):
-                        if candidate_name == name and candidate_position.line == line:
-                            owner <- current
-                            count <- count + 1
-                    Ast::Decl.Module(module_name, body, _):
-                        proof_replay_function_owner_module(body, name, line, module_name, owner, count, depth + 1)
-                    Ast::Decl.Scoped(body, _):
-                        proof_replay_function_owner_module(body, name, line, current, owner, count, depth + 1)
-                    Ast::Decl.Invalid:
-                        count <- 2
-                        return
-                    Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
-                        pass
-                    _:
-                        count <- 2
-                        return
-
-        # Module enclosing the function declared at `line`, whatever its name.
-        def proof_replay_module_at_function_line(declarations: darray[Ast::Decl]&, line: u32, current: sview, owner: mutable sview&, count: mutable usize&, depth: usize) -> void:
-            if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT:
-                count <- 2
-                return
-            for declaration in declarations |line, current, owner, count, depth|:
-                match declaration:
-                    Ast::Decl.Func(_, _, _, _, _, _, candidate_position):
-                        if candidate_position.line == line:
-                            owner <- current
-                            count <- count + 1
-                    Ast::Decl.Module(module_name, body, _):
-                        proof_replay_module_at_function_line(body, line, module_name, owner, count, depth + 1)
-                    Ast::Decl.Scoped(body, _):
-                        proof_replay_module_at_function_line(body, line, current, owner, count, depth + 1)
-                    Ast::Decl.Invalid:
-                        count <- 2
-                        return
-                    Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
-                        pass
-                    _:
-                        count <- 2
-                        return
-
         def proof_replay_owner_work_charge(amount: usize, source_work: mutable usize&) -> bool:
             return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + amount
@@ -109,12 +62,36 @@ extend ElisaProof:
                 return (false, 0, index.entries.count) if row >= index.entries.count
                 entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
                 return (false, 0, index.entries.count) if:
-                    not proof_replay_owner_work_charge(1 + sview_len(entry.name), source_work)
+                    not proof_replay_owner_work_charge(1, source_work)
+                    not proof_replay_owner_work_charge(sview_len(entry.name), source_work)
                     entry.name != wanted
                 if entry.is_function:
                     match entry.declaration:
                         Ast::Decl.Func(_, _, _, _, _, _, position):
                             if position.line == line:
+                                matches <- matches + 1
+                                selected <- row
+                        _:
+                            return (false, 0, index.entries.count)
+                row <- entry.next_index
+                return (false, 0, index.entries.count) if row > index.entries.count
+            return (false, 0, index.entries.count) if row != index.entries.count
+            return (true, matches, selected)
+
+        def proof_replay_summary_owner_function_at_offset(index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, line: u32, offset: usize, source_work: mutable usize&) -> (complete: bool, matches: usize, row: usize):
+            group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(index, wanted, source_work)
+            return (false, 0, index.entries.count) if not group.complete
+            row: mutable usize = group.head
+            selected: mutable usize = index.entries.count
+            matches: mutable usize = 0
+            for _ in 0..<group.count |group, index, row, line, offset, selected, matches, source_work|:
+                return (false, 0, index.entries.count) if row >= index.entries.count
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
+                return (false, 0, index.entries.count) if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(entry.name), source_work) or entry.name != wanted
+                if entry.is_function:
+                    match entry.declaration:
+                        Ast::Decl.Func(_, _, _, _, _, _, position):
+                            if position.line == line and position.offset.usize() == offset:
                                 matches <- matches + 1
                                 selected <- row
                         _:
@@ -143,20 +120,41 @@ extend ElisaProof:
                                 not proof_replay_summary_expr_charge_with_work(base, source_work)
                                 report.analysis_2.replay_owner_line == 0
                                 not proof_replay_deterministic_call_declaration_index_ensure(report.source.source_declarations, report.source.source_annotations, source_work, cache)
-                            target: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_line(cache.declaration_index, trace.dependency, trace.owner_line, source_work)
-                            return false if not target.complete or target.matches != 1 or target.row >= cache.declaration_index.entries.count
-                            caller: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_line(cache.declaration_index, trace.name, report.analysis_2.replay_owner_line, source_work)
+                            caller: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.declaration_index, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, source_work) if report.analysis_2.replay_owner_offset_valid else proof_replay_summary_owner_function_at_line(cache.declaration_index, trace.name, report.analysis_2.replay_owner_line, source_work)
                             return false if not caller.complete or caller.matches != 1 or caller.row >= cache.declaration_index.entries.count
-                            owner: sview = cache.declaration_index.entries[target.row].owner
                             caller_owner: sview = cache.declaration_index.entries[caller.row].owner
                             return false if:
-                                owner == ""
                                 not proof_replay_deterministic_call_alias_imports_ensure(report.source.source_declarations, report.source.source_annotations, source_work, cache)
                                 not proof_replay_deterministic_call_alias_index_ensure(report.source.source_annotations, source_work, cache)
-                            callee_names: darray[sview] = [trace.dependency]
-                            callee_owners: darray[sview] = [owner]
-                            resolved: (complete: bool, row: usize) = proof_module_function_index_for_callee(callee_names, callee_owners, cache.alias_index, caller_owner, callee, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
-                            return resolved.complete and resolved.row == 0
+                                not proof_replay_summary_expr_charge_with_work(callee, source_work)
+                            target_group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(cache.declaration_index, trace.dependency, source_work)
+                            return false if not target_group.complete
+                            target_row: mutable usize = target_group.head
+                            target_matches: mutable usize = 0
+                            for _ in 0..<target_group.count |target_group, target_row, target_matches, cache, trace, callee, caller_owner, source_work|:
+                                return false if target_row >= cache.declaration_index.entries.count
+                                entry: ProofReplayDeterministicDeclarationEntry = cache.declaration_index.entries[target_row]
+                                return false if:
+                                    not proof_replay_owner_work_charge(1, source_work)
+                                    not proof_replay_owner_work_charge(sview_len(entry.name), source_work)
+                                    entry.name != trace.dependency
+                                if entry.is_function and not entry.is_lemma:
+                                    match entry.declaration:
+                                        Ast::Decl.Func(_, _, _, _, _, _, position):
+                                            if position.line == trace.owner_line and entry.owner != "":
+                                                return false if not proof_replay_owner_work_charge(2, source_work)
+                                                callee_names: darray[sview] = [trace.dependency]
+                                                callee_owners: darray[sview] = [entry.owner]
+                                                resolved: (complete: bool, row: usize) = proof_module_function_index_for_callee(callee_names, callee_owners, cache.alias_index, caller_owner, callee, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                                                return false if not resolved.complete
+                                                if resolved.row == 0:
+                                                    target_matches <- target_matches + 1
+                                        _:
+                                            return false
+                                target_row <- entry.next_index
+                                return false if target_row > cache.declaration_index.entries.count
+                            return false if target_row != cache.declaration_index.entries.count or target_matches != 1
+                            return true
                         Ast::Expr.Ident(callee_name, _):
                             return false if:
                                 not proof_replay_owner_work_charge(sview_len(callee_name), source_work)

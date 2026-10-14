@@ -308,7 +308,7 @@ extend ElisaProof:
 
         def proof_replay_attempt_matches_certificate_with_limit(report: ProofReport&, attempt: ProofGoalAttempt&, certificate: ProofGoalCertificate, certificate_index: usize, source_work: mutable usize&, work_limit: usize) -> bool:
             return false if:
-                not attempt.proven or not attempt.has_certificate or attempt.certificate_index != certificate_index
+                not attempt.producer_proven or not attempt.has_certificate or attempt.certificate_index != certificate_index
                 attempt.facts_start != certificate.facts_start or attempt.facts_count != certificate.facts_count
                 attempt.kernel_goal != certificate.kernel_goal or attempt.kernel_facts_start != certificate.kernel_facts_start or attempt.kernel_facts_count != certificate.kernel_facts_count
                 not proof_replay_attempt_text_compare_with_limit(attempt.name, certificate.name, source_work, work_limit)
@@ -331,8 +331,7 @@ extend ElisaProof:
                         return value
                     _:
                         return false
-            return false if not proof_replay_summary_expr_repeat_charge_with_limit(attempt.goal, 2, source_work, work_limit)
-            return proof_replay_ast_matches_kernel(report, attempt.goal, certificate.kernel_goal, 0)
+            return proof_replay_ast_matches_kernel_with_work(report, attempt.goal, certificate.kernel_goal, source_work, 0)
 
         def proof_replay_certificate_root_is_proven(report: ProofReport&, certificate: ProofGoalCertificate, certificate_index: usize) -> bool:
             work: mutable usize = 0
@@ -360,7 +359,7 @@ extend ElisaProof:
                 index.next_indices[attempt_id] <- attempt_count
             for attempt_id in 0..<attempt_count |attempt_id, report, index, certificate_count, attempt_count|:
                 attempt: ProofGoalAttempt = report.results.goal_attempts[attempt_id]
-                continue if not attempt.proven or not attempt.has_certificate
+                continue if not attempt.producer_proven or not attempt.has_certificate
                 return false if attempt.certificate_index >= certificate_count
                 index.next_indices[attempt_id] <- index.heads[attempt.certificate_index]
                 index.heads[attempt.certificate_index] <- attempt_id
@@ -397,6 +396,9 @@ extend ElisaProof:
             # first and sets one only after that certificate's complete check, and the batch still
             # requires every certificate to replay, so nothing is admitted that is not also
             # validated on its own.
+            # Keep this shortcut batch-local: its flags are valid only for the unchanged report
+            # between full certificate replay and the synchronous source-fact snapshot. Public
+            # report replay resets and revalidates the flags on every call.
             return true if validation_workspace.allow_replayed_dependency_memo and dependency_depth > 0 and certificate_index < report.analysis_1.certificates.count and report.analysis_1.certificates[certificate_index].replayed
             return false if:
                 not proof_replay_certificate_rule_valid(certificate.rule)
@@ -407,23 +409,32 @@ extend ElisaProof:
                 certificate.kernel_goal >= report.analysis_1.kernel.nodes.count
                 certificate.facts_count != certificate.kernel_facts_count
                 certificate.facts_start > report.analysis_1.traces.origin_indices.count or certificate.facts_count > report.analysis_1.traces.origin_indices.count - certificate.facts_start
+            if certificate.rule == "resource-safety":
+                resource_root: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[certificate.kernel_goal]
+                return false if resource_root.kind != "resource-safety" or not proof_replay_attempt_text_compare_with_limit(resource_root.name, certificate.name, validation_workspace.source_scan_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return false if not proof_replay_summary_owner_source_preflight(report, certificate.name, certificate.line, validation_workspace.source_scan_work_used)
             next_active_certificates: mutable darray[usize] = []
             next_active_certificates.extend(active_certificates)
             next_active_certificates.push(certificate_index)
             if certificate.rule != "resource-safety" and certificate.rule != "structural-safety" and certificate.rule != "effect-containment":
-                return false if not proof_replay_ast_matches_kernel(report, certificate.goal, certificate.kernel_goal, 0)
+                return false if not proof_replay_ast_matches_kernel_with_work(report, certificate.goal, certificate.kernel_goal, validation_workspace.source_scan_work_used, 0)
             for index in 0..<certificate.facts_count |index, report, certificate|:
                 source_fact: Ast::Expr = report.analysis_1.certificate_facts[certificate.facts_start + index]
                 kernel_fact: usize = report.analysis_1.kernel.certificate_facts[certificate.kernel_facts_start + index]
-                return false if not proof_replay_ast_matches_kernel(report, source_fact, kernel_fact, 0)
+                return false if not proof_replay_ast_matches_kernel_with_work(report, source_fact, kernel_fact, validation_workspace.source_scan_work_used, 0)
             facts: mutable darray[usize] = []
             saved_owner_line: u32 = report.analysis_2.replay_owner_line
+            saved_owner_offset: usize = report.analysis_2.replay_owner_offset
+            saved_owner_offset_valid: bool = report.analysis_2.replay_owner_offset_valid
             saved_consumer_line: u32 = report.analysis_2.trace_owner_line
             saved_consumer_certificate: usize = report.analysis_2.trace_consumer_certificate_index
             saved_consumer_attempt: usize = report.analysis_2.trace_consumer_attempt_index
-            owner_line: u32 = proof_replay_trace_owner_source_position_line_with_work(report, certificate, validation_workspace.source_scan_work_used)
+            owner_position: Ast::Pos = proof_replay_trace_owner_source_position_with_work(report, certificate, validation_workspace.source_scan_work_used)
+            owner_line: u32 = owner_position.line
             # An unidentified owner gets a line no declaration has, so stamped constants never apply.
             report.analysis_2.replay_owner_line <- owner_line if owner_line != 0 else 4294967295
+            report.analysis_2.replay_owner_offset <- owner_position.offset.usize()
+            report.analysis_2.replay_owner_offset_valid <- owner_line != 0
             report.analysis_2.trace_owner_line <- certificate.line
             report.analysis_2.trace_consumer_certificate_index <- certificate_index + 1
             report.analysis_2.trace_consumer_attempt_index <- 0
@@ -444,6 +455,8 @@ extend ElisaProof:
                 continue if not (proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, certificate.name, dependency_stack, false, next_active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
                 facts.push(fact)
             report.analysis_2.replay_owner_line <- saved_owner_line
+            report.analysis_2.replay_owner_offset <- saved_owner_offset
+            report.analysis_2.replay_owner_offset_valid <- saved_owner_offset_valid
             report.analysis_2.trace_owner_line <- saved_consumer_line
             report.analysis_2.trace_consumer_certificate_index <- saved_consumer_certificate
             report.analysis_2.trace_consumer_attempt_index <- saved_consumer_attempt

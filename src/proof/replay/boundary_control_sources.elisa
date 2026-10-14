@@ -7,6 +7,14 @@ extend ElisaProof:
         const PROOF_REPLAY_CONTROL_DEPTH_LIMIT: usize = 64
         const PROOF_REPLAY_CONTROL_INVALID_OWNER_LINE: u32 = 4294967295
 
+        def proof_replay_control_source_work_charge(source_work: mutable usize&, amount: usize) -> bool:
+            return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            if amount > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - source_work:
+                source_work <- PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+                return false
+            source_work <- source_work + amount
+            return true
+
         def proof_replay_control_source_position_equal(left: Ast::Pos, right: Ast::Pos) -> bool:
             return left.line == right.line and left.column == right.column and left.offset == right.offset and left.end_line == right.end_line and left.end_column == right.end_column and left.end_offset == right.end_offset
 
@@ -42,16 +50,18 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_replay_control_global_constant_count(declarations: darray[Ast::Decl]&, target: sview, matches: mutable usize&, mutable_matches: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT
-            for declaration in declarations |target, matches, mutable_matches, depth|:
+        def proof_replay_control_global_constant_count(declarations: darray[Ast::Decl]&, target: sview, matches: mutable usize&, mutable_matches: mutable usize&, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or not proof_replay_control_source_work_charge(source_work, 1)
+            for declaration in declarations |target, matches, mutable_matches, depth, source_work|:
+                return false if not proof_replay_control_source_work_charge(source_work, 1)
                 match declaration:
                     Ast::Decl.Const(name, _, _, is_mutable, _):
+                        return false if not proof_replay_control_source_work_charge(source_work, sview_len(name)) or not proof_replay_control_source_work_charge(source_work, sview_len(target))
                         if name == target:
                             matches <- matches + 1
                             mutable_matches <- mutable_matches + 1 if is_mutable
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_control_global_constant_count(nested, target, matches, mutable_matches, depth + 1)
+                        return false if not proof_replay_control_global_constant_count(nested, target, matches, mutable_matches, depth + 1, source_work)
                     Ast::Decl.Invalid:
                         return false
                     Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
@@ -60,31 +70,35 @@ extend ElisaProof:
                         return false
             return true
 
-        def proof_replay_control_global_constant_immutable(declarations: darray[Ast::Decl]&, target: sview) -> bool:
+        def proof_replay_control_global_constant_immutable(declarations: darray[Ast::Decl]&, target: sview, source_work: mutable usize&) -> bool:
             matches: mutable usize = 0
             mutable_matches: mutable usize = 0
-            return false if target == "" or not proof_replay_control_global_constant_count(declarations, target, &matches, &mutable_matches, 0)
+            return false if target == "" or not proof_replay_control_global_constant_count(declarations, target, &matches, &mutable_matches, 0, source_work)
             matches == 1 and mutable_matches == 0
 
-        def proof_replay_control_immutable_boolean_parameter(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, depth: usize) -> bool:
-            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
-            for declaration in declarations |owner, owner_line, parameter_name, depth|:
+        def proof_replay_control_immutable_boolean_parameter(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, parameter_name: sview, depth: usize, source_work: mutable usize&) -> bool:
+            return false if not exact_owner or depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or not proof_replay_control_source_work_charge(source_work, 1)
+            for declaration in declarations |owner, owner_line, owner_offset, exact_owner, parameter_name, depth, source_work|:
+                return false if not proof_replay_control_source_work_charge(source_work, 1)
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, _, _, _, position):
-                        if name == owner and position.line == owner_line:
+                        return false if not proof_replay_control_source_work_charge(source_work, sview_len(name)) or not proof_replay_control_source_work_charge(source_work, sview_len(owner))
+                        if name == owner and position.line == owner_line and position.offset.usize() == owner_offset:
                             matches: mutable usize = 0
                             valid: mutable bool = false
-                            for parameter in parameters |parameter_name, matches, valid|:
+                            for parameter in parameters |parameter_name, matches, valid, source_work|:
+                                return false if not proof_replay_control_source_work_charge(source_work, 1)
+                                return false if not proof_replay_control_source_work_charge(source_work, sview_len(parameter.name)) or not proof_replay_control_source_work_charge(source_work, sview_len(parameter_name))
                                 if parameter.name == parameter_name:
                                     matches <- matches + 1
                                     match parameter.type_expression:
                                         Ast::Expr.Ident("bool", _):
-                                            valid <- true
+                                            valid <- not parameter.is_mutable
                                         _:
                                             valid <- false
                             return matches == 1 and valid
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return true if proof_replay_control_immutable_boolean_parameter(nested, owner, owner_line, parameter_name, depth + 1)
+                        return true if proof_replay_control_immutable_boolean_parameter(nested, owner, owner_line, owner_offset, exact_owner, parameter_name, depth + 1, source_work)
                     Ast::Decl.Invalid:
                         return false
                     Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
@@ -93,13 +107,29 @@ extend ElisaProof:
                         return false
             return false
 
+        # The shared integer-parameter scanner uses the summary meter. Seed that meter so
+        # this caller's smaller CONTROL budget remains the effective limit, then debit the
+        # exact amount consumed before trying the Boolean-parameter path.
+        def proof_replay_control_immutable_integer_parameter(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_offset: usize, exact_owner: bool, parameter_name: sview, source_work: mutable usize&) -> bool:
+            return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            remaining_work: usize = PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - source_work
+            scan_seed: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - remaining_work
+            scan_work: mutable usize = scan_seed
+            valid: bool = proof_replay_local_binding_immutable_integer_parameter_at_offset_with_work(declarations, owner, owner_line, owner_offset, exact_owner, parameter_name, &scan_work, 0)
+            scan_cost: usize = scan_work - scan_seed
+            if scan_cost > remaining_work:
+                source_work <- PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+                return false
+            source_work <- source_work + scan_cost
+            valid
+
         def proof_replay_control_stable_identifier(report: ProofReport&, trace: ProofFactTrace, name: sview, source_work: mutable usize&) -> bool:
             return false if name == ""
-            if proof_replay_control_global_constant_immutable(report.source.source_declarations, name):
-                return false if proof_replay_local_binding_parameter_name_present_with_work(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, name, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT, 0)
-                return proof_replay_local_binding_parameter_source_unshadowed_with_limit(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, name, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
-            return false if not proof_replay_local_binding_parameter_source_unshadowed_with_limit(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, name, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
-            return proof_replay_local_binding_immutable_integer_parameter_with_work(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, name, source_work, 0) or proof_replay_control_immutable_boolean_parameter(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, name, 0)
+            if proof_replay_control_global_constant_immutable(report.source.source_declarations, name, source_work):
+                return false if proof_replay_local_binding_parameter_name_present_at_offset_with_work(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, report.analysis_2.replay_owner_offset_valid, name, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT, 0)
+                return proof_replay_local_binding_parameter_source_unshadowed_at_offset_with_limit(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, report.analysis_2.replay_owner_offset_valid, name, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
+            return false if not proof_replay_local_binding_parameter_source_unshadowed_at_offset_with_limit(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, report.analysis_2.replay_owner_offset_valid, name, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
+            return proof_replay_control_immutable_integer_parameter(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, report.analysis_2.replay_owner_offset_valid, name, source_work) or proof_replay_control_immutable_boolean_parameter(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, report.analysis_2.replay_owner_offset_valid, name, 0, source_work)
 
         def proof_replay_control_deterministic_declaration_scan_with_work(declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> bool:
             return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
@@ -116,10 +146,9 @@ extend ElisaProof:
             return false if:
                 name == ""
                 not proof_replay_control_deterministic_declaration_scan_with_work(report.source.source_declarations, source_work)
-                not proof_replay_control_deterministic_declaration_scan_with_work(report.source.source_declarations, source_work)
             owner_line: mutable u32 = report.analysis_2.replay_owner_line
             owner_line <- 0 if owner_line == PROOF_REPLAY_CONTROL_INVALID_OWNER_LINE
-            return false if not proof_replay_summary_owner_source_preflight_with_limit(report, trace.name, owner_line, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
+            return false if not proof_replay_summary_owner_source_scan_with_limit(report, trace.name, owner_line, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
             return proof_replay_control_stable_identifier(report, trace, name, source_work)
 
         # Only source expressions whose value cannot change during the control-flow region
@@ -128,13 +157,11 @@ extend ElisaProof:
         def proof_replay_control_stable_expression(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, source_work: mutable usize&) -> bool:
             owner_line: mutable u32 = report.analysis_2.replay_owner_line
             owner_line <- 0 if owner_line == PROOF_REPLAY_CONTROL_INVALID_OWNER_LINE
-            owner_start: usize = source_work
-            return false if not proof_replay_summary_owner_source_preflight_with_limit(report, trace.name, owner_line, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
-            owner_source_work: usize = source_work - owner_start
+            return false if not proof_replay_summary_owner_source_scan_with_limit(report, trace.name, owner_line, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
             return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             expression_seed: usize = source_work
             expression_work: mutable usize = expression_seed
-            valid: bool = proof_replay_control_stable_expression_budgeted(report, trace, expression, &expression_work, owner_source_work, 0)
+            valid: bool = proof_replay_control_stable_expression_budgeted(report, trace, expression, &expression_work, 0)
             expression_work <- expression_work - expression_seed
             return false if expression_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + expression_work
@@ -155,7 +182,7 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_replay_control_stable_expression_budgeted(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, work: mutable usize&, owner_source_work: usize, depth: usize) -> bool:
+        def proof_replay_control_stable_expression_budgeted(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             work <- work + 1
             match expression:
@@ -165,23 +192,21 @@ extend ElisaProof:
                     return false if name == ""
                     for charge_index in 0..<3 |charge_index, report, work|:
                         return false if not proof_replay_control_match_guard_charge_declarations(report.source.source_declarations, work, 0)
-                    return false if owner_source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work
-                    work <- work + owner_source_work
                     return proof_replay_control_stable_identifier(report, trace, name, work)
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_control_stable_expression_budgeted(report, trace, inner, work, owner_source_work, depth + 1)
+                    return proof_replay_control_stable_expression_budgeted(report, trace, inner, work, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
                     return false if operator != TokenKind.Not and operator != TokenKind.Minus
                     protocol: sview = proof_builtin_unary_operator_protocol(operator)
                     return false if protocol != "" and proof_source_primitive_operator_mask_has(report.source.source_primitive_operator_mask, protocol)
-                    return proof_replay_control_stable_expression_budgeted(report, trace, inner, work, owner_source_work, depth + 1)
+                    return proof_replay_control_stable_expression_budgeted(report, trace, inner, work, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent and operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq and operator != TokenKind.And and operator != TokenKind.Or
                     protocol: sview = proof_builtin_operator_protocol(operator)
                     return false if:
                         protocol != "" and proof_source_primitive_operator_mask_has(report.source.source_primitive_operator_mask, protocol)
-                        not proof_replay_control_stable_expression_budgeted(report, trace, left, work, owner_source_work, depth + 1)
-                    return proof_replay_control_stable_expression_budgeted(report, trace, right, work, owner_source_work, depth + 1)
+                        not proof_replay_control_stable_expression_budgeted(report, trace, left, work, depth + 1)
+                    return proof_replay_control_stable_expression_budgeted(report, trace, right, work, depth + 1)
                 _:
                     return false
 

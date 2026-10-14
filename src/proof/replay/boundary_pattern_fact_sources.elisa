@@ -50,6 +50,31 @@ extend ElisaProof:
                 return false
             work <- work + pattern_work * repetitions
             return true
+
+        def proof_replay_control_pattern_string_scan_reserve(text: sview, repetitions: usize, work: mutable usize&) -> bool:
+            length: usize = sview_len(text)
+            return false if length > PROOF_PATTERN_STRING_LITERAL_SCAN_LIMIT or work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            scan_work: usize = length * 4 + 1
+            remaining: usize = PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work
+            return false if repetitions != 0 and scan_work > remaining / repetitions
+            work <- work + scan_work * repetitions
+            true
+
+        def proof_replay_control_pattern_string_scans_reserve(pattern: Ast::Pattern, type_expression: Ast::Expr, repetitions: usize, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            work <- work + 1
+            match pattern:
+                Ast::Pattern.Literal(text):
+                    return true if not proof_replay_control_pattern_type_is_direct_string(type_expression)
+                    return proof_replay_control_pattern_string_scan_reserve(text, repetitions, work)
+                Ast::Pattern.As(_, inner):
+                    return inner.count == 1 and proof_replay_control_pattern_string_scans_reserve(inner[0], type_expression, repetitions, depth + 1, work)
+                Ast::Pattern.Or(options):
+                    for option in options |type_expression, repetitions, depth, work|:
+                        return false if not proof_replay_control_pattern_string_scans_reserve(option, type_expression, repetitions, depth + 1, work)
+                _:
+                    pass
+            return true
         def proof_replay_control_pattern_irrefutable_work_charge(pattern: Ast::Pattern, depth: usize, work: mutable usize&) -> bool:
             return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             work <- work + 1
@@ -59,24 +84,26 @@ extend ElisaProof:
                     return proof_replay_control_pattern_irrefutable_work_charge(inner[0], depth + 1, work)
                 _:
                     return true
-        def proof_replay_control_pattern_exactness_work_charge(pattern: Ast::Pattern, depth: usize, work: mutable usize&) -> bool:
+        def proof_replay_control_pattern_exactness_work_charge(pattern: Ast::Pattern, type_expression: Ast::Expr, depth: usize, work: mutable usize&) -> bool:
             return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             work <- work + 1
             match pattern:
                 Ast::Pattern.Literal(text):
-                    return proof_replay_control_pattern_text_work_charge(text, work)
+                    return false if not proof_replay_control_pattern_text_work_charge(text, work)
+                    return true if not proof_replay_control_pattern_type_is_direct_string(type_expression)
+                    return proof_replay_control_pattern_string_scan_reserve(text, 2, work)
                 Ast::Pattern.Range(low, high, _):
                     return false if not proof_replay_control_pattern_text_work_charge(low, work)
                     return proof_replay_control_pattern_text_work_charge(high, work)
                 Ast::Pattern.As(_, inner):
                     return true if inner.count != 1
-                    return proof_replay_control_pattern_exactness_work_charge(inner[0], depth + 1, work)
+                    return proof_replay_control_pattern_exactness_work_charge(inner[0], type_expression, depth + 1, work)
                 Ast::Pattern.Variant(_, fields):
                     for field in fields |depth, work|:
                         return false if not proof_replay_control_pattern_irrefutable_work_charge(field, depth + 1, work)
                 Ast::Pattern.Or(options):
-                    for option in options |depth, work|:
-                        return false if not proof_replay_control_pattern_exactness_work_charge(option, depth + 1, work)
+                    for option in options |type_expression, depth, work|:
+                        return false if not proof_replay_control_pattern_exactness_work_charge(option, type_expression, depth + 1, work)
                 _:
                     pass
             return true
@@ -145,17 +172,206 @@ extend ElisaProof:
             work <- work + query_work
             touches
 
-        # The producer's pattern type helpers use their own larger cap. Seed their meter so
-        # formal lookup and builtin-type shadowing still fit within this replay lane's remaining
-        # CONTROL allowance, then transfer only the measured delta back to the shared meter.
-        def proof_replay_control_pattern_formal_type(report: ProofReport&, function_name: sview, scrutinee: Ast::Expr, work: mutable usize&) -> Ast::Expr:
+        def proof_replay_control_pattern_source_charge(amount: usize, work: mutable usize&) -> bool:
+            return false if work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT or amount > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT - work
+            work <- work + amount
+            true
+
+        def proof_replay_control_pattern_source_text_equal(left: sview, right: sview, work: mutable usize&) -> (complete: bool, equal: bool):
+            return (false, false) if not proof_replay_control_pattern_source_charge(1, work)
+            return (false, false) if not proof_replay_control_pattern_source_charge(sview_len(left), work)
+            return (false, false) if not proof_replay_control_pattern_source_charge(sview_len(right), work)
+            return (true, left == right)
+
+        # Replay independently locates the source formal and rejects body shadowing instead of
+        # delegating those semantic decisions to the producer's pattern-type lookup.
+        def proof_replay_control_pattern_source_formal_type_find(declarations: darray[Ast::Decl]&, function_name: sview, parameter: sview, found: mutable Ast::Expr&, function_line: mutable u32&, function_offset: mutable usize&, function_module: mutable sview&, declaration_module: mutable sview&, module_path: mutable darray[sview]&, function_module_path: mutable darray[sview]&, function_matches: mutable usize&, parameter_matches: mutable usize&, work: mutable usize&, complete: mutable bool&, depth: usize) -> void:
+            if depth >= PROOF_PATTERN_SOURCE_TYPE_DEPTH_LIMIT or not proof_replay_control_pattern_source_charge(1, work):
+                complete <- false
+                return
+            for declaration in declarations |function_name, parameter, found, function_line, function_offset, function_module, declaration_module, module_path, function_module_path, function_matches, parameter_matches, work, complete, depth|:
+                if not proof_replay_control_pattern_source_charge(1, work):
+                    complete <- false
+                    return
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, body, _, _, position):
+                        function_name_match: (complete: bool, equal: bool) = proof_replay_control_pattern_source_text_equal(name, function_name, work)
+                        if not function_name_match.complete:
+                            complete <- false
+                            return
+                        if function_name_match.equal:
+                            function_matches <- function_matches + 1
+                            function_line <- position.line
+                            function_offset <- position.offset.usize()
+                            declaration_module <- function_module
+                            function_module_path.clear()
+                            for module_segment in module_path |module_segment, function_module_path, work, complete|:
+                                if not proof_replay_control_pattern_source_charge(sview_len(module_segment), work):
+                                    complete <- false
+                                    return
+                                function_module_path.push(module_segment)
+                            matching_parameters: mutable usize = 0
+                            for candidate in parameters |parameter, found, parameter_matches, matching_parameters, work, complete|:
+                                parameter_match: (complete: bool, equal: bool) = proof_replay_control_pattern_source_text_equal(candidate.name, parameter, work)
+                                if not parameter_match.complete:
+                                    complete <- false
+                                    return
+                                if parameter_match.equal:
+                                    matching_parameters <- matching_parameters + 1
+                                    parameter_matches <- parameter_matches + 1
+                                    found <- candidate.type_expression
+                            if matching_parameters != 0:
+                                source_remaining: usize = PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT - work
+                                source_seed: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_remaining
+                                source_work: mutable usize = source_seed
+                                declares_parameter: bool = proof_replay_source_body_declares_with_work(declarations, body, parameter, &source_work)
+                                if source_work < source_seed or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                    complete <- false
+                                    return
+                                body_scan_work: usize = source_work - source_seed
+                                if not proof_replay_control_pattern_source_charge(body_scan_work, work):
+                                    complete <- false
+                                    return
+                                complete <- false if declares_parameter
+                    Ast::Decl.Module(module_name, body, _):
+                        prior_module: sview = function_module
+                        function_module <- module_name
+                        nested_path: (complete: bool, scope: darray[sview]) = proof_replay_global_constant_scope_with_module_and_work(module_path, module_name, work)
+                        if not nested_path.complete or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT:
+                            complete <- false
+                            return
+                        proof_replay_control_pattern_source_formal_type_find(body, function_name, parameter, found, function_line, function_offset, function_module, declaration_module, nested_path.scope, function_module_path, function_matches, parameter_matches, work, complete, depth + 1)
+                        function_module <- prior_module
+                    Ast::Decl.Scoped(body, _):
+                        proof_replay_control_pattern_source_formal_type_find(body, function_name, parameter, found, function_line, function_offset, function_module, declaration_module, module_path, function_module_path, function_matches, parameter_matches, work, complete, depth + 1)
+                    Ast::Decl.Invalid:
+                        complete <- false
+                        return
+                    _:
+                        pass
+
+        # Replay scans root declarations and the exact owner path independently of the producer.
+        def proof_replay_control_pattern_builtin_name_shadowed(declarations: darray[Ast::Decl]&, wanted: sview, owner_path: darray[sview]&, current_path: mutable darray[sview]&, work: mutable usize&, depth: usize) -> (complete: bool, shadowed: bool):
+            return (false, false) if depth >= PROOF_PATTERN_SOURCE_TYPE_DEPTH_LIMIT or not proof_replay_control_pattern_source_charge(1, work)
+            for declaration in declarations |wanted, owner_path, current_path, work, depth|:
+                return (false, false) if not proof_replay_control_pattern_source_charge(1, work)
+                match declaration:
+                    Ast::Decl.Alias(name, _, _) | Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _):
+                        same_name: (complete: bool, equal: bool) = proof_replay_control_pattern_source_text_equal(name, wanted, work)
+                        return (false, false) if not same_name.complete
+                        return (true, true) if same_name.equal
+                    Ast::Decl.Module(module_name, nested, _):
+                        nested_path: (complete: bool, scope: darray[sview]) = proof_replay_global_constant_scope_with_module_and_work(current_path, module_name, work)
+                        return (false, false) if not nested_path.complete or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
+                        continue if nested_path.scope.count > owner_path.count
+                        path_matches: mutable bool = true
+                        for index in 0..<nested_path.scope.count |index, nested_path, owner_path, work, path_matches|:
+                            module_match: (complete: bool, equal: bool) = proof_replay_control_pattern_source_text_equal(nested_path.scope[index], owner_path[index], work)
+                            return (false, false) if not module_match.complete or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
+                            path_matches <- false if not module_match.equal
+                        continue if not path_matches
+                        nested_status: (complete: bool, shadowed: bool) = proof_replay_control_pattern_builtin_name_shadowed(nested, wanted, owner_path, nested_path.scope, work, depth + 1)
+                        return nested_status if not nested_status.complete or nested_status.shadowed
+                    Ast::Decl.Scoped(nested, _):
+                        nested_status: (complete: bool, shadowed: bool) = proof_replay_control_pattern_builtin_name_shadowed(nested, wanted, owner_path, current_path, work, depth + 1)
+                        return nested_status if not nested_status.complete or nested_status.shadowed
+                    Ast::Decl.Invalid:
+                        return (false, false)
+                    _:
+                        pass
+            return (true, false)
+
+        # Qualified import scopes can be matched exactly. A simple module spelling may be
+        # shared by siblings, so keep the conservative any-ancestor match for that case.
+        def proof_replay_control_pattern_import_scope_visible(owner_path: darray[sview]&, import_module: sview, work: mutable usize&) -> (complete: bool, visible: bool):
+            if import_module == "":
+                return (true, true)
+            empty_scope: darray[sview] = []
+            normalized: (complete: bool, scope: darray[sview]) = proof_replay_global_constant_scope_with_module_and_work(empty_scope, import_module, work)
+            return (false, false) if not normalized.complete or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
+            if normalized.scope.count > 1:
+                return (true, false) if owner_path.count < normalized.scope.count
+                for index in 0..<normalized.scope.count |index, owner_path, normalized, work|:
+                    same_module: (complete: bool, equal: bool) = proof_replay_control_pattern_source_text_equal(owner_path[index], normalized.scope[index], work)
+                    return (false, false) if not same_module.complete or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
+                    return (true, false) if not same_module.equal
+                return (true, true)
+            for segment in owner_path |segment, import_module, work|:
+                same_module: (complete: bool, equal: bool) = proof_replay_control_pattern_source_text_equal(segment, import_module, work)
+                return (false, false) if not same_module.complete
+                return (true, true) if same_module.equal
+            (true, false)
+
+        def proof_replay_control_pattern_builtin_import_shadowed(annotations: darray[Ast::EnumAnnotation]&, wanted: sview, owner_path: darray[sview]&, work: mutable usize&) -> (complete: bool, shadowed: bool):
+            for annotation in annotations |wanted, work|:
+                return (false, false) if not proof_replay_control_pattern_source_charge(1, work)
+                imported_name: sview = ""
+                wildcard_marker: (complete: bool, equal: bool) = proof_replay_control_pattern_source_text_equal(annotation.name, "__binding_wildcard_import", work)
+                return (false, false) if not wildcard_marker.complete
+                if wildcard_marker.equal:
+                    wildcard_scope: (complete: bool, visible: bool) = proof_replay_control_pattern_import_scope_visible(owner_path, annotation.module, work)
+                    return (false, false) if not wildcard_scope.complete
+                    return (false, false) if wildcard_scope.visible
+                    continue
+                from_member_marker: (complete: bool, equal: bool) = proof_replay_control_pattern_source_text_equal(annotation.owner, "__from_member", work)
+                return (false, false) if not from_member_marker.complete
+                if from_member_marker.equal:
+                    imported_name <- annotation.name
+                using_alias_marker: (complete: bool, equal: bool) = proof_replay_control_pattern_source_text_equal(annotation.name, "__using_alias", work)
+                return (false, false) if not using_alias_marker.complete
+                if using_alias_marker.equal:
+                    imported_name <- annotation.owner
+                using_member_marker: (complete: bool, equal: bool) = proof_replay_control_pattern_source_text_equal(annotation.name, "__using_member", work)
+                return (false, false) if not using_member_marker.complete
+                same_name: (complete: bool, equal: bool) = proof_replay_control_pattern_source_text_equal(imported_name, wanted, work) if imported_name != "" else (true, false)
+                return (false, false) if not same_name.complete
+                if same_name.equal:
+                    import_scope: (complete: bool, visible: bool) = proof_replay_control_pattern_import_scope_visible(owner_path, annotation.module, work)
+                    return (false, false) if not import_scope.complete
+                    return (true, true) if import_scope.visible
+            return (true, false)
+
+        # Replay owns the formal lookup and builtin-shadow validation. Seed source work so each
+        # scan fits this CONTROL lane's remaining allowance, then transfer the measured delta.
+        def proof_replay_control_pattern_formal_type(report: ProofReport&, function_name: sview, scrutinee: Ast::Expr, work: mutable usize&, replay_cache: mutable ProofReplayDeterministicCallReplayCache&) -> Ast::Expr:
             return Ast::Expr.Absent if:
                 PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT < PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
                 work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             remaining: usize = PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work
             seed: usize = PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT - remaining
             bounded_work: mutable usize = seed
-            pattern_type: Ast::Expr = proof_pattern_source_formal_type(report, function_name, scrutinee, &bounded_work)
+            parameter: mutable sview = ""
+            match proof_strip_parens(scrutinee):
+                Ast::Expr.Ident(name, _):
+                    parameter <- name
+                _:
+                    return Ast::Expr.Absent
+            return Ast::Expr.Absent if parameter == "" or function_name == ""
+            found: mutable Ast::Expr = Ast::Expr.Absent
+            function_line: mutable u32 = 0
+            function_offset: mutable usize = 0
+            function_module: mutable sview = ""
+            declaration_module: mutable sview = ""
+            module_path: mutable darray[sview] = []
+            function_module_path: mutable darray[sview] = []
+            function_matches: mutable usize = 0
+            parameter_matches: mutable usize = 0
+            complete: mutable bool = true
+            proof_replay_control_pattern_source_formal_type_find(report.source.source_declarations, function_name, parameter, &found, &function_line, &function_offset, &function_module, &declaration_module, &module_path, &function_module_path, &function_matches, &parameter_matches, &bounded_work, &complete, 0)
+            return Ast::Expr.Absent if not complete or function_matches != 1 or parameter_matches != 1
+            if proof_pattern_is_string_type(found) or proof_pattern_is_char_type(found):
+                type_name: sview = proof_pattern_type_name(found)
+                replay_generic_work: mutable usize = 0
+                generic_shadowed: bool = proof_replay_type_bound_enum_generic_identity_shadowed_with_work(report, function_line, function_offset, declaration_module, type_name, &replay_generic_work, &replay_cache)
+                return Ast::Expr.Absent if generic_shadowed or replay_generic_work > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return Ast::Expr.Absent if replay_generic_work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT - bounded_work
+                bounded_work <- bounded_work + replay_generic_work
+                current_path: mutable darray[sview] = []
+                declaration_shadow: (complete: bool, shadowed: bool) = proof_replay_control_pattern_builtin_name_shadowed(report.source.source_declarations, type_name, function_module_path, &current_path, &bounded_work, 0)
+                return Ast::Expr.Absent if not declaration_shadow.complete or declaration_shadow.shadowed
+                import_shadow: (complete: bool, shadowed: bool) = proof_replay_control_pattern_builtin_import_shadowed(report.source.source_annotations, type_name, function_module_path, &bounded_work)
+                return Ast::Expr.Absent if not import_shadow.complete or import_shadow.shadowed
+            pattern_type: Ast::Expr = found
             if bounded_work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT or bounded_work < seed:
                 work <- PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
                 return Ast::Expr.Absent
@@ -174,13 +390,13 @@ extend ElisaProof:
                         work <- work + owner_source_work
                         body: mutable darray[Ast::Stmt] = []
                         owner_matches: mutable usize = 0
-                        return false if not proof_replay_control_find_owner_body(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, &body, &owner_matches, work, 0) or owner_matches != 1
+                        return false if not proof_replay_control_find_owner_body(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, report.analysis_2.replay_owner_offset_valid, &body, &owner_matches, work, 0) or owner_matches != 1
                         # Calls, assignments, moves, unknown syntax, and local rebinding all
                         # make the borrowed string's value unstable for a later arm assertion.
                         return not proof_replay_control_pattern_body_touches_with_work(report, body, name, true, work)
                     _:
                         return false
-            return proof_replay_control_stable_expression_budgeted(report, trace, scrutinee, work, owner_source_work, 0)
+            return proof_replay_control_stable_expression_budgeted(report, trace, scrutinee, work, 0)
 
         def proof_replay_control_pattern_exact(pattern: Ast::Pattern, type_expression: Ast::Expr) -> bool:
             if not (type_expression is Ast::Expr.Absent):
@@ -191,6 +407,7 @@ extend ElisaProof:
         def proof_replay_control_pattern_condition(report: ProofReport&, pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr, work: mutable usize&) -> Ast::Expr?:
             return null if:
                 not proof_replay_control_pattern_repeat_charge(pattern, 3, work)
+                (not (type_expression is Ast::Expr.Absent) and not proof_replay_control_pattern_string_scans_reserve(pattern, type_expression, 2, 0, work))
                 not proof_match_closed_pattern(pattern)
             names: mutable darray[sview] = []
             values: mutable darray[Ast::Expr] = []
