@@ -115,6 +115,19 @@ multi_nominal = shape.split("Ast::Expr.IndexN(head, arguments, _):", 1)[1]
 assert "nominal_arity.arity != 1" in single_nominal
 assert "nominal_arity.arity != arguments.count" in multi_nominal
 
+# Source normalization applies the same nominal arity contract before replay builds the
+# certificate-side mirror. Keep both producer application forms and declaration lookups aligned.
+source_nominal_arity = function_body("proof_source_conversion_nominal_generic_arity")
+assert "formal_counts.count != declared_count" in source_nominal_arity
+assert "not index.types.declared_type_generic_formal_counts_valid" in source_nominal_arity
+assert source_nominal_arity.index("not index.types.declared_type_generic_formal_counts_valid") < source_nominal_arity.index("return (true, false, 0) if declared_count == 0")
+assert "proof_source_conversion_scoped_owner_lookup(name, owner" in source_nominal_arity
+assert "proof_source_conversion_scoped_lookup(name, normalized.head" in source_nominal_arity
+assert "proof_source_conversion_name_lookup(name, index.types.declared_types" in source_nominal_arity
+source_shape = function_body("proof_source_conversion_alias_type_expression_safe")
+assert "nominal_arity.arity != 1" in source_shape
+assert "nominal_arity.arity != arguments.count" in source_shape
+
 source_builtin_head = function_body("proof_source_conversion_builtin_generic_type_head")
 assert "owner_target.blocks_parent" in source_builtin_head
 assert "root_target.blocks_parent" in source_builtin_head
