@@ -63,6 +63,12 @@ scope_shape = actual_shape.split("Ast::Expr.Scope(parent, name, _):", 1)[1].spli
 assert "proof_replay_call_conversion_generic_root(parent, work, 0)" in scope_shape
 assert "proof_replay_call_conversion_alias_formal_head(root.name, formal_owner_row, call_target, work)" in scope_shape
 assert "not formal_head.complete or formal_head.found" in scope_shape
+assert "proof_replay_call_conversion_non_generic_alias_target_shape_safe(qualified.row, qualified.target" in scope_shape
+
+non_generic_body = function_body("proof_replay_call_conversion_non_generic_alias_target_shape_safe")
+assert "not proof_replay_call_conversion_alias_work_add(work, 1)" in non_generic_body
+assert "aliases.field_conversion_alias_has_formals[row]" in non_generic_body
+assert "proof_replay_call_conversion_type_argument_shape_safe(target," in non_generic_body
 
 replay_builtin_head = function_body("proof_replay_call_conversion_builtin_generic_type_head")
 assert 'name != "darray" and name != "view" and name != "array"' in replay_builtin_head
@@ -76,10 +82,15 @@ assert shape.count("proof_replay_call_conversion_builtin_generic_type_head(head,
 single_argument_alias = shape.split("Ast::Expr.Index(head, argument, _):", 1)[1].split("Ast::Expr.IndexN(head, arguments, _):", 1)[0]
 assert "field_conversion_alias_generic_application_valid[application.row]" in single_argument_alias
 assert "field_conversion_alias_generic_formal_counts[application.row] != 1" in single_argument_alias
+assert "if not application.found:" in single_argument_alias
+assert "type_argument_shape_safe(head," in single_argument_alias
+assert "type_argument_shape_safe(argument," in single_argument_alias
 multi_argument_alias = shape.split("Ast::Expr.IndexN(head, arguments, _):", 1)[1]
 assert "field_conversion_alias_has_formals[application.row]" in multi_argument_alias
 assert "field_conversion_alias_generic_application_valid[application.row]" in multi_argument_alias
 assert "arguments.count != call_target.aliases.field_conversion_alias_generic_formal_counts[application.row]" in multi_argument_alias
+assert "if not application.found:" in multi_argument_alias
+assert "type_argument_shape_safe(head," in multi_argument_alias
 
 source_builtin_head = function_body("proof_source_conversion_builtin_generic_type_head")
 assert "owner_target.blocks_parent" in source_builtin_head
