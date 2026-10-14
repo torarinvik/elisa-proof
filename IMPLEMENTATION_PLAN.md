@@ -11,7 +11,7 @@ This is the active high-return sequence. Older toolchain snapshots and experimen
 
 4. **Verify proof/kernel soundness and high-return performance changes.** The local proof main now includes arithmetic safety leaf/shape hardening, aggregate traversal, bounded quantifier scans, and binary/unary operator arity checks. Source-only budget, width, index, AST-mirror, quantifier-premise, source-length, and diff checks pass. Runtime refusal/replay testing correctly refuses the old binary because it does not match the current proof HEAD; the Stage1 source checkout is also dirty and its product is stale. Once a clean source-matched Stage1 exists, run malformed-slice/sentinel and operator/arity mutations, goal-fact, postcondition-context, index-safety, type-bound-local, linear-certificate, structural-replay, and source-authority regressions, then the relevant proof suite. Compare work counters and adversarial scaling where available, retaining bounded accounting for walks, allocation, hashing, and probes.
 
-5. **Commit qualified source improvements and refresh this plan.** Core commits ce002c04 and f8735f58 are on main and synced to origin; f873’s focused SMT relevant-formal tests pass, while the recursive `ensure` gate remains red. Proof main is seventeen commits ahead of origin; recent kernel hardening is committed locally but not runtime-qualified, and additional bounded-work changes remain in the working tree pending static verification and a source-matched runtime lane. Record exact compiler/proof revisions and commands with results. Keep timing skipped and refresh the proof pin only after Stage0 and Stage1 come from one coherent tuple.
+5. **Commit qualified source improvements and refresh this plan.** Core commits ce002c04 and f8735f58 are on main and synced to origin; f873’s focused SMT relevant-formal tests pass, while the recursive `ensure` gate remains red. Proof main is twenty commits ahead of origin; recent kernel and bounded-work changes are committed locally and pass focused static checks, but remain runtime-unqualified pending a source-matched compiler lane. Record exact compiler/proof revisions and commands with results. Keep timing skipped and refresh the proof pin only after Stage0 and Stage1 come from one coherent tuple.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -25133,8 +25133,16 @@ the tactic source quota. Static diff check passes; no tests or build were run.
 
 ### 23.27.1425 Reject inconsistent branch widths in fixed-width conditionals (2026-10-14)
 
-The signed fixed-width safety walk now rejects conditional branches with conflicting known
-signedness and also rejects differing known widths within the same signedness. Previously only
-signed/unsigned conflicts were refused, allowing a source-neutral arena to combine branches with
-incompatible width evidence. The condition checks are symmetric and preserve unknown-width branches
-for the existing fail-closed safety recursion. `git diff --check` passes; no tests or build were run.
+The signed and unsigned fixed-width safety walks now reject conditional branches with conflicting
+known signedness and differing known widths within the same signedness. The ordinary, cached and
+goal-metered variants apply the same checks before recursing into the condition and branch values.
+Previously only signed/unsigned conflicts were refused, allowing a source-neutral arena to combine
+branches with incompatible width evidence. Unknown-width branches continue through the existing
+safety recursion. `git diff --check` passes; no tests or build were run.
+
+### 23.27.1426 Traverse field receivers in producer arithmetic guards (2026-10-14)
+
+Signed and unsigned producer safety walks now recurse through field and scope receivers, matching
+kernel replay for expressions such as `(x + 1).i8()`. The signed legacy entry point follows the
+same path as the work-aware helper. This closes a source-side false-safe precheck; the audit found
+no kernel replay verdict bypass. `git diff --check` passes; no tests or build were run.
