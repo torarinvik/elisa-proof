@@ -456,14 +456,13 @@ extend ElisaProof:
             trace_ok: mutable bool = (proof_tactic_replay_with_shared_work(state, annotations, tree.primitive_operator_mask, source_bound, &tree.total_solver_work, &tree.total_solver_preflight_work) can Global{Read,Write})
             kernel_trace_ok: mutable bool = (proof_tactic_kernel_trace_replay_with_work(state, annotations, &tree.total_kernel_replay_work) can Global{Read,Write})
             kernel_ok: mutable bool = (proof_tactic_kernel_replay_with_trace_work(state, annotations, &tree.total_kernel_replay_work) can Global{Read,Write})
-            # The combined certificate predicate is exactly these two independent kernel
-            # results. Replaying both through the convenience wrapper would duplicate the work.
-            certificate_ok: mutable bool = kernel_trace_ok and kernel_ok
+            certificate_ok: mutable bool = kernel_trace_ok and kernel_ok and (trace_ok if source_bound else true)
             if branch_present:
                 trace_ok <- trace_ok and branch_trace_ok
                 kernel_trace_ok <- kernel_trace_ok and branch_kernel_trace_ok
                 kernel_ok <- branch_kernel_ok
                 certificate_ok <- branch_certificate_ok
+            certificate_ok <- certificate_ok and trace_ok if source_bound
             tree_node: usize = tree.states.count
             state_snapshot_charge: usize = state.facts.count + state.initial_facts.count + state.trace_facts.count + state.trace.count
             return exhausted if:
@@ -487,16 +486,14 @@ extend ElisaProof:
             # for every child return rescans the growing postorder prefix quadratically.
             if depth == 0:
                 tree_certificate_ok: bool = (proof_tactic_json_tree_certificate_replay(tree, tree_node, annotations) can Global{Read,Write})
-                certificate_ok <- tree_certificate_ok
-                branch_certificate_ok <- tree_certificate_ok if branch_present
+                certificate_ok <- tree_certificate_ok and (trace_ok if source_bound else true)
+                branch_certificate_ok <- tree_certificate_ok and (trace_ok if source_bound else true) if branch_present
             work_exhausted: bool = state.budget_exhausted or tree.total_actions >= PROOF_JSON_MAX_TOTAL_ACTIONS or tree.total_trace_fact_snapshots >= PROOF_JSON_MAX_TRACE_FACT_SNAPSHOTS or tree.total_expression_work >= PROOF_JSON_EXPRESSION_WORK_LIMIT or tree.total_kernel_replay_work >= ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT or tree.total_solver_work >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or tree.total_solver_preflight_work >= PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT or tree.total_action_ast_work >= PROOF_JSON_ACTION_AST_WORK_LIMIT
             result_reason: sview = "portable tactic script admitted" if certificate_ok else "portable tactic script exhausted an aggregate work budget" if work_exhausted else "portable tactic script did not close an independently replayable goal"
             return ProofTacticJsonResult{valid: true, solved: state.solved or branch_certificate_ok, trace_replayed: trace_ok, kernel_trace_replayed: kernel_trace_ok, kernel_replayed: kernel_ok, certificate_replayed: certificate_ok, branch_present: branch_present, branch_certificate_replayed: branch_certificate_ok, action_count: state.action_count, accepted_count: accepted_count, reason: result_reason, tree_node: tree_node}
 
     private:
-        # Candidate engine for the checked-view wrapper below. Keep the report-taking form
-        # private: a caller-assembled or subsequently modified ProofReport is not source
-        # authority, even when its kernel roots happen to match the imported JSON state.
+        # Private: a caller-supplied ProofReport is not source authority.
         def proof_tactic_json_run_source_candidate[@r](root: JsonValueHandle[r], source_state: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticJsonBranchScratch]& @r, report: ProofReport&, goal_id: usize) -> ProofTacticJsonResult can[Global.Read, Global.Write]:
             invalid: ProofTacticJsonResult = ProofTacticJsonResult{reason: "invalid source-bound proof script"}
             kernel_exhausted: ProofTacticJsonResult = ProofTacticJsonResult{reason: "source-bound tactic import exhausted the aggregate kernel work budget"}
@@ -524,10 +521,10 @@ extend ElisaProof:
             for annotation in report.source.source_annotations |annotations|:
                 annotations.push(annotation)
             attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
-            # Resource safety is represented by an arena transition certificate. Its source AST
-            # mirror is intentionally the inert proposition `true`, so proposition tactics must
-            # never be allowed to stand in for replay of that resource trace.
-            return invalid if attempt.rule == "resource-safety"
+            # These rules use inert `true` mirrors and require their dedicated arena replayers.
+            # Frame attempts are also synthetic: their semantic proposition is an arena event,
+            # not the BoolLit mirror. Never let the generic tactic importer initialize from it.
+            return invalid if attempt.rule in {"resource-safety", "effect-containment", "structural-safety", "frame-spec", "frame-allow", "frame-preserve"}
             facts: mutable darray[Ast::Expr] = []
             return invalid if attempt.facts_start > report.analysis_1.certificate_facts.count or attempt.facts_count > report.analysis_1.certificate_facts.count - attempt.facts_start
             facts_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(source_state, "facts", &tree.total_expression_work)
@@ -550,7 +547,11 @@ extend ElisaProof:
             return kernel_exhausted if not source_state_matches and tree.total_kernel_replay_work >= ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT
             return invalid if not source_state_matches
             proof_tactic_json_initialize_state(state, facts, goal.value, "state initialized from imported source goal")
-            return (proof_tactic_json_run_actions(root, annotations, state, tree, scratch, 0, true, true) can Global{Read,Write})
+            previous_float_mode: bool = proof_float_mode can Global.Read
+            proof_float_mode <- attempt.float_mode
+            result: ProofTacticJsonResult = (proof_tactic_json_run_actions(root, annotations, state, tree, scratch, 0, true, true) can Global{Read,Write})
+            proof_float_mode <- previous_float_mode
+            return result
 
     public:
         # Source-bound tactic admission begins from an opaque checked view, never a bare report.

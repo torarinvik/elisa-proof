@@ -1,4 +1,4 @@
-# Strict reader for `elisa-proof-package-v2`, with compatibility for `elisa-proof-package-v1`.
+# Strict reader for `elisa-proof-package-v3`, with compatibility for package v1 and v2.
 # It is part of the trusted replay base: whatever it builds is what the kernel checks, so it
 # accepts one spelling of each package and nothing else.
 #
@@ -12,7 +12,8 @@
 #   budgets, theorems, hypotheses, and string bytes by `ProofPackageLimit`.
 
 const PROOF_PACKAGE_INPUT_FORMAT_V1: sview = "elisa-proof-package-v1"
-const PROOF_PACKAGE_INPUT_FORMAT: sview = "elisa-proof-package-v2"
+const PROOF_PACKAGE_INPUT_FORMAT_V2: sview = "elisa-proof-package-v2"
+const PROOF_PACKAGE_INPUT_FORMAT: sview = "elisa-proof-package-v3"
 
 const module ProofPackageLimit:
     THEOREMS: usize = 65536
@@ -24,6 +25,9 @@ const module ProofPackageLimit:
     # PROOF_RUNTIME_IDENTITY_BYTE_LIMIT; this caps a package of many theorems over a shared DAG.
     IDENTITY_BYTES: usize = 67108864
     DECIMAL_DIGITS: usize = 19
+    # Package JSON numbers are exact nonnegative integers below 2^53, so no admitted token
+    # needs more than sixteen decimal digits. Reject giant numeric tokens before DOM parsing.
+    JSON_INTEGER_DIGITS: usize = 16
     # The JSON DOM parser pre-counts each container by scanning its contents. Bound the
     # depth-multiplied scan work to this factor of the maximum admitted package size.
     JSON_CONTAINER_SCAN_FACTOR: usize = 8
@@ -143,11 +147,15 @@ def proof_package_json_preflight(text: sview) -> (numbers_canonical: bool, withi
             index <- index + 1
         elif byte == '-'.u8() or (byte >= '0'.u8() and byte <= '9'.u8()):
             return (false, false) if byte == '-'.u8()
-            while index < length |index, text|:
+            digits: mutable usize = 0
+            while index < length |index, text, digits|:
                 token_byte: u8 = sview_at(text, index)
                 is_number_byte: bool = (token_byte >= '0'.u8() and token_byte <= '9'.u8()) or token_byte == '.'.u8() or token_byte == 'e'.u8() or token_byte == 'E'.u8() or token_byte == '+'.u8() or token_byte == '-'.u8()
                 break if not is_number_byte
                 return (false, false) if token_byte == '.'.u8() or token_byte == 'e'.u8() or token_byte == 'E'.u8() or token_byte == '+'.u8() or token_byte == '-'.u8()
+                if token_byte >= '0'.u8() and token_byte <= '9'.u8():
+                    return (false, false) if digits >= ProofPackageLimit::JSON_INTEGER_DIGITS
+                    digits <- digits + 1
                 index <- index + 1
         else:
             index <- index + 1
@@ -306,8 +314,11 @@ def proof_package_read_header[@r](root: JsonValueHandle[r]) -> ProofPackageVerdi
     root_keys: darray[sview] = ["format", "source", "trust", "kernel", "theorems"]
     return proof_package_malformed("package-schema") if not proof_package_has_exactly(root, &root_keys)
     format: (known: bool, value: sview) = proof_package_string_field(root, "format")
-    return proof_package_malformed("format") if not format.known or (format.value != PROOF_PACKAGE_INPUT_FORMAT and format.value != PROOF_PACKAGE_INPUT_FORMAT_V1)
-    source_v2: bool = format.value == PROOF_PACKAGE_INPUT_FORMAT
+    format_v1: bool = format.known and format.value == PROOF_PACKAGE_INPUT_FORMAT_V1
+    format_v2: bool = format.known and format.value == PROOF_PACKAGE_INPUT_FORMAT_V2
+    format_v3: bool = format.known and format.value == PROOF_PACKAGE_INPUT_FORMAT
+    return proof_package_malformed("format") if not format_v1 and not format_v2 and not format_v3
+    source_v2: bool = format_v2 or format_v3
     source: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(root, "source")
     source_keys: darray[sview] = ["path", "bytes", "fingerprint", "admissible", "authenticated", "expanded", "files"] if source_v2 else ["path", "bytes", "fingerprint", "admissible", "authenticated"]
     return proof_package_malformed("source-schema") if not source.known or not proof_package_has_exactly(source.value, &source_keys)
@@ -330,9 +341,10 @@ def proof_package_read_header[@r](root: JsonValueHandle[r]) -> ProofPackageVerdi
             path_entry: (known: bool, value: sview) = proof_package_string_value(entry)
             return proof_package_malformed("source-schema") if not path_entry.known or sview_len(path_entry.value) == 0
     trust: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(root, "trust")
-    trust_keys: darray[sview] = ["hypotheses", "source_correspondence", "fingerprints"]
+    trust_keys: darray[sview] = ["logic_mode", "hypotheses", "source_correspondence", "fingerprints"] if format_v3 else ["hypotheses", "source_correspondence", "fingerprints"]
     return proof_package_malformed("trust-schema") if:
         not trust.known or not proof_package_has_exactly(trust.value, &trust_keys)
+        (format_v3 and not proof_package_string_is(proof_package_string_field(trust.value, "logic_mode"), "classical_propositional"))
         not proof_package_string_is(proof_package_string_field(trust.value, "hypotheses"), "adapter")
         not proof_package_string_is(proof_package_string_field(trust.value, "source_correspondence"), "adapter")
         not proof_package_string_is(proof_package_string_field(trust.value, "fingerprints"), "identity-hint")
