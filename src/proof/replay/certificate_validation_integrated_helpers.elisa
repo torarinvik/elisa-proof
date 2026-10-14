@@ -7,15 +7,21 @@ extend ElisaProof:
         def proof_replay_trace_range_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
             return trace.premises_start <= report.analysis_1.traces.premises.count and trace.premises_count <= report.analysis_1.traces.premises.count - trace.premises_start
 
-        def proof_replay_dependency_in_stack(names: darray[sview]&, dependency: sview) -> bool:
-            return any existing in names where existing == dependency
+        def proof_replay_dependency_in_stack(names: darray[sview]&, dependency: sview, source_work: mutable usize&) -> (complete: bool, found: bool):
+            for existing in names |existing, dependency, source_work|:
+                return (false, false) if not proof_replay_dependency_work_charge(1, source_work) or not proof_replay_dependency_text_compare(existing, dependency, source_work)
+                return (true, true) if existing == dependency
+            return (true, false)
 
         # Dependency names describe declaration-level SCCs, but several obligations can belong
         # to one declaration. Track the exact certificate index as well: a summary may use an SCC
         # induction edge, while direct validation of the same obligation must never re-enter that
         # certificate and consume the native stack.
-        def proof_replay_certificate_in_stack(certificates: darray[usize]&, certificate_index: usize) -> bool:
-            return any existing in certificates where existing == certificate_index
+        def proof_replay_certificate_in_stack(certificates: darray[usize]&, certificate_index: usize, source_work: mutable usize&) -> (complete: bool, found: bool):
+            for existing in certificates |existing, certificate_index, source_work|:
+                return (false, false) if not proof_replay_dependency_work_charge(1, source_work)
+                return (true, true) if existing == certificate_index
+            return (true, false)
 
         # Certificate rules are a closed kernel protocol. An unknown label must not fall through
         # to ordinary proposition replay: doing so would let a future or malformed specialized
@@ -61,7 +67,11 @@ extend ElisaProof:
             return kind == "loop-invariant-missing"
 
         def proof_replay_dependency_work_charge(amount: usize, source_work: mutable usize&) -> bool:
-            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                return false
+            if amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
             source_work <- source_work + amount
             return true
 
@@ -81,9 +91,9 @@ extend ElisaProof:
             capacity: usize = proof_name_index_capacity(row_count)
             return (false, rows) if:
                 capacity == 0
-                capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3
+                capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 5
                 row_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
-                not proof_replay_dependency_work_charge(capacity * 3, source_work)
+                not proof_replay_dependency_work_charge(capacity * 5, source_work)
                 not proof_replay_dependency_work_charge(row_count * 2, source_work)
             rows.names.extend(names)
             rows.hashes.resize(capacity)
@@ -95,6 +105,7 @@ extend ElisaProof:
                 rows.tails[slot] <- row_count
             for row in 0..<row_count |row, rows, capacity, source_work, row_count|:
                 return (false, rows) if not proof_replay_dependency_work_charge(sview_len(rows.names[row]), source_work)
+                return (false, rows) if not proof_replay_dependency_work_charge(1, source_work)
                 rows.next_indices[row] <- row_count
                 hash: u32 = proof_name_hash(rows.names[row])
                 slot: mutable usize = (hash.i64() % capacity.i64()).usize()
@@ -104,6 +115,7 @@ extend ElisaProof:
                     return (false, rows) if not proof_replay_dependency_work_charge(1, source_work)
                     head: usize = rows.heads[slot]
                     if head == row_count:
+                        return (false, rows) if not proof_replay_dependency_work_charge(3, source_work)
                         rows.hashes[slot] <- hash
                         rows.heads[slot] <- row
                         rows.tails[slot] <- row
@@ -117,6 +129,7 @@ extend ElisaProof:
                         if previous_name == rows.names[row]:
                             tail_index: usize = rows.tails[slot]
                             return (false, rows) if tail_index >= row or tail_index >= row_count
+                            return (false, rows) if not proof_replay_dependency_work_charge(2, source_work)
                             rows.next_indices[tail_index] <- row
                             rows.tails[slot] <- row
                             placed <- true
@@ -136,8 +149,8 @@ extend ElisaProof:
             return true
 
         def proof_replay_dependency_owner_cache_initialize(owner_lines: mutable darray[u32]&, owner_resolved: mutable darray[bool]&, row_count: usize, source_work: mutable usize&) -> bool:
-            return false if row_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
-            return false if not proof_replay_dependency_work_charge(row_count * 2, source_work)
+            return false if row_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+            return false if not proof_replay_dependency_work_charge(row_count * 4, source_work)
             owner_lines.resize(row_count)
             owner_resolved.resize(row_count)
             for row in 0..<row_count |row, owner_lines, owner_resolved|:
@@ -148,6 +161,7 @@ extend ElisaProof:
         def proof_replay_dependency_attempt_owner_line(report: ProofReport&, index: ProofReplayDependencyRowIndex, owner_lines: mutable darray[u32]&, owner_resolved: mutable darray[bool]&, row: usize, attempt: ProofGoalAttempt, source_work: mutable usize&) -> u32:
             return 0 if row >= index.names.count or owner_lines.count != index.names.count or owner_resolved.count != index.names.count
             if not owner_resolved[row]:
+                return 0 if not proof_replay_dependency_work_charge(2, source_work)
                 owner_lines[row] <- proof_replay_trace_owner_source_position_line_for_attempt_with_work(report, attempt, source_work)
                 owner_resolved[row] <- true
             return owner_lines[row]
@@ -162,6 +176,7 @@ extend ElisaProof:
         def proof_replay_dependency_certificate_owner_line(report: ProofReport&, index: ProofReplayDependencyRowIndex, owner_lines: mutable darray[u32]&, owner_resolved: mutable darray[bool]&, row: usize, certificate: ProofGoalCertificate, source_work: mutable usize&) -> u32:
             return 0 if row >= index.names.count or owner_lines.count != index.names.count or owner_resolved.count != index.names.count
             if not owner_resolved[row]:
+                return 0 if not proof_replay_dependency_work_charge(2, source_work)
                 owner_lines[row] <- proof_replay_trace_owner_source_position_line_with_work(report, certificate, source_work)
                 owner_resolved[row] <- true
             return owner_lines[row]
@@ -179,11 +194,11 @@ extend ElisaProof:
             return false if report.results.goal_attempts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2 or report.results.findings.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
             attempts: mutable darray[sview] = []
             for attempt in report.results.goal_attempts |attempts, source_work|:
-                return false if not proof_replay_dependency_work_charge(1, source_work)
+                return false if not proof_replay_dependency_work_charge(3, source_work)
                 attempts.push(attempt.name)
             findings: mutable darray[sview] = []
             for finding in report.results.findings |findings, source_work|:
-                return false if not proof_replay_dependency_work_charge(1, source_work)
+                return false if not proof_replay_dependency_work_charge(3, source_work)
                 findings.push(finding.name)
             attempt_index: (complete: bool, rows: ProofReplayDependencyRowIndex) = proof_replay_dependency_row_index_build(attempts, source_work)
             return false if not attempt_index.complete
@@ -200,7 +215,7 @@ extend ElisaProof:
             return false if report.analysis_1.certificates.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
             certificates: mutable darray[sview] = []
             for certificate in report.analysis_1.certificates |certificates, source_work|:
-                return false if not proof_replay_dependency_work_charge(1, source_work)
+                return false if not proof_replay_dependency_work_charge(3, source_work)
                 certificates.push(certificate.name)
             certificate_index: (complete: bool, rows: ProofReplayDependencyRowIndex) = proof_replay_dependency_row_index_build(certificates, source_work)
             return false if not certificate_index.complete
@@ -218,7 +233,7 @@ extend ElisaProof:
             return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or summary_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             names: mutable darray[sview] = []
             for summary in report.analysis_1.executables.summaries |summary, names, source_work|:
-                return false if not proof_replay_dependency_work_charge(1, source_work)
+                return false if not proof_replay_dependency_work_charge(3, source_work)
                 names.push(summary.name)
             indexed: (complete: bool, rows: ProofReplayDependencyRowIndex) = proof_replay_dependency_row_index_build(names, source_work)
             return false if not indexed.complete
@@ -285,7 +300,9 @@ extend ElisaProof:
             attempt_index_value: usize = finding.goal_id
             attempt: ProofGoalAttempt = report.results.goal_attempts[attempt_index_value]
             return true if attempt.name != dependency
-            return proof_replay_dependency_attempt_row_matches_with_work(report, dependency, attempt, attempt_index_value, attempt_index, owner_lines, owner_resolved, owner_line, true, source_work)
+            matches: bool = proof_replay_dependency_attempt_row_matches_with_work(report, dependency, attempt, attempt_index_value, attempt_index, owner_lines, owner_resolved, owner_line, true, source_work)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return matches
 
         def proof_replay_dependency_is_checked[@r](report: mutable ProofReport& @r, dependency: sview, owner_line: u32, dependency_stack: darray[sview]&, dependency_depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global.Read, Global.Write]:
             return false if:
@@ -313,6 +330,7 @@ extend ElisaProof:
                     not proof_replay_dependency_work_charge(1, validation_workspace.source_scan_work_used)
                 attempt_owner_line: u32 = owner_line
                 attempt_owner_line <- proof_replay_dependency_attempt_owner_line(report, structural_cache.dependency_attempt_rows, &structural_cache.dependency_attempt_owner_lines, &structural_cache.dependency_attempt_owner_resolved, attempt_index, attempt, validation_workspace.source_scan_work_used) if owner_line != 0
+                return false if validation_workspace.source_scan_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 # An unresolved same-name attempt could be an unproven goal owned by this
                 # dependency. It must not disappear just because its source owner could not
                 # be authenticated; failed attempts need not have a finding or certificate.
@@ -338,7 +356,9 @@ extend ElisaProof:
                 return false if:
                     not proof_replay_dependency_row_matches(structural_cache.dependency_finding_rows, finding_index, finding.name, dependency, validation_workspace.source_scan_work_used)
                     not proof_replay_dependency_work_charge(1, validation_workspace.source_scan_work_used)
-                if proof_replay_dependency_finding_row_matches_with_work(report, dependency, finding, owner_line, structural_cache.dependency_attempt_rows, &structural_cache.dependency_attempt_owner_lines, &structural_cache.dependency_attempt_owner_resolved, validation_workspace.source_scan_work_used):
+                finding_matches: bool = proof_replay_dependency_finding_row_matches_with_work(report, dependency, finding, owner_line, structural_cache.dependency_attempt_rows, &structural_cache.dependency_attempt_owner_lines, &structural_cache.dependency_attempt_owner_resolved, validation_workspace.source_scan_work_used)
+                return false if validation_workspace.source_scan_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                if finding_matches:
                     return false if not proof_replay_finding_only_widens_state(finding.kind)
                 next_finding: usize = structural_cache.dependency_finding_rows.next_indices[finding_index]
                 return false if next_finding != report.results.findings.count and (next_finding <= finding_index or next_finding >= report.results.findings.count)
@@ -347,10 +367,14 @@ extend ElisaProof:
             return false if:
                 finding_index < report.results.findings.count or finding_visits > report.results.findings.count
                 not found_goal or not all_goals_proven
-            return true if proof_replay_dependency_in_stack(dependency_stack, dependency)
+            stack_lookup: (complete: bool, found: bool) = proof_replay_dependency_in_stack(dependency_stack, dependency, validation_workspace.source_scan_work_used)
+            return false if not stack_lookup.complete
+            return true if stack_lookup.found
             return false if dependency_depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
             next_stack: mutable darray[sview] = []
+            return false if not proof_replay_dependency_work_charge(dependency_stack.count * 2, validation_workspace.source_scan_work_used)
             next_stack.extend(dependency_stack)
+            return false if not proof_replay_dependency_work_charge(2, validation_workspace.source_scan_work_used)
             next_stack.push(dependency)
             found_certificate: mutable bool = false
             return false if:
@@ -368,6 +392,7 @@ extend ElisaProof:
                     not proof_replay_dependency_work_charge(1, validation_workspace.source_scan_work_used)
                 certificate_owner_line: u32 = owner_line
                 certificate_owner_line <- proof_replay_dependency_certificate_owner_line(report, structural_cache.dependency_certificate_rows, &structural_cache.dependency_certificate_owner_lines, &structural_cache.dependency_certificate_owner_resolved, certificate_index, certificate, validation_workspace.source_scan_work_used) if owner_line != 0
+                return false if validation_workspace.source_scan_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 return false if owner_line != 0 and certificate_owner_line == 0
                 if owner_line == 0 or certificate_owner_line == owner_line:
                     found_certificate <- true
@@ -404,7 +429,7 @@ extend ElisaProof:
                         not proof_replay_source_position_equal(call_position, position)
                         not proof_replay_mutable_local_text_compare_work_charge(callee_name, trace.dependency, source_work)
                         callee_name != trace.dependency
-                        proof_replay_local_binding_parameter_name_present_with_default_limit(report.source.source_declarations, trace.name, source_owner_line, callee_name, source_work, 0)
+                        proof_replay_local_binding_parameter_name_present_for_report_owner_with_work(report.source.source_declarations, trace.name, source_owner_line, report, callee_name, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
                     caller_body: mutable darray[Ast::Stmt] = []
                     return false if not proof_replay_source_owner_body_with_work(report, trace.name, source_owner_line, &caller_body, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     return proof_replay_source_call_locals_unshadowed_at_with_work(caller_body, report.source.source_annotations, source_call, source_work)
@@ -457,6 +482,7 @@ extend ElisaProof:
                 return false if sview_len(actual_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
                 validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + sview_len(actual_name)
                 return false if expected_name != actual_name
+                return false if not proof_replay_dependency_work_charge(4, validation_workspace.source_scan_work_used)
                 substitution_names.push(expected_name)
                 substitution_values.push(report.analysis_1.traces.summary_values[trace.summary_bindings_start + index])
             return false if not proof_replay_summary_expr_repeat_charge_with_work(instance, theorem.parameters_count + 1, validation_workspace.source_scan_work_used)

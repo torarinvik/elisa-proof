@@ -106,7 +106,13 @@ extend ElisaProof:
             # producer's resolved local value is not itself evidence that this call occurred.
             return false if not proof_replay_summary_direct_call_source_site_at_with_cache(report, trace, source_call.call, 0, validation_workspace.source_scan_work_used, &structural_cache.deterministic_calls)
             # A threaded call's exclusive `&` arguments are matched as the locals they lend.
-            threading: ProofReplayThreading = proof_replay_summary_threading_with_work(report, trace, summary, source_call.call, validation_workspace.source_scan_work_used)
+            if not structural_cache.initialized:
+                return false if not proof_replay_structural_validation_cache_build(report, validation_workspace.source_scan_work_used, &structural_cache)
+            return false if not structural_cache.complete
+            structural_cache.scratch.analysis_2.replay_owner_line <- report.analysis_2.replay_owner_line
+            structural_cache.scratch.analysis_2.replay_owner_offset <- report.analysis_2.replay_owner_offset
+            structural_cache.scratch.analysis_2.replay_owner_offset_valid <- report.analysis_2.replay_owner_offset_valid
+            threading: ProofReplayThreading = proof_replay_summary_threading_with_work(report, structural_cache.scratch, trace, summary, source_call.call, validation_workspace.source_scan_work_used)
             return false if:
                 not threading.valid
                 not proof_replay_summary_call_arguments_match_with_cache(report, trace, summary, proof_replay_thread_call_arguments(source_call.call, threading), validation_workspace.source_scan_work_used, &structural_cache.deterministic_calls)
@@ -272,9 +278,16 @@ extend ElisaProof:
                     kernel_equality_work: mutable usize = 0
                     same_kernel_expression: mutable bool = false
                     if candidate.kernel_expression < report.analysis_1.kernel.nodes.count:
-                        equality_limit: usize = proof_replay_trace_lookup_remaining_work(report)
-                        return false if equality_limit == 0
-                        same_kernel_expression <- ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public_with_work(report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, candidate.kernel_expression, premise, 0, equality_limit, &kernel_equality_work)
+                        if candidate.kernel_expression == premise:
+                            return false if not proof_replay_trace_lookup_charge(report)
+                            same_kernel_expression <- true
+                        else:
+                            root_shape: (complete: bool, may_equal: bool) = proof_replay_kernel_roots_may_equal(report, candidate.kernel_expression, premise)
+                            return false if not root_shape.complete
+                            if root_shape.may_equal:
+                                equality_limit: usize = proof_replay_trace_lookup_remaining_work(report)
+                                return false if equality_limit == 0
+                                same_kernel_expression <- ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public_with_work(report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, candidate.kernel_expression, premise, 0, equality_limit, &kernel_equality_work)
                     return false if not proof_replay_trace_lookup_charge_amount(report, kernel_equality_work)
                     if same_kernel_expression and (proof_replay_kernel_trace_valid_memo(report, candidate_index, owner, depth + 1, dependency_stack, revalidate_arena, active_certificates, validation_workspace, structural_cache) can Global{Read,Write}):
                         found <- true
@@ -282,6 +295,20 @@ extend ElisaProof:
                     candidate_index <- proof_replay_trace_chain_next(report, candidate_index)
                 return false if not found
             return (ElisaProofKernelReplay::proof_kernel_replay_goal_report_with_workspace(&report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, kernel_premises, trace.kernel_expression, validation_workspace) can Global{Read,Write})
+
+        # Different root kinds or operators can never be structurally equal. Check this small
+        # necessary condition before the full bounded tree walk used for provenance matching.
+        def proof_replay_kernel_roots_may_equal(report: mutable ProofReport&, left_root: usize, right_root: usize) -> (complete: bool, may_equal: bool):
+            return (true, false) if left_root >= report.analysis_1.kernel.nodes.count or right_root >= report.analysis_1.kernel.nodes.count
+            left: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[left_root]
+            right: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[right_root]
+            return (false, false) if:
+                not proof_replay_trace_lookup_charge(report)
+                not proof_replay_trace_lookup_charge_amount(report, sview_len(left.kind))
+                not proof_replay_trace_lookup_charge_amount(report, sview_len(right.kind))
+                not proof_replay_trace_lookup_charge_amount(report, sview_len(left.operator))
+                not proof_replay_trace_lookup_charge_amount(report, sview_len(right.operator))
+            return (true, left.kind == right.kind and left.operator == right.operator)
 
         def proof_replay_kernel_fact_root_is_traced_with_stack[@r](report: mutable ProofReport& @r, fact: usize, owner: sview, dependency_stack: darray[sview]&, revalidate_arena: bool, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global.Read, Global.Write]:
             return false if fact >= report.analysis_1.kernel.nodes.count
@@ -291,9 +318,16 @@ extend ElisaProof:
                 kernel_equality_work: mutable usize = 0
                 same_kernel_expression: mutable bool = false
                 if trace.kernel_expression < report.analysis_1.kernel.nodes.count:
-                    equality_limit: usize = proof_replay_trace_lookup_remaining_work(report)
-                    return false if equality_limit == 0
-                    same_kernel_expression <- ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public_with_work(report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, trace.kernel_expression, fact, 0, equality_limit, &kernel_equality_work)
+                    if trace.kernel_expression == fact:
+                        return false if not proof_replay_trace_lookup_charge(report)
+                        same_kernel_expression <- true
+                    else:
+                        root_shape: (complete: bool, may_equal: bool) = proof_replay_kernel_roots_may_equal(report, trace.kernel_expression, fact)
+                        return false if not root_shape.complete
+                        if root_shape.may_equal:
+                            equality_limit: usize = proof_replay_trace_lookup_remaining_work(report)
+                            return false if equality_limit == 0
+                            same_kernel_expression <- ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public_with_work(report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, trace.kernel_expression, fact, 0, equality_limit, &kernel_equality_work)
                 return false if not proof_replay_trace_lookup_charge_amount(report, kernel_equality_work)
                 return true if same_kernel_expression and (proof_replay_kernel_trace_valid_memo(report, trace_index, owner, 0, dependency_stack, revalidate_arena, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
                 trace_index <- proof_replay_trace_chain_next(report, trace_index)
@@ -315,7 +349,7 @@ extend ElisaProof:
                     fact: usize = report.analysis_1.kernel.children[node.children_start + index]
                     return false if not (proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, active_owner, dependency_stack, false, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
                 return true
-            if node.kind in {"resource-safety", "resource-scope"}:
+            if node.kind in {"resource-safety", "resource-scope", "resource-alternatives"}:
                 return false if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
                 for index in 0..<node.children_count |index, node, report, active_owner, dependency_stack, depth, active_certificates, validation_workspace|:
                     child: usize = report.analysis_1.kernel.children[node.children_start + index]
@@ -378,6 +412,7 @@ extend ElisaProof:
 
 include "./certificate_validation_integrated_helpers.elisa"
 include "./deterministic_call_declaration_index.elisa"
+include "./deterministic_call_cache_ensure.elisa"
 include "./deterministic_call_bare_resolution.elisa"
 include "./deterministic_call_source_validation.elisa"
 include "./certificate_owner_paths.elisa"

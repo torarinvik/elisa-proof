@@ -15,6 +15,7 @@ extend ElisaProof:
                 return (false, false) if not proof_replay_call_work_add(work, 1)
                 current: usize = index.slots[slot]
                 if current == 0:
+                    return (false, false) if not proof_replay_call_work_add(work, 1)
                     index.slots[slot] <- value_index + 1
                     return (true, true)
                 existing: usize = current - 1
@@ -29,6 +30,7 @@ extend ElisaProof:
         def proof_replay_call_name_index_rebuild(calls: darray[sview]&, index: mutable ProofReplayCallNameIndex&, capacity: usize, work: mutable usize&) -> bool:
             return false if:
                 capacity == 0 or calls.count > capacity / 2
+                not proof_replay_call_work_add(work, capacity)
                 not proof_replay_call_work_add(work, capacity)
             index.slots.clear()
             index.slots.resize(capacity)
@@ -48,6 +50,7 @@ extend ElisaProof:
             return false if capacity == 0 or not proof_replay_call_work_add(work, calls.count)
             for name in calls |name, index, work|:
                 return false if not proof_replay_call_work_add(work, sview_len(name))
+                return false if not proof_replay_call_work_add(work, 2)
                 index.hashes.push(proof_name_hash(name))
             return proof_replay_call_name_index_rebuild(calls, index, capacity, work)
 
@@ -61,7 +64,7 @@ extend ElisaProof:
             placed: (complete: bool, inserted: bool) = proof_replay_call_name_index_place(calls, index, wanted, wanted_hash, calls.count, work)
             return false if not placed.complete
             if placed.inserted:
-                return false if not proof_replay_call_work_add(work, 2)
+                return false if not proof_replay_call_work_add(work, 4)
                 calls.push(wanted)
                 index.hashes.push(wanted_hash)
             return true
@@ -75,6 +78,13 @@ extend ElisaProof:
                     return false if not call_target.selection.track_unresolved_dispatch
                     call_target.selection.unresolved_dispatch_found <- true
                     bindings.resize(mark)
+                    if call_target.selection.enabled and call_target.capture.require_exact_call:
+                        matched_before_arm: usize = call_target.selection.matched_calls
+                        return false if:
+                            not proof_replay_call_expression_with_index(arm.guard, bindings, calls, call_index, call_target, work, depth + 1)
+                            not proof_replay_call_body(&arm.body, bindings, calls, call_index, call_target, work, depth + 1)
+                        bindings.resize(mark)
+                        call_target.selection.unresolved_scope_at_target <- true if call_target.selection.matched_calls > matched_before_arm
                     continue
                 return false if:
                     not proof_replay_call_expression_with_index(arm.guard, bindings, calls, call_index, call_target, work, depth + 1)
@@ -266,7 +276,7 @@ extend ElisaProof:
                 Ast::Expr.Comprehension(name, iterable, condition, value, _):
                     return false if not proof_replay_call_expression_with_index(iterable, bindings, calls, call_index, call_target, work, depth + 1)
                     mark: usize = bindings.count
-                    return false if not proof_replay_call_work_add(work, sview_len(name))
+                    return false if not proof_replay_call_work_add(work, sview_len(name)) or not proof_replay_call_work_add(work, 2)
                     bindings.push(name)
                     split_result: (complete: bool, splits: bool) = proof_replay_call_comprehension_filter_splits(condition, work, depth + 1)
                     if not split_result.complete:
@@ -385,7 +395,7 @@ extend ElisaProof:
                             return false if not call_target.selection.track_unresolved_dispatch
                             call_target.selection.unresolved_dispatch_found <- true
                             return true
-                        return false if not proof_replay_call_work_add(work, sview_len(name))
+                        return false if not proof_replay_call_work_add(work, sview_len(name)) or not proof_replay_call_work_add(work, 2)
                         bindings.push(name)
                     Ast::Stmt.Assign(target, operator, value, _):
                         return false if:
@@ -400,7 +410,9 @@ extend ElisaProof:
                                     for bound in bindings |bound, name, bound_already, work|:
                                         return false if not proof_replay_call_string_compare_charge(bound, name, work)
                                         bound_already <- true if bound == name
-                                    bindings.push(name) if not bound_already
+                                    if not bound_already:
+                                        return false if not proof_replay_call_work_add(work, 2)
+                                        bindings.push(name)
                             Ast::Expr.Array(elements, _):
                                 if operator == TokenKind.Assign:
                                     for element in elements |bindings, work|:
@@ -411,7 +423,9 @@ extend ElisaProof:
                                                 for bound in bindings |bound, name, bound_already, work|:
                                                     return false if not proof_replay_call_string_compare_charge(bound, name, work)
                                                     bound_already <- true if bound == name
-                                                bindings.push(name) if not bound_already
+                                                if not bound_already:
+                                                    return false if not proof_replay_call_work_add(work, 2)
+                                                    bindings.push(name)
                                             _:
                                                 pass
                             Ast::Expr.Call(_, _, _, _):
@@ -448,6 +462,7 @@ extend ElisaProof:
                             match base_iterable:
                                 Ast::Expr.Refinement(base, predicate, _):
                                     return false if not proof_replay_call_work_add(work, 1)
+                                    return false if not proof_replay_call_work_add(work, 2)
                                     filters.push(predicate)
                                     if filters.count > 2:
                                         return false if not call_target.selection.track_unresolved_dispatch
@@ -486,7 +501,7 @@ extend ElisaProof:
                     Ast::Stmt.Block(kind, _, binding, nested, _):
                         mark: usize = bindings.count
                         scoped_block: bool = nested.count > 0 and (kind in {"region", "in", "can", "trusted", "with", "pool", "nursery", "scope", "lock"})
-                        return false if binding != "" and not proof_replay_call_work_add(work, sview_len(binding))
+                        return false if binding != "" and (not proof_replay_call_work_add(work, sview_len(binding)) or not proof_replay_call_work_add(work, 2))
                         bindings.push(binding) if binding != ""
                         if kind == "assert_by":
                             if nested.count == 0:
@@ -528,7 +543,7 @@ extend ElisaProof:
             return proof_replay_source_calls_with_work(parameters, body, annotations, calls, &work)
 
         def proof_replay_source_calls_with_work(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, annotations: darray[Ast::EnumAnnotation]&, calls: mutable darray[sview]&, work: mutable usize&) -> bool:
-            target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{selection: ProofReplayCallSiteTargetSelection{enabled: false, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: false, offset: 0, line: 0, name: "", calls_at_offset: 0, matched_calls: 0, track_unresolved_dispatch: false, unresolved_dispatch_found: false, source_annotations: []}, conversions: ProofReplayCallSiteTargetConversions{field_conversion_parameters: [], field_conversion_names: [], field_conversion_index_valid: false, field_conversion_index_hashes: [], field_conversion_index_values: [], field_conversion_index_counts: [], field_conversion_custom_cast_present: false}, aliases: ProofReplayCallSiteTargetAliases{field_conversion_alias_names: [], field_conversion_alias_targets: [], field_conversion_alias_lines: [], field_conversion_bare_alias_root_fallback_valid: false, field_conversion_alias_owners: [], field_conversion_alias_has_formals: [], field_conversion_alias_scope_index_valid: false, field_conversion_alias_scope_index_hashes: [], field_conversion_alias_scope_index_values: [], field_conversion_alias_scope_index_counts: [], field_conversion_alias_index_valid: false, field_conversion_alias_index_hashes: [], field_conversion_alias_index_values: [], field_conversion_alias_index_counts: []}, generics: ProofReplayCallSiteTargetGenerics{field_conversion_generic_params_valid: false, field_conversion_generic_param_lines: [], field_conversion_generic_param_names: [], field_conversion_generic_param_line: 0, field_conversion_generic_param_owner: "", field_conversion_generic_param_owner_known: false, field_conversion_generic_param_index_valid: false, field_conversion_generic_param_index_hashes: [], field_conversion_generic_param_index_values: [], field_conversion_generic_param_index_counts: []}, types: ProofReplayCallSiteTargetTypes{field_conversion_declared_types: [], field_conversion_declared_type_owners: [], field_conversion_declared_type_scope_index_valid: false, field_conversion_declared_type_scope_index_hashes: [], field_conversion_declared_type_scope_index_values: [], field_conversion_declared_type_scope_index_counts: [], field_conversion_declared_type_index_valid: false, field_conversion_declared_type_index_hashes: [], field_conversion_declared_type_index_values: [], field_conversion_declared_type_index_counts: []}}
+            target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{selection: ProofReplayCallSiteTargetSelection{enabled: false, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: false, offset: 0, line: 0, name: "", calls_at_offset: 0, matched_calls: 0, track_unresolved_dispatch: false, unresolved_dispatch_found: false, source_annotations: []}, conversions: ProofReplayCallSiteTargetConversions{field_conversion_parameters: [], field_conversion_names: [], field_conversion_index_valid: false, field_conversion_index_hashes: [], field_conversion_index_values: [], field_conversion_index_counts: [], field_conversion_custom_cast_present: false}, aliases: ProofReplayCallSiteTargetAliases{field_conversion_alias_names: [], field_conversion_alias_targets: [], field_conversion_alias_lines: [], field_conversion_bare_alias_root_fallback_valid: false, field_conversion_alias_owners: [], field_conversion_alias_has_formals: [], field_conversion_alias_scope_index_valid: false, field_conversion_alias_scope_index_hashes: [], field_conversion_alias_scope_index_values: [], field_conversion_alias_scope_index_counts: [], field_conversion_alias_index_valid: false, field_conversion_alias_index_hashes: [], field_conversion_alias_index_values: [], field_conversion_alias_index_counts: []}, generics: ProofReplayCallSiteTargetGenerics{field_conversion_generic_params_valid: false, field_conversion_generic_param_lines: [], field_conversion_generic_param_names: [], field_conversion_generic_param_owner_offsets: [], field_conversion_generic_param_line: 0, field_conversion_generic_param_owner: "", field_conversion_generic_param_owner_known: false, field_conversion_generic_param_owner_offset: 0, field_conversion_generic_param_owner_offset_valid: false, field_conversion_generic_param_index_valid: false, field_conversion_generic_param_index_hashes: [], field_conversion_generic_param_index_values: [], field_conversion_generic_param_index_counts: [], field_conversion_generic_owner_index_valid: false, field_conversion_generic_owner_index_hashes: [], field_conversion_generic_owner_index_values: [], field_conversion_generic_owner_index_counts: [], field_conversion_generic_owner_index_entries: 0, field_conversion_generic_function_index_valid: false, field_conversion_generic_function_index_hashes: [], field_conversion_generic_function_index_values: [], field_conversion_generic_function_index_counts: [], field_conversion_generic_function_index_entries: 0}, types: ProofReplayCallSiteTargetTypes{field_conversion_declared_types: [], field_conversion_declared_type_owners: [], field_conversion_declared_type_scope_index_valid: false, field_conversion_declared_type_scope_index_hashes: [], field_conversion_declared_type_scope_index_values: [], field_conversion_declared_type_scope_index_counts: [], field_conversion_declared_type_index_valid: false, field_conversion_declared_type_index_hashes: [], field_conversion_declared_type_index_values: [], field_conversion_declared_type_index_counts: []}}
             return proof_replay_source_calls_with_target_work(parameters, body, annotations, calls, target, work)
 
         def proof_replay_source_calls_with_target_work(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, annotations: darray[Ast::EnumAnnotation]&, calls: mutable darray[sview]&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&) -> bool:
@@ -536,6 +551,7 @@ extend ElisaProof:
             call_target.selection.calls_at_offset <- 0
             call_target.selection.matched_calls <- 0
             call_target.selection.unresolved_dispatch_found <- false
+            call_target.selection.unresolved_scope_at_target <- false
             if call_target.capture.capture_all_call_sites:
                 call_target.capture.captured_call_offsets.clear()
                 call_target.capture.captured_call_lines.clear()
@@ -555,7 +571,7 @@ extend ElisaProof:
             # Defaults are executable at omitted-argument calls; preserve their edges
             # rather than assuming a call-site always supplies every argument.
             for parameter in parameters |bindings, work|:
-                return false if not proof_replay_call_work_add(work, sview_len(parameter.name))
+                return false if not proof_replay_call_work_add(work, sview_len(parameter.name)) or not proof_replay_call_work_add(work, 2)
                 bindings.push(parameter.name)
             return false if not proof_replay_call_work_add(work, parameters.count)
             for parameter in parameters |bindings, calls, work|:

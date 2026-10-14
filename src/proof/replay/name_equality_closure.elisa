@@ -12,6 +12,14 @@ extend ElisaProof:
             work <- work + amount
             return true
 
+        # Offset the linear reader's local meter so a chunk fits both remaining budgets.
+        def proof_replay_equality_width_chunk_start(work: usize, width_used: usize) -> (complete: bool, start: usize):
+            return (false, 0) if work > PROOF_REPLAY_EQUALITY_WORK_LIMIT or width_used > PROOF_LINEAR_SAFETY_WORK_LIMIT
+            replay_remaining: usize = PROOF_REPLAY_EQUALITY_WORK_LIMIT - work
+            width_remaining: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - width_used
+            allowance: usize = width_remaining if width_remaining < replay_remaining else replay_remaining
+            (true, PROOF_LINEAR_SAFETY_WORK_LIMIT - allowance)
+
         # Reserve work before calling legacy bounded AST predicates that do not accept the
         # replay counter. The shared structural cost walker counts payloads and child arrays;
         # repetitions reserves the worst-case repeated comparisons made by the caller.
@@ -234,6 +242,56 @@ extend ElisaProof:
                         pass
             return (true, false)
 
+        # A complete marker name index answers both hits and misses. Keep the source scan only
+        # when the bounded probe stopped before an empty slot and no sorted collision fallback
+        # is available.
+        def proof_replay_equality_scalar_name_witnessed_indexed(name: sview, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, work: mutable usize&) -> (complete: bool, witnessed: bool):
+            return (true, false) if name == ""
+            return (false, false) if:
+                markers.name_hashes.count != markers.names.count
+                (markers.names.count == 0) != (markers.name_slots.count == 0)
+                markers.name_slots.count > 0 and markers.name_slots.count < markers.names.count
+                markers.sorted_name_indices.count != 0 and markers.sorted_name_indices.count != markers.names.count
+                not proof_replay_equality_work_charge(1, work)
+                not proof_replay_equality_work_charge(sview_len(name), work)
+            capacity: usize = markers.name_slots.count
+            hash_complete: mutable bool = capacity == 0
+            if capacity > 0:
+                wanted_hash: u32 = proof_name_hash(name)
+                slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity and probes < PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT |probes, slot, wanted_hash, name, markers, capacity, work|:
+                    return (false, false) if not proof_replay_equality_work_charge(1, work)
+                    current: usize = markers.name_slots[slot]
+                    return (false, false) if current > markers.names.count
+                    if current == markers.names.count:
+                        hash_complete <- true
+                        break
+                    if markers.name_hashes[current] == wanted_hash:
+                        candidate: sview = markers.names[current]
+                        return (false, false) if not proof_replay_equality_work_charge(sview_len(candidate), work) or not proof_replay_equality_work_charge(sview_len(name), work)
+                        return (true, true) if candidate == name
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+            if markers.sorted_name_indices.count > 0:
+                lower: mutable usize = 0
+                upper: mutable usize = markers.sorted_name_indices.count
+                while lower < upper |lower, upper, markers, name, work|:
+                    return (false, false) if not proof_replay_equality_work_charge(1, work)
+                    middle: usize = lower + (upper - lower) / 2
+                    row: usize = markers.sorted_name_indices[middle]
+                    return (false, false) if row >= markers.names.count
+                    candidate: sview = markers.names[row]
+                    return (false, false) if not proof_replay_equality_work_charge(sview_len(candidate), work) or not proof_replay_equality_work_charge(sview_len(name), work)
+                    return (true, true) if candidate == name
+                    if proof_scalar_witness_name_less(candidate, name):
+                        lower <- middle + 1
+                    else:
+                        upper <- middle
+                return (true, false)
+            return (true, false) if hash_complete
+            return proof_replay_equality_scalar_name_witnessed(name, facts, work)
+
         def proof_replay_scalar_term_witnessed_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, work: mutable usize&, depth: usize) -> (complete: bool, witnessed: bool):
             return (false, false) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_equality_work_charge(1, work)
             match expression:
@@ -267,49 +325,102 @@ extend ElisaProof:
             return (true, false) if not left_witnessed.witnessed
             return proof_replay_scalar_term_witnessed_with_work(right, facts, work, 0)
 
-        def proof_replay_collect_name_equalities(expression: Ast::Expr, facts: darray[Ast::Expr]&, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&, work: mutable usize&) -> bool:
-            proof_replay_collect_name_equalities_depth(expression, facts, left_names, right_names, work, 0)
+        def proof_replay_equality_sort_cache_grow(names: darray[sview]&, hashes: darray[u32]&, slots: mutable darray[usize]&, work: mutable usize&) -> bool:
+            old_capacity: usize = slots.count
+            return false if old_capacity == 0 or names.count != hashes.count or names.count > old_capacity or old_capacity > PROOF_REPLAY_EQUALITY_WORK_LIMIT / 2
+            new_capacity: usize = old_capacity * 2
+            return false if not proof_replay_equality_work_charge(new_capacity, work)
+            grown_slots: mutable darray[usize] = []
+            grown_slots.resize(new_capacity)
+            for slot in 0..<new_capacity |slot, grown_slots, new_capacity, work|:
+                return false if not proof_replay_equality_work_charge(1, work)
+                grown_slots[slot] <- new_capacity
+            for row in 0..<names.count |row, row, names, hashes, grown_slots, new_capacity, work|:
+                slot: mutable usize = (hashes[row].i64() % new_capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < new_capacity and grown_slots[slot] != new_capacity |slot, probes, row, hashes, grown_slots, new_capacity, work|:
+                    return false if not proof_replay_equality_work_charge(1, work)
+                    slot <- (slot + 1) % new_capacity
+                    probes <- probes + 1
+                return false if probes >= new_capacity
+                return false if not proof_replay_equality_work_charge(1, work)
+                grown_slots[slot] <- row
+            slots.clear()
+            slots.extend(grown_slots)
+            return true
 
-        def proof_replay_collect_name_equalities_depth(expression: Ast::Expr, facts: darray[Ast::Expr]&, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&, work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_equality_name_sort_cached(name: sview, sort_index: ProofNameEqualitySortIndex, names: mutable darray[sview]&, values: mutable darray[i64]&, hashes: mutable darray[u32]&, slots: mutable darray[usize]&, work: mutable usize&, width_work: mutable usize&, width_exhausted: mutable bool&) -> (complete: bool, sort: i64):
+            capacity: mutable usize = slots.count
+            return (false, 0) if capacity == 0 or names.count != values.count or names.count != hashes.count
+            if names.count >= capacity:
+                return (false, 0) if not proof_replay_equality_sort_cache_grow(names, hashes, &slots, work)
+                capacity <- slots.count
+            return (false, 0) if not proof_replay_equality_work_charge(sview_len(name), work)
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, wanted_hash, name, sort_index, names, values, hashes, slots, capacity, work, width_work, width_exhausted|:
+                return (false, 0) if not proof_replay_equality_work_charge(1, work)
+                current: usize = slots[slot]
+                if current == capacity:
+                    chunk: (complete: bool, start: usize) = proof_replay_equality_width_chunk_start(work, width_work)
+                    return (false, 0) if not chunk.complete
+                    width_budget: mutable usize = chunk.start
+                    selected_sort: i64 = proof_name_equality_sort_index_lookup(sort_index, name, &width_budget, width_exhausted)
+                    width_cost: usize = width_budget - chunk.start
+                    return (false, 0) if not proof_replay_equality_work_charge(width_cost, work)
+                    width_work <- width_work + width_cost
+                    return (false, 0) if width_exhausted or not proof_replay_equality_work_charge(3, work) or not proof_replay_equality_work_charge(sview_len(name), work)
+                    names.push(name)
+                    values.push(selected_sort)
+                    hashes.push(wanted_hash)
+                    slots[slot] <- names.count - 1
+                    return (true, selected_sort)
+                return (false, 0) if current >= names.count
+                if hashes[current] == wanted_hash:
+                    return (false, 0) if not proof_replay_equality_work_charge(sview_len(names[current]), work) or not proof_replay_equality_work_charge(sview_len(name), work)
+                    return (true, values[current]) if names[current] == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, 0)
+
+        def proof_replay_collect_name_equalities(expression: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, sort_index: ProofNameEqualitySortIndex, sort_names: mutable darray[sview]&, sort_values: mutable darray[i64]&, sort_hashes: mutable darray[u32]&, sort_slots: mutable darray[usize]&, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&, work: mutable usize&, width_work: mutable usize&, width_exhausted: mutable bool&) -> bool:
+            proof_replay_collect_name_equalities_depth(expression, facts, markers, sort_index, sort_names, sort_values, sort_hashes, sort_slots, left_names, right_names, work, width_work, width_exhausted, 0)
+
+        def proof_replay_collect_name_equalities_depth(expression: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, sort_index: ProofNameEqualitySortIndex, sort_names: mutable darray[sview]&, sort_values: mutable darray[i64]&, sort_hashes: mutable darray[u32]&, sort_slots: mutable darray[usize]&, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&, work: mutable usize&, width_work: mutable usize&, width_exhausted: mutable bool&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_equality_work_charge(1, work)
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_collect_name_equalities_depth(inner, facts, left_names, right_names, work, depth + 1)
+                    return proof_replay_collect_name_equalities_depth(inner, facts, markers, sort_index, sort_names, sort_values, sort_hashes, sort_slots, left_names, right_names, work, width_work, width_exhausted, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.And, right, _):
-                    return false if not proof_replay_collect_name_equalities_depth(left, facts, left_names, right_names, work, depth + 1)
-                    return proof_replay_collect_name_equalities_depth(right, facts, left_names, right_names, work, depth + 1)
+                    return false if not proof_replay_collect_name_equalities_depth(left, facts, markers, sort_index, sort_names, sort_values, sort_hashes, sort_slots, left_names, right_names, work, width_work, width_exhausted, depth + 1)
+                    return proof_replay_collect_name_equalities_depth(right, facts, markers, sort_index, sort_names, sort_values, sort_hashes, sort_slots, left_names, right_names, work, width_work, width_exhausted, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
                     left_name: (complete: bool, name: sview) = proof_replay_equality_ident_name(left, work, 0)
                     return false if not left_name.complete
                     right_name: (complete: bool, name: sview) = proof_replay_equality_ident_name(right, work, 0)
                     return false if not right_name.complete
                     if left_name.name != "" and right_name.name != "":
-                        left_witness: (complete: bool, witnessed: bool) = proof_replay_equality_scalar_name_witnessed(left_name.name, facts, work)
+                        left_witness: (complete: bool, witnessed: bool) = proof_replay_equality_scalar_name_witnessed_indexed(left_name.name, facts, markers, work)
                         return false if not left_witness.complete
                         if left_witness.witnessed:
-                            right_witness: (complete: bool, witnessed: bool) = proof_replay_equality_scalar_name_witnessed(right_name.name, facts, work)
+                            right_witness: (complete: bool, witnessed: bool) = proof_replay_equality_scalar_name_witnessed_indexed(right_name.name, facts, markers, work)
                             return false if not right_witness.complete
                             if right_witness.witnessed:
                                 return false if:
                                     not proof_replay_equality_work_charge(2, work)
                                     not proof_replay_equality_work_charge(sview_len(left_name.name), work)
                                     not proof_replay_equality_work_charge(sview_len(right_name.name), work)
-                                left_names.push(left_name.name)
-                                right_names.push(right_name.name)
+                                left_sort: (complete: bool, sort: i64) = proof_replay_equality_name_sort_cached(left_name.name, sort_index, sort_names, sort_values, sort_hashes, sort_slots, work, width_work, width_exhausted)
+                                return false if not left_sort.complete
+                                right_sort: (complete: bool, sort: i64) = proof_replay_equality_name_sort_cached(right_name.name, sort_index, sort_names, sort_values, sort_hashes, sort_slots, work, width_work, width_exhausted)
+                                return false if not right_sort.complete
+                                if left_sort.sort != 0 and left_sort.sort == right_sort.sort:
+                                    left_names.push(left_name.name)
+                                    right_names.push(right_name.name)
                 _:
                     pass
             return true
-
-        def proof_replay_alias_name_index(names: darray[sview]&, name: sview, work: mutable usize&) -> (complete: bool, index: usize):
-            index: mutable usize = 0
-            while index < names.count |index, names, name, work|:
-                return (false, names.count) if:
-                    not proof_replay_equality_work_charge(1, work)
-                    not proof_replay_equality_work_charge(sview_len(names[index]), work)
-                    not proof_replay_equality_work_charge(sview_len(name), work)
-                return (true, index) if names[index] == name
-                index <- index + 1
-            return (true, names.count)
 
         def proof_replay_alias_build_adjacency(names: darray[sview]&, edge_left: darray[usize]&, edge_right: darray[usize]&, adjacency_heads: mutable darray[usize]&, adjacency_names: mutable darray[usize]&, adjacency_next: mutable darray[usize]&, work: mutable usize&) -> bool:
             return false if:
@@ -329,28 +440,76 @@ extend ElisaProof:
 
         def proof_replay_name_equality_graph(facts: darray[Ast::Expr]&, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&, names: mutable darray[sview]&, edge_left: mutable darray[usize]&, edge_right: mutable darray[usize]&, work: mutable usize&) -> bool:
             return false if not proof_replay_equality_work_charge(facts.count, work)
-            for fact in facts |left_names, right_names, work|:
-                return false if not proof_replay_collect_name_equalities(fact, facts, left_names, right_names, work)
-            return false if not proof_replay_equality_work_charge(left_names.count, work)
-            for edge in 0..<left_names.count |edge, left_names, right_names, names, edge_left, edge_right, work|:
-                left_lookup: (complete: bool, index: usize) = proof_replay_alias_name_index(names, left_names[edge], work)
-                return false if not left_lookup.complete
-                left_index: usize = left_lookup.index
-                if left_index == names.count:
-                    names.push(left_names[edge])
+            width_work: mutable usize = 0
+            width_exhausted: mutable bool = false
+            chunk: (complete: bool, start: usize) = proof_replay_equality_width_chunk_start(work, width_work)
+            return false if not chunk.complete
+            width_budget: mutable usize = chunk.start
+            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, &width_budget, &width_exhausted)
+            width_cost: usize = width_budget - chunk.start
+            return false if not proof_replay_equality_work_charge(width_cost, work)
+            width_work <- width_work + width_cost
+            return false if not marker_result.complete or width_exhausted
+            sort_chunk: (complete: bool, start: usize) = proof_replay_equality_width_chunk_start(work, width_work)
+            return false if not sort_chunk.complete
+            sort_budget: mutable usize = sort_chunk.start
+            sort_result: (complete: bool, index: ProofNameEqualitySortIndex) = proof_name_equality_sort_index_build(facts, &sort_budget, &width_exhausted)
+            sort_cost: usize = sort_budget - sort_chunk.start
+            return false if not proof_replay_equality_work_charge(sort_cost, work)
+            width_work <- width_work + sort_cost
+            return false if not sort_result.complete or width_exhausted
+            return false if facts.count > PROOF_REPLAY_EQUALITY_WORK_LIMIT / 2
+            sort_capacity: usize = proof_name_index_capacity(facts.count * 2)
+            return false if facts.count > 0 and sort_capacity == 0
+            return false if not proof_replay_equality_work_charge(sort_capacity, work)
+            sort_names: mutable darray[sview] = []
+            sort_values: mutable darray[i64] = []
+            sort_hashes: mutable darray[u32] = []
+            sort_slots: mutable darray[usize] = []
+            sort_slots.resize(sort_capacity)
+            for slot in 0..<sort_capacity |slot, sort_slots, sort_capacity, work|:
+                return false if not proof_replay_equality_work_charge(1, work)
+                sort_slots[slot] <- sort_capacity
+            for fact in facts |left_names, right_names, marker_result, sort_result, width_work, width_exhausted, work|:
+                return false if not proof_replay_collect_name_equalities(fact, facts, marker_result.witnesses, sort_result.index, sort_names, sort_values, sort_hashes, sort_slots, left_names, right_names, work, &width_work, &width_exhausted)
+            return false if width_exhausted
+            return false if not proof_replay_equality_work_charge(sort_names.count, work)
+            sort_vertex_indices: mutable darray[usize] = []
+            sort_vertex_indices.resize(sort_names.count)
+            for row in 0..<sort_names.count |row, sort_vertex_indices, sort_names, names, work|:
+                return false if not proof_replay_equality_work_charge(1, work)
+                sort_vertex_indices[row] <- sort_names.count
+            for edge in 0..<left_names.count |edge, edge, left_names, right_names, sort_names, sort_hashes, sort_slots, sort_vertex_indices, names, edge_left, edge_right, work|:
+                left_lookup: (complete: bool, found: bool, index: usize) = proof_replay_equality_sort_cache_index(left_names[edge], sort_names, sort_hashes, sort_slots, work)
+                return false if not left_lookup.complete or not left_lookup.found
+                left_index: usize = sort_vertex_indices[left_lookup.index]
+                if left_index == sort_names.count:
+                    return false if not proof_replay_equality_work_charge(1, work) or not proof_replay_equality_work_charge(sview_len(sort_names[left_lookup.index]), work)
+                    names.push(sort_names[left_lookup.index])
                     left_index <- names.count - 1
-                right_lookup: (complete: bool, index: usize) = proof_replay_alias_name_index(names, right_names[edge], work)
-                return false if not right_lookup.complete
-                right_index: usize = right_lookup.index
-                if right_index == names.count:
-                    names.push(right_names[edge])
+                    sort_vertex_indices[left_lookup.index] <- left_index
+                right_lookup: (complete: bool, found: bool, index: usize) = proof_replay_equality_sort_cache_index(right_names[edge], sort_names, sort_hashes, sort_slots, work)
+                return false if not right_lookup.complete or not right_lookup.found
+                right_index: usize = sort_vertex_indices[right_lookup.index]
+                if right_index == sort_names.count:
+                    return false if not proof_replay_equality_work_charge(1, work) or not proof_replay_equality_work_charge(sview_len(sort_names[right_lookup.index]), work)
+                    names.push(sort_names[right_lookup.index])
                     right_index <- names.count - 1
+                    sort_vertex_indices[right_lookup.index] <- right_index
+                return false if not proof_replay_equality_work_charge(2, work)
                 edge_left.push(left_index)
                 edge_right.push(right_index)
             return true
 
         def proof_replay_close_equalities_with_work(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofReplayBound]&, work: mutable usize&) -> bool:
-            return false if not proof_replay_equality_work_charge(bounds.count, work)
+            result: (complete: bool, equal: bool) = proof_replay_close_equalities_with_name_relation(facts, bounds, "", "", work)
+            result.complete
+
+        def proof_replay_close_equalities_with_name_relation(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofReplayBound]&, left_name: sview, right_name: sview, work: mutable usize&) -> (complete: bool, equal: bool):
+            query_relation: bool = left_name != "" or right_name != ""
+            return (false, false) if query_relation and (left_name == "" or right_name == "")
+            equal: mutable bool = query_relation and left_name == right_name
+            return (false, false) if not proof_replay_equality_work_charge(bounds.count, work)
             staged_bounds: mutable darray[ProofReplayBound] = []
             staged_bounds.extend(bounds)
             left_names: mutable darray[sview] = []
@@ -358,34 +517,48 @@ extend ElisaProof:
             names: mutable darray[sview] = []
             edge_left: mutable darray[usize] = []
             edge_right: mutable darray[usize] = []
-            return false if not proof_replay_name_equality_graph(facts, &left_names, &right_names, &names, &edge_left, &edge_right, work)
+            return (false, false) if not proof_replay_name_equality_graph(facts, &left_names, &right_names, &names, &edge_left, &edge_right, work)
 
             adjacency_heads: mutable darray[usize] = []
             adjacency_names: mutable darray[usize] = []
             adjacency_next: mutable darray[usize] = []
-            return false if not proof_replay_alias_build_adjacency(names, edge_left, edge_right, &adjacency_heads, &adjacency_names, &adjacency_next, work)
+            return (false, false) if not proof_replay_alias_build_adjacency(names, edge_left, edge_right, &adjacency_heads, &adjacency_names, &adjacency_next, work)
+
+            left_index: usize = names.count
+            right_index: usize = names.count
+            if query_relation and not equal:
+                left_lookup: (complete: bool, index: usize) = proof_replay_alias_name_index(names, left_name, work)
+                return (false, false) if not left_lookup.complete
+                right_lookup: (complete: bool, index: usize) = proof_replay_alias_name_index(names, right_name, work)
+                return (false, false) if not right_lookup.complete
+                left_index <- left_lookup.index
+                right_index <- right_lookup.index
 
             # Alias bounds are component properties. Merge each component once instead of
             # stopping after a fact-count-dependent number of propagation rounds; integer
             # adjacency traversal visits each alias edge only a constant number of times.
             visited: mutable darray[bool] = []
-            return false if not proof_replay_equality_work_charge(names.count, work)
+            return (false, false) if not proof_replay_equality_work_charge(names.count, work)
             for name_index in 0..<names.count |name_index, names, visited|:
                 visited.push(false)
-            for start in 0..<names.count |start, names, adjacency_heads, adjacency_names, adjacency_next, visited, staged_bounds, work|:
-                return false if not proof_replay_equality_work_charge(1, work)
+            for start in 0..<names.count |start, names, adjacency_heads, adjacency_names, adjacency_next, visited, staged_bounds, query_relation, left_index, right_index, equal, work|:
+                return (false, false) if not proof_replay_equality_work_charge(1, work)
                 continue if visited[start]
                 queue: mutable darray[usize] = [start]
                 members: mutable darray[usize] = []
+                contains_left: mutable bool = false
+                contains_right: mutable bool = false
                 visited[start] <- true
                 cursor: mutable usize = 0
-                while cursor < queue.count |cursor, queue, members, adjacency_heads, adjacency_names, adjacency_next, visited, work|:
-                    return false if not proof_replay_equality_work_charge(1, work)
+                while cursor < queue.count |cursor, queue, members, adjacency_heads, adjacency_names, adjacency_next, visited, query_relation, left_index, right_index, contains_left, contains_right, work|:
+                    return (false, false) if not proof_replay_equality_work_charge(1, work)
                     current: usize = queue[cursor]
                     members.push(current)
+                    contains_left <- true if query_relation and current == left_index
+                    contains_right <- true if query_relation and current == right_index
                     arc: mutable usize = adjacency_heads[current]
                     while arc != 0 |arc, adjacency_names, adjacency_next, queue, visited, work|:
-                        return false if not proof_replay_equality_work_charge(1, work)
+                        return (false, false) if not proof_replay_equality_work_charge(1, work)
                         arc_index: usize = arc - 1
                         neighbor: usize = adjacency_names[arc_index]
                         if not visited[neighbor]:
@@ -394,13 +567,16 @@ extend ElisaProof:
                         arc <- adjacency_next[arc_index]
                     cursor <- cursor + 1
 
+                equal <- true if contains_left and contains_right
+
                 has_lower: mutable bool = false
                 lower: mutable i64 = 0
                 has_upper: mutable bool = false
                 upper: mutable i64 = 0
                 for member in members |member, members, names, staged_bounds, has_lower, lower, has_upper, upper, work|:
+                    return (false, false) if not proof_replay_equality_work_charge(1, work)
                     bound_lookup: (complete: bool, index: usize) = proof_replay_bound_index_with_work(staged_bounds, names[member], work)
-                    return false if not bound_lookup.complete
+                    return (false, false) if not bound_lookup.complete
                     bound_index: usize = bound_lookup.index
                     continue if bound_index == staged_bounds.count
                     bound: ProofReplayBound = staged_bounds[bound_index]
@@ -412,66 +588,11 @@ extend ElisaProof:
                         upper <- bound.upper
 
                 for member in members |member, members, names, staged_bounds, has_lower, lower, has_upper, upper, work|:
-                    return false if:
+                    return (false, false) if not proof_replay_equality_work_charge(1, work)
+                    return (false, false) if:
                         has_lower and not proof_replay_add_lower_with_work(staged_bounds, names[member], lower, work)
                         has_upper and not proof_replay_add_upper_with_work(staged_bounds, names[member], upper, work)
-            return false if not proof_replay_equality_work_charge(staged_bounds.count, work)
+            return (false, false) if not proof_replay_equality_work_charge(staged_bounds.count, work)
             bounds.clear()
             bounds.extend(staged_bounds)
-            return true
-
-        def proof_replay_bound_index_with_work(bounds: darray[ProofReplayBound]&, name: sview, work: mutable usize&) -> (complete: bool, index: usize):
-            for index in 0..<bounds.count |index, bounds, name, work|:
-                return (false, bounds.count) if:
-                    not proof_replay_equality_work_charge(1, work)
-                    not proof_replay_equality_work_charge(sview_len(bounds[index].name), work)
-                    not proof_replay_equality_work_charge(sview_len(name), work)
-                return (true, index) if bounds[index].name == name
-            return (true, bounds.count)
-
-        def proof_replay_names_equal_with_work(left_name: sview, right_name: sview, facts: darray[Ast::Expr]&, work: mutable usize&) -> bool:
-            return false if:
-                left_name == "" or right_name == ""
-                not proof_replay_equality_work_charge(sview_len(left_name), work)
-                not proof_replay_equality_work_charge(sview_len(right_name), work)
-            return true if left_name == right_name
-            left_names: mutable darray[sview] = []
-            right_names: mutable darray[sview] = []
-            names: mutable darray[sview] = []
-            edge_left: mutable darray[usize] = []
-            edge_right: mutable darray[usize] = []
-            return false if not proof_replay_name_equality_graph(facts, &left_names, &right_names, &names, &edge_left, &edge_right, work)
-            adjacency_heads: mutable darray[usize] = []
-            adjacency_names: mutable darray[usize] = []
-            adjacency_next: mutable darray[usize] = []
-            return false if not proof_replay_alias_build_adjacency(names, edge_left, edge_right, &adjacency_heads, &adjacency_names, &adjacency_next, work)
-            start_lookup: (complete: bool, index: usize) = proof_replay_alias_name_index(names, left_name, work)
-            return false if not start_lookup.complete
-            target_lookup: (complete: bool, index: usize) = proof_replay_alias_name_index(names, right_name, work)
-            return false if not target_lookup.complete
-            start: usize = start_lookup.index
-            target: usize = target_lookup.index
-            return false if start == names.count or target == names.count
-            visited: mutable darray[bool] = []
-            return false if not proof_replay_equality_work_charge(names.count, work)
-            for name_index in 0..<names.count |name_index, names, visited|:
-                visited.push(false)
-            queue: mutable darray[usize] = [start]
-            visited[start] <- true
-            cursor: mutable usize = 0
-            while cursor < queue.count |cursor, queue, adjacency_heads, adjacency_names, adjacency_next, visited, target, work|:
-                return false if not proof_replay_equality_work_charge(1, work)
-                current: usize = queue[cursor]
-                return true if current == target
-                arc: mutable usize = adjacency_heads[current]
-                while arc != 0 |arc, adjacency_names, adjacency_next, queue, visited, work|:
-                    return false if not proof_replay_equality_work_charge(1, work)
-                    arc_index: usize = arc - 1
-                    neighbor: usize = adjacency_names[arc_index]
-                    if not visited[neighbor]:
-                        visited[neighbor] <- true
-                        queue.push(neighbor)
-                    arc <- adjacency_next[arc_index]
-                cursor <- cursor + 1
-            return false
-
+            (true, equal)

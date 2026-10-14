@@ -6,6 +6,7 @@
 # too-deep form answers yes, so a caller that trusts a "no" never trusts an unread construct.
 const module ProofReplaySourceLocal:
     DEPTH_LIMIT: usize = 96
+    CAST_HOOK_SCAN_LIMIT: usize = 64
 
 extend ElisaProof:
     private:
@@ -67,11 +68,36 @@ extend ElisaProof:
         def proof_replay_source_numeric_selector(method: sview) -> bool:
             return method in {"i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"}
 
+        # A numeric selector is a non-mutating builtin only when the source snapshot proves
+        # there is no visible cast hook. Imports are unresolved here, and exhausting this small
+        # scan also means dispatch is unknown. The caller reserves CAST_HOOK_SCAN_LIMIT work for
+        # every zero-argument method call before running this source-touch visitor.
+        def proof_replay_source_custom_cast_possible(declarations: darray[Ast::Decl]&, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= ProofReplaySourceLocal::DEPTH_LIMIT or work >= ProofReplaySourceLocal::CAST_HOOK_SCAN_LIMIT
+            for declaration in declarations |work, depth|:
+                return true if work >= ProofReplaySourceLocal::CAST_HOOK_SCAN_LIMIT
+                work <- work + 1
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, _):
+                        return true if name == "__cast__"
+                    Ast::Decl.Extern(name, _, arity, _, callable, _, _, _):
+                        return true if name == "__cast__" and arity == 1 and callable
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return true if proof_replay_source_custom_cast_possible(nested, work, depth + 1)
+                    Ast::Decl.Import(_, _) | Ast::Decl.Invalid:
+                        return true
+                    Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    _:
+                        return true
+            return false
+
         def proof_replay_source_call_touches(declarations: darray[Ast::Decl]&, callee: Ast::Expr, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, name: sview, writes: bool, depth: usize) -> bool:
             if writes:
                 match callee:
                     Ast::Expr.Field(receiver, method, _):
-                        cast: bool = arguments.count == 0 and proof_replay_source_numeric_selector(method)
+                        cast_work: mutable usize = 0
+                        cast: bool = arguments.count == 0 and proof_replay_source_numeric_selector(method) and not proof_replay_source_custom_cast_possible(declarations, &cast_work, 0)
                         return true if not cast and proof_replay_source_place_root(receiver, depth + 1) == name
                     _:
                         pass

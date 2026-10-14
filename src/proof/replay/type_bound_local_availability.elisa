@@ -314,9 +314,12 @@ extend ElisaProof:
                 return false if not proof_replay_type_bound_equal_span_return_valid(returned, return_position, work)
                 explicit_return <- false
             if explicit_return:
-                # The parser owns both spans. Require a same-line expression strictly after the
-                # `return` keyword span; multiline block returns remain outside this witness.
-                return false if return_position.line != returned_position.line or return_position.offset >= returned_position.offset or return_position.end_offset > returned_position.offset
+                # The parser owns both spans. Allow a multiline value only when the return token
+                # precedes the expression in both source coordinates; reject missing or overlapping
+                # token spans rather than inferring order from line numbers alone.
+                if return_position.line != returned_position.line:
+                    return false if return_position.line > returned_position.line
+                return false if return_position.end_offset <= return_position.offset or return_position.offset >= returned_position.offset or return_position.end_offset > returned_position.offset
             else:
                 return false if not proof_replay_source_position_equal(returned_position, return_position)
             returned_search_cost: mutable usize = 0
@@ -357,7 +360,9 @@ extend ElisaProof:
                             proof_source_expression_has_overloaded_operator(expression, report.source.source_primitive_operator_mask, 0)
                             proof_expr_has_call(expression) or proof_expr_has_move(expression)
                             proof_replay_type_bound_expression_has_runtime_index(expression, 0)
-                        expected: Ast::Expr = proof_replay_substitute(expression, "result", returned)
+                        expected_result: (complete: bool, expression: Ast::Expr) = proof_replay_type_bound_substitute_with_work(expression, "result", returned, work)
+                        return false if not expected_result.complete
+                        expected: Ast::Expr = expected_result.expression
                         continue if proof_replay_expr_is_invalid(expected)
                         residual_result: mutable (complete: bool, mentions: bool) = proof_replay_type_bound_local_expr_mentions_name_with_work(expected, "result", work)
                         return false if not residual_result.complete
@@ -449,7 +454,7 @@ extend ElisaProof:
                     return false
                 Ast::Expr.Comprehension(_, iterable, condition, body, _):
                     return proof_replay_type_bound_expression_has_runtime_index(iterable, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(condition, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(body, depth + 1)
-                # These scoped/recovery forms are outside the implicit-return witness tier.
+                # These scoped/recovery forms are outside the local scalar result-witness tier.
                 Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
                     return true
                 _:
@@ -489,38 +494,6 @@ extend ElisaProof:
                 return (false, false)
             work <- work + cost * multiplier
             return (true, proof_expr_mentions_name(expression, target))
-
-        # Substitution can duplicate the return expression at every `result` occurrence.
-        # Reserve a conservative structural upper bound before the replay-side AST copier runs.
-        def proof_replay_type_bound_result_substitution_reserve(ensure: Ast::Expr, returned: Ast::Expr, work: mutable usize&) -> bool:
-            ensure_cost: mutable usize = 0
-            returned_cost: mutable usize = 0
-            if not proof_replay_summary_expr_cost(ensure, &ensure_cost, work, 0) or not proof_replay_summary_expr_cost(returned, &returned_cost, work, 0):
-                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                return false
-            if work > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT or ensure_cost > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work:
-                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                return false
-            work <- work + ensure_cost
-            if returned_cost > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work:
-                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                return false
-            work <- work + returned_cost
-            # The caller performs recursive overloaded-operator, call, move, and index scans on the ensure.
-            if ensure_cost > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work:
-                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                return false
-            work <- work + ensure_cost
-            if ensure_cost > (PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work) / 3:
-                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                return false
-            work <- work + ensure_cost * 3
-            copies_per_result: usize = returned_cost + 1
-            if copies_per_result == 0 or ensure_cost > (PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work) / copies_per_result:
-                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                return false
-            work <- work + ensure_cost * copies_per_result
-            return true
 
         # Local arrays can supply a bound fact at a later index use, so locate the exact
         # declaration by name and source position instead of assuming it shares the fact line.

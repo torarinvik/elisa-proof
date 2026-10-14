@@ -110,12 +110,56 @@ extend ElisaProof:
                     pass
             return ProofReplayInt{known: false, value: 0}
 
-        def proof_replay_constant_comparison(left: Ast::Expr, operator: TokenKind, right: Ast::Expr) -> bool:
+        def proof_replay_small_nonnegative_constant_with_work(expression: Ast::Expr, work: mutable usize&, depth: usize) -> (complete: bool, known: bool, value: i64):
+            return (false, false, 0) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_equality_work_charge(1, work)
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return (true, value >= 0 and value <= ElisaProofKernelCore::PROOF_KERNEL_I8_MAX, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_small_nonnegative_constant_with_work(inner, work, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    inner: (complete: bool, known: bool, value: i64) = proof_replay_small_nonnegative_constant_with_work(operand, work, depth + 1)
+                    return (false, false, 0) if not inner.complete
+                    return inner if inner.known and operator == TokenKind.Plus
+                    return (true, true, 0) if inner.known and operator == TokenKind.Minus and inner.value == 0
+                    return (true, false, 0)
+                Ast::Expr.Binary(left, operator, right, _):
+                    left_value: (complete: bool, known: bool, value: i64) = proof_replay_small_nonnegative_constant_with_work(left, work, depth + 1)
+                    return (false, false, 0) if not left_value.complete
+                    right_value: (complete: bool, known: bool, value: i64) = proof_replay_small_nonnegative_constant_with_work(right, work, depth + 1)
+                    return (false, false, 0) if not right_value.complete
+                    return (true, false, 0) if not left_value.known or not right_value.known
+                    return (true, false, 0) if (operator == TokenKind.LShift or operator == TokenKind.RShift) and right_value.value >= 7
+                    result: ProofReplayInt = ProofReplayInt{known: false, value: 0}
+                    result <- proof_replay_add_safe(left_value.value, right_value.value) if operator == TokenKind.Plus
+                    result <- proof_replay_sub_safe(left_value.value, right_value.value) if operator == TokenKind.Minus
+                    result <- proof_replay_mul_safe(left_value.value, right_value.value) if operator == TokenKind.Star
+                    result <- proof_replay_div_safe(left_value.value, right_value.value) if operator == TokenKind.Slash
+                    result <- proof_replay_mod_safe(left_value.value, right_value.value) if operator == TokenKind.Percent
+                    result <- ProofReplayInt{known: true, value: left_value.value & right_value.value} if operator == TokenKind.Ampersand
+                    result <- ProofReplayInt{known: true, value: left_value.value | right_value.value} if operator == TokenKind.Pipe
+                    result <- ProofReplayInt{known: true, value: left_value.value ^ right_value.value} if operator == TokenKind.Caret
+                    result <- proof_replay_shift_safe(left_value.value, right_value.value, true) if operator == TokenKind.LShift
+                    result <- proof_replay_shift_safe(left_value.value, right_value.value, false) if operator == TokenKind.RShift
+                    return (true, result.known and result.value >= 0 and result.value <= ElisaProofKernelCore::PROOF_KERNEL_I8_MAX, result.value)
+                _:
+                    return (true, false, 0)
+
+        def proof_replay_safe_comparison_constant_with_work(expression: Ast::Expr, work: mutable usize&) -> (complete: bool, known: bool, value: i64):
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return (true, value >= 0, value) if proof_replay_equality_work_charge(1, work)
+                    return (false, false, 0)
+                _:
+                    return proof_replay_small_nonnegative_constant_with_work(expression, work, 0)
+
+        def proof_replay_constant_comparison(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, work: mutable usize&) -> bool:
             # Match the tactic and kernel: direct nonnegative literals compare exactly, while
             # arithmetic folds only inside the nonnegative i8 range at every intermediate.
-            left_value: (known: bool, value: i64) = proof_safe_comparison_constant(left)
-            right_value: (known: bool, value: i64) = proof_safe_comparison_constant(right)
-            return false if not left_value.known or not right_value.known
+            left_value: (complete: bool, known: bool, value: i64) = proof_replay_safe_comparison_constant_with_work(left, work)
+            return false if not left_value.complete or not left_value.known
+            right_value: (complete: bool, known: bool, value: i64) = proof_replay_safe_comparison_constant_with_work(right, work)
+            return false if not right_value.complete or not right_value.known
             return left_value.value == right_value.value if operator == TokenKind.EqEq
             return left_value.value != right_value.value if operator == TokenKind.BangEq
             return left_value.value < right_value.value if operator == TokenKind.Lt
@@ -304,11 +348,11 @@ extend ElisaProof:
             return false if:
                 not left_affine.known or not right_affine.known
                 left_affine.base == "" or right_affine.base == ""
-                left_affine.base != right_affine.base and not proof_replay_names_equal_with_work(left_affine.base, right_affine.base, facts, work)
             bounds: mutable darray[ProofReplayBound] = []
             for fact in facts |bounds, work|:
                 return false if not proof_replay_collect_bounds(fact, facts, &bounds, work)
-            return false if not proof_replay_close_equalities_with_work(facts, &bounds, work)
+            relation: (complete: bool, equal: bool) = proof_replay_close_equalities_with_name_relation(facts, &bounds, left_affine.base, right_affine.base, work)
+            return false if not relation.complete or not relation.equal
             left_safe: (complete: bool, safe: bool) = proof_replay_affine_safe_with_work(left_affine, bounds, work)
             return false if not left_safe.complete or not left_safe.safe
             right_safe: (complete: bool, safe: bool) = proof_replay_affine_safe_with_work(right_affine, bounds, work)
@@ -329,10 +373,8 @@ extend ElisaProof:
             return (false, 0, 0, false, false) if not constant_check.complete
             constant: ProofReplayInt = constant_check.constant
             if constant.known:
-                safe_nodes: (complete: bool, nodes: usize) = proof_replay_equality_constant_nodes(expression, work, 0)
-                return (false, 0, 0, false, false) if not safe_nodes.complete or not proof_replay_equality_work_charge(safe_nodes.nodes, work)
-                safe_constant: (known: bool, value: i64) = proof_safe_comparison_constant(expression)
-                return (true, safe_constant.value, safe_constant.value, true, true) if safe_constant.known
+                safe_constant: (complete: bool, known: bool, value: i64) = proof_replay_safe_comparison_constant_with_work(expression, work)
+                return (true, safe_constant.value, safe_constant.value, true, true) if safe_constant.complete and safe_constant.known
                 return (false, 0, 0, false, false)
             match expression:
                 Ast::Expr.Paren(inner, _):

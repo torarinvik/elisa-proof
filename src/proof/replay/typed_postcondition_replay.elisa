@@ -79,11 +79,12 @@ extend ElisaProof:
                     recorded_gaps <- recorded_gaps + 1
             return if recorded_replayed > ElisaProofKernelCore::PROOF_KERNEL_U32_MAX.usize() or recorded_gaps > ElisaProofKernelCore::PROOF_KERNEL_U32_MAX.usize()
             return if report.analysis_2.replayed != recorded_replayed.u32() or report.analysis_2.replay_gaps != recorded_gaps.u32()
-            postcondition_ast_index: ProofSourcePostconditionAstIndex = proof_source_postcondition_ast_index_create(source.postcondition_ast_inventory, &source_work)
-            return if not postcondition_ast_index.valid
             file: Ast::File& = source.file
             generic_valid: bool = report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count
-            base_context: (known: bool, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) = proof_source_kernel_base_context(file.top_decls, file.enum_annotations, file.generic_param_lines, file.generic_param_names, generic_valid, source_work)
+            generic_line_index_ready: bool = proof_source_conversion_generic_line_index_build(report, source_work)
+            generic_param_index: mutable ProofSourceKernelGenericParamIndex = proof_source_kernel_generic_param_index_from_source(report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, generic_valid, report.source_types.source_effect_index.generics)
+            generic_param_index.valid <- generic_param_index.valid and generic_line_index_ready
+            base_context: (known: bool, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, generic_param_index: ProofSourceKernelGenericParamIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) = proof_source_kernel_base_context(file.top_decls, file.enum_annotations, generic_param_index, source_work)
             return if not base_context.known
             owner_contexts: (complete: bool, index: ProofSourceKernelPostconditionContextIndex) = proof_source_kernel_postcondition_context_index_build(file.top_decls, file.generic_param_lines, file.generic_param_names, generic_valid, &source_work)
             return if not owner_contexts.complete
@@ -98,7 +99,8 @@ extend ElisaProof:
             cached_owner_line: mutable u32 = 0
             cached_owner_offset: mutable usize = 0
             cached_environment: mutable ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: [], bindings: []}
-            for candidate_index in 0..<candidate_goals.count |candidate_index, candidate_goals, report, source, postcondition_ast_index, file, generic_valid, base_context, owner_contexts, validation_workspace, typing_workspace, type_work_used, goal_work_used, scoped_function_index, cached_owner_valid, cached_owner_name, cached_owner_line, cached_owner_offset, cached_environment, source_work|:
+            staged_replayed_certificates: mutable darray[usize] = []
+            for candidate_index in 0..<candidate_goals.count |candidate_index, candidate_goals, report, file, generic_valid, base_context, owner_contexts, validation_workspace, typing_workspace, type_work_used, goal_work_used, scoped_function_index, cached_owner_valid, cached_owner_name, cached_owner_line, cached_owner_offset, cached_environment, staged_replayed_certificates, source_work|:
                 return if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 attempt_index: usize = candidate_goals[candidate_index]
                 attempt: ProofGoalAttempt = report.results.goal_attempts[attempt_index]
@@ -112,9 +114,6 @@ extend ElisaProof:
                 continue if obligation.source_kind != "postcondition"
                 continue if obligation.source_name != attempt.name or obligation.owner_function_line != attempt.owner_function_line or obligation.owner_function_offset != attempt.owner_function_offset
                 continue if obligation.source_line != obligation.owner_function_line or obligation.source_function_offset != obligation.owner_function_offset
-                postcondition_ast: (complete: bool, found: bool, count: usize, contract_line: u32, expression: Ast::Expr) = proof_source_postcondition_ast_index_find(postcondition_ast_index, obligation.source_name, obligation.source_function_offset, obligation.source_line, obligation.source_obligation_index, &source_work)
-                return if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                continue if not postcondition_ast.complete or not postcondition_ast.found or postcondition_ast.count != 1
                 continue if attempt.rule != "goal" or not attempt.producer_proven or not attempt.has_certificate or attempt.certificate_index >= report.analysis_1.certificates.count
                 certificate: ProofGoalCertificate = report.analysis_1.certificates[attempt.certificate_index]
                 continue if not proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, attempt.certificate_index, source_work)
@@ -133,7 +132,7 @@ extend ElisaProof:
                 if cached_owner_matches:
                     environment <- (true, cached_environment)
                 else:
-                    environment <- proof_source_kernel_postcondition_environment_from_index(owner_contexts.index, attempt.name, attempt.owner_function_line, attempt.owner_function_offset, file.top_decls, base_context.type_index, base_context.tuple_label_index, base_context.global_bindings, file.generic_param_lines, file.generic_param_names, generic_valid, &source_work, &scoped_function_index)
+                    environment <- proof_source_kernel_postcondition_environment_from_index(owner_contexts.index, attempt.name, attempt.owner_function_line, attempt.owner_function_offset, file.top_decls, base_context.type_index, base_context.tuple_label_index, base_context.generic_param_index, base_context.global_bindings, file.generic_param_lines, file.generic_param_names, generic_valid, &source_work, &scoped_function_index)
                     if environment.known:
                         cached_owner_valid <- true
                         cached_owner_name <- attempt.name
@@ -148,7 +147,31 @@ extend ElisaProof:
                     kernel_facts.push(report.analysis_1.kernel.certificate_facts[attempt.kernel_facts_start + fact_offset])
                 proved: bool = ElisaProofKernelReplay::proof_kernel_replay_typed_index_read_report_with_cached_globals_and_workspaces(&report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, environment.environment.bindings, kernel_facts, attempt.kernel_goal, &validation_workspace, &typing_workspace, &type_work_used, &goal_work_used) can Global{Read,Write}
                 continue if not proved
-                report.analysis_1.certificates[attempt.certificate_index].replayed <- true
+                # Stage successful upgrades until every candidate has completed. If
+                # later source work is exhausted, this adapter returns with the
+                # baseline report untouched, so receipt status cannot depend on how
+                # far an incomplete retry happened to get.
+                # The report-structure check above requires sequential, unique
+                # certificate ownership for producer-proven attempts, so staging is
+                # linear and needs no repeated scan of prior candidates.
+                return if not proof_replay_source_work_charge(1, source_work)
+                staged_replayed_certificates.push(attempt.certificate_index)
+            return if not proof_replay_source_work_charge(staged_replayed_certificates.count, source_work)
+            previous_staged_certificate: mutable usize = 0
+            has_previous_staged_certificate: mutable bool = false
+            for certificate_index in staged_replayed_certificates |certificate_index, report, previous_staged_certificate, has_previous_staged_certificate, source_work|:
+                return if not proof_replay_source_work_charge(1, source_work)
+                return if:
+                    certificate_index >= report.analysis_1.certificates.count
+                    report.analysis_1.certificates[certificate_index].replayed
+                    has_previous_staged_certificate and certificate_index <= previous_staged_certificate
+                previous_staged_certificate <- certificate_index
+                has_previous_staged_certificate <- true
+            return if not proof_replay_source_work_charge(staged_replayed_certificates.count, source_work)
+            return if staged_replayed_certificates.count > report.analysis_2.replay_gaps.usize()
+            return if staged_replayed_certificates.count > ElisaProofKernelCore::PROOF_KERNEL_U32_MAX.usize() - report.analysis_2.replayed.usize()
+            for certificate_index in staged_replayed_certificates |certificate_index, report|:
+                report.analysis_1.certificates[certificate_index].replayed <- true
                 report.analysis_2.replayed <- report.analysis_2.replayed + 1
                 report.analysis_2.replay_gaps <- report.analysis_2.replay_gaps - 1
             return

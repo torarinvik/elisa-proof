@@ -11,28 +11,56 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_replay_type_bound_scalar_constant_lookup(report: ProofReport&, declarations: darray[Ast::Decl]&, wanted_scope: darray[sview]&, current_scope: darray[sview]&, constant_name: sview, marker_name: sview, marker_width: i64, matches: mutable usize&, valid: mutable bool&, work: mutable usize&, depth: usize) -> void:
-            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
+        def proof_replay_type_bound_scalar_constant_lookup(report: ProofReport&, declarations: darray[Ast::Decl]&, wanted_scope: darray[sview]&, constant_name: sview, marker_name: sview, marker_width: i64, matches: mutable usize&, valid: mutable bool&, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> void:
+            if:
+                not proof_replay_deterministic_call_declaration_index_ensure(report, work, cache)
+                not cache.declaration_index.valid
                 matches <- 2
                 return
-            scope_match: (complete: bool, equal: bool) = proof_replay_type_bound_scope_equal_with_work(wanted_scope, current_scope, work)
-            if not scope_match.complete:
+            group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(cache.declaration_index, constant_name, work)
+            if not group.complete:
                 matches <- 2
                 return
-            in_scope: bool = scope_match.equal
-            for declaration in declarations |report, wanted_scope, current_scope, constant_name, marker_name, marker_width, matches, valid, work, depth, in_scope|:
-                return if matches > 1
-                if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
+            return if group.count == 0
+            index: ProofReplayDeterministicDeclarationIndex& = cache.declaration_index
+            if group.head >= index.entries.count or group.count > index.entries.count:
+                matches <- 2
+                return
+            row: mutable usize = group.head
+            previous: mutable usize = index.entries.count
+            for offset in 0..<group.count |offset, group, index, row, previous, declarations, report, wanted_scope, constant_name, marker_name, marker_width, matches, valid, work|:
+                if row >= index.entries.count or not proof_replay_type_bound_local_work_charge(1, work):
                     matches <- 2
                     return
-                work <- work + 1
-                match declaration:
-                    Ast::Decl.Const(candidate_name, candidate_type, _, is_mutable, position):
-                        if in_scope:
-                            if not proof_replay_type_bound_local_text_compare_charge(candidate_name, constant_name, work):
-                                matches <- 2
-                                return
-                            if candidate_name == constant_name:
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
+                if:
+                    not proof_replay_type_bound_local_text_compare_charge(entry.name, constant_name, work)
+                    entry.name != constant_name
+                    row >= previous
+                    matches <- 2
+                    return
+                previous <- row
+                next: usize = entry.next_index
+                if offset + 1 == group.count:
+                    if next != index.entries.count:
+                        matches <- 2
+                        return
+                else:
+                    if next >= row:
+                        matches <- 2
+                        return
+                if entry.declaration is Ast::Decl.Const(_, _, _, _, _):
+                    candidate_scope: (complete: bool, scope: darray[sview], declaration: Ast::Decl) = proof_replay_type_bound_declaration_scope_from_index_with_work(declarations, index, row, work)
+                    if not candidate_scope.complete:
+                        matches <- 2
+                        return
+                    scope_match: (complete: bool, equal: bool) = proof_replay_type_bound_scope_equal_with_work(wanted_scope, candidate_scope.scope, work)
+                    if not scope_match.complete:
+                        matches <- 2
+                        return
+                    if scope_match.equal:
+                        match candidate_scope.declaration:
+                            Ast::Decl.Const(_, candidate_type, _, is_mutable, _):
                                 matches <- matches + 1
                                 constant_type_name: sview = match candidate_type:
                                     Ast::Expr.Ident(type_name, _): type_name
@@ -59,19 +87,11 @@ extend ElisaProof:
                                     valid <- not is_mutable and unsigned_width > 0 and marker_width == unsigned_width
                                 else:
                                     valid <- false
-                    Ast::Decl.Module(module_name, nested, _):
-                        normalized_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(current_scope, module_name, work)
-                        if not normalized_scope.complete:
-                            matches <- 2
-                            return
-                        next_scope: mutable darray[sview] = normalized_scope.scope
-                        proof_replay_type_bound_scalar_constant_lookup(report, nested, wanted_scope, &next_scope, constant_name, marker_name, marker_width, matches, valid, work, depth + 1)
-                    Ast::Decl.Scoped(nested, _):
-                        proof_replay_type_bound_scalar_constant_lookup(report, nested, wanted_scope, current_scope, constant_name, marker_name, marker_width, matches, valid, work, depth + 1)
-                    Ast::Decl.Invalid:
-                        matches <- 2
-                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
-                        pass
+                            _:
+                                matches <- 2
+                                return
+                if offset + 1 < group.count:
+                    row <- next
 
         def proof_replay_type_bound_owner_function_line(declarations: darray[Ast::Decl]&, name: sview, line: u32, best: mutable u32&, search_complete: mutable bool&, work: mutable usize&, depth: usize) -> void:
             if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
@@ -261,14 +281,9 @@ extend ElisaProof:
             return false if:
                 not proof_replay_type_bound_extent_preflight_with_work(owner_body, trace.expression, true, Ast::Expr.Absent, false, work)
                 proof_replay_source_body_declares_with_work(report.source.source_declarations, owner_body, shadow_name, work)
-            # A qualified spelling is a complete path from the source root. The owner scope is
-            # only a base for bare names; carrying it into a qualified lookup duplicates the
-            # module prefix for self-qualified constants inside `module` / `extend` bodies.
-            lookup_scope: mutable darray[sview] = []
-            lookup_scope.extend(current_scope) if not qualified
             matches: mutable usize = 0
             valid: mutable bool = false
-            proof_replay_type_bound_scalar_constant_lookup(report, report.source.source_declarations, &wanted_scope, &lookup_scope, constant_name, marker_name, marker_width, &matches, &valid, work, 0)
+            proof_replay_type_bound_scalar_constant_lookup(report, report.source.source_declarations, &wanted_scope, constant_name, marker_name, marker_width, &matches, &valid, work, cache)
             matches == 1 and valid
 
         def proof_replay_type_bound_parameter_declaration(report: ProofReport&, trace: ProofFactTrace, declarations: darray[Ast::Decl]&, owner_line: u32, owner_offset: usize, matches: mutable usize&, valid: mutable bool&, work: mutable usize&, depth: usize) -> void:

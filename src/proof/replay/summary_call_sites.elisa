@@ -93,6 +93,9 @@ extend ElisaProof:
         def proof_replay_summary_owner_source_preflight_with_limit(report: ProofReport&, owner: sview, owner_line: u32, work: mutable usize&, work_limit: usize) -> bool:
             scan_start: usize = work
             return false if not proof_replay_summary_owner_source_scan_with_limit(report, owner, owner_line, work, work_limit)
+            if work < scan_start:
+                work <- work_limit
+                return false
             scan_cost: usize = work - scan_start
             seed: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - (work_limit - work)
             if scan_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - seed) / 3:
@@ -119,6 +122,9 @@ extend ElisaProof:
             if not proof_replay_summary_call_exact_span_in_declarations(report.source.source_declarations, owner, owner_line, owner_offset, exact_owner, Ast::Expr.Invalid, &found, &found_owner_line, &matches, &owners, &metered_work, 0):
                 work <- work_limit
                 return false
+            if metered_work < scan_start:
+                work <- work_limit
+                return false
             scan_cost: usize = metered_work - scan_start
             if scan_cost > work_limit - work:
                 work <- work_limit
@@ -135,7 +141,7 @@ extend ElisaProof:
             body: mutable darray[Ast::Stmt] = []
             return false if:
                 not proof_replay_source_owner_body_with_work(report, trace.name, owner_line, &body, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
-                proof_replay_local_binding_parameter_name_present_with_default_limit(report.source.source_declarations, trace.name, owner_line, path[0], work, 0)
+                proof_replay_local_binding_parameter_name_present_for_report_owner_with_work(report.source.source_declarations, trace.name, owner_line, report, path[0], work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
             return not proof_replay_source_body_declares_with_work(report.source.source_declarations, body, path[0], work)
 
         def proof_replay_summary_call_global_constant_matches(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr) -> bool:
@@ -331,7 +337,7 @@ extend ElisaProof:
                 match statement:
                     Ast::Stmt.VarDecl(_, _, initializer, position):
                         matches <- matches + 1 if proof_replay_summary_call_same_source_span(report, trace, initializer, expected, rebind_depth, work, complete, 0)
-                    Ast::Stmt.Assign(_, TokenKind.Assign, value, position) | Ast::Stmt.Expr(value, position) | Ast::Stmt.Return(value, position):
+                    Ast::Stmt.Assign(_, TokenKind.Assign, value, position) | Ast::Stmt.Assign(_, TokenKind.LArrow, value, position) | Ast::Stmt.Expr(value, position) | Ast::Stmt.Return(value, position):
                         matches <- matches + 1 if proof_replay_summary_call_same_source_span(report, trace, value, expected, rebind_depth, work, complete, 0)
                     Ast::Stmt.Contract(_, expression, position):
                         matches <- matches + 1 if proof_replay_summary_call_same_source_span(report, trace, expression, expected, rebind_depth, work, complete, 0)
@@ -344,28 +350,61 @@ extend ElisaProof:
                 return false if not proof_replay_summary_bool_ref_value(complete)
             return true
 
-        def proof_replay_summary_call_same_source_declarations(report: mutable ProofReport&, trace: ProofFactTrace, expected: Ast::Expr, declarations: darray[Ast::Decl]&, owner_line: u32, consumer_position: Ast::Pos, consumer_goal: Ast::Expr, consumer_valid: bool, matches: mutable usize&, work: mutable usize&, complete: mutable bool&, depth: usize, rebind_depth: usize) -> bool:
-            if depth >= 96 or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+        # The per-replay declaration index has already traversed the full source tree and keeps
+        # every same-name row, including duplicate and non-function declarations. Reuse its
+        # collision-checked group here so each summary witness scans only declarations with the
+        # owner's spelling; exact source line and call-span checks still decide admission.
+        def proof_replay_summary_call_same_source_indexed(report: mutable ProofReport&, trace: ProofFactTrace, expected: Ast::Expr, owner_line: u32, consumer_position: Ast::Pos, consumer_goal: Ast::Expr, consumer_valid: bool, matches: mutable usize&, work: mutable usize&, complete: mutable bool&, rebind_depth: usize, cache: ProofReplayDeterministicCallReplayCache&) -> bool:
+            group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(cache.declaration_index, trace.name, work)
+            if not group.complete:
                 complete <- false
                 return false
-            work <- work + declarations.count
-            for declaration in declarations |report, trace, expected, owner_line, consumer_position, consumer_goal, consumer_valid, matches, work, complete, depth|:
-                match declaration:
-                    Ast::Decl.Func(name, _, _, body, _, _, position):
-                        if not proof_replay_mutable_local_text_compare_work_charge(name, trace.name, work):
-                            complete <- false
-                            return false
-                        if name == trace.name and (owner_line == 0 or position.line == owner_line):
-                            return false if not proof_replay_summary_call_same_source_statement(report, trace, body, expected, consumer_position, consumer_goal, consumer_valid, matches, work, complete, rebind_depth)
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_summary_call_same_source_declarations(report, trace, expected, nested, owner_line, consumer_position, consumer_goal, consumer_valid, matches, work, complete, depth + 1, rebind_depth)
-                    Ast::Decl.Invalid:
-                        return false
-                    Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
-                        pass
-            return true
+            row: mutable usize = group.head
+            for _ in 0..<group.count |group, row, cache, trace, owner_line, expected, consumer_position, consumer_goal, consumer_valid, matches, work, complete, report, rebind_depth|:
+                return false if row >= cache.declaration_index.entries.count
+                entry: ProofReplayDeterministicDeclarationEntry = cache.declaration_index.entries[row]
+                return false if not proof_replay_mutable_local_text_compare_work_charge(entry.name, trace.name, work)
+                if entry.name == trace.name:
+                    match entry.declaration:
+                        Ast::Decl.Func(name, _, _, body, _, _, position):
+                            if owner_line == 0 or position.line == owner_line:
+                                return false if not proof_replay_summary_call_same_source_statement(report, trace, body, expected, consumer_position, consumer_goal, consumer_valid, matches, work, complete, rebind_depth)
+                        _:
+                            pass
+                row <- entry.next_index
+                if row > cache.declaration_index.entries.count:
+                    complete <- false
+                    return false
+            if row != cache.declaration_index.entries.count:
+                complete <- false
+                return false
+            true
 
-        def proof_replay_summary_call_same_source_site(report: mutable ProofReport&, trace: ProofFactTrace, call: Ast::Expr, rebind_depth: usize, work: mutable usize&) -> bool:
+        def proof_replay_summary_call_owner_body_from_index(index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, owner_line: u32, body: mutable darray[Ast::Stmt]&, work: mutable usize&) -> (complete: bool, matches: usize):
+            group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(index, wanted, work)
+            return (false, 0) if not group.complete
+            matches: mutable usize = 0
+            row: mutable usize = group.head
+            for _ in 0..<group.count |group, row, index, wanted, owner_line, body, matches, work|:
+                return (false, matches) if row >= index.entries.count
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
+                return (false, matches) if not proof_replay_mutable_local_text_compare_work_charge(entry.name, wanted, work)
+                match entry.declaration:
+                    Ast::Decl.Func(name, _, _, statements, _, _, position):
+                        if name == wanted and position.line == owner_line:
+                            matches <- matches + 1
+                            return (true, matches) if matches > 1
+                            return (false, matches) if statements.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                            work <- work + statements.count
+                            body.extend(statements)
+                    _:
+                        pass
+                row <- entry.next_index
+                return (false, matches) if row > index.entries.count
+            return (false, matches) if row != index.entries.count
+            (true, matches)
+
+        def proof_replay_summary_call_same_source_site(report: mutable ProofReport&, trace: ProofFactTrace, call: Ast::Expr, rebind_depth: usize, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
             matches: mutable usize = 0
             complete: mutable bool = true
             owner_line: mutable u32 = report.analysis_2.replay_owner_line
@@ -373,20 +412,20 @@ extend ElisaProof:
             consumer_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
             consumer_goal: mutable Ast::Expr = Ast::Expr.Invalid
             consumer_valid: mutable bool = false
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, work, cache)
             if report.analysis_2.trace_consumer_certificate_index != 0:
                 return false if owner_line == 0
                 owner_body: mutable darray[Ast::Stmt] = []
-                owner_matches: mutable usize = 0
+                owner_candidate: (complete: bool, matches: usize) = proof_replay_summary_call_owner_body_from_index(cache.declaration_index, trace.name, owner_line, &owner_body, work)
                 return false if:
-                    not proof_replay_local_binding_find_owner_with_work(report.source.source_declarations, trace.name, owner_line, &owner_body, &owner_matches, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
-                    owner_matches != 1
+                    not owner_candidate.complete or owner_candidate.matches != 1
                     not proof_replay_mutable_local_consumer_position_with_work(report, trace, owner_body, &consumer_position, work)
                     report.analysis_2.trace_consumer_certificate_index > report.analysis_1.certificates.count
                 consumer_goal <- report.analysis_1.certificates[report.analysis_2.trace_consumer_certificate_index - 1].goal
                 return false if not proof_replay_source_position_equal(Ast::expr_pos(consumer_goal), consumer_position)
                 consumer_valid <- true
             return false if:
-                not proof_replay_summary_call_same_source_declarations(report, trace, call, report.source.source_declarations, owner_line, consumer_position, consumer_goal, consumer_valid, &matches, work, &complete, 0, rebind_depth)
+                not proof_replay_summary_call_same_source_indexed(report, trace, call, owner_line, consumer_position, consumer_goal, consumer_valid, &matches, work, &complete, rebind_depth, cache)
                 work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return complete and matches == 1
 
@@ -465,7 +504,7 @@ extend ElisaProof:
                 Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), _, _, _):
                     return false if:
                         callee_name == "" or report.analysis_2.replay_owner_line == 0 or report.analysis_2.replay_owner_line == 4294967295
-                        proof_replay_local_binding_parameter_name_present_with_default_limit(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, callee_name, work, 0)
+                        proof_replay_local_binding_parameter_name_present_for_report_owner_with_work(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report, callee_name, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
                     return proof_replay_source_call_locals_unshadowed_at_with_work(body, report.source.source_annotations, call, work)
                 _:
                     pass
@@ -478,35 +517,6 @@ extend ElisaProof:
             work <- work + body.count
             complete <- true
             return proof_replay_deterministic_call_source_contains_statements_bounded(body, bare.call, work, &complete, 0) and complete
-
-        # Check only the live local-binding scope at a call's source position. This keeps calls
-        # before later declarations and calls in sibling blocks available to summaries.
-        def proof_replay_source_call_locals_unshadowed_at_with_work(body: darray[Ast::Stmt]&, annotations: darray[Ast::EnumAnnotation]&, call: Ast::Expr, work: mutable usize&) -> bool:
-            match call:
-                Ast::Expr.Call(callee, _, _, position):
-                    name: mutable sview = ""
-                    match callee:
-                        Ast::Expr.Ident(callee_name, _):
-                            name <- callee_name
-                        Ast::Expr.Scope(_, callee_name, _):
-                            name <- callee_name
-                        _:
-                            return false
-                    return false if name == "" or position.line == 0
-                    target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{selection: ProofReplayCallSiteTargetSelection{enabled: true, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: true, offset: position.offset.usize(), line: position.line, name: name, calls_at_offset: 0, matched_calls: 0, track_unresolved_dispatch: true, unresolved_dispatch_found: false, source_annotations: annotations}, conversions: ProofReplayCallSiteTargetConversions{field_conversion_parameters: [], field_conversion_names: [], field_conversion_index_valid: false, field_conversion_index_hashes: [], field_conversion_index_values: [], field_conversion_index_counts: [], field_conversion_custom_cast_present: false}, aliases: ProofReplayCallSiteTargetAliases{field_conversion_alias_names: [], field_conversion_alias_targets: [], field_conversion_alias_lines: [], field_conversion_bare_alias_root_fallback_valid: false, field_conversion_alias_owners: [], field_conversion_alias_has_formals: [], field_conversion_alias_scope_index_valid: false, field_conversion_alias_scope_index_hashes: [], field_conversion_alias_scope_index_values: [], field_conversion_alias_scope_index_counts: [], field_conversion_alias_index_valid: false, field_conversion_alias_index_hashes: [], field_conversion_alias_index_values: [], field_conversion_alias_index_counts: []}, generics: ProofReplayCallSiteTargetGenerics{field_conversion_generic_params_valid: false, field_conversion_generic_param_lines: [], field_conversion_generic_param_names: [], field_conversion_generic_param_line: 0, field_conversion_generic_param_owner: "", field_conversion_generic_param_owner_known: false, field_conversion_generic_param_index_valid: false, field_conversion_generic_param_index_hashes: [], field_conversion_generic_param_index_values: [], field_conversion_generic_param_index_counts: []}, types: ProofReplayCallSiteTargetTypes{field_conversion_declared_types: [], field_conversion_declared_type_owners: [], field_conversion_declared_type_scope_index_valid: false, field_conversion_declared_type_scope_index_hashes: [], field_conversion_declared_type_scope_index_values: [], field_conversion_declared_type_scope_index_counts: [], field_conversion_declared_type_index_valid: false, field_conversion_declared_type_index_hashes: [], field_conversion_declared_type_index_values: [], field_conversion_declared_type_index_counts: []}}
-                    target.selection.allow_scoped_target <- true
-                    target.capture.expected_call <- call
-                    target.capture.require_exact_call <- true
-                    calls: mutable darray[sview] = []
-                    return false if not proof_replay_source_calls_with_target_work([], body, annotations, &calls, &target, work)
-                    return target.selection.calls_at_offset == 1 and target.selection.matched_calls == 1
-                _:
-                    return false
-
-    public:
-        # Shared by frame and type-bound replay so both use the same live-scope call binding rule.
-        def source_call_locals_unshadowed_at_with_work(body: darray[Ast::Stmt]&, annotations: darray[Ast::EnumAnnotation]&, call: Ast::Expr, work: mutable usize&) -> bool:
-            return proof_replay_source_call_locals_unshadowed_at_with_work(body, annotations, call, work)
 
     private:
         def proof_replay_summary_direct_call_source_site_at(report: mutable ProofReport&, trace: ProofFactTrace, call: Ast::Expr, rebind_depth: usize, work: mutable usize&) -> bool:
@@ -524,7 +534,7 @@ extend ElisaProof:
             work <- work + report.analysis_1.traces.records.count
             return true if proof_replay_deterministic_call_source_site_with_cache(report, trace, call, work, cache)
             return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return true if proof_replay_summary_call_same_source_site(report, trace, call, rebind_depth, work)
+            return true if proof_replay_summary_call_same_source_site(report, trace, call, rebind_depth, work, cache)
             return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return proof_replay_summary_requires_call_source_site(report, trace, call, work)
 

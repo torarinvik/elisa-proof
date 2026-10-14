@@ -16,12 +16,88 @@ extend ElisaProof:
                 _:
                     return ""
 
+        # Replay's threaded-summary path deliberately derives these source facts locally.
+        # Unsupported expression forms are treated as a possible mention and are rejected by
+        # the rewrite below, so they cannot hide a dependency behind producer-side traversal.
+        def proof_replay_thread_mentions_name(expression: Ast::Expr, target: sview, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return false
+                Ast::Expr.BoolLit(_, _):
+                    return false
+                Ast::Expr.FloatLit(_, _):
+                    return false
+                Ast::Expr.StringLit(_, _):
+                    return false
+                Ast::Expr.CharLit(_, _):
+                    return false
+                Ast::Expr.Ident(name, _):
+                    return name == target
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_thread_mentions_name(inner, target, depth + 1)
+                Ast::Expr.Unary(_, inner, _):
+                    return proof_replay_thread_mentions_name(inner, target, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_replay_thread_mentions_name(left, target, depth + 1) or proof_replay_thread_mentions_name(right, target, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_replay_thread_mentions_name(callee, target, depth + 1)
+                    for argument in arguments:
+                        return true if proof_replay_thread_mentions_name(argument, target, depth + 1)
+                    return false
+                Ast::Expr.Field(object, _, _):
+                    return proof_replay_thread_mentions_name(object, target, depth + 1)
+                Ast::Expr.Scope(base, name, _):
+                    return true if name == target
+                    return proof_replay_thread_mentions_name(base, target, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_replay_thread_mentions_name(object, target, depth + 1) or proof_replay_thread_mentions_name(index, target, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_replay_thread_mentions_name(object, target, depth + 1) or proof_replay_thread_mentions_name(low, target, depth + 1) or proof_replay_thread_mentions_name(high, target, depth + 1)
+                Ast::Expr.Move(inner, _):
+                    return proof_replay_thread_mentions_name(inner, target, depth + 1)
+                Ast::Expr.RegionNew(inner, _, _):
+                    return proof_replay_thread_mentions_name(inner, target, depth + 1)
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if proof_replay_thread_mentions_name(element, target, depth + 1)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if proof_replay_thread_mentions_name(element, target, depth + 1)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_replay_thread_mentions_name(condition, target, depth + 1) or proof_replay_thread_mentions_name(then_expr, target, depth + 1) or proof_replay_thread_mentions_name(else_expr, target, depth + 1)
+                _:
+                    return true
+
+        def proof_replay_thread_strip_parens(expression: Ast::Expr, depth: usize) -> Ast::Expr:
+            return Ast::Expr.Invalid if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_thread_strip_parens(inner, depth + 1)
+                _:
+                    return expression
+
+        def proof_replay_thread_callable_name(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return "" if name in {"i8", "i16", "i32", "i64", "int", "isize", "u8", "u16", "u32", "u64", "usize", "uintptr", "f16", "f32", "f64", "bool", "char"}
+                    if sview_len(name) >= 2 and (sview_at(name, 0) == 'i'.u8() or sview_at(name, 0) == 'u'.u8()):
+                        numeric: bool = true
+                        for index in 1..<sview_len(name) |name|:
+                            numeric <- false if sview_at(name, index) < '0'.u8() or sview_at(name, index) > '9'.u8()
+                        return "" if numeric
+                    return name
+                _:
+                    return ""
+
         # Read each threaded parameter's place as its exit symbol (or as the parameter, the entry
         # value, when `pre`), and `old(place)` as the parameter. Any other mention is invalid.
         def proof_replay_thread_rewrite(expression: Ast::Expr, parameters: darray[sview]&, symbols: darray[sview]&, pre: bool, valid: mutable bool&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
             mentioned: mutable bool = false
             for parameter in parameters |expression, mentioned|:
-                mentioned <- true if proof_expr_mentions_name(expression, parameter)
+                mentioned <- true if proof_replay_thread_mentions_name(expression, parameter, 0)
             return expression if not mentioned
             if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT:
                 valid <- false
@@ -66,10 +142,10 @@ extend ElisaProof:
         def proof_replay_thread_statement_call(statement: Ast::Stmt, local_name: sview) -> Ast::Expr:
             match statement:
                 Ast::Stmt.Expr(expression, _):
-                    return proof_strip_parens(expression)
+                    return proof_replay_thread_strip_parens(expression, 0)
                 Ast::Stmt.Assign(target, operator, value, _):
                     return Ast::Expr.Invalid if operator != TokenKind.LArrow or proof_ident_name(target) != local_name
-                    return proof_strip_parens(value)
+                    return proof_replay_thread_strip_parens(value, 0)
                 _:
                     return Ast::Expr.Invalid
 
@@ -87,7 +163,7 @@ extend ElisaProof:
             arguments: mutable darray[Ast::Expr] = []
             match call:
                 Ast::Expr.Call(callee, call_arguments, _, _):
-                    callee_name <- proof_callable_name(callee)
+                    callee_name <- proof_replay_thread_callable_name(callee)
                     arguments.extend(call_arguments)
                 _:
                     return false
@@ -95,8 +171,9 @@ extend ElisaProof:
                 callee_name == ""
                 not proof_replay_summary_expr_charge_with_work(call, source_work)
                 not proof_replay_mutable_local_trace_work_charge(report, source_work, 1)
+            source_cache: mutable ProofReplayStructuralValidationCache = ProofReplayStructuralValidationCache{}
             line: u32 = Ast::expr_pos(call).line
-            for candidate in report.analysis_1.traces.records |candidate, report, owner, local_name, call, callee_name, arguments, line, source_work|:
+            for candidate in report.analysis_1.traces.records |candidate, report, owner, local_name, call, callee_name, arguments, line, source_work, source_cache|:
                 continue if candidate.kind != "function-summary" or candidate.name != owner or candidate.line != line or candidate.dependency != callee_name
                 continue if proof_replay_trace_owner_source_position_line_for_trace_with_work(report, candidate, source_work) != report.analysis_2.replay_owner_line
                 return false if report.analysis_1.executables.summaries.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
@@ -106,7 +183,13 @@ extend ElisaProof:
                     source_work <- source_work + sview_len(summary.name)
                     continue if summary.name != candidate.dependency or (candidate.owner_line != 0 and summary.line != candidate.owner_line)
                     continue if not summary.verified
-                    threading: ProofReplayThreading = proof_replay_summary_threading_with_work(report, candidate, summary, call, source_work)
+                    if not source_cache.initialized:
+                        return false if not proof_replay_structural_validation_cache_build(report, source_work, &source_cache)
+                    return false if not source_cache.complete
+                    source_cache.scratch.analysis_2.replay_owner_line <- report.analysis_2.replay_owner_line
+                    source_cache.scratch.analysis_2.replay_owner_offset <- report.analysis_2.replay_owner_offset
+                    source_cache.scratch.analysis_2.replay_owner_offset_valid <- report.analysis_2.replay_owner_offset_valid
+                    threading: ProofReplayThreading = proof_replay_summary_threading_with_work(report, source_cache.scratch, candidate, summary, call, source_work)
                     continue if not threading.valid
                     for slot in threading.slots |slot, arguments, local_name|:
                         return true if slot < arguments.count and proof_replay_thread_argument_local(arguments[slot]) == local_name
