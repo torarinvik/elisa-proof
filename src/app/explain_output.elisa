@@ -2,6 +2,27 @@
 # goal, its verdict, the refusing gate when it is open, and every fact the engine held beside the
 # origin the replay driver recorded for it. It reads the same report the JSON output does and
 # decides nothing itself (BACKLOG K-08).
+def proof_push_explain_expr_with_work(buffer: mutable darray[u8]&, expression: Ast::Expr, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+    limit: usize = ElisaProof::proof_replay_summary_source_work_limit()
+    cost: mutable usize = 0
+    if work > limit:
+        proof_push(buffer, "<omitted: output work limit>")
+        return false
+    if not proof_replay_summary_expr_cost_with_limit(expression, &cost, work, limit):
+        work <- limit + 1
+        proof_push(buffer, "<omitted: output work limit>")
+        return false
+    remaining: usize = limit - work
+    # Cost extraction bounds the term walk; eight units per cost unit cover the bounded
+    # source-like spelling, separators, and escaped string/character contents.
+    if cost > remaining / 9:
+        work <- limit + 1
+        proof_push(buffer, "<omitted: output work limit>")
+        return false
+    work <- work + cost * 9
+    proof_push_elisa_expr(buffer, expression, false, 0)
+    true
+
 def proof_push_goal_explanation_with_replayed[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, goal_id: usize, replay_work: mutable usize&) -> (complete: bool, found: bool, state: sview) can[Memory.Allocate, Abort.Panic]:
     report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     source_admissions_complete: bool = proof_checked_view_goal_source_admissions_complete(checked_view)
@@ -16,17 +37,26 @@ def proof_push_goal_explanation_with_replayed[@view, @buffer](buffer: mutable da
     goal_state_result: (complete: bool, state: sview) = (goal_status.complete, goal_status.state)
     replayed: bool = goal_status.replayed
     source_admitted: bool = goal_status.source_admitted
+    explanation_complete: mutable bool = goal_status.complete
     origin_work: mutable usize = report.analysis_1.traces.lookup_work_used
     proof_push(buffer, "goal ")
     proof_push_number(buffer, goal_id.u32())
     proof_push(buffer, " in ")
-    proof_push(buffer, attempt.name)
+    if proof_output_reserve_status_snapshot_work(replay_work, sview_len(attempt.name)):
+        proof_push(buffer, attempt.name)
+    else:
+        proof_push(buffer, "<omitted>")
+        explanation_complete <- false
     proof_push(buffer, " line ")
     proof_push_number(buffer, attempt.line)
     proof_push(buffer, " (")
-    proof_push(buffer, attempt.rule)
+    if proof_output_reserve_status_snapshot_work(replay_work, sview_len(attempt.rule)):
+        proof_push(buffer, attempt.rule)
+    else:
+        proof_push(buffer, "<omitted>")
+        explanation_complete <- false
     proof_push(buffer, ")\n  goal: ")
-    proof_push_elisa_expr(buffer, attempt.goal, false, 0)
+    explanation_complete <- proof_push_explain_expr_with_work(buffer, attempt.goal, replay_work) and explanation_complete
     proof_push(buffer, "\n  verdict: ")
     if goal_state_result.state == "proved" and producer_claim and replayed and source_admitted:
         proof_push(buffer, "proven, replayed certificate ")
@@ -40,28 +70,49 @@ def proof_push_goal_explanation_with_replayed[@view, @buffer](buffer: mutable da
         proof_push(buffer, "not proven: producer result lacks successful kernel replay\n")
     else:
         proof_push(buffer, "open, refused at gate ")
-        proof_push(buffer, proof_attempt_refusal_gate(report, attempt))
+        refusal_gate: sview = proof_attempt_refusal_gate(report, attempt)
+        if proof_output_reserve_status_snapshot_work(replay_work, sview_len(refusal_gate)):
+            proof_push(buffer, refusal_gate)
+        else:
+            proof_push(buffer, "<omitted>")
+            explanation_complete <- false
         proof_push(buffer, "\n")
     proof_push(buffer, "  facts: ")
     proof_push_number(buffer, attempt.facts_count.u32())
     proof_push(buffer, "\n")
-    for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer, origin_work|:
+    facts_range_valid: bool = attempt.facts_start <= report.analysis_1.certificate_facts.count and attempt.facts_count <= report.analysis_1.certificate_facts.count - attempt.facts_start
+    explanation_complete <- false if not facts_range_valid
+    facts_preflight_complete: bool = facts_range_valid and proof_output_reserve_status_snapshot_work(replay_work, attempt.facts_count)
+    explanation_complete <- false if not facts_preflight_complete
+    facts_to_render: usize = attempt.facts_count if facts_preflight_complete else 0
+    if not facts_preflight_complete:
+        proof_push(buffer, "    <facts omitted: invalid report range or output work limit>\n")
+    for fact_index in 0..<facts_to_render |fact_index, attempt, report, buffer, origin_work, replay_work, explanation_complete|:
         proof_push(buffer, "    [")
         proof_push_number(buffer, fact_index.u32())
         proof_push(buffer, "] ")
-        proof_push_elisa_expr(buffer, report.analysis_1.certificate_facts[attempt.facts_start + fact_index], false, 0)
+        explanation_complete <- proof_push_explain_expr_with_work(buffer, report.analysis_1.certificate_facts[attempt.facts_start + fact_index], replay_work) and explanation_complete
         origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at_with_work(report, attempt.facts_start + fact_index, attempt.name, origin_work)
         if origin.known:
             proof_push(buffer, "  <- ")
-            proof_push(buffer, origin.kind)
+            if proof_output_reserve_status_snapshot_work(replay_work, sview_len(origin.kind)):
+                proof_push(buffer, origin.kind)
+            else:
+                proof_push(buffer, "<origin text omitted>")
+                explanation_complete <- false
             proof_push(buffer, " line ")
             proof_push_number(buffer, origin.line)
             if origin.dependency != "":
                 proof_push(buffer, " via ")
-                proof_push(buffer, origin.dependency)
+                if proof_output_reserve_status_snapshot_work(replay_work, sview_len(origin.dependency)):
+                    proof_push(buffer, origin.dependency)
+                else:
+                    proof_push(buffer, "<dependency omitted>")
+                    explanation_complete <- false
         else:
             proof_push(buffer, "  <- unknown origin")
         proof_push(buffer, "\n")
     if proof_replay_fact_origin_work_exhausted(origin_work):
         proof_push(buffer, "  fact origin metadata incomplete: replay lookup work limit reached\n")
-    return (goal_status.complete and goal_state_result.complete, true, goal_state_result.state)
+        explanation_complete <- false
+    return (explanation_complete and goal_state_result.complete, true, goal_state_result.state)

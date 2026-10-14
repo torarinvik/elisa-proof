@@ -210,7 +210,7 @@ def proof_push_json_focused_goal_with_replayed[@view, @buffer](buffer: mutable d
     proof_push_number(buffer, goal_id.u32())
     proof_push(buffer, ",\"goal_fingerprint\":")
     if found:
-        fingerprint: (valid: bool, value: u32) = proof_goal_fingerprint(report, report.results.goal_attempts[goal_id])
+        fingerprint: (valid: bool, value: u32) = proof_goal_fingerprint_with_limit(report, report.results.goal_attempts[goal_id], &replay_work, ElisaProof::proof_replay_summary_source_work_limit())
         if fingerprint.valid:
             proof_push(buffer, "{\"algorithm\":\"fnv1a32-kernel-goal-v2\",\"value\":")
             proof_push_number(buffer, fingerprint.value)
@@ -227,12 +227,13 @@ def proof_push_json_focused_goal_with_replayed[@view, @buffer](buffer: mutable d
     replay_status: mutable sview = "not_certified"
     replay_status <- "gap" if attempt.has_certificate
     replay_status <- "replayed" if attempt_replayed
+    metadata_complete: mutable bool = true
     proof_push(buffer, "{\"line\":")
     proof_push_number(buffer, attempt.line)
     proof_push(buffer, ",\"name\":")
-    proof_push_json_string(buffer, attempt.name)
+    metadata_complete <- proof_output_json_string_with_work(buffer, attempt.name, replay_work)
     proof_push(buffer, ",\"rule\":")
-    proof_push_json_string(buffer, attempt.rule)
+    metadata_complete <- proof_output_json_string_with_work(buffer, attempt.rule, replay_work) and metadata_complete
     proof_push(buffer, ",\"proven\":")
     attempt_status: sview = attempt_status_result.state
     replay_proven: bool = attempt_status == "proved"
@@ -247,19 +248,31 @@ def proof_push_json_focused_goal_with_replayed[@view, @buffer](buffer: mutable d
     proof_push(buffer, ",\"kernel_goal\":")
     proof_push_number(buffer, attempt.kernel_goal.u32())
     proof_push(buffer, ",\"facts\":[")
-    for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer|:
-        proof_push(buffer, ",") if fact_index > 0
-        proof_push_json_expr(buffer, report.analysis_1.certificate_facts[attempt.facts_start + fact_index])
+    facts_complete: mutable bool = attempt.facts_start <= report.analysis_1.certificate_facts.count and attempt.facts_count <= report.analysis_1.certificate_facts.count - attempt.facts_start
+    if facts_complete:
+        facts_complete <- proof_output_reserve_status_snapshot_work(replay_work, attempt.facts_count)
+    if facts_complete:
+        for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer, replay_work, facts_complete|:
+            proof_push(buffer, ",") if fact_index > 0
+            if proof_output_json_expr_reserve(report.analysis_1.certificate_facts[attempt.facts_start + fact_index], replay_work):
+                proof_push_json_expr(buffer, report.analysis_1.certificate_facts[attempt.facts_start + fact_index])
+            else:
+                proof_push(buffer, "null")
+                facts_complete <- false
+                break
     proof_push(buffer, "],\"fact_origins\":[")
-    for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer, origin_work|:
-        proof_push(buffer, ",") if fact_index > 0
-        proof_push_json_fact_origin(buffer, report, attempt.facts_start + fact_index, attempt.name, origin_work)
-    proof_push(buffer, "],\"fact_origins_complete\":true" if not proof_replay_fact_origin_work_exhausted(origin_work) else "],\"fact_origins_complete\":false")
+    if facts_complete:
+        for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer, origin_work|:
+            proof_push(buffer, ",") if fact_index > 0
+            proof_push_json_fact_origin(buffer, report, attempt.facts_start + fact_index, attempt.name, origin_work)
+    origins_complete: bool = facts_complete and not proof_replay_fact_origin_work_exhausted(origin_work)
+    proof_push(buffer, "],\"fact_origins_complete\":true" if origins_complete else "],\"fact_origins_complete\":false")
     proof_push(buffer, ",\"dependencies\":")
-    dependencies_complete: bool = proof_push_json_goal_dependencies(buffer, report, attempt.facts_start, attempt.facts_count, attempt.name, origin_work)
+    dependencies_complete: bool = facts_complete and proof_push_json_goal_dependencies(buffer, report, attempt.facts_start, attempt.facts_count, attempt.name, origin_work)
     proof_push(buffer, ",\"dependencies_complete\":true" if dependencies_complete else ",\"dependencies_complete\":false")
     proof_push(buffer, ",\"proposition\":")
-    proof_push_json_expr(buffer, attempt.goal)
+    proposition_complete: bool = proof_output_json_expr_reserve(attempt.goal, replay_work)
+    proof_push_json_expr(buffer, attempt.goal) if proposition_complete else proof_push(buffer, "null")
     proof_push(buffer, "},\"failure\":")
     failure_complete: mutable bool = true
     if replay_proven:
@@ -267,5 +280,7 @@ def proof_push_json_focused_goal_with_replayed[@view, @buffer](buffer: mutable d
     else:
         failure_complete <- proof_push_json_repair_failure_from_selection(buffer, report, diagnostic_selection, goal_id, goal_source_admissible, replay_work)
     proof_push(buffer, ",\"failure_complete\":true" if failure_complete else ",\"failure_complete\":false")
+    details_complete: bool = metadata_complete and facts_complete and origins_complete and dependencies_complete and proposition_complete and replay_work <= ElisaProof::proof_replay_summary_source_work_limit()
+    proof_push(buffer, ",\"detail_complete\":true" if details_complete else ",\"detail_complete\":false")
     proof_push(buffer, "}\n")
-    return (goal_status.complete and attempt_status_result.complete and failure_complete, attempt_status)
+    return (goal_status.complete and attempt_status_result.complete and failure_complete and details_complete, attempt_status)

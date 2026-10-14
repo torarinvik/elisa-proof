@@ -28,22 +28,33 @@ def proof_push_json_kernel_node(buffer: mutable darray[u8]&, node: ElisaProofKer
     proof_push_json_string(buffer, node.secondary_name)
     proof_push(buffer, "}")
 
-def proof_push_json_fact_origin(buffer: mutable darray[u8]&, report: ProofReport&, fact_index: usize, owner: sview, work: mutable usize&) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_json_fact_origin(buffer: mutable darray[u8]&, report: ProofReport&, fact_index: usize, owner: sview, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
     origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at_with_work(report, fact_index, owner, work)
     if not origin.known:
         proof_push(buffer, "null")
-        return
+        return not proof_replay_fact_origin_work_exhausted(work)
+    origin_start: usize = buffer.count
     proof_push(buffer, "{\"kind\":")
-    proof_push_json_string(buffer, origin.kind)
+    if not proof_output_json_string_with_work(buffer, origin.kind, work):
+        buffer.count <- origin_start
+        proof_push(buffer, "null")
+        return false
     proof_push(buffer, ",\"line\":")
     proof_push_number(buffer, origin.line)
     proof_push(buffer, ",\"name\":")
-    proof_push_json_string(buffer, origin.name)
+    if not proof_output_json_string_with_work(buffer, origin.name, work):
+        buffer.count <- origin_start
+        proof_push(buffer, "null")
+        return false
     proof_push(buffer, ",\"dependency\":")
-    proof_push_json_string(buffer, origin.dependency)
+    if not proof_output_json_string_with_work(buffer, origin.dependency, work):
+        buffer.count <- origin_start
+        proof_push(buffer, "null")
+        return false
     proof_push(buffer, ",\"premises\":")
     proof_push_number(buffer, origin.premises_count.u32())
     proof_push(buffer, "}")
+    true
 
 def proof_push_json_goal_dependencies(buffer: mutable darray[u8]&, report: ProofReport&, facts_start: usize, facts_count: usize, owner: sview, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
     dependency_start: usize = buffer.count
@@ -76,9 +87,15 @@ def proof_push_json_goal_dependencies(buffer: mutable darray[u8]&, report: Proof
         continue if duplicate
         proof_push(buffer, ",") if emitted > 0
         proof_push(buffer, "{\"kind\":")
-        proof_push_json_string(buffer, origin.kind)
+        if not proof_output_json_string_with_work(buffer, origin.kind, work):
+            buffer.count <- dependency_start
+            proof_push(buffer, "[]")
+            return false
         proof_push(buffer, ",\"name\":")
-        proof_push_json_string(buffer, origin.dependency)
+        if not proof_output_json_string_with_work(buffer, origin.dependency, work):
+            buffer.count <- dependency_start
+            proof_push(buffer, "[]")
+            return false
         proof_push(buffer, ",\"line\":")
         proof_push_number(buffer, origin.line)
         proof_push(buffer, "}")
@@ -86,16 +103,16 @@ def proof_push_json_goal_dependencies(buffer: mutable darray[u8]&, report: Proof
     proof_push(buffer, "]")
     return true
 
-def proof_push_json_repair_finding(buffer: mutable darray[u8]&, report: ProofReport&, finding: ProofFinding, finding_status: sview, counterexample_trusted: bool) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_json_repair_finding(buffer: mutable darray[u8]&, report: ProofReport&, finding: ProofFinding, finding_status: sview, counterexample_trusted: bool, work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
     proof_push(buffer, "{\"kind\":")
-    proof_push_json_string(buffer, finding.kind)
+    return false if not proof_output_json_string_with_work(buffer, finding.kind, work_used)
     proof_push(buffer, ",\"status\":")
-    proof_push_json_string(buffer, finding_status)
+    return false if not proof_output_json_string_with_work(buffer, finding_status, work_used)
     proof_push(buffer, ",\"message\":")
-    proof_push_json_string(buffer, finding.message)
+    return false if not proof_output_json_string_with_work(buffer, finding.message, work_used)
     if finding.budget_dimension != "":
         proof_push(buffer, ",\"budget\":{\"dimension\":")
-        proof_push_json_string(buffer, finding.budget_dimension)
+        return false if not proof_output_json_string_with_work(buffer, finding.budget_dimension, work_used)
         proof_push(buffer, ",\"observed\":")
         proof_push_number(buffer, finding.budget_observed.u32())
         proof_push(buffer, ",\"limit\":")
@@ -108,10 +125,16 @@ def proof_push_json_repair_finding(buffer: mutable darray[u8]&, report: ProofRep
     proof_push(buffer, "null") if not finding.has_goal
     proof_push(buffer, ",\"counterexample\":[")
     counterexample_count: usize = finding.counterexample_count if counterexample_trusted else 0
-    for index in 0..<counterexample_count |index, finding, report, buffer|:
+    for index in 0..<counterexample_count |index, finding, report, buffer, work_used|:
         proof_push(buffer, ",") if index > 0
-        proof_push_json_expr(buffer, report.results.counterexample_facts[finding.counterexample_start + index])
+        expression: Ast::Expr = report.results.counterexample_facts[finding.counterexample_start + index]
+        expression_start: usize = buffer.count
+        proof_output_json_expr_with_work(buffer, expression, work_used)
+        if work_used > ElisaProof::proof_replay_summary_source_work_limit():
+            buffer.count <- expression_start
+            return false
     proof_push(buffer, "]}")
+    true
 
 def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize, goal_source_admitted: bool, finding_index: ProofRepairFindingLookupIndex&, work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
     selected: (complete: bool, known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index_lookup(finding_index, attempt, goal_id, work_used)
@@ -135,17 +158,17 @@ def proof_push_json_repair_failure_from_selection(buffer: mutable darray[u8]&, r
     return selected.complete
 
 def proof_push_json_repair_finding_with_work(buffer: mutable darray[u8]&, report: ProofReport&, finding: ProofFinding, goal_id: usize, goal_source_admitted: bool, work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
-    return false if:
-        not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.kind))
-        not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.status))
-        not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.name))
-        not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.message))
-        not proof_output_reserve_status_snapshot_work(work_used, finding.counterexample_count)
     status_source_admitted: bool = goal_source_admitted and finding.has_goal and finding.goal_id == goal_id
     finding_status: sview = proof_output_finding_source_status(finding, status_source_admitted)
     counterexample_trusted: bool = finding.counterexample_found and finding_status == "disproved"
-    proof_push_json_repair_finding(buffer, report, finding, finding_status, counterexample_trusted)
-    return true
+    if counterexample_trusted:
+        counterexample_range_valid: bool = finding.counterexample_start <= report.results.counterexample_facts.count and finding.counterexample_count <= report.results.counterexample_facts.count - finding.counterexample_start
+        return false if not counterexample_range_valid or not proof_output_reserve_status_snapshot_work(work_used, finding.counterexample_count)
+    finding_start: usize = buffer.count
+    if not proof_push_json_repair_finding(buffer, report, finding, finding_status, counterexample_trusted, work_used):
+        buffer.count <- finding_start
+        return false
+    true
 
 # Render one goal as an Elisa-like proof a person can read and edit. Everything printed comes from
 # the recorded attempt: its hypotheses are the exact certificate facts, its conclusion is the exact
