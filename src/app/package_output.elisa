@@ -14,6 +14,10 @@
 # in its `trust` record. A source that is not admissible yields no theorems at all.
 const PROOF_PACKAGE_FORMAT: sview = "elisa-proof-package-v4"
 
+def proof_package_output_refuse_oversized(buffer: mutable darray[u8]&, package_start: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    buffer.count <- package_start
+    proof_push(buffer, "{\"format\":\"elisa-proof-package-refusal-v1\",\"reason\":\"package-budget\"}\n")
+
 # Node values are full i64 values; JSON numbers are binary64 and would round those above 2^53,
 # so the package writes every value as a decimal string.
 def proof_push_package_kernel_node(buffer: mutable darray[u8]&, node: ElisaProofKernelCore::ProofKernelNode) -> void can[Memory.Allocate, Abort.Panic]:
@@ -39,11 +43,51 @@ def proof_push_package_kernel_node(buffer: mutable darray[u8]&, node: ElisaProof
     proof_push_json_string(buffer, node.secondary_name)
     proof_push(buffer, "}")
 
-def proof_push_package_theorem(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, attempt: ProofGoalAttempt, origin_work: mutable usize&, output_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+def proof_package_output_string_within_limit(value: sview) -> bool:
+    return ElisaProofJson::sview_len(value) <= ProofPackageLimit::STRING_BYTES and proof_package_string_is_valid_utf8(value)
+
+def proof_package_output_add_kernel_string_bytes(value: sview, used: mutable usize&) -> bool:
+    return false if used > ProofPackageLimit::STRING_BYTES
+    return false if not proof_package_output_string_within_limit(value)
+    length: usize = ElisaProofJson::sview_len(value)
+    return false if length > ProofPackageLimit::STRING_BYTES - used
+    used <- used + length
+    return true
+
+def proof_push_package_theorem(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, attempt: ProofGoalAttempt, origin_work: mutable usize&, output_work: mutable usize&, identity_bytes: mutable usize&, origin_metadata_complete: mutable bool&, budget_exceeded: mutable bool&) -> bool can[Memory.Allocate, Abort.Panic]:
     return false if attempt.kernel_facts_start > report.analysis_1.kernel.certificate_facts.count or attempt.kernel_facts_count > report.analysis_1.kernel.certificate_facts.count - attempt.kernel_facts_start
+    # Source facts and kernel hypotheses are independent tables. Their order establishes
+    # origin correspondence only when the counts agree; otherwise omit presentation metadata
+    # while preserving the independently replayable theorem.
+    origin_count: usize = attempt.facts_count if attempt.facts_count == attempt.kernel_facts_count else 0
+    origin_metadata_complete <- false if origin_count != attempt.facts_count
     statement: mutable darray[u8] = []
     valid: bool = proof_portable_sequent_identity(&statement, report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, report.analysis_1.kernel.certificate_facts, attempt.kernel_facts_start, attempt.kernel_facts_count, attempt.kernel_goal)
     return false if not valid
+    if not proof_package_output_string_within_limit(attempt.name) or not proof_package_output_string_within_limit(attempt.rule) or statement.count > ProofPackageLimit::STRING_BYTES or not proof_package_string_is_valid_utf8(ElisaProofJson::bytes_range_ref(&statement, 0, statement.count)):
+        budget_exceeded <- true
+        return false
+    if identity_bytes > ProofPackageLimit::IDENTITY_BYTES:
+        budget_exceeded <- true
+        return false
+    if statement.count > ProofPackageLimit::IDENTITY_BYTES - identity_bytes:
+        budget_exceeded <- true
+        return false
+    # The reader caps every origin string independently. Refuse before writing this theorem
+    # object if any serialized provenance field would exceed that schema limit; otherwise the
+    # exporter could mark the origin snapshot complete while emitting an unreadable package.
+    origins_all_known: mutable bool = true
+    for index in 0..<origin_count |index, report, attempt, origin_work, budget_exceeded|:
+        origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at_with_work(report, attempt.facts_start + index, attempt.name, origin_work)
+        if proof_replay_fact_origin_work_exhausted(origin_work):
+            budget_exceeded <- true
+            return false
+        if not origin.known:
+            origins_all_known <- false
+            origin_metadata_complete <- false
+        if origin.known and (not proof_package_output_string_within_limit(origin.kind) or not proof_package_output_string_within_limit(origin.name) or not proof_package_output_string_within_limit(origin.dependency)):
+            budget_exceeded <- true
+            return false
     proof_push(buffer, "{\"goal_id\":")
     proof_push_number(buffer, goal_id.u32())
     proof_push(buffer, ",\"name\":")
@@ -57,10 +101,13 @@ def proof_push_package_theorem(buffer: mutable darray[u8]&, report: ProofReport&
         proof_push(buffer, ",") if index > 0
         proof_push_number(buffer, report.analysis_1.kernel.certificate_facts[attempt.kernel_facts_start + index].u32())
     proof_push(buffer, "],\"hypothesis_origins\":[")
-    for index in 0..<attempt.facts_count |index, attempt, report, buffer, origin_work, output_work|:
+    origins_written: mutable usize = 0
+    for index in 0..<origin_count |index, attempt, report, buffer, origin_work, output_work, origins_written|:
         proof_push(buffer, ",") if index > 0
-        break if not proof_push_json_fact_origin(buffer, report, attempt.facts_start + index, attempt.name, origin_work, output_work)
-    origins_complete: bool = not proof_replay_fact_origin_work_exhausted(origin_work) and output_work <= ElisaProof::proof_replay_summary_source_work_limit()
+        origin_written: bool = proof_push_json_fact_origin(buffer, report, attempt.facts_start + index, attempt.name, origin_work, output_work)
+        break if not origin_written
+        origins_written <- origins_written + 1
+    origins_complete: bool = origins_written == attempt.facts_count and attempt.facts_count == attempt.kernel_facts_count and origins_all_known and not proof_replay_fact_origin_work_exhausted(origin_work) and output_work <= ElisaProof::proof_replay_summary_source_work_limit()
     proof_push(buffer, "],\"hypothesis_origins_complete\":true" if origins_complete else "],\"hypothesis_origins_complete\":false")
     proof_push(buffer, ",\"conclusion\":")
     proof_push_number(buffer, attempt.kernel_goal.u32())
@@ -69,9 +116,11 @@ def proof_push_package_theorem(buffer: mutable darray[u8]&, report: ProofReport&
     proof_push(buffer, ",\"goal_fingerprint\":")
     proof_push_number(buffer, proof_source_fingerprint(statement))
     proof_push(buffer, "}")
+    identity_bytes <- identity_bytes + statement.count
     return true
 
 def proof_push_json_package_with_replayed[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, source_path: darray[u8]&, source_map: ProofSourceMap&) -> (snapshot_complete: bool, source_admissible: bool) can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    package_start: usize = buffer.count
     report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     source: darray[u8]& = proof_checked_view_source(checked_view)
     source_bytes: usize = proof_checked_view_source_bytes(checked_view)
@@ -90,9 +139,24 @@ def proof_push_json_package_with_replayed[@view, @buffer](buffer: mutable darray
         proof_push(buffer, "{\"format\":\"elisa-proof-package-refusal-v1\",\"reason\":\"output-work-limit\"}\n")
         return (false, false)
     source_file_count: mutable usize = 0
-    for byte in source_map.files |source_file_count|:
-        source_file_count <- source_file_count + 1 if byte == 0
-    source_within_budget: bool = source_bytes <= ProofPackageLimit::SOURCE_BYTES and source_file_count > 0 and source_file_count <= ProofPackageLimit::SOURCE_FILES
+    source_file_path_bytes: mutable usize = 0
+    source_file_paths_within_budget: mutable bool = true
+    source_file_path_start: mutable usize = 0
+    source_file_position: mutable usize = 0
+    for byte in source_map.files |byte, source_file_count, source_file_path_bytes, source_file_paths_within_budget, source_file_path_start, source_file_position|:
+        if byte == 0:
+            source_file_count <- source_file_count + 1
+            source_file_paths_within_budget <- false if source_file_path_bytes == 0 or source_file_path_bytes > ProofPackageLimit::STRING_BYTES
+            source_file_path: sview = ElisaProofJson::bytes_range_ref(source_map.files, source_file_path_start, source_file_path_bytes)
+            source_file_paths_within_budget <- false if not proof_package_string_is_valid_utf8(source_file_path)
+            source_file_path_bytes <- 0
+            source_file_path_start <- source_file_position + 1
+        else:
+            source_file_path_bytes <- source_file_path_bytes + 1
+            source_file_paths_within_budget <- false if source_file_path_bytes > ProofPackageLimit::STRING_BYTES
+        source_file_position <- source_file_position + 1
+    source_path_text: sview = ElisaProofJson::bytes_range_ref(source_path, 0, source_path.count)
+    source_within_budget: bool = source_bytes <= ProofPackageLimit::SOURCE_BYTES and proof_package_string_is_valid_utf8(source_content) and proof_package_output_string_within_limit(source_path_text) and source_file_count > 0 and source_file_count <= ProofPackageLimit::SOURCE_FILES and source_file_path_bytes == 0 and source_file_paths_within_budget
     source_admissible <- source_admissible and source_within_budget
     if not source_within_budget:
         proof_push(buffer, "{\"format\":\"elisa-proof-package-refusal-v1\",\"reason\":\"source-budget\"}\n")
@@ -103,13 +167,28 @@ def proof_push_json_package_with_replayed[@view, @buffer](buffer: mutable darray
         return (false, false)
     theorems: mutable darray[u8] = []
     written: mutable usize = 0
+    identity_bytes: mutable usize = 0
+    origin_metadata_complete: mutable bool = true
     node_end: mutable usize = 0
+    package_budget_exceeded: mutable bool = false
     if source_admissible:
-        for goal_id in 0..<report.results.goal_attempts.count |__package_goal_loop_unit = false, goal_id, report, theorems, written, node_end, origin_work, output_work, replayed_goals, source_admitted_goals, producer_claimed_goals| -> __package_goal_loop_unit:
+        for goal_id in 0..<report.results.goal_attempts.count |__package_goal_loop_unit = false, goal_id, report, theorems, written, identity_bytes, origin_metadata_complete, node_end, origin_work, output_work, replayed_goals, source_admitted_goals, producer_claimed_goals, package_budget_exceeded| -> __package_goal_loop_unit:
+            break if package_budget_exceeded
             attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
             continue if not proof_output_cached_producer_claim_status(producer_claimed_goals, goal_id) or not proof_output_cached_replay_status(replayed_goals, goal_id) or not proof_output_cached_source_admission_status(source_admitted_goals, goal_id)
+            if written >= ProofPackageLimit::THEOREMS or attempt.kernel_facts_count > ProofPackageLimit::HYPOTHESES:
+                package_budget_exceeded <- true
+                continue
             theorem: mutable darray[u8] = []
-            continue if not proof_push_package_theorem(&theorem, report, goal_id, attempt, origin_work, output_work)
+            continue if not proof_push_package_theorem(&theorem, report, goal_id, attempt, origin_work, output_work, identity_bytes, origin_metadata_complete, package_budget_exceeded)
+            separator_bytes: usize = 1 if written > 0 else 0
+            if theorems.count > PROOF_INPUT_FILE_MAX_BYTES or separator_bytes > PROOF_INPUT_FILE_MAX_BYTES - theorems.count:
+                package_budget_exceeded <- true
+                continue
+            accumulated_theorem_bytes: usize = theorems.count + separator_bytes
+            if theorem.count > PROOF_INPUT_FILE_MAX_BYTES - accumulated_theorem_bytes:
+                package_budget_exceeded <- true
+                continue
             proof_push(&theorems, ",") if written > 0
             theorems.extend(theorem)
             written <- written + 1
@@ -123,6 +202,25 @@ def proof_push_json_package_with_replayed[@view, @buffer](buffer: mutable darray
         node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[index]
         child_end <- node.children_start + node.children_count if node.children_start + node.children_count > child_end
     child_end <- report.analysis_1.kernel.children.count if child_end > report.analysis_1.kernel.children.count
+    string_bytes: mutable usize = 0
+    for index in 0..<node_end |index, report, string_bytes, package_budget_exceeded|:
+        break if package_budget_exceeded
+        node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[index]
+        if not proof_package_output_add_kernel_string_bytes(node.kind, &string_bytes):
+            package_budget_exceeded <- true
+            break
+        if not proof_package_output_add_kernel_string_bytes(node.operator, &string_bytes):
+            package_budget_exceeded <- true
+            break
+        if not proof_package_output_add_kernel_string_bytes(node.name, &string_bytes):
+            package_budget_exceeded <- true
+            break
+        if not proof_package_output_add_kernel_string_bytes(node.secondary_name, &string_bytes):
+            package_budget_exceeded <- true
+            break
+    if package_budget_exceeded:
+        proof_push(buffer, "{\"format\":\"elisa-proof-package-refusal-v1\",\"reason\":\"package-budget\"}\n")
+        return (snapshot.complete, false)
     proof_push(buffer, "{\"format\":\"")
     proof_push(buffer, PROOF_PACKAGE_FORMAT)
     proof_push(buffer, "\",\"source\":{\"path\":")
@@ -139,17 +237,36 @@ def proof_push_json_package_with_replayed[@view, @buffer](buffer: mutable darray
     proof_push(buffer, ",\"goal_status_snapshot_complete\":")
     proof_push(buffer, "true" if snapshot.complete and producer_claim_snapshot.complete else "false")
     proof_push(buffer, ",\"authenticated\":false},\"trust\":{\"logic_mode\":\"classical_propositional\",\"hypotheses\":\"adapter\",\"source_correspondence\":\"adapter\",\"fingerprints\":\"identity-hint\"},\"origin_metadata_complete\":")
-    origin_metadata_complete: bool = not proof_replay_fact_origin_work_exhausted(origin_work) and output_work <= ElisaProof::proof_replay_summary_source_work_limit()
+    origin_metadata_complete <- false if proof_replay_fact_origin_work_exhausted(origin_work) or output_work > ElisaProof::proof_replay_summary_source_work_limit()
     proof_push(buffer, "true" if origin_metadata_complete else "false")
     proof_push(buffer, ",\"kernel\":{\"nodes\":[")
-    for index in 0..<node_end |index, report, buffer|:
+    for index in 0..<node_end |index, report, buffer, package_start, package_budget_exceeded|:
         proof_push(buffer, ",") if index > 0
         proof_push_package_kernel_node(buffer, report.analysis_1.kernel.nodes[index])
+        if buffer.count < package_start or buffer.count - package_start > PROOF_INPUT_FILE_MAX_BYTES:
+            package_budget_exceeded <- true
+            break
+    if package_budget_exceeded:
+        proof_package_output_refuse_oversized(buffer, package_start)
+        return (snapshot.complete, false)
     proof_push(buffer, "],\"children\":[")
-    for index in 0..<child_end |index, report, buffer|:
+    for index in 0..<child_end |index, report, buffer, package_start, package_budget_exceeded|:
         proof_push(buffer, ",") if index > 0
         proof_push_number(buffer, report.analysis_1.kernel.children[index].u32())
+        if buffer.count < package_start or buffer.count - package_start > PROOF_INPUT_FILE_MAX_BYTES:
+            package_budget_exceeded <- true
+            break
+    if package_budget_exceeded:
+        proof_package_output_refuse_oversized(buffer, package_start)
+        return (snapshot.complete, false)
     proof_push(buffer, "]},\"theorems\":[")
+    current_package_bytes: usize = buffer.count - package_start if buffer.count >= package_start else PROOF_INPUT_FILE_MAX_BYTES
+    if current_package_bytes > PROOF_INPUT_FILE_MAX_BYTES or theorems.count > PROOF_INPUT_FILE_MAX_BYTES - current_package_bytes:
+        proof_package_output_refuse_oversized(buffer, package_start)
+        return (snapshot.complete, false)
     buffer.extend(theorems)
     proof_push(buffer, "]}\n")
+    if buffer.count < package_start or buffer.count - package_start > PROOF_INPUT_FILE_MAX_BYTES:
+        proof_package_output_refuse_oversized(buffer, package_start)
+        return (snapshot.complete, false)
     return (snapshot.complete and producer_claim_snapshot.complete and source_files_complete and origin_metadata_complete, source_admissible)
