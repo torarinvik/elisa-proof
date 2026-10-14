@@ -2,16 +2,17 @@
 
 ## Current execution order — 2026-10-14
 
-This is the active high-return sequence. Older toolchain snapshots and experiment logs below are historical evidence, not current status. Use the newest clean Elisa compiler revision that can produce a source-matched Stage1; preserve expression-based Elisa and its safety/effect checks in every source change.
+This is the active high-return sequence. Use the newest clean Elisa compiler revision that can produce a source-matched Stage1; preserve expression-based Elisa and its safety/effect checks in every source change. Keep timing skipped until a source-matched proof product passes correctness gates.
 
-1. **Restore a trustworthy compiler lane.** The latest committed proof source revision is `34c2ea43`; the reviewed kernel replay and generic-alias changes are committed. It pins Elisa-compiler `c5a6616a`, which contains the alias-formal identity/offset parser fix and its AST regression. A clean detached compiler snapshot at the pin and Core Stage0 `f8735f58` are available. The focused `test/parity/parser_ast_smoke.sh` was run against that pair; `-emit test` exits 1 before the summary, so the parser regression is not qualified. Its log records 19 unproved preconditions, 6 region store diagnostics, 3 ghost-purity diagnostics, and 6 loop-decreases fallbacks (plus style warnings). Resolve these blockers without weakening checks, then rebuild a source-matched Stage1 and qualify the proof runtime against the exact revision containing the reviewed source changes. Keep timing skipped. Historical seed evidence remains: clean c93 failed before object emission with 438 `call may store` and 81 `cannot infer region` diagnostics; p115 O0 against Core 26af7953 had 651 and 3 respectively. Those separate diagnostic classes are not an aggregate quality score. The p115 candidate emitted no object and is not qualified.
+1. **Restore a source-matched Stage1 lane.** Proof `main` is `c99b8caf6`, pins Elisa-compiler `c5a6616a` and Core stage0 `4fadc2c0`, and is 40 commits ahead of origin. Core stage0 was rebuilt from a clean worktree; its embedded revision is `4fadc2c0` with `vcs.modified=false`. The first Stage1 seed was killed at about 3.5 GiB RSS without an object while a separate O0 compiler run was active. That run has since terminated; its log shows a peak footprint of 8.56 GiB, 770 postcondition failures and 641 call-may-store failures, making resource contention a likely contributor, though not a proven sole cause. One isolated retry is the next gate. If it succeeds, build the current proof HEAD and verify manifest/compiler pins before runtime tests. If it fails, use the first hard diagnostics and peak-memory record to select the next fix.
 
-2. **Restore the recursive proof semantic gate.** Core `main` is now f8735f58. Its relevant-formal SMT binding change removes the recursive call-precondition diagnostics and has focused positive/negative environment tests, but `TestGhostRecursiveProofSupportsImmutableLocalsAndSViewIndex` still fails at the recursive `ensure` equality. The VC contains the `next_state` defining equation; the missing link is the local `byte: u8 = value[index].u8()` because SMT translation cannot recover the source type of the indexed `char` cast. A general bitvector/call-alias experiment made the focused test exceed two minutes and was discarded. Next implement a narrowly scoped, exact SView-byte/cast model with bounded solver work; retain sign-changing conversion negatives and require the recursive gate plus the full semantic package to pass.
-3. **Qualify global-mutable grants and kernel soundness.** Existing Core grant controls cover separate `Global.Read`/`Global.Write`, read-modify-write, const purity, brace syntax, shadowing, and indexed/reference access; rerun that matrix on f8735f58. The proof runtime grant regression still lacks a current source-matched executable. After the Stage1 lane is restored, run proof CLI and direct-API grants, wrong-member, alias/reference, inferred-row, and transitive-call controls. Preserve the typed-kernel classical-mode fixture and frozen replay/mutation checks; malformed certificates, missing identity, and exhausted budgets must fail closed.
+2. **Close the indexed-char SMT proof gap.** Core commit `4fadc2c0` adds narrow `char`→`u8` truncation modeling, justified by runtime lowering and focused positive SView/index tests, a wrapping negative, and a control showing `char` is not globally byte-sized. Those focused Core tests pass. The recursive `sview_fnv1a_fold_from` and `ctx_cstr_eq_sview` proof obligations remain unverified until a matching proof product exists. Then run those exact obligations, preserve sign-changing and wrapping negatives, and keep solver work bounded.
 
-4. **Verify proof/kernel soundness and high-return performance changes.** The local proof main now includes arithmetic safety leaf/shape hardening, aggregate traversal, bounded quantifier scans, and binary/unary operator arity checks. The normalized-arithmetic shortcut requires integer witnesses and passes only after the whole current goal root has passed signed and unsigned fixed-width safety checks. Source-only budget, width, index, AST-mirror, quantifier-premise, source-length, and diff checks pass; this latest change remains runtime-unqualified. Runtime refusal/replay testing correctly refuses the old binary because it does not match the current proof HEAD; the Stage1 source checkout is also dirty and its product is stale. Once a clean source-matched Stage1 exists, run malformed-slice/sentinel and operator/arity mutations, goal-fact, postcondition-context, index-safety, type-bound-local, linear-certificate, structural-replay, and source-authority regressions, then the relevant proof suite. Compare work counters and adversarial scaling where available, retaining bounded accounting for walks, allocation, hashing, and probes.
+3. **Qualify global-mutable grants and replay soundness.** The Core grant suite and proof matrix distinguish `Global.Read` from `Global.Write` across updates, index expressions, shadows, qualified globals, mutable references and fields. Run them against the source-matched product alongside typed-kernel classical-mode controls, malformed arenas, missing source identity, replay gaps and work-budget exhaustion. Every malformed or exhausted case must fail closed.
 
-5. **Commit qualified source improvements and refresh this plan.** Core commits ce002c04 and f8735f58 are on main and synced to origin; f873’s focused SMT relevant-formal tests pass, while the recursive `ensure` gate remains red. Proof `main` is ahead of origin; recent kernel and bounded-work changes are committed locally and pass source-length, diff, typed-transition, and width-safety guards, but remain runtime-unqualified pending the source-matched Stage1. Record exact compiler/proof revisions and commands with results. Keep timing skipped; do not treat a successful seed or source freshness alone as semantic qualification.
+4. **Finish bounded-work migration; measure only after correctness.** Recent kernel commits remove dead fresh-meter wrappers and disconnected unmetered replay paths. The current working tree still has proof-source changes, so validate the exact snapshot with static guards, source-length and diff checks before committing. Once Stage1 is source-matched, run bounded-model, alias/nominal arity, quantifier, cast, call-result and portable forged-certificate regressions. Only then measure fixed workloads with paired runs and report median/p95, CPU and peak RSS; operation counts alone do not establish a speedup.
+
+5. **Keep the repository state reviewable.** The proof checkout has one branch and one worktree; do not push. Commit source changes only after their appropriate checks complete. Do not treat static guards, a successful seed, or source freshness alone as semantic qualification.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -7401,6 +7402,11 @@ State the target theorem precisely: accepting a derivation of H entails C implie
 interpretation satisfying H satisfies C under the stated semantics. Account for each rule,
 normalization step and trusted helper, and identify which claims have formal proof, review,
 testing or only an assumption.
+
+The initial source-level boundary and outstanding proof obligations are recorded in
+[`docs/validation/kernel-replay-semantics.md`](docs/validation/kernel-replay-semantics.md). This
+inventory is a review aid, not a soundness proof; each rule still needs formal or mechanically
+checked evidence, and source adapters still need independent source correspondence.
 
 Continue kernel dogfooding, malformed/cyclic package controls and independent replay, but report
 these as implementation assurance. Self-verification does not establish logical soundness or
@@ -25802,3 +25808,77 @@ when the nominal declaration table is empty. Extended the source guard to pin th
 that validity check before the empty-table “not found” result, preventing an incomplete index
 from silently authorizing an application. The generic alias/nominal dispatch guard and
 `git diff --check` pass.
+
+### 23.27.1489 Include active fact and comparison helpers in the kernel closure (2026-10-14)
+
+The kernel inventory’s transitive-include audit reported seven called helpers with no definition
+inside the replay closure. Their source files existed but were not included by
+`kernel_replay.elisa`, leaving the supposedly self-contained kernel source closure incomplete.
+Included the metered fact-model helpers after signed-fact projection and the metered comparison
+helpers after scalar-witness support. The kernel inventory now verifies all 11 tables and 341
+entries against source; source-length validation and `git diff --check` pass. Compiler/runtime
+qualification is still pending the pinned compiler product.
+
+### 23.27.1489 Remove unused fresh-meter replay adapters (2026-10-14)
+
+A repository-wide definition/call scan found additional private adapters that reset work to zero
+and had no callers: symbolic quantifier replay, dictionary substitution, quantifier marker lookup,
+several unsigned-division helpers, arithmetic inconsistency checks, negative integer bit-pattern
+search, conditional helpers, and indexed-container path extraction. Removed those adapters while
+retaining the caller-metered implementations. The focused scan now reports no unreferenced replay
+adapter that initializes `work_used` to zero; `git diff --check` and source-length validation pass.
+No tests or builds were run.
+
+### 23.27.1490 Guard exact source-call identity during summary rebinding (2026-10-14)
+
+Direct call-result rebinding now matches a trace to the exact parser call span, because an
+earlier textually identical call may have different state or resolution. Extended the source
+guard to require all six position coordinates and to check the call-only exact-span filter.
+The focused source guard, Python syntax compilation, source-length check, and `git diff --check`
+pass. End-to-end verification remains pending a matching proof/compiler product.
+
+### 23.27.1490 Remove two remaining dead fresh-meter adapters (2026-10-14)
+
+The local-meter inventory found two more unreferenced wrappers: plain-bound closure and negative
+integer bit-pattern scanning. Removed both while retaining the versions that accept the caller's
+goal meter. A focused reference scan found no remaining references to the removed entry points;
+`git diff --check` and source-length validation pass. No tests or builds were run.
+
+### 23.27.1492 Guard the active signed-bound replay path (2026-10-14)
+
+The generic dispatch guard now checks nominal arity on both producer and replay sides. Added a
+focused guard for the signed-width marker parser and bound inserter, requiring exact marker
+recognition, charged node/text scans, width validation, and use of the caller's goal-work counter.
+The signed-bound guard, kernel inventory (11 tables and 341 entries), source-length check, and
+`git diff --check` pass. Runtime qualification remains open on the pinned compiler product.
+
+### 23.27.1491 Consolidate duplicate kernel replay helpers (2026-10-14)
+
+The newly completed replay include closure contained duplicate private definitions for value
+binding lookup, signed marker parsing, and signed type-bound insertion. Kept a single value lookup
+definition and consolidated signed-marker helpers into one shared-meter implementation, including
+metered identifier comparison for the bound name. A definition scan now shows one definition for
+each helper; `git diff --check` and source-length validation pass. No tests or builds were run.
+
+### 23.27.1493 Share work across source pattern-binding scans (2026-10-14)
+
+Call-result source validation already carried one cumulative owner-source meter, but restarted a
+fresh counter for every match-arm pattern. The scan now passes its existing counter into the
+metered pattern-binding walker. Removed the obsolete, unreferenced `source_call_walk.elisa`, which
+was not in the replay include closure and duplicated the live pattern helper. `git diff --check`,
+source-length validation, and an exact-signature definition scan pass. No tests or builds were run.
+
+### 23.27.1494 Fail closed when guarded-difference premise collection is truncated (2026-10-14)
+
+The plain-difference closure had a local traversal and constraint cap separate from the shared
+goal-work meter. Hitting either cap silently left a prefix of the premises, which could then be
+used for a successful replay. The closure now marks the shared meter exhausted and refuses when
+either cap is reached, so truncated collection cannot yield a proof. `git diff --check` and
+source-length validation pass. No tests or builds were run.
+
+### 23.27.1495 Refuse comparison-chain proofs after candidate truncation (2026-10-14)
+
+Comparison-chain replay capped lower and upper middle candidates but continued checking the
+collected prefixes. It now refuses when either candidate list reaches its cap, including while
+collecting equality hops, so a truncated search cannot return `proven`. `git diff --check` and
+source-length validation pass. No tests or builds were run.
