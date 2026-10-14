@@ -25207,6 +25207,8 @@ Typed tactic-step replay previously started the before-state and after-state pro
 from independent copies of the typing-index cost. Typed branch replay rebuilt the index and gave
 each of its three states a fresh full typing budget. Both public transitions now build one index
 and carry one cumulative work counter through all state checks (and the step's term-sort checks).
-This bounds aggregate work per transition while avoiding repeated index construction. The dedicated
-source guard is included in the kernel audit suite and passes; focused width/budget checks and source
-length also pass. Runtime replay remains unqualified pending a source-matched Stage1.
+This bounds aggregate work per transition while avoiding repeated index construction. Branch replay
+uses the work-aware report after typed whole-arena admission, avoiding a second full arena scan while
+retaining proposition and transition checks. The dedicated source guard is included in the kernel
+audit suite and passes; focused width/budget checks and source length also pass. Runtime replay remains
+unqualified pending a source-matched Stage1.

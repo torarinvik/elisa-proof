@@ -37,6 +37,8 @@ assert "proof_kernel_replay_build_typing_index(environment, &typing_work_used)" 
 for state in ("parent_facts, parent_goal", "left_facts, left_goal", "right_facts, right_goal"):
     assert f"{state}, &typing_work_used" in branch
 assert "typing_work_used > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET" in branch
+assert "proof_kernel_replay_tactic_branch_report_with_work" in branch
+assert "proof_kernel_replay_tactic_branch_report(nodes" not in branch
 
 state = body(formation, "proof_kernel_replay_typed_proposition_state_valid_with_index")
 assert "work_used > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET" in state
