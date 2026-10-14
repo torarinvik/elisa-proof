@@ -22,6 +22,13 @@ data = run(ROOT / "examples/tuple_field_region.elisa")
 assert data["summary"]["proven"] == 9 and data["summary"]["failed"] == 0 and data["findings"] == [], data["summary"]
 assert data["replay"]["gaps"] == 0 and data["replay"]["replayed"] == 9
 
+data = run(ROOT / "examples/tuple_direct_call_field_witness.elisa")
+assert data["summary"]["proven"] == 1 and data["summary"]["failed"] == 1, data["summary"]
+assert data["summary"]["obligations"] == 2, data["summary"]
+assert any(f["name"] == "rejected_direct_tuple_field_overloaded_reflexivity" and f["kind"] == "ensure-unproven"
+           for f in data["findings"]), data["findings"]
+assert data["replay"]["gaps"] == 0 and data["replay"]["replayed"] == data["replay"]["certificates"]
+
 data = run(ROOT / "examples/rejected_tuple_field_region.elisa")
 assert data["summary"]["failed"] == 5 and data["replay"]["gaps"] == 0
 assert [(f["name"], f["line"]) for f in data["findings"]] == [

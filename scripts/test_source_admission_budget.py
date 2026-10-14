@@ -22,7 +22,7 @@ goal_admission = (ROOT / "src/proof/model/report_goal_admission.elisa").read_tex
 postcondition_inventory = (ROOT / "src/proof/model/report_postcondition_ast_inventory.elisa").read_text(encoding="utf-8")
 type_bound_local = (ROOT / "src/proof/replay/type_bound_local_availability.elisa").read_text(encoding="utf-8")
 linear_goal_api = (ROOT / "src/proof/linear/goal_api.elisa").read_text(encoding="utf-8")
-kernel_resource_model = (ROOT / "src/proof/kernel_replay/resource_model.elisa").read_text(encoding="utf-8")
+kernel_resource_model = (ROOT / "src/proof/kernel_replay/resource_model.elisa").read_text(encoding="utf-8") + (ROOT / "src/proof/kernel_replay/resource_model_depth.elisa").read_text(encoding="utf-8")
 return_matches = (ROOT / "src/proof/check/returns/matches.elisa").read_text(encoding="utf-8")
 assert "source_work: mutable usize&" in termination_body.splitlines()[2]
 assert "proof_replay_summary_expr_cost_body(body, &body_cost, source_work, 0)" in termination_body
