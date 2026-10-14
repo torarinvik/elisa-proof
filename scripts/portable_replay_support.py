@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 
 __all__ = (
@@ -30,14 +29,21 @@ def resolve_products():
         return Path(proof_override), Path(replay_override)
 
     result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/verify_product_pair.py"), "resolve",
-         "--generation-root", os.environ.get("ELISA_PROOF_GENERATION_ROOT",
-                                               str(ROOT / "build/elisa-proof-generations"))],
-        capture_output=True, text=True, check=True,
+        ["bash", str(ROOT / "scripts/qualify_prebuilt_test.sh"), "--json"],
+        cwd=ROOT, capture_output=True, text=True, check=False, timeout=120,
     )
-    products = json.loads(result.stdout)["products"]
-    return (Path(products["elisa-proof"]["binary"]),
-            Path(products["elisa-proof-replay"]["binary"]))
+    if result.returncode:
+        detail = result.stdout + result.stderr
+        raise SystemExit(
+            "portable replay refused an unqualified proof/replay pair; current source and "
+            f"compiler provenance check failed:\n{detail}"
+        )
+    products = json.loads(result.stdout)
+    proof_binary = products.get("proof_binary") if isinstance(products, dict) else None
+    replay_binary = products.get("replay_binary") if isinstance(products, dict) else None
+    if not isinstance(proof_binary, str) or not isinstance(replay_binary, str):
+        raise SystemExit("portable replay qualification returned an incomplete product pair")
+    return Path(proof_binary), Path(replay_binary)
 
 
 BINARY, REPLAY = resolve_products()
@@ -45,7 +51,7 @@ WORK = Path(tempfile.mkdtemp(prefix="elisa-proof-portable-"))
 
 TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapter",
          "source_correspondence": "adapter", "fingerprints": "identity-hint",
-         "source_authenticated": False}
+         "source_authenticated": False, "logic_mode": "classical_propositional"}
 SCALAR_KINDS = {
     "frame-field", "absent", "bool", "char", "effect", "effect-call", "effect-containment", "effect-row",
     "field-init", "float", "opaque-float-literal", "ident", "int", "resource-bind", "resource-call", "resource-call-arg",
@@ -150,7 +156,7 @@ def replay_text(text, name):
     path.write_bytes(text) if isinstance(text, bytes) else path.write_text(text)
     run = subprocess.run([str(REPLAY), str(path)], capture_output=True, text=True, timeout=120)
     result = json.loads(run.stdout)
-    assert result["format"] == "elisa-proof-replay-result-v1", result
+    assert result["format"] == "elisa-proof-replay-result-v2", result
     if run.returncode == 2:
         return run.returncode, result
     assert result["trust"] == TRUST, result
