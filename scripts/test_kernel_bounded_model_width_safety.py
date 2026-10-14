@@ -61,6 +61,16 @@ for source in (ROOT / "src/proof/kernel_replay").glob("*.elisa"):
     if "ProofKernelReplayBool{known: true, value: true} if marker" in source.read_text(encoding="utf-8"):
         marker_truth_sites.append(source)
 assert marker_truth_sites == [model_path], marker_truth_sites
+fact_model_helpers = (ROOT / "src/proof/kernel_replay/fact_model_integrated_helpers.elisa").read_text(encoding="utf-8")
+for legacy_pin_helper in (
+    "proof_kernel_replay_term_pin(",
+    "proof_kernel_replay_pinned_constant(",
+    "proof_kernel_replay_collect_constant_pins(",
+    "proof_kernel_replay_cached_pinned_constant(",
+    "proof_kernel_replay_constant_int_with_pins(",
+    "proof_kernel_replay_operand_matches_through_pins(",
+):
+    assert legacy_pin_helper not in fact_model_helpers, legacy_pin_helper
 portable_forgery = (ROOT / "scripts/tests/portable_replay_kernel_forgeries.py").read_text(encoding="utf-8")
 assert 'forged_disjunction = append_node(marker_goal, "binary", "or", unsigned_bound, subject_is_zero)' in portable_forgery
 assert '"hypotheses": [signed_bound, subject_is_one]' in portable_forgery
