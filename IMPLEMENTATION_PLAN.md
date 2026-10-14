@@ -4,7 +4,7 @@
 
 This is the active high-return sequence. Older toolchain snapshots and experiment logs below are historical evidence, not current status. Use the newest clean Elisa compiler revision that can produce a source-matched Stage1; preserve expression-based Elisa and its safety/effect checks in every source change.
 
-1. **Restore a trustworthy compiler lane.** Proof source is at `8d33e556` and pins Elisa-compiler `c5a6616a`, which contains the alias-formal identity/offset parser fix and its AST regression. A clean detached compiler snapshot at the pin and Core Stage0 `f8735f58` are available. The focused `test/parity/parser_ast_smoke.sh` was run against that pair; `-emit test` exits 1 before the summary, so the parser regression is not qualified. Its log records 19 unproved preconditions, 6 region store diagnostics, 3 ghost-purity diagnostics, and 6 loop-decreases fallbacks (plus style warnings). Resolve these blockers without weakening checks, then rebuild a source-matched Stage1 and qualify the proof runtime against exact proof source revision `8d33e556`. Keep timing skipped. Historical seed evidence remains: clean c93 failed before object emission with 438 `call may store` and 81 `cannot infer region` diagnostics; p115 O0 against Core 26af7953 had 651 and 3 respectively. Those separate diagnostic classes are not an aggregate quality score. The p115 candidate emitted no object and is not qualified.
+1. **Restore a trustworthy compiler lane.** The latest committed proof source revision is `34c2ea43`; the reviewed kernel replay and generic-alias changes are committed. It pins Elisa-compiler `c5a6616a`, which contains the alias-formal identity/offset parser fix and its AST regression. A clean detached compiler snapshot at the pin and Core Stage0 `f8735f58` are available. The focused `test/parity/parser_ast_smoke.sh` was run against that pair; `-emit test` exits 1 before the summary, so the parser regression is not qualified. Its log records 19 unproved preconditions, 6 region store diagnostics, 3 ghost-purity diagnostics, and 6 loop-decreases fallbacks (plus style warnings). Resolve these blockers without weakening checks, then rebuild a source-matched Stage1 and qualify the proof runtime against the exact revision containing the reviewed source changes. Keep timing skipped. Historical seed evidence remains: clean c93 failed before object emission with 438 `call may store` and 81 `cannot infer region` diagnostics; p115 O0 against Core 26af7953 had 651 and 3 respectively. Those separate diagnostic classes are not an aggregate quality score. The p115 candidate emitted no object and is not qualified.
 
 2. **Restore the recursive proof semantic gate.** Core `main` is now f8735f58. Its relevant-formal SMT binding change removes the recursive call-precondition diagnostics and has focused positive/negative environment tests, but `TestGhostRecursiveProofSupportsImmutableLocalsAndSViewIndex` still fails at the recursive `ensure` equality. The VC contains the `next_state` defining equation; the missing link is the local `byte: u8 = value[index].u8()` because SMT translation cannot recover the source type of the indexed `char` cast. A general bitvector/call-alias experiment made the focused test exceed two minutes and was discarded. Next implement a narrowly scoped, exact SView-byte/cast model with bounded solver work; retain sign-changing conversion negatives and require the recursive gate plus the full semantic package to pass.
 3. **Qualify global-mutable grants and kernel soundness.** Existing Core grant controls cover separate `Global.Read`/`Global.Write`, read-modify-write, const purity, brace syntax, shadowing, and indexed/reference access; rerun that matrix on f8735f58. The proof runtime grant regression still lacks a current source-matched executable. After the Stage1 lane is restored, run proof CLI and direct-API grants, wrong-member, alias/reference, inferred-row, and transitive-call controls. Preserve the typed-kernel classical-mode fixture and frozen replay/mutation checks; malformed certificates, missing identity, and exhausted budgets must fail closed.
@@ -23632,6 +23632,19 @@ comparison also uses that counter. No uncovered traversal or duplicate `source_e
 charge was found in this path, so no code change was warranted. This is source inspection only;
 compiler/runtime qualification remains pending.
 
+### 23.27.1285a Confirm match-pattern and explicit-return admission accounting
+
+A follow-up audit checked whether match-arm binder visibility was charged twice. The admission
+helper reserves three pattern traversals for the cost-measurement walk, closed-pattern validation,
+and binder collection; the binder collector also charges each emitted name comparison and uses an
+invalid placeholder for discarded projections, so it does not copy the scrutinee per binder. Those
+are distinct executed passes, and the expression-level summary reservation discussed in earlier
+audits is not applied by this source-admission path. No budget debit was removed. The return
+inventory rejects absent terminal values and only admits substitution when the declared return
+type is known and non-void. The later §23.27.959 change also closed the explicit-return local-scalar
+witness gap noted in §23.27.954. Source inspection and `git diff --check` only; no tests or builds
+were run.
+
 ### 23.27.1286 Preserve early interval hits when index setup is too costly
 
 The stable-bound index is an optional lookup accelerator, but its builder currently charges and
@@ -24467,6 +24480,7 @@ constructor sets are kept aligned, unequal hashes safely reject candidates; hash
 require exact structural equality. Added this filter before the potentially deep comparison to
 reduce repeated structural work. `git diff --check` and source-length gates pass. No tests, builds,
 or runtime replay were run.
+
 
 ### 23.27.1359 Replay resource alternatives from a shared pre-branch state
 
@@ -25306,3 +25320,97 @@ old per-child heuristic was removed because it did not bound the full continuati
 fallback remains intact. Focused interval/bound/difference-budget, typed-transition, source-authority,
 source-admission, width, quantifier, source-length, and diff checks pass. No current source-matched
 Stage1 is available for runtime qualification, and performance impact is not yet measured.
+
+
+### 23.27.1443 Bind serialized quantifier arity to its range (2026-10-14)
+
+Arena admission now requires one-binder quantifiers to use non-dictionary ranges and two-binder
+quantifiers to use dictionary ranges. This matches the source encoder (which emits the second
+binder only for dictionary iteration) and prevents untyped elimination from accepting a forged
+two-binder array/range quantifier even though that elimination substitutes only the primary name.
+The check charges the range-kind read to arena-validation work. The new focused arena-shape guard,
+source-authority and kernel-inventory checks, source-length gate, and `git diff --check` pass. No
+Elisa build or runtime replay was run.
+
+
+### 23.27.1444 Charge alias-formal scratch allocation (2026-10-14)
+
+Generic alias application validation now debits source-index work proportional to temporary
+used-formal vectors and actual-argument copies before allocating or appending them. Alias-index
+construction likewise charges the formal-owner usage table before allocation. Generic applications
+now reach the applied-expansion helper, which centrally revalidates the alias definition before
+substituting actuals. This closes linear-work gaps where source-sized metadata could otherwise
+allocate, initialize, or copy scratch arrays without consuming the bounded admission budget. These edits are committed; no tests, Elisa build, or runtime replay were run.
+
+
+### 23.27.1445 Dispatch applied generic aliases during type normalization (2026-10-14)
+
+The source index had generic-alias validation and an applied-alias expansion helper, but normal
+type unwrapping did not call that helper. `Index` and `IndexN` now resolve an alias head, validate
+its formal declarations and exact arity, normalize actual arguments in the caller's owner/formal
+environment, then expand the target with those actuals substituted by formal position. This keeps
+caller names from being re-resolved in the alias declaration's module. A focused static guard,
+quantifier-shape guard, source-authority/admission guards, source-length check, and diff check pass.
+The compiler/runtime remains unqualified because there is no matching proof/compiler product.
+
+
+### 23.27.1446 Preserve generic shadowing during alias application dispatch (2026-10-14)
+
+Applied-alias dispatch now checks the caller's exact generic scope before looking up an `Index` or
+`IndexN` head, so a same-named generic parameter cannot be mistaken for a source alias. Alias RHS
+validation and substitution also reject higher-kinded formal heads because the source metadata does
+not distinguish type parameters from const or constructor parameters. `git diff --check` passes;
+no tests, Elisa build, or runtime replay were run.
+
+
+### 23.27.1447 Preserve typed literal dictionary quantifiers (2026-10-14)
+
+Existential dictionary-range replay now checks duplicate keys using direct integer literals:
+untagged nonnegative literals compare by value, while typed literals compare only when their
+exact serialized sort, signedness, and width match. Arithmetic keys and mixed or cross-sort keys remain
+unsupported because erased source-width coercions could make distinct mathematical values collide
+at runtime. This restores a bounded typed-literal case without weakening the duplicate-key guard.
+The check runs in the shared arena-child validator used by both per-root and whole-arena public
+admission. The code is committed; no test, Elisa build, or runtime replay was run.
+
+
+### 23.27.1449 Carry contextual sorts into source-bound rewrites (2026-10-14)
+
+The source tactic width scanner assigns width zero to every `Ast::Expr.IntLit`; the numeric
+suffix sidecar is intentionally not a trusted type witness. The source-bound rewrite producer
+therefore rejects unsolved rewrites with a literal endpoint, while the typed kernel transition can
+accept it only after checking exact inferred-sort equality through its typing environment. The
+next expressiveness step is to carry checked contextual sort evidence from source typing into
+source-bound tactic replay, preserving the kernel's exact-sort requirement instead of guessing
+from literal spelling. This limitation was established by static call-path review; no code or tests
+were changed for it.
+
+### 23.27.1448 Reject wrapping arithmetic as a dictionary-key uniqueness proof (2026-10-14)
+
+Review of existential dictionary replay found that mathematical constant evaluation could treat
+keys such as `255u8 + 1u8` and `0u8` as distinct even if fixed-width evaluation wraps them to
+the same runtime key. Uniqueness now accepts only direct integer literals; typed literals must
+have matching validated signedness and width, and unknown, mixed-sort, or arithmetic keys fail
+closed. Each repeated literal-field read is charged to arena validation. Added a forged wrapping-key
+existential case and a singleton positive control, plus a static guard for both whole-arena and
+direct replay entry points. Static guard, Python syntax, source-length, and diff checks pass; the
+portable runtime regression remains unqualified without a matching proof binary.
+
+
+### 23.27.1450 Compare dictionary keys by exact typed sort (2026-10-14)
+
+A follow-up review found that matching only signedness and width could still conflate distinct sort
+names with the same representation, such as a platform-sized alias and a fixed-width integer. The
+uniqueness reader now retains the validated sort spelling and requires exact sort equality before
+comparing typed payloads. The focused source guard, source-length gate, and diff check pass; runtime
+qualification remains unavailable on the source-mismatched binary.
+
+
+### 23.27.1451 Preserve witnessed call and conditional widths in source rewrites (2026-10-14)
+
+The source-bound rewrite width scanner treated calls and conditional expressions as untyped even
+though the kernel's `proof_strict_signed_width` accepts witnessed call results and derives
+conditional widths from their arms. This caused valid same-sort rewrites to be rejected before
+replay. The scanner now uses that same strict-width helper for both forms; kernel replay continues
+to validate exact argument sorts at the transition boundary. `git diff --check` passes; no tests or
+builds were run.
