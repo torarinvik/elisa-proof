@@ -90,6 +90,55 @@ dict_control["theorems"] = [reseal(dict_control, dict_control_theorem)]
 control_code, control_result = replay(dict_control, "dictionary-quantifier-capture-control")
 assert control_code == 0 and control_result["status"] == "replayed", control_result
 
+# Raw dictionary AST children can retain pairs that runtime construction overwrites when a
+# later equal key appears. Existential replay over both rows could use the stale first value.
+# Forbid that forged range before evaluating its body, while keeping the single-key form useful.
+dict_exists = copy.deepcopy(quantified)
+dict_exists["kernel"] = {"nodes": [], "children": []}
+dict_key_a = append_node(dict_exists, "int", value="1")
+dict_key_b = append_node(dict_exists, "int", value="1")
+dict_value_zero = append_node(dict_exists, "int", value="0")
+dict_value_one = append_node(dict_exists, "int", value="1")
+dict_entry_a = append_node(dict_exists, "dict_entry", left=dict_key_a, right=dict_value_zero)
+dict_entry_b = append_node(dict_exists, "dict_entry", left=dict_key_b, right=dict_value_one)
+dict_range = collection(dict_exists, "dict", [dict_entry_a, dict_entry_b])
+exists_key = append_node(dict_exists, "ident", name="k")
+exists_value = append_node(dict_exists, "ident", name="v")
+key_is_one = append_node(dict_exists, "binary", "==", exists_key, dict_key_a)
+value_is_zero = append_node(dict_exists, "binary", "==", exists_value, dict_value_zero)
+exists_body = append_node(dict_exists, "binary", "and", key_is_one, value_is_zero)
+duplicate_exists = append_node(dict_exists, "quantifier", "exists", dict_range, exists_body,
+                               name="k", auxiliary=2, secondary_name="v")
+duplicate_exists_theorem = {
+    "goal_id": 0, "name": "duplicate-key-existential", "line": 1,
+    "rule": "quantifier-exists", "hypotheses": [], "hypothesis_origins": [],
+    "conclusion": duplicate_exists, "statement": "", "goal_fingerprint": 0,
+}
+dict_exists["theorems"] = [reseal(dict_exists, duplicate_exists_theorem)]
+refused(dict_exists, "duplicate-key-existential", "rejected", "kernel-rejected")
+
+dict_single = copy.deepcopy(dict_exists)
+dict_single["kernel"] = {"nodes": [], "children": []}
+single_key = append_node(dict_single, "int", value="1")
+single_value = append_node(dict_single, "int", value="0")
+single_entry = append_node(dict_single, "dict_entry", left=single_key, right=single_value)
+single_range = collection(dict_single, "dict", [single_entry])
+single_bound_key = append_node(dict_single, "ident", name="k")
+single_bound_value = append_node(dict_single, "ident", name="v")
+single_key_match = append_node(dict_single, "binary", "==", single_bound_key, single_key)
+single_value_match = append_node(dict_single, "binary", "==", single_bound_value, single_value)
+single_body = append_node(dict_single, "binary", "and", single_key_match, single_value_match)
+single_exists = append_node(dict_single, "quantifier", "exists", single_range, single_body,
+                            name="k", auxiliary=2, secondary_name="v")
+single_exists_theorem = {
+    "goal_id": 0, "name": "single-key-existential-control", "line": 1,
+    "rule": "quantifier-exists", "hypotheses": [], "hypothesis_origins": [],
+    "conclusion": single_exists, "statement": "", "goal_fingerprint": 0,
+}
+dict_single["theorems"] = [reseal(dict_single, single_exists_theorem)]
+single_code, single_result = replay(dict_single, "single-key-existential-control")
+assert single_code == 0 and single_result["status"] == "replayed", single_result
+
 base = packages["verified"]
 # A recognized type marker is a domain restriction when used as a premise; it is not
 # an automatically true proposition. Keep this source-neutral sequent from proving an

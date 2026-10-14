@@ -269,6 +269,7 @@ run_py_test test_scalar_copy_bounds.py
 run_py_test test_scalar_copy_bound_source.py
 run_py_test test_return_branch_path_fact.py
 run_py_test test_kernel_inventory.py
+run_py_test test_existential_dictionary_key_guard.py
 run_py_test test_portable_trust_inventory.py
 run_py_test test_unsigned_subtraction_upper.py
 run_py_test test_unsigned_or_goal.py
