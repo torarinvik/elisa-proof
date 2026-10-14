@@ -180,5 +180,29 @@ exact_check = function_body(replay, "proof_replay_control_pattern_exact")
 assert "proof_replay_control_pattern_typed_payload_unambiguous(pattern, type_expression)" in exact_check
 assert "proof_pattern_condition_exact_typed(pattern, type_expression)" in exact_check
 assert "proof_replay_control_pattern_needs_source_type(pattern)" in exact_check
+typed_pattern_replay = function_body(replay, "proof_replay_control_pattern_condition")
+assert "proof_source_expression_has_overloaded_operator(expression, report.source.source_primitive_operator_mask, 0)" in typed_pattern_replay
+assert "custom literal comparisons cannot enter through a user operator" in typed_pattern_replay
+overloaded_eq_cases = (ROOT / "scripts/pattern_literal_overloaded_eq_case.py").read_text(encoding="utf-8")
+assert "PATTERN_COLLISIONS.update(STRING_EQ_OVERRIDE_COLLISIONS)" in collision_tests
+assert "STRING_EQ_OVERRIDE_PRELUDE" in collision_tests
+assert "impl Eq for sview" in overloaded_eq_cases and "impl Eq for cstr" in overloaded_eq_cases
+assert "impl Eq for i64" in overloaded_eq_cases and "impl Eq for u64" in overloaded_eq_cases
+assert "sview_pattern_overloaded_eq_collision" in overloaded_eq_cases
+assert "cstr_pattern_overloaded_eq_collision" in overloaded_eq_cases
+assert "i64_pattern_overloaded_eq_collision" in overloaded_eq_cases
+assert "u64_pattern_overloaded_eq_collision" in overloaded_eq_cases
+for fixture_name, type_name in (("sview_pattern_overloaded_eq_collision", "sview"),
+                                ("cstr_pattern_overloaded_eq_collision", "cstr"),
+                                ("i64_pattern_overloaded_eq_collision", "i64"),
+                                ("u64_pattern_overloaded_eq_collision", "u64")):
+    fixture_start = overloaded_eq_cases.index(f"    '{fixture_name}': '''")
+    fixture_end = overloaded_eq_cases.index("''',", fixture_start)
+    fixture = overloaded_eq_cases[fixture_start:fixture_end]
+    assert f"def {fixture_name}(value: {type_name}) -> bool:" in fixture
+    assert "ensure result == true" in fixture and "match value:" in fixture
+    expected_literal = '"needle"' if type_name in ("sview", "cstr") else "7"
+    assert f"        {expected_literal}:" in fixture
+    assert f"return value == {expected_literal}" in fixture
 
 print("pattern literal source guards: bounded typed literals and replay preflight remain aligned")

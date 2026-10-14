@@ -46,6 +46,12 @@ def main() -> None:
         REPLAY / "scalar_witness_work.elisa",
         "proof_kernel_replay_unsigned_marker_info_with_work",
     )
+    element_apply = function_body(scalar, "proof_kernel_replay_untrusted_element_operator_applies_with_work")
+    reference_apply = function_body(scalar, "proof_kernel_replay_untrusted_scalar_reference_operator_applies_with_work")
+    comparison = (REPLAY / "order_and_sign_integrated_helpers.elisa").read_text(encoding="utf-8")
+    bounded_model = (REPLAY / "goal_metered_bounded_model.elisa").read_text(encoding="utf-8")
+    logical_join = (REPLAY / "logical_join_identity.elisa").read_text(encoding="utf-8")
+    source_witnesses = (ROOT / "src/proof/check/operator_witnesses.elisa").read_text(encoding="utf-8")
 
     # Invalid fact/callee references and exhausted name scans are incomplete, never
     # interpreted as an ordinary non-marker fact.
@@ -76,6 +82,20 @@ def main() -> None:
         assert width in core
     assert "ensure result ==" in core
     assert "proof_kernel_unsigned_width_valid(width_work.value)" in unsigned_marker
+    # Indexed container markers require an indexed path. Element.Ref applies to the
+    # exact reference and every single-index read rooted there, including dynamic indexes.
+    assert "subscripts.count == 0" in element_apply
+    assert "Element.Ref" in fill
+    scalar_reference_branch = source_witnesses.split("if scalar_reference.known and not scalar_reference_is_owner_generic:", 1)[1].split("builtin_type:", 1)[0]
+    assert '"Element.Ref"' in scalar_reference_branch
+    assert "proof_add_untrusted_scalar_element_operator_witness_with_work" in scalar_reference_branch
+    assert "proof_kernel_replay_scalar_witness_expr_equal(nodes, children, marked_reference, term" in reference_apply
+    for consumer in (comparison, bounded_model, logical_join):
+        assert "PROOF_KERNEL_REPLAY_WITNESS_UNTRUSTED_SCALAR_REFERENCE_OPERATOR" in consumer or 'marker.protocol == "Element.Ref"' in consumer
+        assert "proof_kernel_replay_untrusted_scalar_reference_operator_applies_with_work" in consumer
+    assert "subscripts.count != 1" in reference_apply
+    assert "same_reference" in reference_apply
+    assert "constant_int_remaining_with_work_limit" not in reference_apply
     for reader in (
         "proof_kernel_replay_untrusted_operator_marker_with_work",
         "proof_kernel_replay_marker_argument_with_work",

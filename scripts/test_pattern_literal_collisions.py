@@ -9,6 +9,10 @@ from pattern_literal_fixed_width_cases import (
     FIXED_WIDTH_RANGE_CONTROLS,
 )
 from pattern_literal_collision_report_checks import check_pattern_collision_reports
+from pattern_literal_overloaded_eq_case import (
+    STRING_EQ_OVERRIDE_COLLISIONS,
+    STRING_EQ_OVERRIDE_PRELUDE,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = proof_test_binary(ROOT)
@@ -224,6 +228,7 @@ def u64_max_literal_collision(value: u64) -> i64:
 ''',
 }
 PATTERN_COLLISIONS.update(FIXED_WIDTH_PATTERN_COLLISIONS)
+PATTERN_COLLISIONS.update(STRING_EQ_OVERRIDE_COLLISIONS)
 
 # Typed string-pattern controls require the exact source literal text to flow into proof facts;
 # blanket string-pattern refusal fails these positive controls.
@@ -471,7 +476,7 @@ def cstr_identifier_or_pattern_control(value: cstr) -> i64:
 
 with tempfile.TemporaryDirectory() as folder:
     path = Path(folder) / 'pattern-collisions.elisa'
-    path.write_text('\n'.join(PATTERN_COLLISIONS.values()) + '\n' + THEOREM_PATTERN_COLLISION + '\n' + THEOREM_FIXED_WIDTH_PATTERN_COLLISION)
+    path.write_text(STRING_EQ_OVERRIDE_PRELUDE + '\n' + '\n'.join(PATTERN_COLLISIONS.values()) + '\n' + THEOREM_PATTERN_COLLISION + '\n' + THEOREM_FIXED_WIDTH_PATTERN_COLLISION)
 
     control_path = Path(folder) / 'string-pattern-control.elisa'
     control_path.write_text(STRING_PATTERN_CONTROL + '\n' + CSTR_PATTERN_CONTROL + '\n' + PUNCTUATED_STRING_PATTERN_CONTROLS + '\n' + EMPTY_STRING_PATTERN_CONTROLS + '\n' + AMBIGUOUS_SPELLING_STRING_PATTERN_CONTROLS + '\n' + CHAR_PATTERN_CONTROL + '\n' + GROUPED_STRING_PATTERN_CONTROL + '\n' + '\n'.join(FIXED_WIDTH_RANGE_CONTROLS.values()))
@@ -588,4 +593,4 @@ with tempfile.TemporaryDirectory() as folder:
                                     (THEOREM_PATTERN_COLLISION_NAME,
                                      THEOREM_FIXED_WIDTH_PATTERN_COLLISION_NAME))
 
-print('pattern literals: typed string and char controls prove; string, char-code, and fixed-width collisions fail closed')
+print('pattern literals: typed controls prove; string, char-code, fixed-width, and overloaded-equality collisions fail closed')

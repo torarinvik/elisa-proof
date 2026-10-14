@@ -45,11 +45,15 @@ for fixture, expected in (("index_read_equality.elisa", "failed"),
             assert not any(d.get("name") == target and d.get("verified")
                            for d in report["declaration_details"])
     elif fixture == "rejected_typed_index_read_overloaded_equality.elisa":
-        target = "rejected_index_read_through_overloaded_equality"
-        assert any(f["name"] == target and f["kind"] == "ensure-unproven"
-                   for f in report["findings"]), (target, report["findings"])
-        assert not any(d.get("name") == target and d.get("verified")
-                       for d in report["declaration_details"])
+        for target in ("rejected_index_read_through_overloaded_equality",
+                       "rejected_implicit_scalar_reference_overloaded_reflexivity",
+                       "rejected_explicit_scalar_reference_overloaded_reflexivity",
+                       "rejected_array_element_overloaded_equality",
+                       "rejected_pure_call_result_overloaded_reflexivity"):
+            assert any(f["name"] == target and f["kind"] == "ensure-unproven"
+                       for f in report["findings"]), (target, report["findings"])
+            assert not any(d.get("name") == target and d.get("verified")
+                           for d in report["declaration_details"])
     elif fixture == "rejected_typed_index_read_overloaded_index.elisa":
         target = "rejected_custom_index_congruence"
         assert any(f["name"] == target and f["kind"] == "ensure-unproven"

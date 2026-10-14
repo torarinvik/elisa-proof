@@ -3,6 +3,8 @@ include "./operator_witness_markers.elisa"
 include "./operator_impl_queries.elisa"
 include "./operator_impl_chain.elisa"
 include "./struct_members.elisa"
+include "./operator_witness_dispatch.elisa"
+include "./operator_witness_indexes.elisa"
 
 extend ElisaProof:
     private:
@@ -94,44 +96,6 @@ extend ElisaProof:
         const PROOF_SCALAR_WITNESS_FUNCTION_BUDGET: usize = 32
         const PROOF_SCALAR_WITNESS_DEPTH: usize = 3
 
-        def proof_add_builtin_index_witness(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, position: Ast::Pos) -> void:
-            marker: Ast::Expr = proof_builtin_index_marker(root, position)
-            proof_add_type_bound_fact(facts, report, marker, position.line, report.analysis_1.type_bounds.owner)
-
-        def proof_add_index_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, element: Ast::Expr, position: Ast::Pos, source_work: mutable usize&) -> bool can[Global.Read]:
-            element_is_builtin: bool = proof_scalar_type_kind_with_work(element, report.source.source_declarations, 0, source_work) == 1 or (proof_builtin_operator_type_name_with_work(element, report.source.source_declarations, 0, source_work) can Global.Read) != ""
-            element_container: (known: bool, element: Ast::Expr) = proof_container_element_type_with_work(element, report.source.source_declarations, 0, source_work)
-            element_is_container: bool = element_container.known
-            element_is_named: bool = proof_type_head_name_with_work(element, report.source.source_declarations, 0, source_work) != ""
-            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return true if not element_is_builtin and not element_is_container and not element_is_named
-            # One fact preserves the same complete indexed protocol set.
-            marker: Ast::Expr = proof_builtin_operator_marker(root, "Index.All", position) if element_is_builtin else proof_untrusted_operator_marker(root, "Index.All", position)
-            proof_add_type_bound_fact(facts, report, marker, position.line, report.analysis_1.type_bounds.owner)
-            return true
-
-        def proof_add_builtin_operator_witnesses_with_work(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, concrete: sview, position: Ast::Pos, source_work: mutable usize&) -> bool:
-            return false if concrete == "" or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
-            overrides: mutable darray[bool] = []
-            any_override: mutable bool = false
-            for protocol in protocols |report, concrete, source_work, overrides, any_override|:
-                return false if not proof_type_audit_work_charge(1, source_work) or not proof_type_audit_work_charge(sview_len(concrete), source_work) or not proof_type_audit_work_charge(sview_len(protocol), source_work)
-                implementation: (complete: bool, exists: bool) = proof_report_builtin_operator_impl_exists_with_work(report, concrete, protocol, source_work)
-                return false if not implementation.complete
-                overrides.push(implementation.exists)
-                any_override <- true if implementation.exists
-            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            if not any_override:
-                proof_add_type_bound_fact(facts, report, proof_builtin_operator_marker(root, "All", position), position.line, report.analysis_1.type_bounds.owner)
-            else:
-                for protocol_index in 0..<protocols.count |facts, report, root, protocols, overrides, position, protocol_index|:
-                    protocol: sview = protocols[protocol_index]
-                    marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position) if overrides[protocol_index] else proof_builtin_operator_marker(root, protocol, position)
-                    proof_add_type_bound_fact(facts, report, marker, position.line, report.analysis_1.type_bounds.owner)
-            proof_add_builtin_index_witness(facts, report, root, position)
-            return true
-
         def proof_add_scalar_type_witness(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, owner: sview) -> void:
             # A witness already present costs nothing; every goal of a return re-derives them.
             for existing in facts |existing, expression|:
@@ -155,12 +119,24 @@ extend ElisaProof:
             scalar_reference: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type_with_work(type_expression, report.source.source_declarations, 0, &source_work)
             report.source_types.source_effect_index.work.implicit_effect_work <- source_work
             return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            if scalar_reference.known:
+            # This shape-only recognizer may treat a generic formal named like a
+            # primitive (for example `u8`) as a scalar pointee. Check the exact
+            # owner before emitting any indexed scalar facts for the reference.
+            scalar_reference_is_owner_generic: bool = proof_resource_type_mentions_owner_generic_at_owner_with_work(scalar_reference.target, declaration_line, declaration_offset.u32(), report.source_types.source_generic_owner_params_valid, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work, 0) if scalar_reference.known else true
+            report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+            return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if scalar_reference.known and not scalar_reference_is_owner_generic:
                 # This root is scalar only because the source declaration resolved to a
                 # primitive pointee type; the branch does not apply to general references.
+                element_operator_complete: bool = proof_add_untrusted_scalar_element_operator_witness_with_protocol_work(facts, report, root, scalar_reference.target, "Element.Ref", position, declaration_line, declaration_offset, &source_work)
+                report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                return if not element_operator_complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                indexed_element_operator_complete: bool = proof_add_untrusted_scalar_element_operator_witness_with_work(facts, report, root, scalar_reference.target, position, declaration_line, declaration_offset, &source_work)
+                report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                return if not indexed_element_operator_complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(proof_ident_name(root), position), line, owner) if proof_ident_name(root) != ""
                 proof_add_builtin_index_witness(facts, report, root, position)
-                index_witness_complete: bool = proof_add_index_operator_witnesses(facts, report, root, scalar_reference.target, position, &source_work) can Global.Read
+                index_witness_complete: bool = proof_add_index_operator_witnesses(facts, report, root, scalar_reference.target, position, scalar_reference_is_owner_generic, &source_work) can Global.Read
                 report.source_types.source_effect_index.work.implicit_effect_work <- source_work
                 return if not index_witness_complete
                 element_width: i64 = proof_unsigned_type_width_with_work(scalar_reference.target, report.source.source_declarations, 0, &source_work)
@@ -199,8 +175,11 @@ extend ElisaProof:
             container: (known: bool, element: Ast::Expr) = (container_profile.known, container_profile.element)
             element_depth: i64 = container_profile.scalar_depth
             if container.known:
+                element_is_owner_generic: bool = proof_resource_type_mentions_owner_generic_at_owner_with_work(container.element, declaration_line, declaration_offset.u32(), report.source_types.source_generic_owner_params_valid, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work, 0)
+                report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 proof_add_builtin_index_witness(facts, report, root, position)
-                index_witness_complete: bool = proof_add_index_operator_witnesses(facts, report, root, container.element, position, &source_work) can Global.Read
+                index_witness_complete: bool = proof_add_index_operator_witnesses(facts, report, root, container.element, position, element_is_owner_generic, &source_work) can Global.Read
                 report.source_types.source_effect_index.work.implicit_effect_work <- source_work
                 return if not index_witness_complete
                 budget <- budget - 1
@@ -210,8 +189,15 @@ extend ElisaProof:
                 # every alias of the count.
                 proof_add_scalar_type_witness(facts, report, proof_unsigned_place_marker(Ast::Expr.Field(root, "count", position), 64, position), line, owner)
                 proof_add_scalar_type_witness(facts, report, Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, Ast::Expr.Field(root, "count", position), position), line, owner) if proof_count_fact_wanted(root, type_expression)
-                if element_depth > 0 and budget > 0:
+                # Primitive-looking names can be shadowed by an owner generic (for
+                # example, a formal named `u8`). The shape-only scalar profile has
+                # no owner context, so authenticate the leaf before emitting a
+                # width-bearing scalar marker. Unknown generic metadata fails closed.
+                if element_depth > 0 and not element_is_owner_generic and budget > 0:
                     budget <- budget - 1
+                    element_operator_complete: bool = proof_add_untrusted_scalar_element_operator_witness_for_container_with_work(facts, report, root, type_expression, position, declaration_line, declaration_offset, &source_work)
+                    report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                    return if not element_operator_complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     proof_add_scalar_type_witness(facts, report, proof_scalar_element_marker(root, element_depth, position, container_profile.unsigned_width), line, owner)
                 # A container of records has no scalar leaf at the container level, but an
                 # indexed primitive field is scalar. Record one exact marker per declared field;

@@ -88,6 +88,14 @@ assert "def rejected_disequality_different_index" in negative
 assert "def rejected_index_read_through_cross_sort_edges" in negative
 assert "impl Eq for i64:" in overloaded_negative
 assert "return self != other" in overloaded_negative
+assert "def rejected_implicit_scalar_reference_overloaded_reflexivity(value: i64&) -> i64:" in overloaded_negative
+assert "ensure value == value" in overloaded_negative
+assert "def rejected_explicit_scalar_reference_overloaded_reflexivity(value: i64&) -> i64:" in overloaded_negative
+assert "ensure value[0] == value[0]" in overloaded_negative
+assert "def rejected_array_element_overloaded_equality(values: array[i64, 8]&" in overloaded_negative
+assert "requires first == second\n    ensure values[first] == values[second]" in overloaded_negative
+assert "def rejected_pure_call_result_overloaded_reflexivity(value: i64) -> i64:" in overloaded_negative
+assert "ensure pure_i64_value(value) == pure_i64_value(value)" in overloaded_negative
 assert "requires first == middle\n    requires middle == last\n    ensure rows[first] == rows[last]" in overloaded_negative
 assert "impl Index for Box:" in overloaded_index_negative
 assert "def __index__(self: Box&, index: i64) -> i64&:" in overloaded_index_negative
@@ -102,6 +110,10 @@ assert '"rejected_index_read_equality.elisa", "failed"' in runtime
 assert '"rejected_typed_index_read_overloaded_equality.elisa", "failed"' in runtime
 assert '"rejected_typed_index_read_overloaded_index.elisa", "failed"' in runtime
 assert '"rejected_index_read_through_overloaded_equality"' in runtime
+assert '"rejected_implicit_scalar_reference_overloaded_reflexivity"' in runtime
+assert '"rejected_explicit_scalar_reference_overloaded_reflexivity"' in runtime
+assert '"rejected_array_element_overloaded_equality"' in runtime
+assert '"rejected_pure_call_result_overloaded_reflexivity"' in runtime
 assert '"rejected_custom_index_congruence"' in runtime
 assert '"rejected_disequality_different_index"' in runtime
 assert '"rejected_index_read_through_cross_sort_edges"' in runtime

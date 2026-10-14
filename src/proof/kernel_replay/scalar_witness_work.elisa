@@ -85,9 +85,10 @@ extend ElisaProofKernelReplay:
                 return false if not marker_candidate.complete
                 continue if marker_candidate.kind == 0
                 if marker_candidate.kind == PROOF_KERNEL_REPLAY_WITNESS_UNTRUSTED_OPERATOR:
-                    marker: (known: bool, term: usize) = proof_kernel_replay_untrusted_operator_marker_with_work(nodes, children, fact, work_used, work_limit)
+                    marker: (known: bool, term: usize, protocol: sview) = proof_kernel_replay_untrusted_operator_marker_with_work(nodes, children, fact, work_used, work_limit)
                     return false if not marker.known
-                    markers.push(ProofKernelReplayWitnessMarker{kind: PROOF_KERNEL_REPLAY_WITNESS_UNTRUSTED_OPERATOR, root: marker.term, depth: 0})
+                    marker_kind: usize = PROOF_KERNEL_REPLAY_WITNESS_UNTRUSTED_ELEMENT_OPERATOR if marker.protocol == "Element.All" or marker.protocol == "Index.All" else PROOF_KERNEL_REPLAY_WITNESS_UNTRUSTED_SCALAR_REFERENCE_OPERATOR if marker.protocol == "Element.Ref" else PROOF_KERNEL_REPLAY_WITNESS_UNTRUSTED_OPERATOR
+                    markers.push(ProofKernelReplayWitnessMarker{kind: marker_kind, root: marker.term, depth: 0})
                 elif marker_candidate.kind == PROOF_KERNEL_REPLAY_WITNESS_PRIMITIVE_SCALAR:
                     marker: (known: bool, root: usize) = proof_kernel_replay_marker_argument_with_work(nodes, children, fact, "__elisa_primitive_scalar_type", work_used, work_limit)
                     return false if not marker.known
@@ -155,8 +156,8 @@ extend ElisaProofKernelReplay:
             return empty if argument_node.kind != "call_arg" or argument_node.name != "" or argument_node.secondary_name != "" or not proof_kernel_replay_valid(nodes, argument_node.left)
             (true, argument_node.left)
 
-        def proof_kernel_replay_untrusted_operator_marker_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, work_used: mutable usize&, work_limit: usize) -> (known: bool, term: usize):
-            empty: (known: bool, term: usize) = (false, 0)
+        def proof_kernel_replay_untrusted_operator_marker_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, work_used: mutable usize&, work_limit: usize) -> (known: bool, term: usize, protocol: sview):
+            empty: (known: bool, term: usize, protocol: sview) = (false, 0, "")
             return empty if not proof_kernel_replay_scalar_witness_charge_node_text(nodes, root, work_used, work_limit)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return empty if:
@@ -183,7 +184,7 @@ extend ElisaProofKernelReplay:
                 not proof_kernel_replay_scalar_witness_charge_node_text(nodes, protocol_node.left, work_used, work_limit)
             protocol: ElisaProofKernelCore::ProofKernelNode = nodes[protocol_node.left]
             return empty if protocol.kind != "string" or protocol.name == ""
-            (true, term_node.left)
+            (true, term_node.left, protocol.name)
 
         def proof_kernel_replay_unsigned_marker_info_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize, work_used: mutable usize&, work_limit: usize) -> (known: bool, name_root: usize, width: i64):
             return (false, 0, 0) if:
@@ -289,6 +290,29 @@ extend ElisaProofKernelReplay:
                 return true
             container <- expression
             return true
+
+        def proof_kernel_replay_untrusted_element_operator_applies_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, marked_container: usize, term: usize, work_used: mutable usize&, work_limit: usize) -> bool:
+            return false if not proof_kernel_replay_scalar_witness_charge_node_text(nodes, term, work_used, work_limit)
+            return false if work_used > work_limit or not proof_kernel_replay_valid(nodes, term)
+            container: mutable usize = 0
+            subscripts: mutable darray[usize] = []
+            return false if not proof_kernel_replay_indexed_container_path_with_work(nodes, children, term, &container, &subscripts, 0, work_used, work_limit) or subscripts.count == 0
+            proof_kernel_replay_scalar_witness_expr_equal(nodes, children, marked_container, container, work_used, work_limit)
+
+        def proof_kernel_replay_untrusted_scalar_reference_operator_applies_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, marked_reference: usize, term: usize, work_used: mutable usize&, work_limit: usize) -> bool:
+            exact_reference: bool = proof_kernel_replay_scalar_witness_expr_equal(nodes, children, marked_reference, term, work_used, work_limit)
+            return true if exact_reference
+            return false if work_used > work_limit
+            container: mutable usize = 0
+            subscripts: mutable darray[usize] = []
+            return false if not proof_kernel_replay_indexed_container_path_with_work(nodes, children, term, &container, &subscripts, 0, work_used, work_limit)
+            return false if subscripts.count != 1
+            same_reference: bool = proof_kernel_replay_scalar_witness_expr_equal(nodes, children, marked_reference, container, work_used, work_limit)
+            return false if not same_reference or work_used > work_limit
+            # Element.Ref overrides apply to every indexed read through this exact
+            # reference. Reject all such paths, including nonzero or dynamic indexes;
+            # replay does not need to prove which index the source witness used.
+            work_used <= work_limit
 
         def proof_kernel_replay_untrusted_operator_applies_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, marked_term: usize, term: usize, depth: usize, work_used: mutable usize&, work_limit: usize) -> bool:
             return false if not proof_kernel_replay_scalar_witness_charge(work_used, 1, work_limit)
@@ -417,6 +441,12 @@ extend ElisaProofKernelReplay:
             return false if budget == 0
             markers: mutable darray[ProofKernelReplayWitnessMarker] = []
             return false if not proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, &markers, work_used, work_limit)
+            proof_kernel_replay_scalar_term_pair_witnessed_with_markers_work(nodes, children, markers, left, right, depth, budget, work_used, work_limit)
+
+        def proof_kernel_replay_scalar_term_pair_witnessed_with_markers_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, markers: darray[ProofKernelReplayWitnessMarker], left: usize, right: usize, depth: usize, budget: usize, work_used: mutable usize&, work_limit: usize) -> bool:
+            requires depth <= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
+            requires budget > 0
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
             first: bool = proof_kernel_replay_scalar_term_witnessed_budget_with_work(nodes, children, markers, left, depth, budget, work_used, work_limit)
             return false if work_used > work_limit or not first
             proof_kernel_replay_scalar_term_witnessed_budget_with_work(nodes, children, markers, right, depth, budget, work_used, work_limit)
@@ -462,6 +492,10 @@ extend ElisaProofKernelReplay:
                 return false if not proof_kernel_replay_scalar_witness_charge(work_used, 1, work_limit)
                 if marker.kind == PROOF_KERNEL_REPLAY_WITNESS_UNTRUSTED_OPERATOR:
                     return false if proof_kernel_replay_untrusted_operator_applies_with_work(nodes, children, marker.root, root, depth + 1, work_used, work_limit)
+                elif marker.kind == PROOF_KERNEL_REPLAY_WITNESS_UNTRUSTED_ELEMENT_OPERATOR:
+                    return false if proof_kernel_replay_untrusted_element_operator_applies_with_work(nodes, children, marker.root, root, work_used, work_limit)
+                elif marker.kind == PROOF_KERNEL_REPLAY_WITNESS_UNTRUSTED_SCALAR_REFERENCE_OPERATOR:
+                    return false if proof_kernel_replay_untrusted_scalar_reference_operator_applies_with_work(nodes, children, marker.root, root, work_used, work_limit)
             return false if work_used > work_limit
             return true if proof_kernel_replay_congruent_scalar_literal(node)
             if node.kind == "ident":
