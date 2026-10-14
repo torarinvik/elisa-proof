@@ -6,7 +6,9 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import sys
 import tempfile
+from qualified_test_binary import proof_test_binary
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_CACHE_SPEC = importlib.util.spec_from_file_location(
@@ -15,6 +17,7 @@ REPORT_CACHE_SPEC = importlib.util.spec_from_file_location(
 assert REPORT_CACHE_SPEC and REPORT_CACHE_SPEC.loader
 report_cache = importlib.util.module_from_spec(REPORT_CACHE_SPEC)
 REPORT_CACHE_SPEC.loader.exec_module(report_cache)
+sys.modules["report_cache"] = report_cache
 PREFETCH_SPEC = importlib.util.spec_from_file_location(
     "prefetch_reports_executable_swap", ROOT / "scripts/prefetch_reports.py"
 )
@@ -22,7 +25,7 @@ assert PREFETCH_SPEC and PREFETCH_SPEC.loader
 prefetch = importlib.util.module_from_spec(PREFETCH_SPEC)
 PREFETCH_SPEC.loader.exec_module(prefetch)
 
-SOURCE_BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof")).resolve()
+SOURCE_BINARY = Path(proof_test_binary(ROOT)).resolve()
 FIXTURE = ROOT / "examples/perf_luna_accept.elisa"
 
 
@@ -30,9 +33,14 @@ def main() -> None:
     assert SOURCE_BINARY.is_file() and os.access(SOURCE_BINARY, os.X_OK), SOURCE_BINARY
     previous_default_binary = report_cache.DEFAULT_BINARY
     previous_cache = os.environ.get("ELISA_PROOF_REPORT_CACHE")
+    previous_registry = report_cache.SOUNDNESS_INCIDENT_REGISTRY
     try:
         with tempfile.TemporaryDirectory(prefix="elisa-report-cache-executable-swap-") as temporary:
             directory = Path(temporary)
+            test_registry = directory / "soundness-incidents.json"
+            test_registry.write_text(json.dumps({"schema": "elisa-proof-soundness-incident-registry-v2",
+                                                 "incidents": [], "unclassified_reports": []}), encoding="utf-8")
+            report_cache.SOUNDNESS_INCIDENT_REGISTRY = test_registry
             executable = directory / "elisa-proof"
             reference_binary = directory / "elisa-proof-original"
             cache_dir = directory / "reports"
@@ -105,6 +113,7 @@ def main() -> None:
             )
     finally:
         report_cache.DEFAULT_BINARY = previous_default_binary
+        report_cache.SOUNDNESS_INCIDENT_REGISTRY = previous_registry
         if previous_cache is None:
             os.environ.pop("ELISA_PROOF_REPORT_CACHE", None)
         else:

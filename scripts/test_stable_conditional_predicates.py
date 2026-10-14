@@ -1,11 +1,12 @@
 import json
-import os
+import os, qualified_test_binary
 import tempfile
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get('ELISA_PROOF_BIN', ROOT / 'build/elisa-proof'))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 base = '''def bounded(byte: u8) -> u8:
     ensure result <= 2
     selected: u8 = 1 if CONDITION else 2

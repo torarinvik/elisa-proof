@@ -1,13 +1,14 @@
 """Return-analysis fuel scales with source shape but always fails closed at its cap."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def function(name: str, statements: int) -> str:

@@ -1,12 +1,13 @@
 """Signed product growth is range-safe, nonnegative and non-strict."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = """def checked(amount: i64, speed: i64) -> i64:
     requires amount >= 0 and amount <= 100
     requires speed >= 1 and speed <= 100

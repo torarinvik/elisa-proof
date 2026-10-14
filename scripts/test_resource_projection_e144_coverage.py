@@ -1,6 +1,6 @@
 """Coverage for typed aggregate field reads and bounded-container non-transfer controls."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
@@ -9,7 +9,8 @@ if not __debug__:
     raise SystemExit("resource projection coverage must run without Python -O")
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def report(example, expected_exit, expected_status):

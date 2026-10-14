@@ -1,11 +1,12 @@
 """Source locals capture one invocation, never repeatable non-pure call text."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 for name, accepted in (
     ("arithmetic_call_result_alias", True),
     ("call_result_literal_alias", True),

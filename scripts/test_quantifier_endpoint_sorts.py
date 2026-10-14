@@ -1,11 +1,12 @@
 """Signed ghost endpoints must not admit unsigned negation or wrapped tokens."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BIN = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BIN = qualified_test_binary.proof_test_binary(ROOT)
 if not __debug__:
     raise SystemExit("run without Python -O")
 run = subprocess.run(

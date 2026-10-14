@@ -1,16 +1,17 @@
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
+
 if not __debug__:
     raise SystemExit("run without Python -O")
 for fixture, expected in (
     ("stride_index_write_probe.elisa", [("rejected_stride_index_write_missing_bound", "index-upper-unproven")]),
     ("stride_index_borrow_probe.elisa", [("stride_index_borrow_disjoint", "borrow-overlap-unproven"),
                                        ("rejected_stride_index_borrow_same_element", "borrow-overlap-unproven")])):
-    run = subprocess.run([os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof")), "--json", str(ROOT / "test" / fixture)],
+    run = subprocess.run([qualified_test_binary.proof_test_binary(ROOT), "--json", str(ROOT / "test" / fixture)],
                          capture_output=True, text=True, timeout=60)
     r = json.loads(run.stdout)
     assert run.returncode == 1 and r["summary"]["semantic_errors"] == 0

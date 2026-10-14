@@ -1,12 +1,13 @@
 """Qualified constants reach scoped value loops without namespace shadowing."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get('ELISA_PROOF_BIN', str(ROOT/'build/elisa-proof'))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = (ROOT/'examples/nested_record_loop_bound_gap.elisa').read_text()
 INITIALIZER = BASE.replace('        for index', '        found: bool =\n            for index').replace('            all <-', '                all <-')+'        found\n'
 CASES = (

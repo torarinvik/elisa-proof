@@ -1,12 +1,13 @@
 """Every unproven goal and its finding name the first guard that refuses it (BACKLOG A-02).
 The field is diagnostic only: proven goals carry none, and the gate never changes a verdict."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 GATES = {"unknown", "kernel-replay-gap", "budget", "literal-width", "ambiguous-constant-goal", "wrap-guard-fact",
          "wrap-guard-goal", "quantifier", "overloaded-operator", "connective",
          "non-comparison-goal", "opaque-call-goal"}

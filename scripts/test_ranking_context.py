@@ -1,13 +1,14 @@
 """Ranking premise filtering retains pinned names and checked type evidence."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 if not __debug__:
     raise SystemExit("ranking checks must run without Python -O")
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 for fixture, count in (("lexicographic_decreases", 38),
                        ("lexicographic_recursive_lemma", 14),

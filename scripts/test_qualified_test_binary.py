@@ -1,5 +1,6 @@
 """The focused regression runner must never silently use a stale proof executable."""
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,37 @@ STALE = ROOT / "build/elisa-proof"
 
 
 class QualifiedProofBinaryTests(unittest.TestCase):
+    def test_cli_regressions_do_not_default_to_build_binary(self):
+        scripts = ROOT / "scripts"
+        test_files = [*scripts.glob("test_*.py"), * (scripts / "tests").glob("test_*.py")]
+        for path in test_files:
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "ELISA_PROOF_BIN"
+                    and len(node.args) > 1
+                ):
+                    continue
+                default_text = ast.get_source_segment(
+                    source, node.args[1]
+                ) or ""
+                constants = {
+                    child.value
+                    for child in ast.walk(node.args[1])
+                    if isinstance(child, ast.Constant) and isinstance(child.value, str)
+                }
+                self.assertFalse(
+                    "build/elisa-proof" in default_text
+                    or {"build", "elisa-proof"}.issubset(constants),
+                    f"{path}:{node.lineno} defaults to an unqualified proof binary",
+                )
+
     def test_standalone_resolves_current_product(self):
         result = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=json.dumps({"proof_binary": str(QUALIFIED)}), stderr=""

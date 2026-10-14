@@ -2,12 +2,13 @@
 so `x / 2 <= 16383` closes for an i16 local or field. A bound one inside the range, a narrow
 field held to a tighter bound, and a reassigned local's value stay unproven."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(path):

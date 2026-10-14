@@ -4,7 +4,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
+from qualified_test_binary import proof_test_binary
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_CACHE_SPEC = importlib.util.spec_from_file_location(
@@ -13,6 +15,7 @@ REPORT_CACHE_SPEC = importlib.util.spec_from_file_location(
 assert REPORT_CACHE_SPEC and REPORT_CACHE_SPEC.loader
 report_cache = importlib.util.module_from_spec(REPORT_CACHE_SPEC)
 REPORT_CACHE_SPEC.loader.exec_module(report_cache)
+sys.modules["report_cache"] = report_cache
 PREFETCH_SPEC = importlib.util.spec_from_file_location(
     "prefetch_reports_real", ROOT / "scripts/prefetch_reports.py"
 )
@@ -20,7 +23,7 @@ assert PREFETCH_SPEC and PREFETCH_SPEC.loader
 prefetch = importlib.util.module_from_spec(PREFETCH_SPEC)
 PREFETCH_SPEC.loader.exec_module(prefetch)
 
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof")).resolve()
+BINARY = Path(proof_test_binary(ROOT)).resolve()
 FIXTURES = (
     (ROOT / "examples/perf_luna_accept.elisa", "proved", 0),
     (ROOT / "examples/perf_luna_refusal.elisa", "failed", 1),
@@ -43,9 +46,14 @@ def main() -> None:
     assert BINARY.is_file() and os.access(BINARY, os.X_OK), BINARY
     original_binary = report_cache.DEFAULT_BINARY
     original_cache = os.environ.get("ELISA_PROOF_REPORT_CACHE")
+    original_registry = report_cache.SOUNDNESS_INCIDENT_REGISTRY
     report_cache.DEFAULT_BINARY = BINARY
     try:
         with tempfile.TemporaryDirectory(prefix="elisa-real-report-cache-") as temporary:
+            test_registry = Path(temporary) / "soundness-incidents.json"
+            test_registry.write_text(json.dumps({"schema": "elisa-proof-soundness-incident-registry-v2",
+                                                 "incidents": [], "unclassified_reports": []}), encoding="utf-8")
+            report_cache.SOUNDNESS_INCIDENT_REGISTRY = test_registry
             os.environ["ELISA_PROOF_REPORT_CACHE"] = temporary
             (Path(temporary) / "pending").mkdir()
             for fixture, expected_status, expected_rc in FIXTURES:
@@ -119,6 +127,7 @@ def main() -> None:
             print("included module edit: fresh theorem identity, complete replay, cached/fresh JSON equal")
     finally:
         report_cache.DEFAULT_BINARY = original_binary
+        report_cache.SOUNDNESS_INCIDENT_REGISTRY = original_registry
         if original_cache is None:
             os.environ.pop("ELISA_PROOF_REPORT_CACHE", None)
         else:

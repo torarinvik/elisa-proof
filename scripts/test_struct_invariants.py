@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Struct invariants are refused until verified: positive, adversarial, malformed and budget cases."""
 import json
-import os
+import os, qualified_test_binary
 import subprocess
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 KIND = "declaration-unsupported"
 
 

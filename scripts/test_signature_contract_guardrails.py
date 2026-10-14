@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Regression tests for proof admission and call edges from signature contracts."""
 import json
-import os
+import os, qualified_test_binary
 import subprocess
 import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def report(source: str) -> dict:

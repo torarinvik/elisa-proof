@@ -7,14 +7,15 @@ and an unreadable file are refused before checking. Budget: without Z3 the oracl
 and the report is unchanged.
 """
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 SOURCE = ROOT / "examples/smt_linear_oracle.elisa"
 WORK = Path(tempfile.mkdtemp(prefix="elisa-proof-smt-"))
 failures = []

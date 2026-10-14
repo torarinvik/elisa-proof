@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 
 
@@ -12,6 +13,9 @@ ROOT = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("report_cache", ROOT / "scripts/report_cache.py")
 cache = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(cache)
+# Prefetch imports the cache helpers by module name. Share this instance so the explicit empty
+# incident registry configured by this isolated test also governs its writer path.
+sys.modules["report_cache"] = cache
 PREFETCH_SPEC = importlib.util.spec_from_file_location("prefetch_reports", ROOT / "scripts/prefetch_reports.py")
 prefetch = importlib.util.module_from_spec(PREFETCH_SPEC)
 PREFETCH_SPEC.loader.exec_module(prefetch)
@@ -20,6 +24,16 @@ PREFETCH_SPEC.loader.exec_module(prefetch)
 def main():
     with tempfile.TemporaryDirectory(prefix="elisa-report-cache-identity-") as temporary:
         root = Path(temporary)
+        # The shipped ledger intentionally contains unresolved reports. This test is about cache
+        # identity mechanics, so give its isolated cache an explicit reviewed empty ledger.
+        original_registry = cache.SOUNDNESS_INCIDENT_REGISTRY
+        test_registry = root / "soundness-incidents.json"
+        test_registry.write_text(json.dumps({
+            "schema": "elisa-proof-soundness-incident-registry-v2",
+            "incidents": [],
+            "unclassified_reports": [],
+        }), encoding="utf-8")
+        cache.SOUNDNESS_INCIDENT_REGISTRY = test_registry
         fixture = root / "float_mode.elisa"
         dependency = root / "decision.elisa"
         binary = root / "elisa-proof"
@@ -68,7 +82,9 @@ def main():
         original_default = cache.DEFAULT_BINARY
         cache.DEFAULT_BINARY = binary
         original_recipes = cache.REPORT_CACHE_RECIPES
-        assert {path.name for path in original_recipes} == {"report_cache.py", "prefetch_reports.py"}, "report cache key omits an implementation recipe"
+        assert {path.name for path in original_recipes} == {
+            "report_cache.py", "prefetch_reports.py", "strict_json.py"
+        }, "report cache key omits an implementation recipe"
         cache_recipe = root / "report-cache-recipe.py"
         cache_recipe.write_text("cache recipe v1", encoding="utf-8")
         cache.REPORT_CACHE_RECIPES = (cache_recipe,)
@@ -176,6 +192,7 @@ def main():
         finally:
             cache.DEFAULT_BINARY = original_default
             cache.REPORT_CACHE_RECIPES = original_recipes
+            cache.SOUNDNESS_INCIDENT_REGISTRY = original_registry
             if previous_cache is None:
                 os.environ.pop("ELISA_PROOF_REPORT_CACHE", None)
             else:

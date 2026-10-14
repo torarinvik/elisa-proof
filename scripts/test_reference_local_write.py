@@ -1,6 +1,6 @@
 """A write through a mutable reference local must invalidate what the checker knew of its referent."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
@@ -8,7 +8,8 @@ if not __debug__:
     raise SystemExit("reference-local write checks must run without Python -O")
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 run = subprocess.run([str(BINARY), "--json", str(ROOT / "examples/rejected_reference_local_write.elisa")],
                      capture_output=True, text=True, timeout=120)
 assert run.returncode == 1, (run.returncode, run.stderr[-2000:], run.stdout[-2000:])

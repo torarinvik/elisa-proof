@@ -2,12 +2,13 @@
 `v <= 127`). The front end cannot show such a postcondition statically, so its own diagnostic is
 expected; the proof engine's obligations are what this test reads. The lower bound is imported too, spelled `-MAX - 1`."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def run(name):

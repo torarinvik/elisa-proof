@@ -1,12 +1,13 @@
 """Scalar guards retain witnesses without raising aggregate traversal budgets."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
+BINARY = qualified_test_binary.proof_test_binary(ROOT)
 BASE = (ROOT / "examples/late_scalar_field_bounds.elisa").read_text()
 FIRST = BASE.replace("struct Store:\n", "struct Store:\n    used: usize\n").replace("    used: usize\ndef", "def")
 CASES = (

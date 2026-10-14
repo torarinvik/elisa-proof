@@ -1,11 +1,11 @@
 """Qualified scalar type witnesses resolve from the source root inside module bodies."""
 import json
-import os
 from pathlib import Path
 import subprocess
+from qualified_test_binary import proof_test_binary
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+BINARY = proof_test_binary(ROOT)
 
 
 def run(name):

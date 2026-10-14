@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,7 @@ REPORT_CACHE_SPEC = importlib.util.spec_from_file_location(
 assert REPORT_CACHE_SPEC and REPORT_CACHE_SPEC.loader
 report_cache = importlib.util.module_from_spec(REPORT_CACHE_SPEC)
 REPORT_CACHE_SPEC.loader.exec_module(report_cache)
+sys.modules["report_cache"] = report_cache
 PREFETCH_SPEC = importlib.util.spec_from_file_location(
     "prefetch_reports_symlink_dependency", ROOT / "scripts/prefetch_reports.py"
 )
@@ -24,9 +26,14 @@ PREFETCH_SPEC.loader.exec_module(prefetch)
 def main() -> None:
     previous_default_binary = report_cache.DEFAULT_BINARY
     previous_cache = os.environ.get("ELISA_PROOF_REPORT_CACHE")
+    previous_registry = report_cache.SOUNDNESS_INCIDENT_REGISTRY
     try:
         with tempfile.TemporaryDirectory(prefix="elisa-report-cache-symlink-dependency-") as temporary:
             root = Path(temporary)
+            test_registry = root / "soundness-incidents.json"
+            test_registry.write_text(json.dumps({"schema": "elisa-proof-soundness-incident-registry-v2",
+                                                 "incidents": [], "unclassified_reports": []}), encoding="utf-8")
+            report_cache.SOUNDNESS_INCIDENT_REGISTRY = test_registry
             fixture = root / "proof.elisa"
             linked_dependency = root / "decision.elisa"
             proved_dependency = root / "proved.elisa"
@@ -96,6 +103,7 @@ def main() -> None:
             print("symlink include retarget: key changed, verifier reran once, cached/uncached reports equal")
     finally:
         report_cache.DEFAULT_BINARY = previous_default_binary
+        report_cache.SOUNDNESS_INCIDENT_REGISTRY = previous_registry
         if previous_cache is None:
             os.environ.pop("ELISA_PROOF_REPORT_CACHE", None)
         else:
