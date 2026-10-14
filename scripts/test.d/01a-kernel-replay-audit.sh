@@ -13,6 +13,7 @@ python3 "$ROOT_DIR/scripts/test_kernel_bound_work_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_difference_closure_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_bounded_model_width_safety.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_workspace_cache_boundary.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_resource_summary_root_cache.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_index_read_operator_parity.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_global_mutable_array_owner_identity.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_global_constant_owner_identity.py" || exit 1
