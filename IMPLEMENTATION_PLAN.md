@@ -25125,6 +25125,16 @@ no tests or build were run.
 Interactive assumption and apply actions previously reserved source work for quantifier annotation
 scans but not for recursive expression equality, quantifier-shape validation, or call/move scans
 over every candidate. They now measure the goal and candidate expression sizes, charge sizing work,
-and reserve eight complete passes over each possible comparison before entering the matching loop.
-Budget exhaustion refuses the action rather than allowing candidate-count × expression-size work to
-escape the tactic source quota. Static diff and source-length checks pass; no tests or build were run.
+and reserve twelve complete passes over each possible comparison before entering the matching loop.
+The reservation covers the initial ordinary equality, quantifier shape validation and nested body
+comparison, plus the separate two-pass candidate-only call/move scans used by `apply`. Budget
+exhaustion refuses the action rather than allowing candidate-count × expression-size work to escape
+the tactic source quota. Static diff check passes; no tests or build were run.
+
+### 23.27.1425 Reject inconsistent branch widths in fixed-width conditionals (2026-10-14)
+
+The signed fixed-width safety walk now rejects conditional branches with conflicting known
+signedness and also rejects differing known widths within the same signedness. Previously only
+signed/unsigned conflicts were refused, allowing a source-neutral arena to combine branches with
+incompatible width evidence. The condition checks are symmetric and preserve unknown-width branches
+for the existing fail-closed safety recursion. `git diff --check` passes; no tests or build were run.

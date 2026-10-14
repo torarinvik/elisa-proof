@@ -1,0 +1,47 @@
+extend ElisaProof:
+    private:
+        def proof_tactic_state_charge_source_work(state: mutable ProofTacticState&, amount: usize) -> bool:
+            return false if state.source_quota > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or state.source_work_used > state.source_quota
+            if amount > state.source_quota - state.source_work_used:
+                state.source_work_used <- state.source_quota
+                return false
+            state.source_work_used <- state.source_work_used + amount
+            return true
+
+        # Quantifier equality may validate two shapes and compare the bodies after the ordinary
+        # equality attempt. Reserve twelve AST-sized comparison passes; apply's call/move walks
+        # are charged separately so assumption does not pay for them.
+        def proof_tactic_state_quantifier_match_work(state: mutable ProofTacticState&, selected_index: usize, selected_only: bool, scan_effects: bool) -> bool:
+            candidate_count: usize = 1 if selected_only else state.facts.count
+            return true if candidate_count == 0
+            return false if selected_only and selected_index >= state.facts.count
+            work: mutable usize = state.source_work_used
+            goal_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(state.goal, &goal_cost, work, state.source_quota):
+                state.source_work_used <- state.source_quota
+                return false
+            return false if not proof_tactic_state_charge_source_work(state, goal_cost)
+            candidate_cost: mutable usize = 0
+            for candidate in 0..<candidate_count |state, selected_index, selected_only, work, candidate_cost, candidate|:
+                index: usize = selected_index if selected_only else candidate
+                fact_cost: mutable usize = 0
+                if not proof_replay_summary_expr_cost_with_limit(state.facts[index], &fact_cost, state.source_work_used, state.source_quota):
+                    state.source_work_used <- state.source_quota
+                    return false
+                return false if not proof_tactic_state_charge_source_work(state, fact_cost)
+                return false if fact_cost > state.source_quota - candidate_cost
+                candidate_cost <- candidate_cost + fact_cost
+            remaining: mutable usize = state.source_quota - state.source_work_used
+            return false if goal_cost > remaining / candidate_count
+            repeated_goal_cost: usize = goal_cost * candidate_count
+            return false if candidate_cost > remaining - repeated_goal_cost
+            comparisons_cost: usize = candidate_cost + repeated_goal_cost
+            remaining <- state.source_quota - state.source_work_used
+            return false if comparisons_cost > remaining / 12
+            comparison_reserve: usize = comparisons_cost * 12
+            remaining <- remaining - comparison_reserve
+            effect_reserve: usize = 0
+            if scan_effects:
+                return false if candidate_cost > remaining / 2
+                effect_reserve <- candidate_cost * 2
+            proof_tactic_state_charge_source_work(state, comparison_reserve + effect_reserve)
