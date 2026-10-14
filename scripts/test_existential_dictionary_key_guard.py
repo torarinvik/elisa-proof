@@ -27,6 +27,7 @@ assert 'nodes[root].kind == "typed-int"' in key_literal
 assert 'nodes[root].operator != ""' in key_literal
 assert 'nodes[root].kind != "int" or nodes[root].name != "" or nodes[root].value < 0' in key_literal
 assert "ElisaProofKernelCore::typed_literal_value(nodes[root])" in key_literal
+assert "nodes[root].name, literal.unsigned, literal.width" in key_literal
 assert "proof_kernel_replay_constant_int_remaining_with_work_limit" not in key_literal
 for field in ("kind", "operator", "name"):
     assert f"sview_len(nodes[root].{field})" in key_literal
@@ -37,8 +38,11 @@ assert "PROOF_KERNEL_REPLAY_MAX_QUANTIFIER_ENTRIES" in unique
 assert "pair_count > work_limit - work_used" in unique
 assert "proof_kernel_replay_existential_dictionary_key_literal_with_work" in unique
 assert "left_key.typed != right_key.typed" in unique
+assert "left_key.sort != right_key.sort" in unique
 assert "left_key.unsigned != right_key.unsigned or left_key.width != right_key.width" in unique
 assert "left_key.bits == right_key.bits" in unique
+assert "sview_len(left_key.sort)" in unique
+assert "sview_len(right_key.sort)" in unique
 
 arena = body("proof_kernel_replay_arena_children_valid_with_work")
 assert 'if node.operator == "exists" and node.auxiliary == 2:' in arena
@@ -52,9 +56,10 @@ assert 'if kind == "exists" and quantifier.auxiliary == 2:' in direct
 assert "proof_kernel_replay_existential_dictionary_keys_unique_with_work" in direct
 
 forgery = (ROOT / "scripts/tests/portable_replay_kernel_forgeries.py").read_text(encoding="utf-8")
-assert '"name": "duplicate-key-existential"' in forgery
+assert '"name": "wrapping-key-existential"' in forgery
+assert 'append_node(dict_exists, "binary", "+", wrapped_key_left, wrapped_key_right)' in forgery
+assert 'refused(dict_exists, "wrapping-key-existential", "rejected", "kernel-rejected")' in forgery
 assert '"name": "single-key-existential-control"' in forgery
-assert 'refused(dict_exists, "duplicate-key-existential", "rejected", "kernel-rejected")' in forgery
 assert 'single_result["status"] == "replayed"' in forgery
 assert '"name": "typed-duplicate-key-existential"' in forgery
 assert 'refused(typed_dict_exists, "typed-duplicate-key-existential", "rejected", "kernel-rejected")' in forgery

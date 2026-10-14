@@ -95,8 +95,10 @@ assert control_code == 0 and control_result["status"] == "replayed", control_res
 # Forbid that forged range before evaluating its body, while keeping the single-key form useful.
 dict_exists = copy.deepcopy(quantified)
 dict_exists["kernel"] = {"nodes": [], "children": []}
-dict_key_a = append_node(dict_exists, "int", value="1")
-dict_key_b = append_node(dict_exists, "int", value="1")
+wrapped_key_left = append_node(dict_exists, "int", value="255")
+wrapped_key_right = append_node(dict_exists, "int", value="1")
+dict_key_a = append_node(dict_exists, "binary", "+", wrapped_key_left, wrapped_key_right)
+dict_key_b = append_node(dict_exists, "int", value="0")
 dict_value_zero = append_node(dict_exists, "int", value="0")
 dict_value_one = append_node(dict_exists, "int", value="1")
 dict_entry_a = append_node(dict_exists, "dict_entry", left=dict_key_a, right=dict_value_zero)
@@ -104,18 +106,19 @@ dict_entry_b = append_node(dict_exists, "dict_entry", left=dict_key_b, right=dic
 dict_range = collection(dict_exists, "dict", [dict_entry_a, dict_entry_b])
 exists_key = append_node(dict_exists, "ident", name="k")
 exists_value = append_node(dict_exists, "ident", name="v")
-key_is_one = append_node(dict_exists, "binary", "==", exists_key, dict_key_a)
+mathematical_key = append_node(dict_exists, "int", value="256")
+key_is_wrapped_value = append_node(dict_exists, "binary", "==", exists_key, mathematical_key)
 value_is_zero = append_node(dict_exists, "binary", "==", exists_value, dict_value_zero)
-exists_body = append_node(dict_exists, "binary", "and", key_is_one, value_is_zero)
+exists_body = append_node(dict_exists, "binary", "and", key_is_wrapped_value, value_is_zero)
 duplicate_exists = append_node(dict_exists, "quantifier", "exists", dict_range, exists_body,
                                name="k", auxiliary=2, secondary_name="v")
 duplicate_exists_theorem = {
-    "goal_id": 0, "name": "duplicate-key-existential", "line": 1,
+    "goal_id": 0, "name": "wrapping-key-existential", "line": 1,
     "rule": "quantifier-exists", "hypotheses": [], "hypothesis_origins": [],
     "conclusion": duplicate_exists, "statement": "", "goal_fingerprint": 0,
 }
 dict_exists["theorems"] = [reseal(dict_exists, duplicate_exists_theorem)]
-refused(dict_exists, "duplicate-key-existential", "rejected", "kernel-rejected")
+refused(dict_exists, "wrapping-key-existential", "rejected", "kernel-rejected")
 
 dict_single = copy.deepcopy(dict_exists)
 dict_single["kernel"] = {"nodes": [], "children": []}
