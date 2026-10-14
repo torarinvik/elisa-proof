@@ -6,81 +6,128 @@ extend ElisaProof:
         # identity, and model tiers already handled every goal that needs no equality premise.
         # Conjunction is the only proposition whose equality children are exported here, and
         # `not (a != b)` is the equivalent positive form used by the kernel seed rule.
-        def proof_congruence_has_seed(expression: Ast::Expr, depth: usize) -> bool:
-            return false if depth >= PROOF_CONGRUENCE_SCAN_DEPTH
+        def proof_congruence_has_seed_with_work(expression: Ast::Expr, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, found: bool):
+            return (true, false) if depth >= PROOF_CONGRUENCE_SCAN_DEPTH
+            return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_congruence_has_seed(inner, depth + 1)
+                    return proof_congruence_has_seed_with_work(inner, depth + 1, budget, exhausted)
                 Ast::Expr.Binary(_, TokenKind.EqEq, _, _):
-                    return true
+                    return (true, true)
                 Ast::Expr.Binary(left, TokenKind.And, right, _):
-                    return proof_congruence_has_seed(left, depth + 1) or proof_congruence_has_seed(right, depth + 1)
+                    left_seed: (complete: bool, found: bool) = proof_congruence_has_seed_with_work(left, depth + 1, budget, exhausted)
+                    return (false, false) if not left_seed.complete
+                    return (true, true) if left_seed.found
+                    return proof_congruence_has_seed_with_work(right, depth + 1, budget, exhausted)
                 Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
                     match inner:
                         Ast::Expr.Binary(_, TokenKind.BangEq, _, _):
-                            return true
+                            return (true, true)
                         _:
                             pass
                 _:
                     pass
-            return false
+            return (true, false)
 
-        def proof_congruence_has_seed_in_facts(facts: darray[Ast::Expr]&) -> bool:
-            for fact in facts |fact|:
-                return true if proof_congruence_has_seed(fact, 0)
-            return false
+        def proof_congruence_has_seed_in_facts_with_work(facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, found: bool):
+            for fact in facts |fact, budget, exhausted|:
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                seed: (complete: bool, found: bool) = proof_congruence_has_seed_with_work(fact, 0, budget, exhausted)
+                return (false, false) if not seed.complete
+                return (true, true) if seed.found
+            return (true, false)
 
-        # Whether an equality premise, in the shapes `proof_congruence_has_seed` reads, has the
-        # literal `value` as one side. Parentheses are looked through, which only admits more.
-        def proof_congruence_seed_has_literal(expression: Ast::Expr, value: i64, depth: usize) -> bool:
-            return false if depth >= PROOF_CONGRUENCE_SCAN_DEPTH
+        # The literal prefilter runs before AST lowering, so charge every node it follows to
+        # the caller's remaining congruence allowance. A cut-off cannot be treated as an
+        # unseeded literal: later facts may contain the equality the kernel needs.
+        def proof_congruence_literal_scan_charge_with_work(work_used: mutable usize&, work_budget: usize, exhausted: mutable bool&) -> bool:
+            return false if not proof_linear_safety_work_charge(work_used, exhausted, 1)
+            if work_used > work_budget:
+                exhausted <- true
+                return false
+            return true
+
+        def proof_congruence_literal_side_with_work(side: Ast::Expr, value: i64, work_used: mutable usize&, work_budget: usize, exhausted: mutable bool&, depth: usize) -> (complete: bool, matches: bool):
+            if depth >= PROOF_CONGRUENCE_SCAN_DEPTH:
+                exhausted <- true
+                return (false, false)
+            return (false, false) if not proof_congruence_literal_scan_charge_with_work(work_used, work_budget, exhausted)
+            match side:
+                Ast::Expr.Paren(inner, _):
+                    return proof_congruence_literal_side_with_work(inner, value, work_used, work_budget, exhausted, depth + 1)
+                Ast::Expr.IntLit(literal, _):
+                    return (true, literal == value)
+                _:
+                    return (true, false)
+            return (true, false)
+
+        # Whether an equality premise, in the shapes `proof_congruence_has_seed_with_work` reads, has
+        # the literal `value` as one side. Parentheses are looked through, which only admits more.
+        def proof_congruence_seed_has_literal_with_work(expression: Ast::Expr, value: i64, work_used: mutable usize&, work_budget: usize, exhausted: mutable bool&, depth: usize) -> (complete: bool, found: bool):
+            if depth >= PROOF_CONGRUENCE_SCAN_DEPTH:
+                exhausted <- true
+                return (false, false)
+            return (false, false) if not proof_congruence_literal_scan_charge_with_work(work_used, work_budget, exhausted)
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_congruence_seed_has_literal(inner, value, depth + 1)
+                    return proof_congruence_seed_has_literal_with_work(inner, value, work_used, work_budget, exhausted, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
-                    return proof_congruence_literal_side(left, value) or proof_congruence_literal_side(right, value)
+                    left_match: (complete: bool, matches: bool) = proof_congruence_literal_side_with_work(left, value, work_used, work_budget, exhausted, depth + 1)
+                    return (false, false) if not left_match.complete
+                    return (true, true) if left_match.matches
+                    return proof_congruence_literal_side_with_work(right, value, work_used, work_budget, exhausted, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.And, right, _):
-                    return proof_congruence_seed_has_literal(left, value, depth + 1) or proof_congruence_seed_has_literal(right, value, depth + 1)
+                    left_seed: (complete: bool, found: bool) = proof_congruence_seed_has_literal_with_work(left, value, work_used, work_budget, exhausted, depth + 1)
+                    return (false, false) if not left_seed.complete
+                    return (true, true) if left_seed.found
+                    return proof_congruence_seed_has_literal_with_work(right, value, work_used, work_budget, exhausted, depth + 1)
                 Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    if not proof_congruence_literal_scan_charge_with_work(work_used, work_budget, exhausted):
+                        return (false, false)
                     match inner:
                         Ast::Expr.Binary(left, TokenKind.BangEq, right, _):
-                            return proof_congruence_literal_side(left, value) or proof_congruence_literal_side(right, value)
+                            left_match: (complete: bool, matches: bool) = proof_congruence_literal_side_with_work(left, value, work_used, work_budget, exhausted, depth + 2)
+                            return (false, false) if not left_match.complete
+                            return (true, true) if left_match.matches
+                            return proof_congruence_literal_side_with_work(right, value, work_used, work_budget, exhausted, depth + 2)
                         _:
                             pass
                 _:
                     pass
-            return false
-
-        def proof_congruence_literal_side(side: Ast::Expr, value: i64) -> bool:
-            match proof_strip_parens(side):
-                Ast::Expr.IntLit(literal, _):
-                    return literal == value
-                _:
-                    return false
-            return false
+            return (true, false)
 
         # The closure merges a leaf only through a premise that names it as one side: the
         # congruence step relates terms with operands. An integer literal goal side that no
         # premise names stays alone in its class, so `b == 9` beside the case `b == 32` is
         # refused here without lowering every fact into a scratch arena.
-        def proof_congruence_literal_side_unseeded(facts: darray[Ast::Expr]&, side: Ast::Expr) -> bool:
+        def proof_congruence_literal_side_unseeded_with_work(facts: darray[Ast::Expr]&, side: Ast::Expr, work_used: mutable usize&, work_budget: usize, exhausted: mutable bool&) -> (complete: bool, unseeded: bool):
             match side:
                 Ast::Expr.IntLit(value, _):
-                    for fact in facts |fact, value|:
-                        return false if proof_congruence_seed_has_literal(fact, value, 0)
-                    return true
+                    for fact in facts |fact, value, work_used, work_budget, exhausted|:
+                        return (false, false) if not proof_congruence_literal_scan_charge_with_work(work_used, work_budget, exhausted)
+                        seed: (complete: bool, found: bool) = proof_congruence_seed_has_literal_with_work(fact, value, work_used, work_budget, exhausted, 0)
+                        return (false, false) if not seed.complete
+                        return (true, false) if seed.found
+                    return (true, true)
                 _:
-                    return false
-            return false
+                    return (true, false)
+            return (true, false)
 
-        def proof_congruence_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, exhausted: mutable bool&) -> bool:
-            return false if:
+        def proof_congruence_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, has_seed: bool, work_budget: usize, exhausted: mutable bool&) -> (proven: bool, work_used: usize):
+            return (false, 0) if:
                 not proof_kernel_expression_supported(goal)
-                not proof_congruence_has_seed_in_facts(facts)
+                not has_seed
+            scan_work: mutable usize = 0
             match goal:
                 Ast::Expr.Binary(goal_left, TokenKind.EqEq, goal_right, _):
                     if not proof_expr_equal(goal_left, goal_right):
-                        return false if proof_congruence_literal_side_unseeded(facts, goal_left) or proof_congruence_literal_side_unseeded(facts, goal_right)
+                        left_seed: (complete: bool, unseeded: bool) = proof_congruence_literal_side_unseeded_with_work(facts, goal_left, &scan_work, work_budget, exhausted)
+                        return (false, work_budget + 1) if not left_seed.complete
+                        return (false, scan_work) if left_seed.unseeded
+                        right_seed: (complete: bool, unseeded: bool) = proof_congruence_literal_side_unseeded_with_work(facts, goal_right, &scan_work, work_budget, exhausted)
+                        return (false, work_budget + 1) if not right_seed.complete
+                        return (false, scan_work) if right_seed.unseeded
                 _:
                     pass
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
@@ -89,7 +136,10 @@ extend ElisaProof:
             for fact in facts |fact, nodes, children, roots, annotations|:
                 continue if not proof_kernel_expression_supported(fact)
                 roots.push(proof_kernel_encode_annotated(fact, &nodes, &children, annotations))
-            return false if roots.count == 0
+            return (false, scan_work) if roots.count == 0
             goal_root: usize = proof_kernel_encode_annotated(goal, &nodes, &children, annotations)
-            return ElisaProofKernelReplay::proof_kernel_replay_congruence_report_status(&nodes, &children, roots, goal_root, exhausted)
+            remaining_work: usize = work_budget - scan_work if scan_work <= work_budget else 0
+            replay: (proven: bool, work_used: usize) = ElisaProofKernelReplay::proof_kernel_replay_congruence_report_status_with_budget(&nodes, &children, roots, goal_root, remaining_work, exhausted)
+            return (false, work_budget + 1) if replay.work_used > remaining_work
+            return (replay.proven, scan_work + replay.work_used)
 
