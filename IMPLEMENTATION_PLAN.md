@@ -24937,7 +24937,17 @@ base expressions and every stored child; `field-init` is treated as a value wrap
 node validity, depth, and the existing work limits remain enforced, and unsupported child-bearing
 forms still fail closed. `git diff --check` and the source-length gate pass; no tests or build were run.
 
-### 23.27.1402 Bind alias-formal markers to parser-owned source (2026-10-14)
+### 23.27.1404 Bind all generic side rows to parser source (2026-10-14)
+
+Structural replay intentionally authenticates ordinary generic rows against function identity
+markers and excludes high-bit bound rows from the binder index. That census does not cover every
+non-function generic parameter row. Source-bound admission now compares the complete parallel
+generic line, name, and owner-offset arrays against the retained parser-owned `Ast::File` arrays,
+including non-function declarations and encoded bound rows. Counts, row visits, and both name
+lengths are charged to the admission budget; malformed or changed snapshots refuse source
+authority. No tests or build were run.
+
+### 23.27.1403 Bind alias-formal markers to parser-owned source (2026-10-14)
 
 Checked-view source admission now includes `__alias_owner` rows in the ordered parser-snapshot
 comparison alongside generic-bound and generic-identity markers. Replay uses these rows to decide
@@ -24946,10 +24956,17 @@ expansion after checking. The scan charges row visits and owner bytes; selected 
 full annotation payload and arguments. Static diff check passes; no build or runtime qualification
 was run.
 
-### 23.27.1402 Scan every child for negative integer bit patterns (2026-10-14)
+### 23.27.1404 Scan every child for negative integer bit patterns (2026-10-14)
 
 The unsigned negative-bit-pattern walk returned `false` from inside its child loop after the
 first safe child, so a later child could contain an unchecked negative literal. The success case
 still exits early when a negative value is found; the no-match result now occurs only after all
 children have been inspected. Each child keeps the existing recursive depth and work accounting.
 Static diff and source-length checks pass; no runtime check was run.
+
+### 23.27.1405 Traverse resource-call arguments in signed safety (2026-10-14)
+
+Signed fixed-width safety now handles `resource-call` using its validated arena shape: it checks
+the declared argument prefix, confirms each child is a `resource-call-arg`, and recursively
+checks each argument value under the existing depth and work limits. The ordinary and cached
+goal paths agree; unsupported trailing child forms still fail closed. No tests or build were run.
