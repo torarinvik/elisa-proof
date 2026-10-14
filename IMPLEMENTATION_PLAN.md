@@ -4,7 +4,7 @@
 
 This is the active high-return sequence. Use the newest clean Elisa compiler revision that can produce a source-matched Stage1; preserve expression-based Elisa and its safety/effect checks in every source change. Keep timing skipped until a source-matched proof product passes correctness gates.
 
-1. **Restore a source-matched Stage1 lane.** Proof `main` is currently `bc0bc0c62`, pins Elisa-compiler `c5a6616a` and Core stage0 `4fadc2c0`, and is 53 commits ahead of origin. Core stage0 was rebuilt from a clean worktree; its embedded revision is `4fadc2c0` with `vcs.modified=false`. Two Stage1 seed attempts ended in SIGKILL/status 137 during object emission without publishing an object or reporting Elisa source errors. The isolated retry was killed by macOS for low swap after crossing a compressed-memory threshold; the earlier run overlapped an unrelated O0 compiler. The retry log is `/private/tmp/elisa-stage1-seed-c5a-core4fadc-retry-20261014.log`. No maximum-RSS or peak-footprint record exists; the highest live sample was about 3.4 GiB and is not the peak. A current host snapshot shows 10.30 GiB of 11 GiB swap in use, with another Claude scratch O0 `elisac` compile active; this confirms that the local host still lacks safe headroom. Defer another full seed until memory headroom is available and capture process-tree RSS during any retry. Then require a successful source-matched Stage1 and verify manifest/compiler pins before runtime tests.
+1. **Restore a source-matched Stage1 lane.** Proof `main` is currently `86aaf16dd`, pins Elisa-compiler `c5a6616a` and Core stage0 `4fadc2c0`, and is 56 commits ahead of origin. Core stage0 was rebuilt from a clean worktree; its embedded revision is `4fadc2c0` with `vcs.modified=false`. Three cleanly logged Stage1 seed attempts ended in SIGKILL/status 137 during object emission, without publishing an object or reporting Elisa source errors. The latest used a clean detached worktree at the newest compiler commit `c5a6616a`; macOS unified logs confirm a no-paging-space/low-swap kill after the compiler exceeded 50% of compressed memory. `/usr/bin/time -l` measured 5,736,398,848 bytes maximum RSS, and the process-tree sampler measured a 5,037,968 KB peak. Defer further full seeds until host memory conditions change; capture process-tree RSS if another attempt is later justified. Then require a successful source-matched Stage1 and verify manifest/compiler pins before runtime tests.
 
 2. **Close the indexed-char SMT proof gap.** Core commit `4fadc2c0` adds narrow `char`→`u8` truncation modeling, justified by runtime lowering and focused positive SView/index tests, a wrapping negative, and a control showing `char` is not globally byte-sized. Those focused Core tests pass. The recursive `sview_fnv1a_fold_from` and `ctx_cstr_eq_sview` proof obligations remain unverified until a matching proof product exists. Then run those exact obligations, preserve sign-changing and wrapping negatives, and keep solver work bounded.
 
@@ -15989,6 +15989,20 @@ acceptance.
 Diff and source-length gates pass; semantic qualification remains pending the matching Stage1
 compiler.
 
+### 23.27.1520 Close operator-dispatch gaps in ordering and loop-range replay (2026-10-14)
+
+Replay's type-operator lookup now mirrors producer dispatch by treating `Less` implementations as
+`Ord` overrides. Loop-range trace admission checks the broad source-derived protocol mask across
+the iterable, so overloaded endpoint expressions through stable global constants cannot be
+reinterpreted as builtin arithmetic. Fixed-array `.count` facts now trigger the `usize` operator
+scan only when the candidate actually mentions `.count`. Static regressions cover these boundaries
+and the literal-only counting-loop witness restrictions. Focused source checks, relevant kernel
+audit guards, source-length limits, and `git diff --check` pass. The wider static matrix exposed a
+coverage-target mismatch: `test_kernel_coverage_targets.py` expects 17 helper declarations already
+pruned before current HEAD. Compiler-backed qualification remains pending; the newest compiler
+self-host attempt ends with Stage0 proof/postcondition and region diagnostics, so no matched proof
+binary is available.
+
 ### 23.27.595 Order tactic simplification after its shared work meter
 
 The facade now includes `goal_search_work_budget.elisa` before `tactic_simplify.elisa`, so the
@@ -17243,6 +17257,16 @@ later added owner-carrying witness provenance and replay of exact/root/import/gl
 before enabling the fallback. No behavior was relaxed by this intermediate change. Static diff
 and source-length gates passed; runtime validation remains held pending matching Stage1
 provenance.
+
+### 23.27.1517 Exercise overloaded equality on pure-call results (2026-10-14)
+
+The source-derived primitive-marker guard now also has an adversarial end-to-end fixture for pure
+calls returning an overloaded scalar type. `pure_i64_value` is value-pure, but `Eq for i64` is
+irreflexive, so replay must not prove equality of two repeated call results. The existing indexed
+read runtime runner asserts this remains unproven, and the independent call-result marker source
+guard is part of the kernel audit script. The call-result marker guard, indexed-read parity and
+primitive-marker guards, Python syntax, source-length, and diff checks pass. Runtime qualification
+awaits a matched compiler.
 
 ### 23.27.717 Match bare enum-name precedence in replay (2026-10-14)
 
@@ -19099,6 +19123,14 @@ active certificate declaration offset and refuses an absent offset. Added and re
 source guard. The requires-call, global-constant, global mutable array, and indexed-read guards pass,
 as do source-length and diff checks. Runtime replay remains unqualified without the pinned compiler
 product.
+
+### 23.27.1521 Check unsigned lower-bound relation roots for overloaded operators (2026-10-14)
+
+Unsigned nonzero lower-bound replay checked primitive operands but did not independently reject
+an untrusted comparison-root marker on the goal. It now builds one witness-marker cache, rejects
+incomplete or untrusted goal and premise relation roots, and reuses the cache for operand checks.
+`git diff --check` and source-length validation pass. Runtime qualification remains pending a
+compiler product matched to current provenance.
 
 ### 23.27.1032 Recheck the pinned Stage1 bootstrap path
 
@@ -25965,3 +25997,193 @@ metered cache across candidate roots; primitive-comparison and operator-trust qu
 cache. The linear-admission guard verifies the cache-aware calls, and the kernel inventory,
 focused arithmetic guards, source-length check, and `git diff --check` pass. Runtime timing and
 semantic qualification remain pending a source-matched compiler product.
+
+### 23.27.1506 Share witness markers across disequality and contradiction scans (2026-10-14)
+
+The fixed-width distinct-disequality rule parsed the same fact markers for each signed and
+unsigned branch. It now builds one cache per goal and reuses it for both operands. Recursive
+fact-inconsistency scanning now lazily builds one cache per fact set and threads it through
+conjunctions and constant-comparison checks. Added source guards for the cache ownership and
+trusted comparison-root admission. The focused guards, kernel inventory (11 tables / 341 entries),
+source-length gate, and `git diff --check` pass. Runtime qualification remains pending the matched
+compiler product.
+
+### 23.27.1507 Reuse markers during call-summary fact search (2026-10-14)
+
+Call-summary replay rebuilt the witness-marker cache for each candidate summary equality. The scan
+now lazily constructs one validated marker cache at its first equality candidate and uses it for
+each candidate's relation-root admission, preserving the shared work meter and fail-closed cache
+construction. The linear-admission guard, kernel inventory, primitive-marker guard, source-length
+gate, and `git diff --check` pass. Runtime qualification is still pending the exact compiler
+product.
+
+### 23.27.1508 Reject primitive replay for overridden scalar elements (2026-10-14)
+
+Scalar-element witnesses for containers and scalar references are rooted at their owning
+place, while ordinary untrusted-operator witnesses are rooted at the scalar value. Indexed
+operands could therefore be admitted as primitive without connecting the two roots. Source
+analysis now emits a distinct `Element.All` marker for scalar leaves whose type has an
+overridden primitive operator. Replay binds that marker to indexed paths from the exact place
+and rejects primitive scalar/comparison use, including scalar-reference zero-index reads.
+`git diff --check` and source-length validation pass. The guard is protocol-wide because current
+replay comparison entry points do not retain enough operator context for safe per-protocol
+element admission; runtime compilation and regression qualification remain pending the pinned
+compiler provenance repair.
+
+### 23.27.1509 Bind scalar-reference operator markers to implicit reads (2026-10-14)
+
+The `Element.All` replay matcher intentionally requires an indexed path, but scalar references
+also have an implicit read represented by the reference term itself. Source now emits a distinct
+`Element.Ref` marker for scalar-reference pointees, and replay checks it against the exact term
+identity in scalar-witness, comparison, bounded-model, and logical-join paths. The primitive-marker
+guard now distinguishes indexed container matching from exact scalar-reference matching. Focused
+static guards, source-length validation, and `git diff --check` pass; runtime qualification remains
+blocked on a source-matched compiler product.
+
+### 23.27.1510 Reuse and authenticate comparison markers in plain-bound closure (2026-10-14)
+
+The plain difference-constraint closure rebuilt marker state while traversing each comparison
+and did not explicitly gate the relation root before interpreting it. It now builds one validated
+marker cache for the fact set, checks every comparison root (including negated-order premises),
+and reuses that cache for primitive operand admission. The source-length gate and `git diff --check`
+pass. Runtime qualification remains pending the source-matched compiler product.
+
+### 23.27.1511 Keep source-budget guard aligned with replay module split (2026-10-14)
+
+The kernel resource-model helpers were split into `resource_model_depth.elisa`, but the broad
+source-admission guard still searched only `resource_model.elisa` and crashed before checking its
+goal-depth invariants. The guard now combines both included source modules, restoring coverage of
+the moved function. Source-admission, pattern-literal, structural-replay, source-authority,
+kernel-inventory, primitive-marker, and linear-admission guards pass, as do source-length and
+whitespace checks. Compiler-backed qualification remains unavailable.
+
+### 23.27.1512 Add adversarial implicit scalar-reference equality case (2026-10-14)
+
+The `Element.Ref` replay fix now has a runtime regression case in the overloaded-equality fixture.
+It uses an intentionally irreflexive `Eq for i64` implementation and asks replay to prove
+`value == value` for a scalar reference's implicit read; the fixture must remain unverified with an
+`ensure-unproven` finding. The existing runner asserts this beside the indexed overloaded-equality
+negative. The parity guard, Python syntax check, source-length gate, and `git diff --check` pass;
+runtime execution awaits a compiler product matched to current source.
+
+### 23.27.1513 Guard every scalar-reference operator replay route (2026-10-14)
+
+The `Element.Ref` protocol is consumed in several independent replay paths. The primitive-marker
+source guard now checks that scalar-reference matching remains wired into comparison admission,
+bounded-model evaluation, and logical-join identity, in addition to the recursive scalar-witness
+path. The marker, indexed-read parity, source-admission, source-length, and whitespace checks pass.
+Runtime qualification remains pending a matched compiler product.
+
+### 23.27.1514 Preserve explicit scalar-reference index distrust (2026-10-14)
+
+The implicit-read fix changed scalar-reference markers to `Element.Ref`, which matched the plain
+reference term but no longer matched the explicit `value[0]` term. Source now emits both the exact
+`Element.Ref` marker and the indexed-path `Element.All` marker for scalar-reference pointees with
+overridden operators. The overloaded-equality regression now has separate implicit and explicit
+scalar-reference reflexivity claims; the source guards require both marker emissions and both
+adversarial shapes. Static marker/parity guards, source length, and diff checks pass; runtime
+qualification awaits the matched compiler.
+
+### 23.27.1515 Test overloaded equality on fixed-array scalar elements (2026-10-14)
+
+The indexed-read regression previously used a primitive `usize` array while overriding
+`Eq for i64`, so it did not exercise source admission of a scalar-element marker whose element
+type itself has an overload. Added a negative case over `array[i64, 8]` with equal indices and an irreflexive
+custom equality. The existing runtime runner requires the goal to stay unproven. Wired the
+independent source-replay guard for overloaded array element markers into the kernel audit script.
+Static array-marker, indexed-read parity, primitive-marker, Python syntax, source-length, and diff
+checks pass; runtime qualification awaits the matched compiler.
+
+### 23.27.1516 Recompute primitive operator trust at type-bound admission (2026-10-14)
+
+Positive scalar type markers for parameters, locals, fixed-array elements, constants, and call
+results must not depend on the producer also emitting a matching overload-denial marker. Replay
+now checks the source operator implementations before admitting scalar markers used to authorize
+numeric reasoning, including signed markers consumed by sort selection. It separately checks
+`Ord`/`Less` before admitting source-derived range comparisons. During review, stale helper
+references were replaced with the existing fail-closed check. `git diff --check` and the
+source-length gate pass; no compiler build or test was run, and runtime qualification still
+requires the compiler matching current provenance.
+
+### 23.27.1517 Authenticate named tuple projections from direct call results (2026-10-14)
+
+The producer emits scalar and width witnesses for `pure_call().field`, but source replay only
+recognized a marker whose subject was a direct call. Replay now extracts a direct call beneath a
+field projection, resolves the callee as before, and selects the projected type only when the
+parser-origin return tuple has one unambiguous, unique label per component and exactly one match
+for the requested field. Scalar operator trust and width checks run on that selected declared
+component type. Added a source guard for exact label selection, duplicate rejection, and the
+operator-trust checks. `git diff --check` and the source-length gate pass. The new guard has not
+been run; compiler-backed positive and adversarial runtime qualification remains pending the
+matched compiler product.
+
+### 23.27.1518 Authenticate counting-loop scalar witnesses against the inferred literal type (2026-10-14)
+
+Counting-loop replay previously admitted a primitive scalar marker from range syntax alone. The
+producer emits the signed binder marker only for literal ranges in a bounded nonnegative i32
+interval, so replay now authenticates both scalar and signed-place markers against that exact
+literal shape and rechecks all i32 operator overrides. Other range endpoint forms remain
+unadmitted until replay can recover their exact source types. Static source-length and whitespace
+checks pass; no tests or compiler build were run.
+
+### 23.27.1519 Preserve deny-only overloaded-operator witnesses at the replay boundary (2026-10-14)
+
+The type-bound source validator previously discarded `__elisa_untrusted_operator_type` rows as
+unsupported, preventing the kernel from applying the checker's overload denials to named types,
+container elements, and scalar references. Replay now admits only the exact two-positional-argument
+marker with a recognized protocol, under both the expression meter and the type-bound source
+budget. Auditing all kernel and linear consumers confirmed these marker classes only reject
+scalar/arithmetic/operator use or make replay inconclusive; they never add a positive fact. Static
+source-length and whitespace checks pass; runtime qualification remains pending the matched
+compiler.
+
+### 23.27.1520 Reject overloaded equality in pattern replay facts (2026-10-14)
+
+Match lowering and ordinary `==` need not share semantics: string patterns compare bytes, while
+ordinary equality can resolve through `Eq`; integer pattern matching may likewise select a
+literal arm while an overloaded primitive equality returns false. The replay adapter rejects a
+pattern-derived equality condition when the source primitive-operator mask contains an `Eq`
+override. Added adversarial collisions for `sview`, `cstr`, `i64`, and `u64`, plus static guards
+requiring each fixture and the replay operator check. Static source and runtime qualification
+remain pending the matched compiler product; no compiler-backed test was run.
+
+### 23.27.1521 Align replay coverage gates with current metered declarations (2026-10-14)
+
+The standalone audit still required 17 helper names removed by earlier kernel refactors, so its
+static coverage guard failed before the runtime audit could assess current code. Replaced them
+with the present metered entry points for constant comparison, literal-derived comparison,
+ordering, conjunction flattening, contradiction recursion, pinned constants, arithmetic parsing,
+and difference queries. The target count and minimum replayed-certificate threshold are unchanged;
+the runtime validator still requires every selected declaration to be marked verified. All 39
+targets now resolve to current source declarations, and the static kernel audit matrix, source
+length gate, and whitespace checks pass. Runtime verification awaits a proof binary built with the
+pinned compiler.
+
+### 23.27.1522 Guard indexed operator-witness admission (2026-10-14)
+
+Added a focused static guard for the parser-annotation operator implementation index. It requires
+the index to build successfully before source operator masks or function collection run, keeps
+annotation pairing and hashing inside the shared source-work cap, bounds collision chains, and
+fails closed on malformed bucket links or parallel-array shape mismatches. The guard also locks
+the `Less` to `Ord` denial mapping used by kernel admission. The guard, source-length gate, and
+whitespace checks pass; runtime qualification still needs the exact pinned compiler product.
+
+### 23.27.1523 Reuse marker snapshots during goal replay (2026-10-14)
+
+Goal replay repeatedly rebuilt the witness-marker cache while scanning fixed premise sets for
+witnessed-call rewriting, call-summary consequences, and negated relation admission. Those paths
+now screen candidates first, lazily build one cache per fixed premise set, and reuse it for exact
+root admission and primitive operand checks under the same shared work counter. The call-summary
+scan moved to an integrated helper to keep the depth module within its source-length bound. The
+typed-boundary review found no additional root-admission gap in the field-place guard path.
+`git diff --check` passes; no tests or compiler build were run, and compiler-matched runtime
+qualification remains outstanding.
+
+### 23.27.1524 Gate generic same-arena reset and stale-view use (2026-10-14)
+
+Added a compiler regression fixture where a generic helper receives an arena and a view under
+separate region parameters, destroys the arena, then reads the view; the caller instantiates both
+parameters with the same arena. The Stage1 compiler probe requires rejection with the destroyed-
+region diagnostic and no emitted LLVM. Static shell and source checks pass, but this gate has not
+been executed with a compiler matching the current compiler source, so the suspected region
+aliasing gap remains unconfirmed and the runtime result is unqualified.

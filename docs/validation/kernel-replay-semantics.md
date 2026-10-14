@@ -41,6 +41,16 @@ admission result. Workspace arrays are scratch, not authority. Cache reuse is so
 same immutable arena snapshot is being checked; public workspace APIs revalidate rather than
 trusting a previous verdict.
 
+The bool goal-report API treats a failed search as “not established.” Callers that need to report
+why may use `proof_kernel_replay_goal_report_status` or its workspace variant, which also reports
+whether the cumulative logical goal-search meter exhausted its limit. This status does not classify
+arena-admission failures; those remain a separate refusal boundary.
+
+Source certificate replay receipts and full report output expose a batch-wide
+`goal_search_work_exhausted` diagnostic. It records that some logical replay in the batch hit the
+shared limit; it does not identify a particular goal or change its verdict. Producer-side
+`timeout` findings continue to describe only exhaustion in the source proof search.
+
 ## Logical rules
 
 The proposition checker admits the logical fragment represented by the arena: Boolean constants,
@@ -66,6 +76,18 @@ and exact fact membership before applying interval, difference, linear, congruen
 specialized rules. Linear certificates are untrusted: replay checks that each premise is present,
 that multipliers satisfy the rule's sign and magnitude restrictions, that checked arithmetic
 normalization succeeds, and that variable coefficients cancel with a positive residual constant.
+The unsigned strict-progress rule also admits the complete goal comparison against untrusted
+operator markers and requires primitive scalar witnesses for both operands before using its
+arithmetic argument. This source-level guard still needs matched-build positive and forged-root
+runtime controls; it is not yet runtime-qualified.
+
+Scalar-element witnesses are rooted at the owning container or scalar reference. When the
+resolved scalar element type overrides a primitive operator, source analysis emits an
+`__elisa_untrusted_operator_type(place, "Element.All")` marker. Replay recognizes this distinct
+marker and rejects primitive admission for indexed terms whose index path resolves to that exact
+place. The marker currently blocks all primitive operators on those elements because the replay
+entry points do not carry protocol identity consistently. Source marker provenance and the
+indexed-path match are both required; malformed marker payloads or exhausted work remain unknown.
 
 The bounded-model procedure is a finite countermodel search, not a general theorem prover. It may
 prove an implication only when its admitted finite domain is complete for the current hypotheses
