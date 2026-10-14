@@ -4,14 +4,14 @@
 
 This is the active high-return sequence. Older toolchain snapshots and experiment logs below are historical evidence, not current status. Use the newest clean Elisa compiler revision that can produce a source-matched Stage1; preserve expression-based Elisa and its safety/effect checks in every source change.
 
-1. **Restore a trustworthy compiler lane.** The proof project pins Elisa-compiler `c93a77740053fe9e9350641d095b57b3fe8bed27` and Stage0 Core `093ec96e89a951502407fb53d406eba7525cbb39`; `git ls-remote origin refs/heads/main` confirms c93 is still Elisa-compiler `origin/main`. The exact clean c93 Stage0 seed failed before object emission. `/private/tmp/elisa-proof-stage1-seed.log` records 438 `call may store` and 81 `cannot infer region` diagnostic lines across compiler sources; the largest groups are `semantic/check_borrow_after_move.elisa` (153), `semantic/semantic_api.elisa` (62), `backend/codegen_stmt_blocks_exprs.elisa` (25), and `semantic/check_region_escape.elisa` (21). The nine `codegen_stmt_assign_place.elisa` reports and `emit_edir.elisa:1374` inference failure are part of this wider failure. The proof project’s pinned Stage0 and installed Stage1 (`5cda9b4e`) do not qualify the current source tuple. Local Core `main` now includes commit `ce002c04`, which resolves only exact module-qualified direct calls in the StoreFlow read-only scan; its focused tests pass, and the full semantic run has one failure that reproduces identically on the clean 093 baseline. That change is orthogonal to the seed errors, which involve unqualified calls. The latest StoreFlow probes rule out the obvious recursive `Expr.IndexN` annotation path: it returns pointer-free `ValueType`s, while an explicit control that stores an `Expr` handle still reports the expected flow. The remaining concrete conservative flow is the `Expr.Scope` owner path: a borrowed module-name `sview` is temporarily written to `StructTable.visibility.current_owner` and later restored, but StoreFlow has no field-specific save/restore kill analysis. Do not suppress this diagnostic without a sound overwrite/restore model. Next, group the full seed diagnostics by exact root cause, test a source refactor that avoids the temporary borrowed table write, and separately resolve the region-inference failure. Keep true AST-retention controls. Rebuild Stage0 and Stage1 from one clean source tuple only after the focused controls pass; no object emission means the seed is unqualified. Keep timing skipped.
+1. **Restore a trustworthy compiler lane.** Elisa-compiler `main` is still pinned at c93a777, but its checkout is dirty and its available Stage1 product is 5cda9b4, so it is not a clean current-source compiler. Proof still pins Stage0 093ec96, while Core `main` and the installed Stage0 now match f8735f58. Do not mix these revisions or refresh the proof pin yet. The last clean c93 seed failed before object emission with 438 `call may store` and 81 `cannot infer region` diagnostics; `emit_edir.elisa:1374` remains a separate `source_identity_region` inference failure. A compiler-owned p115 O0 probe is currently running against Core candidate 26af7953; wait for that exact probe before starting another compiler job. The earlier StoreFlow audit ruled out recursive `Expr.IndexN` as the remaining retention cause; preserve its AST-storage negative control and resolve the `Expr.Scope` owner save/restore path with a sound model. Only run a full seed after focused diagnostics show an actual reduction, then build Stage0 and Stage1 from one clean tuple. Keep timing skipped.
 
-2. **Restore the recursive proof semantic gate.** On Core `093ec96e89a951502407fb53d406eba7525cbb39`, `go test ./src/semantic -count=1` fails only `TestGhostRecursiveProofSupportsImmutableLocalsAndSViewIndex`; a clean-baseline isolated run reproduces the same failure, so it predates `ce002c04`. The failing obligations are recursive-call preconditions for `value.len > 0` and `(index + 1) <= value.len`, plus an `ensure` and the `decreases` condition. Earlier SMT-query inspection showed the termination VC includes the function preconditions and branch path, while machine-width casts and `index + 1` lower through `int2bv`/`bv2nat`/`mod`. Treat arithmetic normalization as a lead, not a proven root cause. Repair the prover and require this focused test and the full semantic package to pass before claiming a green semantic gate.
-3. **Qualify global-mutable grants and kernel soundness.** Core’s focused grant tests pass on `093ec96e89a951502407fb53d406eba7525cbb39`, covering separate `Global.Read`/`Global.Write`, read-modify-write, const purity, brace syntax, shadowing, and indexed/reference access. The proof runtime grant regression still refuses the stale proof executable. A typed-kernel fixture now also pins the declared classical mode by requiring replay to derive an abstract `Prop` atom from its double negation. With the matched compiler tuple, run both fixtures plus direct grant cases and wrong-member, alias/reference, inferred-row, and transitive-call controls. Then run frozen proof/kernel replay and mutation tests; malformed certificates, missing identity, and exhausted budgets must fail closed.
+2. **Restore the recursive proof semantic gate.** Core `main` is now f8735f58. Its relevant-formal SMT binding change removes the recursive call-precondition diagnostics and has focused positive/negative environment tests, but `TestGhostRecursiveProofSupportsImmutableLocalsAndSViewIndex` still fails at the recursive `ensure` equality. The VC contains the `next_state` defining equation; the missing link is the local `byte: u8 = value[index].u8()` because SMT translation cannot recover the source type of the indexed `char` cast. A general bitvector/call-alias experiment made the focused test exceed two minutes and was discarded. Next implement a narrowly scoped, exact SView-byte/cast model with bounded solver work; retain sign-changing conversion negatives and require the recursive gate plus the full semantic package to pass.
+3. **Qualify global-mutable grants and kernel soundness.** Existing Core grant controls cover separate `Global.Read`/`Global.Write`, read-modify-write, const purity, brace syntax, shadowing, and indexed/reference access, but they have not been rerun on f8735f58. The proof runtime grant regression still lacks a current source-matched executable. Re-run the Core grant matrix on f8735f58, then—after restoring the compiler lane—run proof CLI and direct-API grants, wrong-member, alias/reference, inferred-row, and transitive-call controls. Preserve the typed-kernel classical-mode fixture and frozen replay/mutation checks; malformed certificates, missing identity, and exhausted budgets must fail closed.
 
-4. **Verify proof/kernel soundness and high-return performance changes.** Current static checks pass for authority/admission, structural replay, pattern literals, source-admission budgets, kernel audit accounting, and shared goal-search/index budgets. The inferred-float type recovery was split into `returns/inferred_float_values.elisa`, bringing `returns/declarations.elisa` to 549 lines; the source-length gate and `git diff --check` pass again. Portable replay tests now run the full prebuilt source/compiler qualification before selecting a generation; the current pair is correctly refused because its compiler snapshot differs from the dirty proof source. These checks do not qualify runtime behavior. Once the matching proof build exists, run focused goal-fact, postcondition-context, index-safety, type-bound-local, linear-certificate, structural-replay, and source-authority regressions, then the relevant proof suite. Compare work counters and adversarial scaling where available, and retain bounded accounting for walks, allocation, hashing, and probes.
+4. **Verify proof/kernel soundness and high-return performance changes.** Static authority/admission, structural replay, pattern literal, source-work, kernel-audit, and goal/index-budget checks pass. The current dirty proof-source change rejects missing-expression sentinels as arithmetic leaves and skips only absent slice bounds after validating their arena shape; its focused static checks pass, but runtime replay is unqualified. The proof build correctly refuses the stale compiler snapshot. After a clean Stage1 is available, run focused malformed-slice/sentinel mutations, goal-fact, postcondition-context, index-safety, type-bound-local, linear-certificate, structural-replay, and source-authority regressions, then the relevant proof suite. Compare work counters and adversarial scaling where available, retaining bounded accounting for walks, allocation, hashing, and probes.
 
-5. **Commit qualified source improvements and refresh this plan.** Core’s exact-qualified StoreFlow resolver is committed locally as `ce002c04` with focused tests; proof still pins Stage0 `093ec96`, so this change is not yet part of a source-matched proof build. Record exact compiler/proof revisions and commands with results. Keep timing skipped. Refresh the proof pin only after Stage0 and Stage1 come from one coherent tuple and the relevant proof/kernel regressions pass.
+5. **Commit qualified source improvements and refresh this plan.** Core commits ce002c04 and f8735f58 are on main and synced to origin; f873’s focused SMT relevant-formal tests pass, while the recursive `ensure` gate remains red. Proof main is eight commits ahead of origin with dirty source changes, including the sentinel validation work; do not commit those changes until they pass a source-matched Stage1 build and replay controls. Record exact compiler/proof revisions and commands with results. Keep timing skipped and refresh the proof pin only after Stage0 and Stage1 come from one coherent tuple.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -11084,6 +11084,15 @@ manifest-sidecar, and prebuilt-qualification checks; Python syntax, shell syntax
 checks also pass. This hardens source/product qualification and cache invalidation but does not
 produce a current Stage1 or admit the dirty Elisa proof sources. No Elisa compile, replay, or timing
 was run.
+
+### 23.27.1416 Enforce operator arity in arena node shapes (2026-10-14)
+
+Unary nodes already have a narrower operator whitelist, but binary nodes used the common operator
+set and therefore admitted unary-only `not`. Binary shape validation now excludes that operator at
+the arena boundary; arithmetic-safety walkers also keep explicit evaluation policies for each
+accepted binary operator. This makes malformed arity fail during admission instead of depending on
+the consuming replay path. Static diff and source-length checks pass; no runtime qualification was
+run.
 
 ### 23.27.137 Stage1 provenance schema and seed-chain qualification (2026-10-12)
 
@@ -25022,3 +25031,74 @@ position, ownership, and argument slice. This also binds contract-quantifier mar
 extern, and effect metadata. Row visits and variable text lengths use the shared source-admission
 budget. `git diff --check` passes; no tests or build were run, and runtime qualification remains
 blocked by the compiler provenance mismatch.
+
+### 23.27.1413 Exclude missing-expression sentinels from arithmetic leaves (2026-10-14)
+
+The arena's `absent` node is a parser sentinel for omitted expressions, not a value term. The
+signed, cached signed, and unsigned arithmetic-safety walkers now reject it instead of treating
+any structurally valid sentinel as a safe scalar leaf. Slice nodes may use it for an omitted low
+or high bound; those slots are skipped because they are unevaluated, while the slice object and
+present bounds are checked. Before examining either optional root, each safety walk now bounds-checks
+its index and validates the `absent` node's canonical shape, so malformed sentinel indices cannot
+cause an out-of-range read or hide a present expression. Ordinary literals and identifiers remain
+accepted after arena-shape validation; width and scalar witnesses still govern arithmetic use.
+Static diff and source-length checks pass; no runtime qualification was run.
+
+### 23.27.1414 Fail closed on binary operators without an evaluation policy (2026-10-14)
+
+Arena shape validation checks that a binary node uses a known operator, but does not constrain
+operators by arity. Signed and unsigned safety walkers previously treated every operator outside
+their arithmetic sets as harmless after traversing both operands. They now enumerate the known
+non-arithmetic binary operators explicitly and reject any operator in neither set, including unary
+only `not` in a malformed binary node. This keeps the source operator table and the replay safety
+policy aligned as either evolves. Static diff and source-length checks pass; no runtime qualification
+was run.
+
+### 23.27.1415 Guard child indices before arithmetic replay dereferences (2026-10-14)
+
+`proof_kernel_replay_valid` checks only that its requested root is within the node array; it does not
+recursively validate every edge. Optional slice-bound inspection and signed-minimum literal
+recognition therefore now check child indices before direct reads, then validate the slice sentinel
+shape or recurse through present bounds. This prevents malformed caller-supplied arenas from causing
+out-of-range reads in the safety walkers. Static diff and source-length checks pass; no runtime
+qualification was run.
+
+### 23.27.1416 Meter quantifier annotation scans in symbolic search (2026-10-14)
+
+Symbolic range, instance, subscript-renaming, and alias-instance search repeatedly classified goals
+and facts with a full unmetered scan of parser quantifier annotations. Those scans are now charged
+to the solver's shared enumeration budget through the work-aware quantifier lookup; exhaustion
+refuses the optimization and marks the search exhausted. In particular, the alias rule no longer
+uses an unmetered `any` scan over the fact frame. Static source review and `git diff --check` pass;
+no tests or build were run, and runtime qualification remains blocked by the compiler provenance
+mismatch.
+
+### 23.27.1417 Validate sview return resource-use witness shape (2026-10-14)
+
+Sview summary return extraction previously accepted a `resource-use` witness after checking only
+its tag and nonempty name. It now also validates the witness's canonical arena shape before using
+that name as the returned formal. The referenced place continues through the resource place
+decoder. Static diff and source-length checks pass; no tests or build were run.
+
+### 23.27.1418 Charge quantifier annotation text comparisons (2026-10-14)
+
+Quantifier marker lookup previously charged one unit per inspected annotation while comparing
+source-controlled owner and marker text without charging their lengths. The bounded helper now
+charges both text lengths, and depth-limit exhaustion marks lookup incomplete. Symbolic search also
+charges each lookup itself, including expressions requiring no annotation scan. It refuses
+quantifier-based rewrites on exhaustion instead of treating an incomplete lookup as a negative
+result. `git diff --check` passes; no tests or build were run.
+
+### 23.27.1419 Constrain unary arena operators by arity (2026-10-14)
+
+The generic operator table is shared across unary and binary nodes, so shape validation formerly
+accepted binary-only operators in unary nodes. A dedicated unary whitelist now permits only unary
+plus, minus, logical negation, and borrow; malformed operator/arity pairs fail arena admission.
+Static diff check passes; no tests or build were run.
+
+### 23.27.1420 Meter all symbolic quantifier classification paths (2026-10-14)
+
+Difference-constraint goals, quantified-premise filtering, and quantified-predicate simplification
+also classified parser-erased quantifiers. They now use the shared budgeted lookup, and abandon the
+optimization if its annotation scan is incomplete or exhausts the solver budget. Static diff check
+passes; no tests or build were run.
