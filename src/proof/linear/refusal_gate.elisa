@@ -1,58 +1,64 @@
 extend ElisaProof:
     public:
+        def proof_refusal_gate_work_limit() -> usize:
+            PROOF_LINEAR_SAFETY_WORK_LIMIT
+
         # Diagnostic only, never an admission path: after a goal is refused, name the first
         # guard in `proof_goal_depth`'s order that can be identified after refusal, so a census
         # or an agent can see why without instrumenting the search. This is a post-hoc diagnostic,
         # not a trace of the actual search path. If no rejecting guard can be identified, report
         # "unknown" instead of guessing that a particular rule was the first refusal.
-        def proof_refusal_gate_with_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, exhausted: bool, budget: mutable usize&) -> sview:
-            return "budget" if exhausted
-            return "unknown" if budget >= PROOF_LINEAR_SAFETY_WORK_LIMIT
+        def proof_refusal_gate_with_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, exhausted: bool, budget: mutable usize&) -> (gate: sview, complete: bool):
+            return ("budget", true) if exhausted
+            return ("unknown", false) if budget >= PROOF_LINEAR_SAFETY_WORK_LIMIT
             safety_exhausted: mutable bool = false
             total_nodes: mutable usize = 0
-            return "unknown" if not proof_linear_safety_fact_shape_total_with_work(facts, &total_nodes, &budget, &safety_exhausted)
+            if not proof_linear_safety_fact_shape_total_with_work(facts, &total_nodes, &budget, &safety_exhausted):
+                return ("unknown", false)
             goal_nodes: mutable usize = 0
-            return "unknown" if:
+            if:
                 not proof_linear_safety_expression_shape_with_work(goal, 0, &goal_nodes, &budget, &safety_exhausted)
                 goal_nodes > PROOF_LINEAR_SAFETY_WORK_LIMIT - total_nodes
+                return ("unknown", false)
             total_nodes <- total_nodes + goal_nodes
             # Legacy literal-width and ambiguous-constant diagnostics repeat formula reads
             # while resolving widths against the entire fact frame and annotation table.
             # Reserve expression × environment work before reporting a specific reason.
             annotation_rows: usize = annotations.count
-            return "unknown" if annotation_rows > PROOF_LINEAR_SAFETY_WORK_LIMIT - total_nodes
+            return ("unknown", false) if annotation_rows > PROOF_LINEAR_SAFETY_WORK_LIMIT - total_nodes
             annotation_rows <- annotation_rows + total_nodes
-            return "unknown" if not proof_linear_safety_charge_cross_with_work(&budget, &safety_exhausted, total_nodes, annotation_rows, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
-            return "literal-width" if not proof_state_literals_fit(facts, goal, annotations)
-            return "unknown" if safety_exhausted
-            return "ambiguous-constant-goal" if proof_quantifier_kind(goal, annotations) == "" and proof_has_ambiguous_integer_constant_in(goal, facts, 0)
-            return "unknown" if safety_exhausted
+            return ("unknown", false) if not proof_linear_safety_charge_cross_with_work(&budget, &safety_exhausted, total_nodes, annotation_rows, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+            return ("literal-width", true) if not proof_state_literals_fit(facts, goal, annotations)
+            return ("unknown", false) if safety_exhausted
+            return ("ambiguous-constant-goal", true) if proof_quantifier_kind(goal, annotations) == "" and proof_has_ambiguous_integer_constant_in(goal, facts, 0)
+            return ("unknown", false) if safety_exhausted
             facts_bounds: mutable darray[ProofBound] = []
             signed_facts_bounds: mutable darray[ProofBound] = []
             kept_safe_facts: mutable darray[Ast::Expr] = []
             facts_safe: bool = proof_unsigned_safe_facts_with_context_work(facts, &kept_safe_facts, &facts_bounds, &signed_facts_bounds, &budget, &safety_exhausted)
-            return "unknown" if safety_exhausted
-            return "wrap-guard-fact" if not facts_safe
+            return ("unknown", false) if safety_exhausted
+            return ("wrap-guard-fact", true) if not facts_safe
             goal_safe: bool = proof_unsigned_expression_safe_with_context_work(goal, facts, &facts_bounds, &signed_facts_bounds, &budget, &safety_exhausted)
-            return "unknown" if safety_exhausted
-            return "wrap-guard-goal" if not goal_safe
-            return "quantifier" if proof_quantifier_kind(goal, annotations) != ""
+            return ("unknown", false) if safety_exhausted
+            return ("wrap-guard-goal", true) if not goal_safe
+            return ("quantifier", true) if proof_quantifier_kind(goal, annotations) != ""
             operator_mask: usize = proof_source_primitive_operator_mask(annotations)
             arithmetic_guard_safe: bool = proof_source_arithmetic_operator_guard_with_work(goal, facts, operator_mask, budget, safety_exhausted)
-            return "unknown" if safety_exhausted
-            return "overloaded-operator" if not arithmetic_guard_safe
+            return ("unknown", false) if safety_exhausted
+            return ("overloaded-operator", true) if not arithmetic_guard_safe
             match goal:
                 Ast::Expr.Binary(_, operator, _, _):
-                    return "unknown" if proof_is_comparison(operator)
-                    return "connective" if operator == TokenKind.And or operator == TokenKind.Or or operator == TokenKind.FatArrow
-                    return "non-comparison-goal"
+                    return ("unknown", true) if proof_is_comparison(operator)
+                    return ("connective", true) if operator == TokenKind.And or operator == TokenKind.Or or operator == TokenKind.FatArrow
+                    return ("non-comparison-goal", true)
                 Ast::Expr.Call(_, _, _, _):
-                    return "opaque-call-goal"
+                    return ("opaque-call-goal", true)
                 _:
-                    return "non-comparison-goal"
+                    return ("non-comparison-goal", true)
 
         # Compatibility entry point for callers that do not render a shared report. Report
         # renderers should use the work-aware form so repeated diagnostics share one meter.
         def proof_refusal_gate(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, exhausted: bool) -> sview:
             budget: mutable usize = 0
-            return proof_refusal_gate_with_work(facts, goal, annotations, exhausted, budget)
+            result: (gate: sview, complete: bool) = proof_refusal_gate_with_work(facts, goal, annotations, exhausted, budget)
+            return result.gate
