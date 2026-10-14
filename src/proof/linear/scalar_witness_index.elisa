@@ -25,18 +25,99 @@ extend ElisaProof:
             element_terms: mutable darray[Ast::Expr]
             element_depths: mutable darray[i64]
             element_widths: mutable darray[i64]
-            # Exact place terms and widths from unsigned place-bound markers.
-            place_terms: mutable darray[Ast::Expr]
-            place_widths: mutable darray[i64]
+            # Exact terms and widths from unsigned type-bound markers, including call results.
+            unsigned_terms: mutable darray[Ast::Expr]
+            unsigned_widths: mutable darray[i64]
             # Collision-safe open-addressed lookup for `names`; slots store an index into the
             # ordered source list so exact equality remains authoritative.
             name_hashes: mutable darray[u32]
             name_slots: mutable darray[usize]
             # Exact deterministic fallback, sorted by name without changing source order above.
             sorted_name_indices: mutable darray[usize]
+            # Shape hashes narrow exact signed/unsigned term lookups; slots retain source row indices.
+            signed_hashes: mutable darray[u32]
+            signed_slots: mutable darray[usize]
+            unsigned_hashes: mutable darray[u32]
+            unsigned_slots: mutable darray[usize]
 
+        # Build a bounded exact-term index. Shape hashes only choose candidates; exact AST
+        # equality remains authoritative. Duplicate rows retain the first signed width, while
+        # unsigned exact-term markers merge to their narrowest width just as the legacy lookup did.
+    private:
+        def proof_scalar_witness_term_index_build(terms: darray[Ast::Expr]&, widths: mutable darray[i64]&, hashes: mutable darray[u32]&, slots: mutable darray[usize]&, merge_min_width: bool, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return false if terms.count != widths.count or exhausted
+            return true if terms.count == 0
+            if terms.count > PROOF_LINEAR_SAFETY_WORK_LIMIT / 2:
+                exhausted <- true
+                return false
+            capacity: mutable usize = 1
+            target: usize = terms.count * 2
+            while capacity < target |capacity, target, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                if capacity > PROOF_LINEAR_SAFETY_WORK_LIMIT / 2:
+                    exhausted <- true
+                    return false
+                capacity <- capacity * 2
+            return false if not proof_linear_safety_work_charge(budget, exhausted, capacity) or not proof_linear_safety_work_charge(budget, exhausted, terms.count)
+            hashes.resize(terms.count)
+            slots.resize(capacity)
+            for slot in 0..<capacity |slot, slots, terms, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                slots[slot] <- terms.count
+            for row in 0..<terms.count |row, row, terms, widths, hashes, slots, capacity, merge_min_width, budget, exhausted|:
+                cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(terms[row], &budget, &exhausted)
+                return false if not cost.complete or not proof_linear_safety_work_charge(budget, exhausted, cost.cost)
+                hash: u32 = proof_expr_shape_hash(terms[row], 0)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, row, terms, widths, hashes, slots, capacity, merge_min_width, hash, slot, budget, exhausted|:
+                    return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                    existing: usize = slots[slot]
+                    if existing >= terms.count:
+                        slots[slot] <- row
+                        hashes[row] <- hash
+                        placed <- true
+                        break
+                    if hashes[existing] == hash:
+                        equal: bool = proof_unsigned_witness_terms_equal_with_work(terms[existing], terms[row], &budget, &exhausted)
+                        return false if exhausted
+                        if equal:
+                            if merge_min_width:
+                                widths[existing] <- proof_scalar_witness_merge_unsigned_width(widths[existing], widths[row])
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                if not placed:
+                    exhausted <- true
+                    return false
+            return true
+
+        def proof_scalar_witness_bare_name(expression: Ast::Expr, depth: usize) -> (complete: bool, name: sview):
+            return (false, "") if depth >= PROOF_UNSIGNED_PLACE_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return (true, name)
+                Ast::Expr.Paren(inner, _):
+                    return proof_scalar_witness_bare_name(inner, depth + 1)
+                _:
+                    return (true, "")
+
+        def proof_scalar_witness_bare_name_with_work(expression: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&, depth: usize) -> (complete: bool, name: sview):
+            return (false, "") if depth >= PROOF_UNSIGNED_PLACE_DEPTH_LIMIT or not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return (false, "") if not proof_linear_safety_work_charge(budget, exhausted, sview_len(name))
+                    return (true, name)
+                Ast::Expr.Paren(inner, _):
+                    return proof_scalar_witness_bare_name_with_work(inner, budget, exhausted, depth + 1)
+                _:
+                    return (true, "")
+
+    public:
         def proof_scalar_witness_markers(facts: darray[Ast::Expr]&) -> ProofScalarWitnesses:
-            witnesses: mutable ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], name_unsigned_widths: [], signed_terms: [], signed_widths: [], element_terms: [], element_depths: [], element_widths: [], place_terms: [], place_widths: [], name_hashes: [], name_slots: [], sorted_name_indices: []}
+            witnesses: mutable ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], name_unsigned_widths: [], signed_terms: [], signed_widths: [], element_terms: [], element_depths: [], element_widths: [], unsigned_terms: [], unsigned_widths: [], name_hashes: [], name_slots: [], sorted_name_indices: [], signed_hashes: [], signed_slots: [], unsigned_hashes: [], unsigned_slots: []}
             for fact in facts |witnesses|:
                 callee: sview = proof_marker_callee_name(fact)
                 if callee == "__elisa_untrusted_operator_type":
@@ -46,8 +127,9 @@ extend ElisaProof:
                     argument: (known: bool, term: Ast::Expr) = proof_marker_argument(fact, "__elisa_primitive_scalar_type")
                     if argument.known:
                         witnesses.scalar_terms.push(argument.term)
-                        name: sview = proof_ident_name(argument.term)
-                        if name != "":
+                        named: (complete: bool, name: sview) = proof_scalar_witness_bare_name(argument.term, 0)
+                        if named.complete and named.name != "":
+                            name: sview = named.name
                             witnesses.names.push(name)
                             witnesses.name_unsigned_widths.push(0)
                 elif callee == "__elisa_primitive_scalar_element":
@@ -57,19 +139,21 @@ extend ElisaProof:
                         witnesses.element_depths.push(element.depth)
                         witnesses.element_widths.push(element.width)
                 elif callee == "__elisa_unsigned_type_bound":
-                    marker: (known: bool, name: sview, width: i64) = proof_unsigned_marker_info(fact)
+                    marker: (known: bool, term: Ast::Expr, width: i64) = proof_unsigned_exact_term_marker_info(fact)
                     if marker.known:
-                        witnesses.names.push(marker.name)
-                        witnesses.name_unsigned_widths.push(marker.width)
-                    place = proof_unsigned_place_marker_info(fact)
-                    if place.known:
-                        match place.term:
-                            Ast::Expr.Tuple(_, _):
-                                witnesses.scalar_terms.push(place.term)
-                            _:
-                                pass
-                        witnesses.place_terms.push(place.term)
-                        witnesses.place_widths.push(place.width)
+                        named: (complete: bool, name: sview) = proof_scalar_witness_bare_name(marker.term, 0)
+                        if named.complete and named.name != "":
+                            name: sview = named.name
+                            witnesses.names.push(name)
+                            witnesses.name_unsigned_widths.push(marker.width)
+                        if proof_place_root_name(marker.term, 0) != "":
+                            match marker.term:
+                                Ast::Expr.Tuple(_, _):
+                                    witnesses.scalar_terms.push(marker.term)
+                                _:
+                                    pass
+                        witnesses.unsigned_terms.push(marker.term)
+                        witnesses.unsigned_widths.push(marker.width)
             # Keep `names` in source order for diagnostics and differential checks. The hash
             # table is the common-case index; build an exact sorted fallback only if a collision
             # cluster exceeds the bounded probe window.
@@ -112,6 +196,34 @@ extend ElisaProof:
                     proof_scalar_witness_merge_sorted_unsigned_widths(witnesses.sorted_name_indices, witnesses.names, &witnesses.name_unsigned_widths)
             return witnesses
 
+        def proof_scalar_witness_indexed_term_width_with_work(term: Ast::Expr, terms: darray[Ast::Expr]&, widths: darray[i64]&, hashes: darray[u32]&, slots: darray[usize]&, budget: mutable usize&, exhausted: mutable bool&) -> (indexed: bool, width: i64):
+            return (false, 0) if hashes.count == 0 and slots.count == 0
+            if hashes.count != terms.count or terms.count != widths.count or slots.count < terms.count:
+                exhausted <- true
+                return (true, 0)
+            cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(term, &budget, &exhausted)
+            return (true, 0) if not cost.complete or not proof_linear_safety_work_charge(budget, exhausted, cost.cost)
+            hash: u32 = proof_expr_shape_hash(term, 0)
+            capacity: usize = slots.count
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, hash, term, terms, widths, hashes, slots, capacity, budget, exhausted|:
+                return (true, 0) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                current: usize = slots[slot]
+                return (true, 0) if current == terms.count
+                if current >= terms.count:
+                    exhausted <- true
+                    return (true, 0)
+                if hashes[current] == hash:
+                    equal: bool = proof_unsigned_witness_terms_equal_with_work(terms[current], term, &budget, &exhausted)
+                    return (true, 0) if exhausted
+                    return (true, widths[current]) if equal
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            exhausted <- true
+            return (true, 0)
+
+
         def proof_scalar_witness_merge_unsigned_width(first: i64, second: i64) -> i64:
             return second if first == 0
             return first if second == 0 or first <= second
@@ -139,7 +251,7 @@ extend ElisaProof:
         # rare exact-sort fallback are charged at the operations that perform them. Exhaustion
         # returns no partially built witness index.
         def proof_scalar_witness_markers_with_work(facts: darray[Ast::Expr]&, include_signed_markers: bool, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, witnesses: ProofScalarWitnesses):
-            empty: ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], name_unsigned_widths: [], signed_terms: [], signed_widths: [], element_terms: [], element_depths: [], element_widths: [], place_terms: [], place_widths: [], name_hashes: [], name_slots: [], sorted_name_indices: []}
+            empty: ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], name_unsigned_widths: [], signed_terms: [], signed_widths: [], element_terms: [], element_depths: [], element_widths: [], unsigned_terms: [], unsigned_widths: [], name_hashes: [], name_slots: [], sorted_name_indices: [], signed_hashes: [], signed_slots: [], unsigned_hashes: [], unsigned_slots: []}
             return (false, empty) if exhausted
             witnesses: mutable ProofScalarWitnesses = empty
             for fact in facts |fact, witnesses, budget, exhausted|:
@@ -162,9 +274,11 @@ extend ElisaProof:
                     if argument.known:
                         return (false, empty) if not proof_linear_safety_work_charge(budget, exhausted, 1)
                         witnesses.scalar_terms.push(argument.term)
-                        name: sview = proof_ident_name(argument.term)
+                        named: (complete: bool, name: sview) = proof_scalar_witness_bare_name_with_work(argument.term, budget, exhausted, 0)
+                        return (false, empty) if not named.complete
+                        name: sview = named.name
                         if name != "":
-                            return (false, empty) if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(name))
+                            return (false, empty) if not proof_linear_safety_work_charge(budget, exhausted, 1)
                             witnesses.names.push(name)
                             witnesses.name_unsigned_widths.push(0)
                 elif callee == "__elisa_primitive_scalar_element":
@@ -177,22 +291,25 @@ extend ElisaProof:
                         witnesses.element_widths.push(element.width)
                 elif callee == "__elisa_unsigned_type_bound":
                     return (false, empty) if not proof_linear_safety_work_charge_scaled(budget, exhausted, nodes, 3)
-                    marker: (known: bool, name: sview, width: i64) = proof_unsigned_marker_info(fact)
+                    marker: (known: bool, term: Ast::Expr, width: i64) = proof_unsigned_exact_term_marker_info(fact)
                     if marker.known:
-                        return (false, empty) if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(marker.name))
-                        witnesses.names.push(marker.name)
-                        witnesses.name_unsigned_widths.push(marker.width)
-                    place = proof_unsigned_place_marker_info(fact)
-                    if place.known:
-                        match place.term:
-                            Ast::Expr.Tuple(_, _):
-                                return (false, empty) if not proof_linear_safety_work_charge(budget, exhausted, 1)
-                                witnesses.scalar_terms.push(place.term)
-                            _:
-                                pass
+                        named: (complete: bool, name: sview) = proof_scalar_witness_bare_name_with_work(marker.term, budget, exhausted, 0)
+                        return (false, empty) if not named.complete
+                        name: sview = named.name
+                        if name != "":
+                            return (false, empty) if not proof_linear_safety_work_charge(budget, exhausted, 2)
+                            witnesses.names.push(name)
+                            witnesses.name_unsigned_widths.push(marker.width)
+                        if proof_place_root_name(marker.term, 0) != "":
+                            match marker.term:
+                                Ast::Expr.Tuple(_, _):
+                                    return (false, empty) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                                    witnesses.scalar_terms.push(marker.term)
+                                _:
+                                    pass
                         return (false, empty) if not proof_linear_safety_work_charge(budget, exhausted, 2)
-                        witnesses.place_terms.push(place.term)
-                        witnesses.place_widths.push(place.width)
+                        witnesses.unsigned_terms.push(marker.term)
+                        witnesses.unsigned_widths.push(marker.width)
                 elif include_signed_markers and callee == "__elisa_signed_type_bound":
                     return (false, empty) if not proof_linear_safety_work_charge_scaled(budget, exhausted, nodes, 3)
                     marker: (known: bool, term: Ast::Expr, width: i64) = proof_signed_marker_info(fact)
@@ -235,7 +352,7 @@ extend ElisaProof:
                     slot: mutable usize = (hash.i64() % capacity.i64()).usize()
                     probes: mutable usize = 0
                     placed: mutable bool = false
-                    while probes < capacity and probes < PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT |probes, slot, hash, name_index, witnesses, capacity, placed, budget, exhausted|:
+                    while probes < capacity |probes, slot, hash, name_index, witnesses, capacity, placed, budget, exhausted|:
                         return (false, empty) if not proof_linear_safety_work_charge(budget, exhausted, 1)
                         existing: usize = witnesses.name_slots[slot]
                         if existing >= witnesses.names.count:
@@ -264,6 +381,8 @@ extend ElisaProof:
                         return (false, empty)
                     if not proof_scalar_witness_merge_sorted_unsigned_widths_with_work(&witnesses.sorted_name_indices, witnesses.names, &witnesses.name_unsigned_widths, budget, exhausted):
                         return (false, empty)
+            return (false, empty) if not proof_scalar_witness_term_index_build(witnesses.signed_terms, &witnesses.signed_widths, &witnesses.signed_hashes, &witnesses.signed_slots, false, budget, exhausted)
+            return (false, empty) if not proof_scalar_witness_term_index_build(witnesses.unsigned_terms, &witnesses.unsigned_widths, &witnesses.unsigned_hashes, &witnesses.unsigned_slots, true, budget, exhausted)
             return (true, witnesses)
 
         def proof_scalar_witness_merge_sorted_unsigned_widths_with_work(indices: darray[usize]&, names: darray[sview]&, widths: mutable darray[i64]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
@@ -403,7 +522,7 @@ extend ElisaProof:
             wanted_hash: u32 = proof_name_hash(name)
             slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
-            while probes < capacity and probes < PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT |probes, slot, wanted_hash, name, witnesses, capacity, budget, exhausted|:
+            while probes < capacity |probes, slot, wanted_hash, name, witnesses, capacity, budget, exhausted|:
                 return 0 if not proof_linear_safety_work_charge(budget, exhausted, 1)
                 current: usize = witnesses.name_slots[slot]
                 return 0 if current >= witnesses.names.count

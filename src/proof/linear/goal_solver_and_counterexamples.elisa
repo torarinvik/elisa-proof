@@ -418,9 +418,54 @@ extend ElisaProof:
         # ordinary equality expressions so existing JSON tooling can display/replay it directly.
         def proof_find_counterexample(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: ProofReport&, owner: sview, assignments: mutable darray[Ast::Expr]&) -> bool:
             return true if proof_find_machine_counterexample(facts, goal, report, owner, assignments)
-            return proof_find_diagnostic_counterexample(facts, goal, assignments)
+            return proof_find_diagnostic_counterexample(facts, goal, report, assignments)
 
-        def proof_find_diagnostic_counterexample(facts: darray[Ast::Expr]&, goal: Ast::Expr, assignments: mutable darray[Ast::Expr]&) -> bool:
+        def proof_find_diagnostic_counterexample(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: ProofReport&, assignments: mutable darray[Ast::Expr]&) -> bool:
+            # This fallback attaches a user-visible "disproved" status, so it must use the
+            # same primitive-operator boundary as the machine model before interpreting source
+            # comparisons with built-in semantics. Reserve repeated AST/frame scans up front;
+            # every refusal here only suppresses a diagnostic witness.
+            total_nodes: mutable usize = 0
+            fact_nodes: mutable usize = 0
+            expression_work: mutable usize = 0
+            for fact in facts |total_nodes, fact_nodes, expression_work|:
+                fact_cost: mutable usize = 0
+                return false if:
+                    not proof_replay_summary_expr_cost(fact, &fact_cost, expression_work, 0)
+                    fact_cost > PROOF_COUNTEREXAMPLE_WORK_LIMIT - total_nodes
+                    fact_cost > PROOF_COUNTEREXAMPLE_WORK_LIMIT - fact_nodes
+                    fact_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - expression_work
+                total_nodes <- total_nodes + fact_cost
+                fact_nodes <- fact_nodes + fact_cost
+                expression_work <- expression_work + fact_cost
+            goal_cost: mutable usize = 0
+            return false if:
+                not proof_replay_summary_expr_cost(goal, &goal_cost, expression_work, 0)
+                goal_cost > PROOF_COUNTEREXAMPLE_WORK_LIMIT - total_nodes
+                goal_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - expression_work
+            total_nodes <- total_nodes + goal_cost
+            expression_work <- expression_work + goal_cost
+            fact_read_nodes: usize = fact_nodes if fact_nodes > 0 else 1
+            preprocessing_work: mutable usize = 0
+            return false if:
+                not proof_counterexample_charge_product(&preprocessing_work, total_nodes, fact_read_nodes, 1, 64, 1)
+                not proof_counterexample_charge_product(&preprocessing_work, total_nodes, total_nodes, 1, 128, 1)
+                expression_work > PROOF_COUNTEREXAMPLE_WORK_LIMIT - preprocessing_work
+            preprocessing_work <- preprocessing_work + expression_work
+            operator_mask_work: mutable usize = 0
+            operator_mask_result: (complete: bool, mask: usize) = proof_source_primitive_operator_mask_with_work(report.source.source_annotations, &operator_mask_work)
+            return false if:
+                not operator_mask_result.complete
+                operator_mask_work > PROOF_COUNTEREXAMPLE_WORK_LIMIT - preprocessing_work
+            preprocessing_work <- preprocessing_work + operator_mask_work
+            operator_guard_work: mutable usize = 0
+            operator_guard_exhausted: mutable bool = false
+            operator_guard_safe: bool = proof_source_arithmetic_operator_guard_with_work(goal, facts, operator_mask_result.mask, &operator_guard_work, &operator_guard_exhausted)
+            return false if:
+                not operator_guard_safe
+                operator_guard_exhausted
+                operator_guard_work > PROOF_COUNTEREXAMPLE_WORK_LIMIT - preprocessing_work
+            preprocessing_work <- preprocessing_work + operator_guard_work
             names: mutable darray[sview] = []
             for fact in facts |names|:
                 proof_diagnostic_counterexample_collect_names(fact, &names)
@@ -445,6 +490,7 @@ extend ElisaProof:
             starts: mutable darray[usize] = []
             counts: mutable darray[usize] = []
             candidates: mutable darray[i64] = []
+            leaf_assignments: mutable usize = 1
             for name in names |name, starts, counts, candidates, bounds|:
                 bound: ProofBound = proof_bound_for(bounds, name)
                 start: usize = candidates.count
@@ -455,9 +501,17 @@ extend ElisaProof:
                 proof_diagnostic_counterexample_collect_candidates(goal, name, facts, start, bound, &candidates, 0)
                 starts.push(start)
                 counts.push(candidates.count - start)
-                return false if counts[counts.count - 1] == 0
+                candidate_count: usize = counts[counts.count - 1]
+                return false if candidate_count == 0 or leaf_assignments > PROOF_GOAL_COUNTEREXAMPLE_BUDGET / candidate_count
+                leaf_assignments <- leaf_assignments * candidate_count
             values: mutable darray[i64] = []
             values.resize(names.count)
+            # The leaf counter alone does not bound traversal: after it reaches zero, a
+            # recursive Cartesian search can still visit every remaining branch. Refuse a
+            # candidate product above the leaf budget before entering recursion.
+            return false if:
+                not proof_counterexample_charge_product(&preprocessing_work, leaf_assignments, total_nodes, fact_read_nodes, 64, 1)
+                not proof_counterexample_charge_product(&preprocessing_work, leaf_assignments, total_nodes, total_nodes, 16, 1)
             budget: mutable usize = PROOF_GOAL_COUNTEREXAMPLE_BUDGET
             found: bool = proof_diagnostic_counterexample_search(0, names, boolean_names, &values, starts, counts, candidates, facts, goal, &budget)
             return false if not found

@@ -1,0 +1,65 @@
+# Typed constant readers shared by linear reasoning and return checks.
+extend ElisaProof:
+    private:
+        def proof_signed_constant_at_width(expression: Ast::Expr, width: i64, depth: usize) -> (known: bool, value: i64):
+            return (false, 0) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            unsigned: bool = width < 0
+            minimum: i64 = 0 if unsigned else ElisaProofKernelCore::proof_kernel_signed_width_min(width)
+            maximum: i64 = proof_unsigned_width_max(0 - width) if unsigned else ElisaProofKernelCore::proof_kernel_signed_width_max(width)
+            return (false, 0) if (minimum == 0 and not unsigned) or maximum <= 0
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return (value >= 0 and value <= maximum, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_signed_constant_at_width(inner, width, depth + 1)
+                Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(value, _), _) if not unsigned and value > maximum:
+                    # The signed minimum is written `-(MAX+1)`. Its payload alone is out of width,
+                    # but in two's complement `-(MAX+1)` and its wrapped reading `-(MIN)` are both
+                    # MIN, so the one literal one past the maximum has a single typed value.
+                    return (value - 1 == maximum, minimum)
+                Ast::Expr.Unary(operator, operand, _):
+                    inner: (known: bool, value: i64) = proof_signed_constant_at_width(operand, width, depth + 1)
+                    return (false, 0) if not inner.known
+                    return inner if operator == TokenKind.Plus
+                    return (false, 0) if operator != TokenKind.Minus
+                    # Every non-negative value within the width negates within it.
+                    negated: (known: bool, value: i64) = proof_sub_safe(0, inner.value)
+                    return (negated.known and negated.value >= minimum and negated.value <= maximum, negated.value)
+                Ast::Expr.Binary(left, operator, right, _):
+                    left_value: (known: bool, value: i64) = proof_signed_constant_at_width(left, width, depth + 1)
+                    right_value: (known: bool, value: i64) = proof_signed_constant_at_width(right, width, depth + 1)
+                    return (false, 0) if not left_value.known or not right_value.known
+                    result: mutable (known: bool, value: i64) = (false, 0)
+                    result <- proof_add_safe(left_value.value, right_value.value) if operator == TokenKind.Plus
+                    result <- proof_sub_safe(left_value.value, right_value.value) if operator == TokenKind.Minus
+                    result <- proof_mul_safe(left_value.value, right_value.value) if operator == TokenKind.Star
+                    # Truncating division and remainder of in-width operands stay in width, except
+                    # `min / -1`, which the range check below refuses like any other overflow.
+                    result <- proof_div_safe(left_value.value, right_value.value) if operator == TokenKind.Slash
+                    result <- proof_mod_safe(left_value.value, right_value.value) if operator == TokenKind.Percent
+                    return (result.known and result.value >= minimum and result.value <= maximum, result.value)
+                _:
+                    return (false, 0)
+
+        def proof_ambiguous_constant_at_width(expression: Ast::Expr, facts: darray[Ast::Expr]&, width: i64, depth: usize) -> bool:
+            return true if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            if proof_closed_integer_arithmetic(expression, depth):
+                # The typed reading only widens the untyped guard: a closed form the width evaluator
+                # does not model, such as a shift, is still judged by the untyped guard.
+                constant: (known: bool, value: i64) = proof_signed_constant_at_width(expression, width, 0)
+                return false if constant.known
+                return proof_has_ambiguous_integer_constant(expression, depth)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_ambiguous_constant_at_width(inner, facts, width, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    return proof_ambiguous_constant_at_width(operand, facts, width, depth + 1) if operator == TokenKind.Minus or operator == TokenKind.Plus
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent:
+                        return proof_ambiguous_constant_at_width(left, facts, width, depth + 1) or proof_ambiguous_constant_at_width(right, facts, width, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return true if proof_has_ambiguous_integer_constant_in(condition, facts, depth + 1)
+                    return proof_ambiguous_constant_at_width(then_expression, facts, width, depth + 1) or proof_ambiguous_constant_at_width(else_expression, facts, width, depth + 1)
+                _:
+                    pass
+            return proof_has_ambiguous_integer_constant(expression, depth)

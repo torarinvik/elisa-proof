@@ -1,0 +1,305 @@
+# Work-aware source-side disjunct pruning. Unsupported arithmetic stays unknown; exhausted
+# analysis is reported separately so goal search cannot silently continue past its shared budget.
+extend ElisaProof:
+    private:
+        def proof_linear_strip_parens_with_work(expression: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, stripped: Ast::Expr):
+            current: mutable Ast::Expr = expression
+            depth: mutable usize = 0
+            while true |current, depth, budget, exhausted|:
+                if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                    budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                    exhausted <- true
+                    return (false, Ast::Expr.Invalid)
+                return (false, Ast::Expr.Invalid) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                match current:
+                    Ast::Expr.Paren(inner, _):
+                        current <- inner
+                        depth <- depth + 1
+                    _:
+                        return (true, current)
+            return (false, Ast::Expr.Invalid)
+
+        def proof_linear_is_or_with_work(expression: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, is_or: bool):
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(expression, budget, exhausted)
+            return (false, false) if not stripped.complete
+            match stripped.expression:
+                Ast::Expr.Binary(_, TokenKind.Or, _, _):
+                    return (true, true)
+                _:
+                    return (true, false)
+
+        def proof_linear_disequality_with_work(fact: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, known: bool, left: Ast::Expr, right: Ast::Expr):
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(fact, budget, exhausted)
+            return (false, false, fact, fact) if not stripped.complete
+            match stripped.expression:
+                Ast::Expr.Binary(left, TokenKind.BangEq, right, _):
+                    return (true, true, left, right)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    equality: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(inner, budget, exhausted)
+                    return (false, false, fact, fact) if not equality.complete
+                    match equality.expression:
+                        Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                            return (true, true, left, right)
+                        _:
+                            return (true, false, fact, fact)
+                _:
+                    return (true, false, fact, fact)
+
+        def proof_linear_disequality_refuted_with_work(facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, refuted: bool):
+            return proof_linear_disequality_refuted_after_goal_with_work(facts, false, Ast::Expr.Absent, Ast::Expr.Absent, budget, exhausted)
+
+        def proof_linear_disequality_goal_refuted_with_work(facts: darray[Ast::Expr]&, left: Ast::Expr, right: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, refuted: bool):
+            return proof_linear_disequality_refuted_after_goal_with_work(facts, true, left, right, budget, exhausted)
+
+        def proof_linear_disequality_refuted_after_goal_with_work(facts: darray[Ast::Expr]&, include_goal_equality: bool, goal_left: Ast::Expr, goal_right: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, refuted: bool):
+            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+            return (false, false) if not marker_result.complete or exhausted
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(marker_result.witnesses, budget, exhausted)
+            return (false, false) if not marker_scale.complete or exhausted
+            if include_goal_equality:
+                primitive: (complete: bool, primitive: bool) = proof_linear_search_primitive_comparison(goal_left, goal_right, marker_result.witnesses, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                return (false, false) if not primitive.complete or exhausted
+                return (true, false) if not primitive.primitive
+            for fact in facts |fact, budget, exhausted|:
+                measured: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                return (false, false) if not measured.complete
+                callee: sview = proof_marker_callee_name(fact)
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(callee))
+                return (true, false) if proof_linear_certificate_marker(fact)
+            bounds_ready: mutable bool = false
+            base_bounds: mutable darray[ProofBound] = []
+            signed_bounds: mutable darray[ProofBound] = []
+            base_terms: mutable darray[ProofNormalTerm] = []
+            base_spans: mutable darray[ProofLinearSpan] = []
+            reserve: usize = 4 if include_goal_equality else 2
+            if not proof_linear_fact_constraints_with_work(facts, false, reserve, marker_result.witnesses, marker_scale.scale, &bounds_ready, &base_bounds, &signed_bounds, &base_terms, &base_spans, budget, exhausted):
+                return (false, false)
+            if include_goal_equality:
+                goal_pushed: bool = proof_linear_push_comparison_with_work(goal_left, TokenKind.EqEq, goal_right, false, facts, marker_result.witnesses, marker_scale.scale, &base_terms, &base_spans, budget, exhausted)
+                return (false, false) if exhausted
+                return (true, false) if not goal_pushed
+            for fact in facts |fact, facts, marker_result, marker_scale, base_terms, base_spans, budget, exhausted|:
+                pair: (complete: bool, known: bool, left: Ast::Expr, right: Ast::Expr) = proof_linear_disequality_with_work(fact, budget, exhausted)
+                return (false, false) if not pair.complete
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                continue if not pair.known
+                primitive: (complete: bool, primitive: bool) = proof_linear_search_primitive_comparison(pair.left, pair.right, marker_result.witnesses, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                return (false, false) if not primitive.complete or exhausted
+                continue if not primitive.primitive
+                terms: mutable darray[ProofNormalTerm] = []
+                spans: mutable darray[ProofLinearSpan] = []
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, base_terms.count + base_spans.count)
+                terms.extend(base_terms)
+                spans.extend(base_spans)
+                pushed: bool = proof_linear_push_comparison_with_work(pair.left, TokenKind.EqEq, pair.right, false, facts, marker_result.witnesses, marker_scale.scale, &terms, &spans, budget, exhausted)
+                return (false, false) if exhausted
+                continue if not pushed
+                result: (complete: bool, refutes: bool) = proof_linear_refutes_with_work(terms, spans, budget, exhausted)
+                return (false, false) if not result.complete or exhausted
+                return (true, true) if result.refutes
+            return (true, false)
+
+        def proof_facts_have_disjunction_with_work(facts: darray<Ast::Expr>&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, found: bool):
+            for fact in facts |fact, budget, exhausted|:
+                is_or: (complete: bool, is_or: bool) = proof_linear_is_or_with_work(fact, budget, exhausted)
+                return (false, false) if not is_or.complete
+                return (true, true) if is_or.is_or
+            (true, false)
+
+        # Reuse bounds already collected and closed under the shared meter. This avoids
+        # rebuilding the fact index through the legacy unmetered inconsistency helper.
+        def proof_linear_bounds_conflict_with_work(bounds: darray[ProofBound]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, conflict: bool):
+            for bound in bounds |bound, budget, exhausted|:
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                return (true, true) if bound.has_lower and bound.has_upper and bound.lower > bound.upper
+            return (true, false)
+
+        def proof_linear_prune_signed_bounds_with_work(facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, bounds_ready: mutable bool&, base_bounds: mutable darray[ProofBound]&, signed_bounds: mutable darray[ProofBound]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return true if bounds_ready
+            return false if not proof_collect_fact_bounds_with_work(facts, markers, &base_bounds, budget, exhausted)
+            return false if not proof_close_equalities_with_work(facts, markers, &base_bounds, budget, exhausted)
+            return false if not proof_signed_safety_bounds_from_base_with_work(facts, base_bounds, &signed_bounds, markers, budget, exhausted)
+            bounds_ready <- true
+            return true
+
+        def proof_linear_pruning_fact_scan_cost_with_work(facts: darray[Ast::Expr]&, fact_scan_cost: mutable usize&, fact_scan_cost_valid: mutable bool&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return true if fact_scan_cost_valid
+            total: mutable usize = 0
+            for fact in facts |fact, total, budget, exhausted|:
+                measured: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                return false if not measured.complete or measured.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - total
+                total <- total + measured.cost
+            fact_scan_cost <- total
+            fact_scan_cost_valid <- true
+            return true
+
+        def proof_linear_fact_parts_with_work(fact: Ast::Expr, negated: bool, facts: darray[Ast::Expr]&, signed_only: bool, markers: ProofScalarWitnesses&, marker_scale: usize, fact_scan_cost: mutable usize&, fact_scan_cost_valid: mutable bool&, bounds_ready: mutable bool&, base_bounds: mutable darray[ProofBound]&, signed_bounds: mutable darray[ProofBound]&, reserve: usize, terms: mutable darray[ProofNormalTerm]&, spans: mutable darray[ProofLinearSpan]&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return true if depth >= 16 or spans.count + reserve >= PROOF_LINEAR_FM_CONSTRAINT_LIMIT
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(fact, budget, exhausted)
+            return false if not stripped.complete
+            match stripped.expression:
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    return proof_linear_fact_parts_with_work(operand, not negated, facts, signed_only, markers, marker_scale, &fact_scan_cost, &fact_scan_cost_valid, &bounds_ready, &base_bounds, &signed_bounds, reserve, terms, spans, depth + 1, budget, exhausted)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if (operator == TokenKind.And and not negated) or (operator == TokenKind.Or and negated):
+                        return false if not proof_linear_fact_parts_with_work(left, negated, facts, signed_only, markers, marker_scale, &fact_scan_cost, &fact_scan_cost_valid, &bounds_ready, &base_bounds, &signed_bounds, reserve, terms, spans, depth + 1, budget, exhausted)
+                        return proof_linear_fact_parts_with_work(right, negated, facts, signed_only, markers, marker_scale, &fact_scan_cost, &fact_scan_cost_valid, &bounds_ready, &base_bounds, &signed_bounds, reserve, terms, spans, depth + 1, budget, exhausted)
+                    return true if not proof_is_comparison(operator)
+                    if negated and proof_is_order_operator(operator):
+                        return false if not proof_linear_pruning_fact_scan_cost_with_work(facts, &fact_scan_cost, &fact_scan_cost_valid, budget, exhausted)
+                        left_integer: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(left, facts, markers, marker_scale, fact_scan_cost, 0, budget, exhausted)
+                        return false if not left_integer.complete
+                        return true if not left_integer.integer
+                        right_integer: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(right, facts, markers, marker_scale, fact_scan_cost, 0, budget, exhausted)
+                        return false if not right_integer.complete
+                        return true if not right_integer.integer
+                    effective: TokenKind = proof_comparison_negation(operator) if negated else operator
+                    return true if effective == TokenKind.BangEq or effective == TokenKind.Eof
+                    primitive: (complete: bool, primitive: bool) = proof_linear_search_primitive_comparison(left, right, markers, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return false if not primitive.complete
+                    return true if not primitive.primitive
+                    if signed_only:
+                        if not proof_linear_prune_signed_bounds_with_work(facts, markers, &bounds_ready, &base_bounds, &signed_bounds, budget, exhausted):
+                            return false
+                        safe: bool = proof_signed_expression_safe_with_bounds_work_inner_scaled(stripped.expression, facts, signed_bounds, 0, markers, marker_scale, budget, exhausted)
+                        return false if exhausted
+                        return true if not safe
+                    if spans.count + reserve + 2 > PROOF_LINEAR_FM_CONSTRAINT_LIMIT and effective == TokenKind.EqEq:
+                        return true
+                    pushed: bool = proof_linear_push_comparison_with_work(left, effective, right, signed_only, facts, markers, marker_scale, terms, spans, budget, exhausted)
+                    if exhausted:
+                        return false
+                    if not pushed and budget >= PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                        exhausted <- true
+                        return false
+                    return true
+                _:
+                    return true
+
+        def proof_linear_fact_constraints_with_work(facts: darray[Ast::Expr]&, signed_only: bool, reserve: usize, markers: ProofScalarWitnesses&, marker_scale: usize, bounds_ready: mutable bool&, base_bounds: mutable darray[ProofBound]&, signed_bounds: mutable darray[ProofBound]&, terms: mutable darray[ProofNormalTerm]&, spans: mutable darray[ProofLinearSpan]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            fact_scan_cost: mutable usize = 0
+            fact_scan_cost_valid: mutable bool = false
+            for fact in facts |fact, facts, signed_only, reserve, markers, marker_scale, fact_scan_cost, fact_scan_cost_valid, bounds_ready, base_bounds, signed_bounds, terms, spans, budget, exhausted|:
+                break if spans.count + reserve >= PROOF_LINEAR_FM_CONSTRAINT_LIMIT
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                is_or: (complete: bool, is_or: bool) = proof_linear_is_or_with_work(fact, budget, exhausted)
+                return false if not is_or.complete
+                return false if not proof_linear_fact_parts_with_work(fact, false, facts, signed_only, markers, marker_scale, &fact_scan_cost, &fact_scan_cost_valid, &bounds_ready, &base_bounds, &signed_bounds, reserve, terms, spans, 0, budget, exhausted)
+            return not exhausted
+
+        def proof_linear_prune_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, fact_scan_cost: mutable usize&, fact_scan_cost_valid: mutable bool&, bounds_ready: mutable bool&, base_bounds: mutable darray[ProofBound]&, signed_bounds: mutable darray[ProofBound]&, base_terms: darray[ProofNormalTerm]&, base_spans: darray[ProofLinearSpan]&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, truth: i64, changed: bool, pruned: Ast::Expr):
+            unknown: (complete: bool, truth: i64, changed: bool, pruned: Ast::Expr) = (not exhausted, 0, false, expression)
+            return (false, 0, false, expression) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            return unknown if depth >= 32
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(expression, budget, exhausted)
+            return (false, 0, false, expression) if not stripped.complete
+            match stripped.expression:
+                Ast::Expr.Binary(left, TokenKind.Or, right, position):
+                    left_result: (complete: bool, truth: i64, changed: bool, pruned: Ast::Expr) = proof_linear_prune_with_work(left, facts, markers, marker_scale, &fact_scan_cost, &fact_scan_cost_valid, &bounds_ready, &base_bounds, &signed_bounds, base_terms, base_spans, depth + 1, budget, exhausted)
+                    return (false, 0, false, expression) if not left_result.complete
+                    right_result: (complete: bool, truth: i64, changed: bool, pruned: Ast::Expr) = proof_linear_prune_with_work(right, facts, markers, marker_scale, &fact_scan_cost, &fact_scan_cost_valid, &bounds_ready, &base_bounds, &signed_bounds, base_terms, base_spans, depth + 1, budget, exhausted)
+                    return (false, 0, false, expression) if not right_result.complete
+                    return (true, 2, true, stripped.expression) if left_result.truth == 2 and right_result.truth == 2
+                    return (true, 1, true, stripped.expression) if left_result.truth == 1 or right_result.truth == 1
+                    return (true, right_result.truth, true, right_result.pruned) if left_result.truth == 2
+                    return (true, left_result.truth, true, left_result.pruned) if right_result.truth == 2
+                    return (true, 0, false, expression) if not left_result.changed and not right_result.changed
+                    return (false, 0, false, expression) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                    return (true, 0, true, Ast::Expr.Binary(left_result.pruned, TokenKind.Or, right_result.pruned, position))
+                Ast::Expr.Binary(left, operator, right, _):
+                    return unknown if not proof_is_comparison(operator) or operator == TokenKind.BangEq
+                    primitive: (complete: bool, primitive: bool) = proof_linear_search_primitive_comparison(left, right, markers, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return (false, 0, false, expression) if not primitive.complete
+                    return unknown if not primitive.primitive
+                    if not proof_linear_prune_signed_bounds_with_work(facts, markers, &bounds_ready, &base_bounds, &signed_bounds, budget, exhausted):
+                        return (false, 0, false, expression)
+                    safe: bool = proof_signed_expression_safe_with_bounds_work_inner_scaled(stripped.expression, facts, signed_bounds, 0, markers, marker_scale, budget, exhausted)
+                    return (false, 0, false, expression) if exhausted
+                    return unknown if not safe
+                    terms: mutable darray[ProofNormalTerm] = []
+                    spans: mutable darray[ProofLinearSpan] = []
+                    return (false, 0, false, expression) if:
+                        not proof_linear_safety_work_charge(budget, exhausted, base_terms.count + base_spans.count)
+                        exhausted
+                    terms.extend(base_terms)
+                    spans.extend(base_spans)
+                    pushed: bool = proof_linear_push_comparison_with_work(left, operator, right, true, facts, markers, marker_scale, &terms, &spans, budget, exhausted)
+                    if exhausted or (not pushed and budget >= PROOF_LINEAR_SAFETY_WORK_LIMIT):
+                        exhausted <- true
+                        return (false, 0, false, expression)
+                    return unknown if not pushed
+                    refuted: (complete: bool, refutes: bool) = proof_linear_refutes_with_work(terms, spans, budget, exhausted)
+                    return (false, 0, false, expression) if not refuted.complete or exhausted
+                    return (true, 2, false, stripped.expression) if refuted.refutes
+                    negated: TokenKind = proof_comparison_negation(operator)
+                    return unknown if negated == TokenKind.BangEq or negated == TokenKind.Eof
+                    entail_terms: mutable darray[ProofNormalTerm] = []
+                    entail_spans: mutable darray[ProofLinearSpan] = []
+                    return (false, 0, false, expression) if:
+                        not proof_linear_safety_work_charge(budget, exhausted, base_terms.count + base_spans.count)
+                        exhausted
+                    entail_terms.extend(base_terms)
+                    entail_spans.extend(base_spans)
+                    entail_pushed: bool = proof_linear_push_comparison_with_work(left, negated, right, true, facts, markers, marker_scale, &entail_terms, &entail_spans, budget, exhausted)
+                    return (false, 0, false, expression) if exhausted or (not entail_pushed and budget >= PROOF_LINEAR_SAFETY_WORK_LIMIT)
+                    return unknown if not entail_pushed
+                    entails: (complete: bool, refutes: bool) = proof_linear_refutes_with_work(entail_terms, entail_spans, budget, exhausted)
+                    return (false, 0, false, expression) if not entails.complete or exhausted
+                    return (true, 1, true, stripped.expression) if entails.refutes
+                    return unknown
+                _:
+                    return unknown
+
+        def proof_linear_prune_facts_with_work(facts: darray[Ast::Expr]&, pruned: mutable darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, truth: i64):
+            base: mutable darray[Ast::Expr] = []
+            disjunctive: mutable bool = false
+            for fact in facts |fact, base, disjunctive, budget, exhausted|:
+                is_or: (complete: bool, is_or: bool) = proof_linear_is_or_with_work(fact, budget, exhausted)
+                return (false, 0) if not is_or.complete
+                if is_or.is_or:
+                    disjunctive <- true
+                else:
+                    return (false, 0) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                    base.push(fact)
+            return (true, 0) if not disjunctive
+            base_marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(base, true, budget, exhausted)
+            return (false, 0) if not base_marker_result.complete or exhausted
+            base_marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(base_marker_result.witnesses, budget, exhausted)
+            return (false, 0) if not base_marker_scale.complete or exhausted
+            base_terms: mutable darray[ProofNormalTerm] = []
+            base_spans: mutable darray[ProofLinearSpan] = []
+            base_bounds_ready: mutable bool = false
+            base_bounds: mutable darray[ProofBound] = []
+            base_signed_bounds: mutable darray[ProofBound] = []
+            return (false, 0) if not proof_linear_fact_constraints_with_work(base, true, 2, base_marker_result.witnesses, base_marker_scale.scale, &base_bounds_ready, &base_bounds, &base_signed_bounds, &base_terms, &base_spans, budget, exhausted)
+            return (false, 0) if exhausted
+            return (true, 0) if base_spans.count == 0
+            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+            return (false, 0) if not marker_result.complete or exhausted
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(marker_result.witnesses, budget, exhausted)
+            return (false, 0) if not marker_scale.complete or exhausted
+            fact_scan_cost: mutable usize = 0
+            fact_scan_cost_valid: mutable bool = false
+            bounds_ready: mutable bool = false
+            full_base_bounds: mutable darray[ProofBound] = []
+            signed_bounds: mutable darray[ProofBound] = []
+            changed: mutable bool = false
+            for fact in facts |fact, facts, marker_result, marker_scale, fact_scan_cost, fact_scan_cost_valid, bounds_ready, full_base_bounds, signed_bounds, base_terms, base_spans, pruned, changed, budget, exhausted|:
+                is_or: (complete: bool, is_or: bool) = proof_linear_is_or_with_work(fact, budget, exhausted)
+                return (false, 0) if not is_or.complete
+                if is_or.is_or:
+                    result: (complete: bool, truth: i64, changed: bool, pruned: Ast::Expr) = proof_linear_prune_with_work(fact, facts, marker_result.witnesses, marker_scale.scale, &fact_scan_cost, &fact_scan_cost_valid, &bounds_ready, &full_base_bounds, &signed_bounds, base_terms, base_spans, 0, budget, exhausted)
+                    return (false, 0) if not result.complete
+                    return (true, 2) if result.truth == 2
+                    if result.truth == 1:
+                        changed <- true
+                        continue
+                    if result.changed:
+                        changed <- true
+                        return (false, 0) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                        pruned.push(result.pruned)
+                        continue
+                return (false, 0) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                pruned.push(fact)
+            return (true, 1) if changed
+            return (true, 0)

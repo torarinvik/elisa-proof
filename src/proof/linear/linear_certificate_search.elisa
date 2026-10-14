@@ -4,43 +4,75 @@
 # each carrying its provenance: the non-negative weight of every premise slot it combines. Slot 0
 # is the negated goal; an equality fact takes two slots, one per direction.
 extend ElisaProof:
+    private:
+        def proof_linear_search_take_work(work: mutable usize&, work_limit: usize, amount: usize) -> bool:
+            return false if work >= work_limit
+            if amount > work_limit - work:
+                work <- work_limit
+                return false
+            work <- work + amount
+            true
+
+        def proof_linear_search_name_equal(left: sview, right: sview, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, equal: bool):
+            return (true, left == right) if not metered
+            return (false, false) if not proof_linear_search_take_work(&work, work_limit, 1)
+            return (false, false) if not proof_linear_search_take_work(&work, work_limit, sview_len(left))
+            return (false, false) if not proof_linear_search_take_work(&work, work_limit, sview_len(right))
+            return (true, left == right)
+
+        def proof_linear_search_name_in(name: sview, candidates: darray[sview]&, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, found: bool):
+            for candidate in candidates |candidate, name, work, work_limit, metered|:
+                equal: (complete: bool, equal: bool) = proof_linear_search_name_equal(candidate, name, &work, work_limit, metered)
+                return (false, false) if not equal.complete
+                return (true, true) if equal.equal
+            return (true, false)
+
     public:
         struct ProofLinearRows:
             coefficients: mutable darray[i64]
             constants: mutable darray[i64]
             provenance: mutable darray[i64]
 
-        def proof_linear_gcd(left: i64, right: i64) -> i64:
+        def proof_linear_gcd_with_work(left: i64, right: i64, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, divisor: i64):
+            # 2^63 is not representable as a positive i64. A divisor of one is always
+            # sound and leaves the row unnormalized, so avoid negating MIN_I64 here.
+            return (true, 1) if left == proof_i64_min() or right == proof_i64_min()
             first: mutable i64 = left if left >= 0 else 0 - left
             second: mutable i64 = right if right >= 0 else 0 - right
-            while second != 0 |first, second|:
+            while second != 0 |first, second, work, work_limit, metered|:
+                return (false, 0) if metered and not proof_linear_search_take_work(&work, work_limit, 1)
                 remainder: i64 = first % second
                 first <- second
                 second <- remainder
-            return first
+            return (true, first)
 
-        # Read `fact` (or the goal's negation) as a row over `atoms`, declining a name outside them.
-        def proof_linear_row(fact: Ast::Expr, sign: i64, negate: bool, facts: darray[Ast::Expr]&, atoms: darray[sview]&, rows: mutable ProofLinearRows&) -> bool:
+        def proof_linear_search_row(fact: Ast::Expr, sign: i64, negate: bool, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, atoms: darray[sview]&, rows: mutable ProofLinearRows&, work: mutable usize&, work_limit: usize, metered: bool) -> bool:
             names: mutable darray[sview] = []
             coefficients: mutable darray[i64] = []
             constant: mutable i64 = 0
-            return false if not proof_linear_constraint_add(fact, sign, negate, facts, &names, &coefficients, &constant)
-            for name in names |name, atoms|:
-                return false if not any atom in atoms where atom == name
-            for atom in atoms |atom, names, coefficients, rows|:
+            return false if not proof_linear_constraint_add_with_search_work(fact, sign, negate, facts, markers, &names, &coefficients, &constant, &work, work_limit, metered)
+            for name in names |name, atoms, work, work_limit, metered|:
+                present: (complete: bool, found: bool) = proof_linear_search_name_in(name, atoms, &work, work_limit, metered)
+                return false if not present.complete or not present.found
+            for atom in atoms |atom, names, coefficients, rows, work, work_limit, metered|:
+                return false if metered and not proof_linear_search_take_work(&work, work_limit, 1)
                 value: mutable i64 = 0
                 index: mutable usize = 0
-                while index < names.count |index, names, coefficients, atom, value|:
-                    value <- coefficients[index] if names[index] == atom and index < coefficients.count
+                while index < names.count |index, names, coefficients, atom, value, work, work_limit, metered|:
+                    return false if metered and not proof_linear_search_take_work(&work, work_limit, 1)
+                    equal: (complete: bool, equal: bool) = proof_linear_search_name_equal(names[index], atom, &work, work_limit, metered)
+                    return false if not equal.complete
+                    value <- coefficients[index] if equal.equal and index < coefficients.count
                     index <- index + 1
                 rows.coefficients.push(value)
             rows.constants.push(constant)
             return true
 
         # `left_weight * left + right_weight * right`, reduced by the gcd of every entry.
-        def proof_linear_combine(rows: ProofLinearRows&, left: usize, left_weight: i64, right: usize, right_weight: i64, atoms: usize, slots: usize, output: mutable ProofLinearRows&) -> bool:
+        def proof_linear_combine(rows: ProofLinearRows&, left: usize, left_weight: i64, right: usize, right_weight: i64, atoms: usize, slots: usize, output: mutable ProofLinearRows&, work: mutable usize&, work_limit: usize, metered: bool) -> bool:
             entries: mutable darray[i64] = []
-            for position in 0..<(atoms + 1 + slots) |position, rows, left, left_weight, right, right_weight, atoms, slots, entries|:
+            for position in 0..<(atoms + 1 + slots) |position, rows, left, left_weight, right, right_weight, atoms, slots, entries, work, work_limit, metered|:
+                return false if metered and not proof_linear_search_take_work(&work, work_limit, 1)
                 first: mutable i64 = 0
                 second: mutable i64 = 0
                 if position < atoms:
@@ -59,15 +91,19 @@ extend ElisaProof:
                 return false if not sum.known
                 entries.push(sum.value)
             divisor: mutable i64 = 0
-            for position in 0..<entries.count |position, entries, divisor, atoms|:
+            for position in 0..<entries.count |position, entries, divisor, atoms, work, work_limit, metered|:
+                return false if metered and not proof_linear_search_take_work(&work, work_limit, 1)
                 entry: i64 = entries[position]
-                divisor <- proof_linear_gcd(divisor, entry)
+                gcd: (complete: bool, divisor: i64) = proof_linear_gcd_with_work(divisor, entry, &work, work_limit, metered)
+                return false if not gcd.complete
+                divisor <- gcd.divisor
                 # Coefficients and the constant may be MIN_I64, whose absolute value is not
                 # representable. Finish scanning them; only the non-negative provenance suffix
                 # is safe to skip after the divisor reaches one.
                 break if divisor == 1 and position >= atoms
             divisor <- 1 if divisor == 0
-            for position in 0..<entries.count |position, entries, atoms, divisor, output|:
+            for position in 0..<entries.count |position, entries, atoms, divisor, output, work, work_limit, metered|:
+                return false if metered and not proof_linear_search_take_work(&work, work_limit, 1)
                 value: i64 = entries[position] / divisor
                 if position < atoms:
                     output.coefficients.push(value)
@@ -94,46 +130,123 @@ extend ElisaProof:
                 return (true, row) if zero
             return (false, 0)
 
-        def proof_linear_eliminate(rows: ProofLinearRows&, atom: usize, atoms: usize, slots: usize, output: mutable ProofLinearRows&) -> bool:
+        def proof_linear_eliminate(rows: ProofLinearRows&, atom: usize, atoms: usize, slots: usize, output: mutable ProofLinearRows&, work: mutable usize&, work_limit: usize, metered: bool) -> bool:
             count: usize = rows.constants.count
-            for row in 0..<count |row, rows, atom, atoms, slots, output|:
-                proof_linear_copy_row(rows, row, atoms, slots, output) if rows.coefficients[row * atoms + atom] == 0
-            for upper in 0..<count |upper, rows, atom, atoms, slots, output, count|:
+            for row in 0..<count |row, rows, atom, atoms, slots, output, work, work_limit, metered|:
+                return false if metered and not proof_linear_search_take_work(&work, work_limit, 1)
+                if rows.coefficients[row * atoms + atom] == 0:
+                    return false if output.constants.count >= ProofLinearCertificateLimit::ROWS
+                    return false if metered and not proof_linear_search_take_work(&work, work_limit, atoms + slots + 1)
+                    proof_linear_copy_row(rows, row, atoms, slots, output)
+            for upper in 0..<count |upper, rows, atom, atoms, slots, output, count, work, work_limit, metered|:
+                return false if metered and not proof_linear_search_take_work(&work, work_limit, 1)
                 upper_value: i64 = rows.coefficients[upper * atoms + atom]
                 continue if upper_value <= 0
-                for lower in 0..<count |lower, upper, upper_value, rows, atom, atoms, slots, output|:
+                for lower in 0..<count |lower, upper, upper_value, rows, atom, atoms, slots, output, work, work_limit, metered|:
+                    return false if metered and not proof_linear_search_take_work(&work, work_limit, 1)
                     lower_value: i64 = rows.coefficients[lower * atoms + atom]
                     continue if lower_value >= 0
                     return false if:
                         lower_value == proof_i64_min()
                         output.constants.count >= ProofLinearCertificateLimit::ROWS
-                        not proof_linear_combine(rows, upper, 0 - lower_value, lower, upper_value, atoms, slots, output)
+                        not proof_linear_combine(rows, upper, 0 - lower_value, lower, upper_value, atoms, slots, output, &work, work_limit, metered)
             return true
 
         # The names a fact mentions, or false when it is not a linear constraint.
+        def proof_linear_fact_names_with_witnesses(fact: Ast::Expr, negate: bool, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, names: mutable darray[sview]&) -> bool:
+            coefficients: mutable darray[i64] = []
+            constant: mutable i64 = 0
+            return proof_linear_constraint_add_with_witnesses(fact, 1, negate, facts, markers, names, &coefficients, &constant)
+
+        def proof_linear_fact_names_with_search_work(fact: Ast::Expr, negate: bool, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, names: mutable darray[sview]&, work: mutable usize&, work_limit: usize, metered: bool) -> bool:
+            coefficients: mutable darray[i64] = []
+            constant: mutable i64 = 0
+            return proof_linear_constraint_add_with_search_work(fact, 1, negate, facts, markers, names, &coefficients, &constant, &work, work_limit, metered)
+
+        # Compatibility entrypoint used by linear hints with their own source-work preflight.
+        # Keep its historical reader rather than imposing the certificate search's smaller
+        # per-index safety ceiling on those callers.
         def proof_linear_fact_names(fact: Ast::Expr, negate: bool, facts: darray[Ast::Expr]&, names: mutable darray[sview]&) -> bool:
             coefficients: mutable darray[i64] = []
             constant: mutable i64 = 0
             return proof_linear_constraint_add(fact, 1, negate, facts, names, &coefficients, &constant)
 
+        # Charge the one-time source-shape scan before search. Index construction, primitive
+        # marker comparisons, width lookups, premise comparisons, and row alignment all debit
+        # their actual bounded work to the shared meter during the search.
+        def proof_linear_certificate_search_reserve_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, work: mutable usize&) -> bool:
+            scan_work: mutable usize = 0
+            goal_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(goal, &goal_cost, scan_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                return false
+            if not proof_goal_tactic_preflight_charge(&scan_work, goal_cost):
+                work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                return false
+            for fact in facts |fact, scan_work|:
+                fact_cost: mutable usize = 0
+                if not proof_replay_summary_expr_cost_with_limit(fact, &fact_cost, scan_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                    work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                    return false
+                if not proof_goal_tactic_preflight_charge(&scan_work, fact_cost):
+                    work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                    return false
+            if not proof_goal_tactic_preflight_charge(&work, scan_work):
+                work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                return false
+            true
+
         # Pick premises relevant to the goal's names: each must share a name with the atoms
         # gathered so far and may bring new ones while the atom budget lasts.
-        def proof_linear_select_premises(facts: darray[Ast::Expr]&, atoms: mutable darray[sview]&, premises: mutable darray[Ast::Expr]&) -> void:
-            for round in 0..<2 |round, facts, atoms, premises|:
-                for fact in facts |fact, facts, atoms, premises|:
-                    return if premises.count >= ProofLinearCertificateLimit::PREMISES
+        def proof_linear_select_premises(facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, atoms: mutable darray[sview]&, premises: mutable darray[Ast::Expr]&, work: mutable usize&, work_limit: usize, metered: bool) -> bool:
+            round: mutable usize = 0
+            while round < ProofLinearCertificateLimit::ATOMS + 1 |round, facts, markers, atoms, premises, work, work_limit, metered|:
+                atoms_before_round: usize = atoms.count
+                for fact in facts |fact, facts, markers, atoms, premises, work, work_limit, metered|:
+                    return false if metered and not proof_linear_search_take_work(&work, work_limit, 1)
+                    return true if premises.count >= ProofLinearCertificateLimit::PREMISES
                     continue if proof_linear_certificate_marker(fact)
-                    continue if any chosen in premises where proof_expr_equal(chosen, fact)
+                    duplicate: mutable bool = false
+                    for chosen in premises |chosen, fact, duplicate, premises, work, work_limit, metered|:
+                        equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(chosen, fact, &work, work_limit, metered)
+                        return false if not equal.complete
+                        if equal.matches:
+                            duplicate <- true
+                            break
+                    continue if duplicate
                     names: mutable darray[sview] = []
-                    continue if not proof_linear_fact_names(fact, false, facts, &names)
-                    continue if not any name in names where any atom in atoms where atom == name
-                    fresh: mutable usize = 0
-                    for name in names |name, atoms, fresh|:
-                        fresh <- fresh + 1 if not any atom in atoms where atom == name
-                    continue if atoms.count + fresh > ProofLinearCertificateLimit::ATOMS
-                    for name in names |name, atoms|:
-                        atoms.push(name) if not any atom in atoms where atom == name
+                    parsed: bool = proof_linear_fact_names_with_search_work(fact, false, facts, markers, &names, &work, work_limit, metered)
+                    return false if metered and not parsed and work >= work_limit
+                    continue if not parsed
+                    shares_atom: mutable bool = false
+                    for name in names |name, atoms, shares_atom, work, work_limit, metered|:
+                        match: (complete: bool, found: bool) = proof_linear_search_name_in(name, atoms, &work, work_limit, metered)
+                        return false if not match.complete
+                        if match.found:
+                            shares_atom <- true
+                            break
+                    continue if not shares_atom
+                    return false if atoms.count > ProofLinearCertificateLimit::ATOMS
+                    fresh_names: mutable darray[sview] = []
+                    exceeds_atom_budget: mutable bool = false
+                    remaining_atoms: usize = ProofLinearCertificateLimit::ATOMS - atoms.count
+                    for name in names |name, atoms, fresh_names, exceeds_atom_budget, remaining_atoms, work, work_limit, metered|:
+                        present: (complete: bool, found: bool) = proof_linear_search_name_in(name, atoms, &work, work_limit, metered)
+                        return false if not present.complete
+                        if not present.found:
+                            return false if metered and not proof_linear_search_take_work(&work, work_limit, 1)
+                            fresh_names.push(name)
+                            if fresh_names.count > remaining_atoms:
+                                exceeds_atom_budget <- true
+                                break
+                    continue if exceeds_atom_budget
+                    for name in fresh_names |name, atoms, work, work_limit, metered|:
+                        return false if metered and not proof_linear_search_take_work(&work, work_limit, 1)
+                        atoms.push(name)
                     premises.push(fact)
+                return true if atoms.count == atoms_before_round
+                round <- round + 1
+            true
 
         def proof_linear_multiplier_expr(value: i64, position: Ast::Pos) -> Ast::Expr:
             return Ast::Expr.IntLit(value, position) if value >= 0
@@ -141,47 +254,66 @@ extend ElisaProof:
 
         # Search for a certificate refuting the negation of `goal`. The returned marker is only a
         # proposal for the checker.
-        def proof_linear_certificate_search(facts: darray[Ast::Expr]&, goal: Ast::Expr, line: u32) -> (found: bool, certificate: Ast::Expr):
+        def proof_linear_certificate_search(facts: darray[Ast::Expr]&, goal: Ast::Expr, line: u32, work: mutable usize&, work_limit: usize, metered: bool) -> (found: bool, certificate: Ast::Expr):
             position: Ast::Pos = Ast::Pos{line: line, column: 0, offset: 0, end_line: line, end_column: 0, end_offset: 0}
             invalid: Ast::Expr = Ast::Expr.BoolLit(false, position)
             atoms: mutable darray[sview] = []
+            markers: mutable ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], name_unsigned_widths: [], signed_terms: [], signed_widths: [], element_terms: [], element_depths: [], element_widths: [], unsigned_terms: [], unsigned_widths: [], name_hashes: [], name_slots: [], sorted_name_indices: [], signed_hashes: [], signed_slots: [], unsigned_hashes: [], unsigned_slots: []}
+            if metered:
+                marker_start: (complete: bool, baseline: usize) = proof_linear_search_width_local_start(work, work_limit)
+                return (false, invalid) if not marker_start.complete
+                marker_work: mutable usize = marker_start.baseline
+                marker_exhausted: mutable bool = false
+                marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, &marker_work, &marker_exhausted)
+                if marker_exhausted:
+                    work <- work_limit
+                    return (false, invalid)
+                return (false, invalid) if not proof_linear_search_take_work(&work, work_limit, marker_work - marker_start.baseline)
+                return (false, invalid) if not marker_result.complete
+                markers <- marker_result.witnesses
+            else:
+                markers <- proof_scalar_witness_markers(facts)
             return (false, invalid) if:
-                not proof_linear_fact_names(goal, true, facts, &atoms)
+                not proof_linear_fact_names_with_search_work(goal, true, facts, markers, &atoms, &work, work_limit, metered)
                 atoms.count == 0 or atoms.count > ProofLinearCertificateLimit::ATOMS
             premises: mutable darray[Ast::Expr] = []
-            proof_linear_select_premises(facts, &atoms, &premises)
+            return (false, invalid) if not proof_linear_select_premises(facts, markers, &atoms, &premises, &work, work_limit, metered)
             return (false, invalid) if premises.count == 0
             # Slots: the goal, then each premise, then a reverse slot for each equality.
             slot_premise: mutable darray[usize] = [0]
             slot_sign: mutable darray[i64] = [1]
             rows: mutable ProofLinearRows = ProofLinearRows{coefficients: [], constants: [], provenance: []}
-            return (false, invalid) if not proof_linear_row(goal, 1, true, facts, atoms, &rows)
-            for index in 0..<premises.count |index, premises, facts, atoms, rows, slot_premise, slot_sign|:
-                if proof_linear_row(premises[index], 1, false, facts, atoms, &rows):
+            return (false, invalid) if not proof_linear_search_row(goal, 1, true, facts, markers, atoms, &rows, &work, work_limit, metered)
+            for index in 0..<premises.count |index, premises, facts, markers, atoms, rows, slot_premise, slot_sign, work, work_limit, metered|:
+                if proof_linear_search_row(premises[index], 1, false, facts, markers, atoms, &rows, &work, work_limit, metered):
                     slot_premise.push(index + 1)
                     slot_sign.push(1)
-                    if proof_linear_row(premises[index], -1, false, facts, atoms, &rows):
+                    if proof_linear_search_row(premises[index], -1, false, facts, markers, atoms, &rows, &work, work_limit, metered):
                         slot_premise.push(index + 1)
                         slot_sign.push(-1)
             slots: usize = slot_premise.count
             return (false, invalid) if rows.constants.count != slots
+            return (false, invalid) if metered and not proof_linear_search_take_work(&work, work_limit, slots * slots)
             for row in 0..<slots |row, slots, rows|:
                 for slot in 0..<slots |slot, row, rows|:
                     rows.provenance.push(1 if slot == row else 0)
             atom: mutable usize = 0
-            while atom < atoms.count |atom, atoms, slots, rows|:
+            while atom < atoms.count |atom, atoms, slots, rows, work, work_limit, metered|:
+                return (false, invalid) if metered and not proof_linear_search_take_work(&work, work_limit, rows.constants.count * (atoms.count + 1))
                 break if proof_linear_contradiction(rows, atoms.count).found
                 next: mutable ProofLinearRows = ProofLinearRows{coefficients: [], constants: [], provenance: []}
-                return (false, invalid) if not proof_linear_eliminate(rows, atom, atoms.count, slots, &next)
+                return (false, invalid) if not proof_linear_eliminate(rows, atom, atoms.count, slots, &next, &work, work_limit, metered)
                 rows <- next
                 atom <- atom + 1
+            return (false, invalid) if metered and not proof_linear_search_take_work(&work, work_limit, rows.constants.count * (atoms.count + 1))
             contradiction: (found: bool, row: usize) = proof_linear_contradiction(rows, atoms.count)
             return (false, invalid) if not contradiction.found
             base: usize = contradiction.row * slots
             goal_multiplier: i64 = rows.provenance[base]
             return (false, invalid) if goal_multiplier <= 0 or goal_multiplier > ProofLinearCertificateLimit::MULTIPLIER
             arguments: mutable darray[Ast::Expr] = [Ast::Expr.IntLit(goal_multiplier, position)]
-            for index in 0..<premises.count |index, premises, slots, slot_premise, slot_sign, rows, base, arguments, position|:
+            for index in 0..<premises.count |index, premises, slots, slot_premise, slot_sign, rows, base, arguments, position, work, work_limit, metered|:
+                return (false, invalid) if metered and not proof_linear_search_take_work(&work, work_limit, slots + 1)
                 multiplier: mutable i64 = 0
                 for slot in 1..<slots |slot, index, slot_premise, slot_sign, rows, base, multiplier|:
                     continue if slot_premise[slot] != index + 1

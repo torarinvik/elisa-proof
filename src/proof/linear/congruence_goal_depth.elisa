@@ -4,14 +4,14 @@ extend ElisaProof:
             if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT:
                 exhausted <- true
                 return false
-            # Disjunction introduction from the left must happen before inspecting a right-hand
-            # fixed-width term that is not evaluated once the left proposition is true. The left
-            # subgoal still enters its own source-dispatch and machine-range guards.
-            match proof_strip_parens(goal):
+            stripped_goal: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(goal, budget, exhausted)
+            if not stripped_goal.complete or exhausted:
+                exhausted <- true
+                return false
+            # Left introduction precedes inspecting the right term; each subgoal still enters both guards.
+            match stripped_goal.expression:
                 Ast::Expr.Binary(left, TokenKind.Or, _, _):
-                    # The source replay boundary currently rejects local-binding facts because it
-                    # cannot authenticate their reaching definitions. Do not let any disjunction
-                    # search path build a theorem certificate from that incomplete context.
+                    # Do not certify from local aliases: replay cannot authenticate their definitions yet.
                     call_alias_scan: (complete: bool, found: bool) = proof_disjunction_has_call_valued_local_alias(facts, budget, exhausted)
                     return false if:
                         not call_alias_scan.complete or exhausted
@@ -22,22 +22,19 @@ extend ElisaProof:
                         width_uniform: bool = proof_closed_formula_width_uniform_with_work(goal, budget, exhausted)
                         return false if exhausted
                         return true if width_uniform
-                    # A disjunction that is itself a fact, the branch condition `b == 32 or
-                    # b == 9 or ...` a join re-proves in its own arm, is closed by assumption
-                    # here, behind the same operator guard the assumption step below passes.
-                    # Recursing into the left alternative first ran a full failing case split
-                    # over that very fact at every nesting level of the chain. Taking the
-                    # assumption early returns only what the step below would return.
+                    # Close a fact-disjunction through the operator-guarded assumption path.
                     if disjunction_operator_safe:
                         for fact in facts |fact, budget, exhausted|:
                             contained: (complete: bool, contains: bool) = proof_disjunction_fact_contains_with_work(fact, goal, budget, exhausted, 0)
-                            return false if not contained.complete
+                            if not contained.complete or exhausted:
+                                exhausted <- true
+                                return false
                             return true if contained.contains
-                    # If the same conditional occurs under both alternatives, split once
-                    # around the whole disjunction before spending the proof budget on a
-                    # failing left branch. Each path then reduces one alternative to reflexivity.
+                    # Split a shared conditional once so each branch reduces to reflexivity.
                     nested_scan_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(goal, budget, exhausted)
-                    return false if not nested_scan_cost.complete or not proof_linear_safety_work_charge_scaled(budget, exhausted, nested_scan_cost.cost, 1)
+                    if not nested_scan_cost.complete or not proof_linear_safety_work_charge_scaled(budget, exhausted, nested_scan_cost.cost, 1):
+                        exhausted <- true
+                        return false
                     nested: (found: bool, value: Ast::Expr) = proof_first_nested_conditional(goal, 0, 0)
                     return false if exhausted
                     return true if nested.found and disjunction_operator_safe and (proof_nested_conditional_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
@@ -52,30 +49,29 @@ extend ElisaProof:
                         return true if premise_entails_goal
                     false_left: (applicable: bool, proven: bool) = (proof_disjunction_false_left_goal(facts, goal, annotations, operator_mask, disjunction_operator_safe, depth, budget, split_depth, exhausted) can Global{Read,Write})
                     return false_left.proven if false_left.applicable
-                    # Preserve correlations before a failing left-alternative search spends
-                    # fuel splitting this same premise. The kernel uses this order too.
+                    # Preserve correlations before a failing left-alternative split, as the kernel does.
                     if disjunction_operator_safe:
                         candidate: (known: bool, index: usize, left: Ast::Expr, right: Ast::Expr) = (proof_find_goal_relevant_disjunction(facts, goal, annotations, budget, exhausted) can Global{Read,Write})
                         return false if exhausted
                         exhausted <- true if candidate.known and split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
                         if candidate.known and split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
+                            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, 2)
                             left_facts: mutable darray[Ast::Expr] = []
                             right_facts: mutable darray[Ast::Expr] = []
                             for index in 0..<facts.count |index, facts, left_facts, right_facts, candidate|:
+                                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
                                 continue if index == candidate.index
                                 left_facts.push(facts[index])
                                 right_facts.push(facts[index])
+                            return false if not proof_linear_safety_work_charge(budget, exhausted, 2)
                             left_facts.push(candidate.left)
                             right_facts.push(candidate.right)
                             return true if (proof_goal_depth(left_facts, goal, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write}) and (proof_goal_depth(right_facts, goal, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})
                     return true if (proof_goal_depth(facts, left, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write})
                 _:
                     pass
-            # A direct comparison against an exact primitive equality premise is independent
-            # of unrelated path facts. Guard the goal operator itself, and let the narrow rule
-            # validate the exact equality/term witnesses it consumes; do not let an unrelated
-            # imported operator elsewhere in the frame suppress this local proof.
-            match proof_strip_parens(goal):
+            # This comparison needs its exact primitive equality, not unrelated path facts.
+            match stripped_goal.expression:
                 Ast::Expr.Binary(left, operator, right, _):
                     if proof_is_comparison(operator):
                         goal_overloaded: bool = proof_source_expression_has_overloaded_operator_with_work(goal, operator_mask, budget, exhausted)
@@ -86,52 +82,55 @@ extend ElisaProof:
                             return true if equality_literal_proof
                 _:
                     pass
-            # Reject overloaded operators before arithmetic conversion rules.
             arithmetic_guard_safe: bool = proof_source_arithmetic_operator_guard_with_work(goal, facts, operator_mask, budget, exhausted)
             return false if exhausted or not arithmetic_guard_safe
-            return true if proof_signed_scaled_quotient_sum_goal(facts, goal)
-            # A Boolean call may be the surviving alternative of a verified
-            # summary. Eliminate only explicitly refuted siblings, without
-            # spending case-split fuel on unrelated selector summaries.
-            match proof_strip_parens(goal):
+            scaled_quotient: (complete: bool, proven: bool) = proof_signed_scaled_quotient_sum_goal_with_work(facts, goal, budget, exhausted)
+            if not scaled_quotient.complete or exhausted:
+                exhausted <- true
+                return false
+            return true if scaled_quotient.proven
+            match stripped_goal.expression:
                 Ast::Expr.Call(_, _, _, _):
                     premise_entails_goal: bool = (proof_disjunction_premise_entails_goal(goal, facts, annotations, budget, exhausted) can Global{Read,Write})
                     return false if exhausted
                     return true if premise_entails_goal
                 _:
                     pass
-            return true if proof_logical_join_identity(facts, goal)
-            widening: (known: bool, goal: Ast::Expr) = proof_unsigned_widening_comparison(goal, facts)
-            if widening.known:
-                return (proof_goal_depth(facts, widening.goal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write})
-            return true if:
-                proof_signed_disequality_from_equality_fact(goal, facts)
-                proof_signed_distinct_disequality_disjunction(goal, facts)
-                proof_unsigned_disequality_from_equality_fact(goal, facts)
-                proof_unsigned_distinct_disequality_disjunction(goal, facts)
-                proof_unsigned_nonzero_lower_bound(goal, facts)
-                (proof_negated_boolean_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-            match proof_strip_parens(goal):
+            logical_join: (complete: bool, identity: bool) = proof_logical_join_identity_with_work(facts, goal, budget, exhausted)
+            if not logical_join.complete or exhausted:
+                exhausted <- true
+                return false
+            return true if logical_join.identity
+            nonzero_bound: (complete: bool, proven: bool) = proof_unsigned_nonzero_lower_bound_with_work(goal, facts, budget, exhausted)
+            if not nonzero_bound.complete or exhausted:
+                exhausted <- true
+                return false
+            return true if nonzero_bound.proven
+            disequality_shortcut: (complete: bool, proven: bool) = proof_scalar_disequality_goal_with_work(goal, facts, budget, exhausted)
+            if not disequality_shortcut.complete or exhausted:
+                exhausted <- true
+                return false
+            return true if disequality_shortcut.proven
+            return true if (proof_negated_boolean_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
+            match stripped_goal.expression:
                 Ast::Expr.BoolLit(value, _):
                     return true if value
                 _:
                     pass
-            return true if proof_closed_signed_literal_comparison(goal)
+            closed_signed_literal: bool = proof_closed_signed_literal_comparison_with_work(stripped_goal.expression, budget, exhausted)
+            return false if exhausted
+            return true if closed_signed_literal
             typed_constant_comparison: bool = (proof_closed_typed_constant_comparison(goal, annotations, budget, exhausted) can Global{Read,Write})
             return false if exhausted
-            return true if:
-                typed_constant_comparison
-                proof_closed_literal_comparison(goal)
-            # An explicitly asserted proposition is accepted before trying the arithmetic
-            # fragment. This matters for one-sided facts such as `x >= 0`: the fact itself is
-            # valid even though it is not enough to construct a finite interval for `x`.
+            return true if typed_constant_comparison
+            closed_literal_comparison: bool = proof_closed_literal_comparison_with_work(stripped_goal.expression, budget, exhausted)
+            return false if exhausted
+            return true if closed_literal_comparison
+            # Exact assertions close before arithmetic, including one-sided facts with no finite interval.
             exact_fact: bool = proof_goal_explicit_fact_with_work(facts, goal, annotations, budget, exhausted)
             return false if exhausted
             return true if exact_fact
-            # The exact unsigned quotient bound is cheap when its divisor precondition is already
-            # a fact. Try it before recursive symbolic/quantifier search can consume the shared
-            # case-split budget. The kernel checks the same theorem immediately after exact-fact
-            # closure in `proof_kernel_replay_goal_depth_remaining`.
+            # Try the exact unsigned quotient bound before recursive symbolic search.
             return true if:
                 (proof_unsigned_quotient_upper_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
                 (proof_symbolic_instance_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
@@ -141,70 +140,83 @@ extend ElisaProof:
                 (proof_finite_universal_premise_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
                 (proof_goal_with_strict_order_consequence(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
                 (proof_predicate_equality_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-                # Index AST nodes can also encode protocol-overloaded selection. This
-                # producer has no resolved receiver-type witness, so it cannot transport
-                # equality through a read soundly; keep reads opaque until that evidence is
-                # part of the producer/kernel certificate interface.
-            # The broader signed remainder/quotient interval rule may need recursive side goals,
-            # so retain it after the cheaper symbolic consequences above.
+                # Keep index reads opaque: this producer lacks the receiver-type witness needed
+                # to transport equality soundly through protocol-overloaded selection.
+            # Keep recursive signed remainder/quotient intervals after cheaper symbolic rules.
             return true if:
                 (proof_unsigned_quotient_window_bound_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
                 (proof_exact_division_reconstruction_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
                 (proof_division_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
                 (proof_negated_name_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-            # A comparison of full-width unsigned literals is decided by their recorded type, never
-            # by their wrapped i64 payloads; untyped comparisons stay with the tiers below.
+            # Full-width unsigned literals use their recorded type, not wrapped i64 payloads.
             return true if proof_typed_constant_comparison(goal, annotations)
-            # A negated primitive comparison and its complement are propositionally equivalent
-            # even when an operand contains fixed-width arithmetic whose integer range is
-            # intentionally unknown. This consumes no arithmetic interpretation: both sides
-            # compare the same evaluated terms with complementary operators. Keep the source
-            # operator and primitive-type guards above, then let the independent kernel replay
-            # this exact-complement step before its own unsigned-wrap guard.
+            # Complementary primitive comparisons need no arithmetic interpretation, even for
+            # fixed-width operands with unknown ranges; the kernel replays this after source guards.
             match goal:
-                Ast::Expr.Binary(left, operator, right, _):
-                    return true if operator == TokenKind.BangEq and proof_strict_order_fact_implies_disequality(goal, facts)
-                    # Typed nullable-field substitution can leave two reserved null literals.
-                    # This exact identity grants no equality of arbitrary reference values.
-                    return true if operator == TokenKind.EqEq and proof_ident_name(proof_strip_parens(left)) == "null" and proof_ident_name(proof_strip_parens(right)) == "null"
-                    # Source proposition formation admits null equality only for nullable
-                    # references. Its complement is Boolean logic, with no numeric pointer
-                    # interpretation; consume the same operands from the negated premise.
-                    null_equality: bool = (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and (proof_ident_name(proof_strip_parens(left)) == "null" or proof_ident_name(proof_strip_parens(right)) == "null")
-                    if proof_is_comparison(operator) and (proof_primitive_comparison(left, right, facts) or null_equality):
-                        return true if proof_fact_proves_comparison_negation(left, operator, right, facts)
+                Ast::Expr.Binary(_, operator, _, _):
+                    return true if operator == TokenKind.BangEq and proof_goal_strict_order_disequality_with_work(goal, facts, budget, exhausted)
+                    return false if exhausted
+                    return true if proof_goal_comparison_negation_closure_with_work(goal, facts, budget, exhausted)
+                    return false if exhausted
                 _:
                     pass
-            # Do not let the unbounded signed interval/model tiers prove a fixed-width unsigned
-            # expression unless every arithmetic subterm is shown to remain in its declared
-            # range. Directly asserted facts were handled above and remain valid path assumptions.
+            unsigned_identity: (complete: bool, proven: bool) = proof_unsigned_goal_identity_with_work(goal, facts, budget, exhausted)
+            if not unsigned_identity.complete or exhausted:
+                exhausted <- true
+                return false
+            return true if unsigned_identity.proven
+            pinned_unsigned: bool = (proof_unsigned_pinned_goal_with_work(facts, goal, annotations, operator_mask, depth, split_depth, budget, exhausted) can Global{Read,Write})
+            return true if pinned_unsigned
+            return false if exhausted
             return true if:
-                proof_unsigned_goal_identity(goal, facts)
                 (proof_comparison_boolean_equation_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-                proof_unsigned_pinned_comparison(facts, goal, annotations) or (proof_unsigned_pinned_premise_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
                 (proof_subtraction_alias_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-            # A validated same-width subtraction witness can establish that a sum is in range;
-            # consult it before the generic wrap guard rejects the sum under proof.
-            return true if:
-                proof_unsigned_sum_upper_shape(facts, goal) or proof_unsigned_strict_progress_shape(facts, goal) or proof_unsigned_literal_progress(facts, goal, annotations) or proof_unsigned_maximum_equality(facts, goal, annotations)
-                proof_unsigned_unit_increment_order_shape(facts, goal)
-                proof_unsigned_scaled_product_upper_shape(facts, goal) or proof_signed_product_growth(facts, goal)
-                proof_unsigned_scaled_child_quotient_shape(facts, goal, annotations)
+            return false if exhausted
+            scaled_child_quotient: (complete: bool, proven: bool) = proof_unsigned_scaled_child_quotient_shape_with_work(facts, goal, annotations, budget, exhausted)
+            exhausted <- true if not scaled_child_quotient.complete
+            return false if exhausted
+            return true if scaled_child_quotient.proven
+            # Reserve a checked bound for remaining legacy range scans.
+            legacy_unsigned_shapes: (complete: bool, proven: bool) = proof_unsigned_legacy_goal_shapes_with_work(goal, facts, annotations, budget, exhausted)
+            exhausted <- true if not legacy_unsigned_shapes.complete or exhausted
+            return false if exhausted
+            return true if legacy_unsigned_shapes.proven
+            scaled_product_upper: (complete: bool, proven: bool) = proof_unsigned_scaled_product_upper_shape_with_work(facts, goal, budget, exhausted)
+            exhausted <- true if not scaled_product_upper.complete
+            return false if exhausted
+            return true if scaled_product_upper.proven
+            signed_growth: (complete: bool, proven: bool) = proof_signed_product_growth_with_work(goal, facts, budget, exhausted)
+            exhausted <- true if not signed_growth.complete
+            return false if exhausted
+            return true if signed_growth.proven
             monotone_order_proved: bool = (proof_monotone_order_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
             return true if monotone_order_proved
             return false if exhausted
-            return true if:
-                (proof_unsigned_conditional_alias_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-                proof_facts_propositionally_inconsistent(facts) or (proof_conditional_comparison_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-            # Disjunctive syllogism consumes no case split: retain the surviving
-            # subexpression, with fewer connective nodes and unchanged fact count.
+            unsigned_conditional_alias: bool = (proof_unsigned_conditional_alias_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
+            return true if unsigned_conditional_alias
+            return false if exhausted
+            early_propositional: (complete: bool, inconsistent: bool) = proof_linear_facts_propositionally_inconsistent_with_work(facts, budget, exhausted)
+            if not early_propositional.complete or exhausted:
+                exhausted <- true
+                return false
+            return true if early_propositional.inconsistent
+            if split_depth > 0:
+                early_order_complement: (complete: bool, complementary: bool) = proof_linear_facts_order_complementary_with_work(facts, budget, exhausted)
+                if not early_order_complement.complete or exhausted:
+                    exhausted <- true
+                    return false
+                return true if early_order_complement.complementary
+            return true if (proof_conditional_comparison_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
+            # Disjunctive syllogism needs no split and retains fewer connective nodes.
             for index in 0..<facts.count |index, facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted|:
                 fact_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(facts[index], budget, exhausted)
                 return false if:
                     not fact_cost.complete
                     not proof_linear_safety_work_charge_scaled(budget, exhausted, fact_cost.cost, 2)
                 candidate: (complete: bool, known: bool, left: Ast::Expr, right: Ast::Expr) = proof_disjunction_find_with_work(facts[index], budget, exhausted, 0)
-                return false if not candidate.complete
+                if not candidate.complete or exhausted:
+                    exhausted <- true
+                    return false
                 continue if not candidate.known
                 left_refuted: bool = (proof_disjunct_refuted(candidate.left, facts, annotations, budget, exhausted, 0) can Global{Read,Write})
                 return false if exhausted
@@ -232,6 +244,7 @@ extend ElisaProof:
                     if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
                         exhausted <- true
                         return false
+                    return false if not proof_linear_safety_work_charge(budget, exhausted, facts.count)
                     denied_facts: mutable darray[Ast::Expr] = []
                     denied_facts.extend(facts)
                     if not proof_push_disjunction_denial(left, &denied_facts, facts.count + PROOF_DISJUNCTION_DENIAL_FACT_LIMIT, 0, budget, exhausted):
@@ -240,27 +253,33 @@ extend ElisaProof:
                     return (proof_goal_depth(denied_facts, right, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})
                 _:
                     pass
-            # Propositional inconsistency first. It reads no term as a number, so no wrapping
-            # premise can mislead it, and a contradictory branch must be able to close before the
-            # guard below asks its facts to be range-safe -- the branch a disjunctive premise
-            # refutes often cannot answer that, and does not have to.
-            return true if:
-                proof_facts_propositionally_inconsistent(facts)
-                split_depth > 0 and proof_facts_order_complementary(facts)
             pruned_facts: mutable darray[Ast::Expr] = []
-            return (proof_goal_depth(pruned_facts, goal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write}) if proof_disjunct_prune_facts(facts, &pruned_facts)
+            disjunct_prune: (complete: bool, changed: bool) = proof_disjunct_prune_facts_with_work(facts, &pruned_facts, budget, exhausted)
+            if not disjunct_prune.complete or exhausted:
+                exhausted <- true
+                return false
+            if disjunct_prune.complete and disjunct_prune.changed:
+                return (proof_goal_depth(pruned_facts, goal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write})
             # Alternatives the linear tier refutes from the other facts are removed before a
             # split opens them; a disjunction left with none closes the goal.
             linear_pruned: mutable darray[Ast::Expr] = []
-            linear_prune: i64 = proof_linear_prune_facts(facts, &linear_pruned)
-            return true if linear_prune == 2
-            return (proof_goal_depth(linear_pruned, goal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write}) if linear_prune == 1
+            linear_prune: (complete: bool, truth: i64) = proof_linear_prune_facts_with_work(facts, &linear_pruned, budget, exhausted)
+            if not linear_prune.complete or exhausted:
+                exhausted <- true
+                return false
+            if linear_prune.complete:
+                return true if linear_prune.truth == 2
+                return (proof_goal_depth(linear_pruned, goal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write}) if linear_prune.truth == 1
             # A disjunctive premise over call results, `f(x) - x <= c or ...`, is opaque to the
             # linear pruning above, which reads identifiers only, so every split would open it
             # blind. Generalizing the witnessed places first, once at the top of a goal, lets the
             # pruning read them; a failed attempt falls through to the ordinary split. Kernel
             # mirror in `proof_kernel_replay_goal_depth_remaining`.
-            if split_depth == 0 and proof_facts_have_disjunction(facts) and proof_comparison_goal_shape(goal):
+            disjunction_scan: (complete: bool, found: bool) = proof_facts_have_disjunction_with_work(facts, budget, exhausted)
+            if not disjunction_scan.complete or exhausted:
+                exhausted <- true
+                return false
+            if split_depth == 0 and disjunction_scan.found and proof_comparison_goal_shape(goal):
                 return true if (proof_field_place_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
             selected: (known: bool, index: usize, left: Ast::Expr, right: Ast::Expr) = (proof_find_goal_relevant_disjunction(facts, goal, annotations, budget, exhausted) can Global{Read,Write})
             return false if exhausted
@@ -271,42 +290,26 @@ extend ElisaProof:
             # not unprovable: the remaining tiers run without it, and a failure is a timeout.
             exhausted <- true if disjunction_index < facts.count and split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
             if disjunction_index < facts.count and split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
-                left_facts: mutable darray[Ast::Expr] = []
-                right_facts: mutable darray[Ast::Expr] = []
-                for index in 0..<facts.count |index, facts, left_facts, right_facts, disjunction_index|:
-                    continue if index == disjunction_index
-                    left_facts.push(facts[index])
-                    right_facts.push(facts[index])
-                # Modus ponens: an alternative the other facts refute is dropped and the survivor
-                # is assumed outright, so `a != b or result == b` at a call with `a` and `b` the
-                # same value yields `result == b` without a split that must close both sides.
-                # Once an alternative is refuted the split's surviving branch is the same search,
-                # so the modus-ponens answer is final either way. It runs at the outermost split
-                # only: two refutation searches at every nested level multiply the whole search.
-                for side in 0..<(2 if split_depth == 0 else 0) |side, left_facts, disjunction_left, disjunction_right, goal, annotations, operator_mask, depth, budget, split_depth, exhausted|:
-                    refuted: Ast::Expr = disjunction_left if side == 0 else disjunction_right
-                    survivor: Ast::Expr = disjunction_right if side == 0 else disjunction_left
-                    step: (refuted: bool, proven: bool) = (proof_disjunct_modus_ponens(left_facts, refuted, survivor, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-                    return step.proven if step.refuted
-                left_facts.push(disjunction_left)
-                right_facts.push(disjunction_right)
-                return (proof_goal_depth(left_facts, goal, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write}) and (proof_goal_depth(right_facts, goal, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})
-            # Nonnegativity is decided before the wrap guards below. It is the one claim that
-            # holds under both readings of a fixed-width term -- an unsigned machine value is
-            # nonnegative, and so is a subtraction-free combination of nonnegative leaves -- and
-            # it consumes no premise: only the type markers, which state declared types rather
-            # than values. Behind the guards it was unreachable, because a guard written over the
-            # same sum leaves a premise the guard itself refuses.
-            return true if:
-                proof_unsigned_nonnegative_shape(facts, goal)
-                proof_unsigned_span_descent(facts, goal)
-                proof_unsigned_subtraction_upper_shape(facts, goal) or proof_unsigned_span_cursor_bound(facts, goal)
+                split: (complete: bool, handled: bool, proven: bool) = proof_goal_relevant_disjunction_split_with_work(facts, disjunction_index, disjunction_left, disjunction_right, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                if not split.complete or exhausted:
+                    exhausted <- true
+                    return false
+                return split.proven if split.handled
+                return true if split.proven
+            span_descent: (complete: bool, proven: bool) = proof_unsigned_span_descent_with_work(goal, facts, budget, exhausted)
+            exhausted <- true if not span_descent.complete
+            return false if exhausted
+            return true if span_descent.proven
+            return true if proof_unsigned_span_cursor_fallback_with_work(facts, goal, budget, exhausted)
+            return false if exhausted
             # Equality congruence is valid for deterministic fixed-width operators even when an
             # intermediate wraps; it does not reinterpret signed operations as unbounded integers.
             match goal:
                 Ast::Expr.Binary(_, TokenKind.EqEq, _, _):
                     width_check: (complete: bool, free: bool) = proof_goal_unsigned_widths_free_with_work(goal, facts, budget, exhausted)
-                    return false if not width_check.complete or exhausted
+                    if not width_check.complete or exhausted:
+                        exhausted <- true
+                        return false
                     unsigned_free: bool = width_check.free
                     if unsigned_free:
                         equality_arithmetic_guard_safe: bool = proof_source_arithmetic_operator_guard_with_work(goal, facts, operator_mask, budget, exhausted)
@@ -317,31 +320,26 @@ extend ElisaProof:
                     pass
             safe_constant_comparison: bool = proof_disjunction_closed_safe_constant_comparison_in_with_work(goal, facts, budget, exhausted)
             return false if exhausted
-            return true if:
-                safe_constant_comparison
-                proof_closed_signed_i64_comparison(goal, facts)
-            # Signed decision procedures consume premises as well as the goal.
-            # A true wrapping premise may be false over integers; treating it as
-            # such can discard every actual execution and prove an arbitrary goal.
-            # Each branch of a split above re-enters here, so every premise a tier
-            # below actually consumes has passed this guard in its own branch. A
-            # quantifier is a block, which the guard cannot read; its range bounds
-            # are guarded where they are evaluated and every instance re-enters here.
-            # A quantified fact is likewise skipped: no tier below reads it as a number
-            # (it closes a goal only by exact match, above), and an instance a tactic
-            # derives from it re-enters this guard as an ordinary fact.
-            # A closed goal true at every width holds even when each disjunct alone is
-            # width-dependent, `(0 - 1) < 0 or (0 - 1) >= 22`. A false one may still close
-            # from inconsistent premises below.
+            return true if safe_constant_comparison
+            signed_i64_comparison: (complete: bool, proven: bool) = proof_closed_signed_i64_comparison_with_work(goal, facts, budget, exhausted)
+            return false if not signed_i64_comparison.complete or exhausted
+            return true if signed_i64_comparison.proven
+            # Signed arithmetic consumes premises as well as the goal: treating a true
+            # wrapping premise as an integer fact can prove anything. Split branches and
+            # quantified instances re-enter this guard; quantified blocks are guarded at
+            # range evaluation and exact-match use. Width-uniform goals remain valid even
+            # when their disjuncts depend on width, e.g. `(0 - 1) < 0 or (0 - 1) >= 22`.
             width_uniform: bool = proof_closed_formula_width_uniform_with_work(goal, budget, exhausted)
             return false if exhausted
             return true if width_uniform
             if quantifier_kind == "":
                 ambiguous_goal: (complete: bool, ambiguous: bool) = proof_goal_ambiguous_integer_constant_with_work(goal, facts, budget, exhausted)
-                return false if not ambiguous_goal.complete or exhausted or ambiguous_goal.ambiguous
-            # An ambiguous premise is dropped rather than refusing the goal: forgetting a fact
-            # only weakens the premises, so a module constant such as `NONE == -1` no longer
-            # blocks goals that never read it.
+                if not ambiguous_goal.complete or exhausted:
+                    exhausted <- true
+                    return false
+                return false if ambiguous_goal.ambiguous
+            # Drop ambiguous premises: forgetting a fact weakens premises, so an unrelated
+            # module constant such as `NONE == -1` cannot block this goal.
             admitted_facts: mutable darray[Ast::Expr] = []
             dropped_fact: mutable bool = false
             for fact in facts |fact, annotations, admitted_facts, dropped_fact, budget, exhausted|:
@@ -351,7 +349,9 @@ extend ElisaProof:
                 return false if exhausted
                 if fact_quantifier_kind == "" and not proof_linear_certificate_marker(fact):
                     ambiguous_fact: (complete: bool, ambiguous: bool) = proof_goal_ambiguous_integer_constant_with_work(fact, facts, budget, exhausted)
-                    return false if not ambiguous_fact.complete or exhausted
+                    if not ambiguous_fact.complete or exhausted:
+                        exhausted <- true
+                        return false
                     dropped_fact <- true if ambiguous_fact.ambiguous
                     admitted_facts.push(fact) if not ambiguous_fact.ambiguous
                 else:
@@ -363,7 +363,8 @@ extend ElisaProof:
             kept_safe_facts: mutable darray[Ast::Expr] = []
             safety_bounds: mutable darray[ProofBound] = []
             signed_safety_bounds: mutable darray[ProofBound] = []
-            all_facts_safe: bool = proof_unsigned_safe_facts_with_context_work(facts, &kept_safe_facts, &safety_bounds, &signed_safety_bounds, budget, exhausted)
+            safety_markers: mutable ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], name_unsigned_widths: [], signed_terms: [], signed_widths: [], element_terms: [], element_depths: [], element_widths: [], unsigned_terms: [], unsigned_widths: [], name_hashes: [], name_slots: [], sorted_name_indices: [], signed_hashes: [], signed_slots: [], unsigned_hashes: [], unsigned_slots: []}
+            all_facts_safe: bool = proof_unsigned_safe_facts_with_context_and_markers_work(facts, &kept_safe_facts, &safety_bounds, &signed_safety_bounds, &safety_markers, budget, exhausted)
             return false if exhausted
             if not all_facts_safe:
                 # The generalization below takes one comparison. A conjunction is split first so
@@ -379,41 +380,56 @@ extend ElisaProof:
                 # Otherwise the premises the guard refuses are set aside: fewer premises
                 # only weaken the claim, and every tier below re-enters over the rest.
                 return (proof_goal_without_unsafe_premises(facts, kept_safe_facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-            return true if:
-                proof_facts_inconsistent(facts)
-                proof_linear_disequality_refuted(facts)
+            bounds_conflict: (complete: bool, conflict: bool) = proof_linear_bounds_conflict_with_work(safety_bounds, budget, exhausted)
+            if not bounds_conflict.complete or exhausted:
+                exhausted <- true
+                return false
+            return true if bounds_conflict.conflict
+            disequality_refutation: (complete: bool, refuted: bool) = proof_linear_disequality_refuted_with_work(facts, budget, exhausted)
+            if not disequality_refutation.complete or exhausted:
+                exhausted <- true
+                return false
+            return true if disequality_refutation.refuted
             # To prove primitive a != b, refute a == b with an existing linear
             # disequality premise. All consumed facts have passed the wrap guard.
-            match proof_strip_parens(goal):
-                Ast::Expr.Binary(left, TokenKind.BangEq, right, position):
-                    if proof_primitive_comparison(left, right, facts):
-                        disequality_goal_safe: bool = proof_unsigned_expression_safe_with_facts_work(goal, facts, budget, exhausted)
-                        return false if exhausted
-                        if disequality_goal_safe:
-                            denied: mutable darray[Ast::Expr] = []
-                            denied.extend(facts)
-                            denied.push(Ast::Expr.Binary(left, TokenKind.EqEq, right, position))
-                            return true if proof_linear_disequality_refuted(denied)
+            match stripped_goal.expression:
+                Ast::Expr.Binary(left, TokenKind.BangEq, right, _):
+                    disequality_goal_safe: bool = proof_unsigned_expression_safe_with_facts_work(goal, facts, budget, exhausted)
+                    return false if exhausted
+                    if disequality_goal_safe:
+                        goal_refutation: (complete: bool, refuted: bool) = proof_linear_disequality_goal_refuted_with_work(facts, left, right, budget, exhausted)
+                        if not goal_refutation.complete or exhausted:
+                            exhausted <- true
+                            return false
+                        return true if goal_refutation.refuted
                 _:
                     pass
-            return true if:
-                proof_fact_proves_call_summary(facts, goal)
-                (proof_goal_with_call_consequences(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-            goal_safe: bool = proof_unsigned_expression_safe_with_context_work(goal, facts, &safety_bounds, &signed_safety_bounds, budget, exhausted)
+            call_summary: (complete: bool, proves: bool) = proof_linear_fact_proves_call_summary_with_work(facts, goal, budget, exhausted)
+            if not call_summary.complete or exhausted:
+                exhausted <- true
+                return false
+            return true if call_summary.proves
+            call_consequences: (complete: bool, proves: bool) = (proof_goal_with_call_consequences_with_work(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
+            if not call_consequences.complete or exhausted:
+                exhausted <- true
+                return false
+            return true if call_consequences.proves
+            goal_safe: bool = proof_unsigned_expression_safe_with_context_and_markers_work(goal, facts, &safety_bounds, &signed_safety_bounds, safety_markers, budget, exhausted)
             return false if exhausted
             if not goal_safe:
-                # The goal's sum may be in range only through a field place, `start + 3` under
-                # `stop <= text.length`, which the guard cannot read. Generalizing the place
-                # re-enters every guard over fresh names. A conjunction is split first, as above.
+                # Field-place safety can depend on facts, so split conjunctions before generalizing.
                 match goal:
                     Ast::Expr.Binary(left, TokenKind.And, right, _):
                         return (proof_goal_depth(facts, left, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write}) and (proof_goal_depth(facts, right, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write})
                     _:
                         pass
                 return proof_comparison_goal_shape(goal) and ((proof_field_place_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write}) or (proof_nested_conditional_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write}))
-            return true if:
-                proof_linear_certificate_goal(facts, goal)
-                proof_bounded_model_goal(facts, goal, exhausted)
+            linear_certificate_closed: bool = proof_linear_certificate_goal(facts, goal, budget, exhausted)
+            return false if exhausted
+            return true if linear_certificate_closed
+            bounded_model_proves: bool = proof_bounded_model_goal(facts, goal, budget, exhausted)
+            return false if exhausted
+            return true if bounded_model_proves
             match goal:
                 Ast::Expr.BoolLit(value, _):
                     return value
@@ -425,7 +441,27 @@ extend ElisaProof:
                             return not value
                         Ast::Expr.Binary(left, operator, right, _):
                             negated_operator: TokenKind = proof_comparison_negation(operator)
-                            return proof_linear_goal(left, negated_operator, right, facts) if negated_operator != TokenKind.Eof
+                            if negated_operator != TokenKind.Eof:
+                                # Ordered complements do not characterize negation for
+                                # IEEE values: NaN makes both sides false. Permit the
+                                # arithmetic shortcut only when both terms are integers.
+                                complement_safe: mutable bool = true
+                                if proof_is_order_operator(operator):
+                                    left_integer: (complete: bool, integer: bool) = proof_disjunction_integer_term_with_work(left, facts, budget, exhausted)
+                                    if not left_integer.complete or exhausted:
+                                        exhausted <- true
+                                        return false
+                                    right_integer: (complete: bool, integer: bool) = proof_disjunction_integer_term_with_work(right, facts, budget, exhausted)
+                                    if not right_integer.complete or exhausted:
+                                        exhausted <- true
+                                        return false
+                                    complement_safe <- left_integer.integer and right_integer.integer
+                                if complement_safe:
+                                    negated_result: (complete: bool, proven: bool) = proof_linear_arithmetic_goal_from_facts_with_work(left, negated_operator, right, facts, budget, exhausted)
+                                    if not negated_result.complete or exhausted:
+                                        exhausted <- true
+                                        return false
+                                    return true if negated_result.proven
                         _:
                             pass
                 Ast::Expr.Binary(left, operator, right, position):
@@ -450,6 +486,8 @@ extend ElisaProof:
                         if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
                             exhausted <- true
                             return false
+                        return false if not proof_linear_safety_work_charge(budget, exhausted, facts.count)
+                        return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
                         negated_facts: mutable darray[Ast::Expr] = []
                         negated_facts.extend(facts)
                         negated_left: mutable Ast::Expr = Ast::Expr.Unary(TokenKind.Not, left, position)
@@ -461,20 +499,25 @@ extend ElisaProof:
                         negated_facts.push(negated_left)
                         return (proof_goal_depth(negated_facts, right, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})
                     if operator == TokenKind.FatArrow:
+                        return false if not proof_linear_safety_work_charge(budget, exhausted, facts.count)
+                        return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
                         implication_facts: mutable darray[Ast::Expr] = []
                         implication_facts.extend(facts)
                         implication_facts.push(left)
                         return (proof_goal_depth(implication_facts, right, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write})
-                    # Eliminate a conditional expression by checking both semantic branches.
-                    # The condition and its negation are path assumptions, not asserted facts;
-                    # both branches are required, so an opaque condition cannot manufacture a
-                    # proof. Bound the split with the same small case-splitting budget used for
-                    # disjunctive facts. A conditional the budget refuses to eliminate leaves the
-                    # goal undecided rather than unprovable.
-                    exhausted <- true if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT and (proof_expression_is_conditional(left) or proof_expression_is_conditional(right))
+                    # Both semantic branches must prove under condition and negation assumptions.
+                    # A refused case split leaves the goal undecided.
+                    if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
+                        conditional_operand: (complete: bool, present: bool) = proof_conditional_operand_present_with_work(left, right, budget, exhausted)
+                        if not conditional_operand.complete or exhausted:
+                            exhausted <- true
+                            return false
+                        exhausted <- true if conditional_operand.present
                     if split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
                         match left:
                             Ast::Expr.If(condition, then_expression, else_expression, _):
+                                return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, 2)
+                                return false if not proof_linear_safety_work_charge(budget, exhausted, 2)
                                 then_facts: mutable darray[Ast::Expr] = []
                                 else_facts: mutable darray[Ast::Expr] = []
                                 then_facts.extend(facts)
@@ -490,6 +533,8 @@ extend ElisaProof:
                                 pass
                         match right:
                             Ast::Expr.If(condition, then_expression, else_expression, _):
+                                return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, 2)
+                                return false if not proof_linear_safety_work_charge(budget, exhausted, 2)
                                 then_facts: mutable darray[Ast::Expr] = []
                                 else_facts: mutable darray[Ast::Expr] = []
                                 then_facts.extend(facts)
@@ -505,35 +550,42 @@ extend ElisaProof:
                     if proof_is_comparison(operator):
                         denial_arithmetic_guard_safe: bool = proof_source_arithmetic_operator_guard_with_work(goal, facts, operator_mask, budget, exhausted)
                         return false if exhausted or not denial_arithmetic_guard_safe
-                        return true if proof_linear_goal(left, operator, right, facts)
-                        # Cancellation reads each side as a sum over the integers, which is only
-                        # sound here: the wrap guard above has certified every operation in it.
-                        return true if proof_primitive_comparison(left, right, facts) and proof_normalized_difference_goal(left, operator, right, facts)
-                        # General linear tier: Fourier-Motzkin with a checked Farkas certificate.
+                        linear_goal: (complete: bool, proven: bool) = proof_linear_arithmetic_goal_from_facts_with_work(left, operator, right, facts, budget, exhausted)
+                        if not linear_goal.complete or exhausted:
+                            exhausted <- true
+                            return false
+                        return true if linear_goal.proven
+                        cancelled: (complete: bool, proven: bool) = proof_cancelled_difference_goal_with_work(left, operator, right, facts, budget, exhausted)
+                        return false if not cancelled.complete or exhausted
+                        return true if cancelled.proven
+                        product_sign: (complete: bool, proven: bool) = proof_product_sign_goal_with_work(left, operator, right, facts, budget, exhausted)
+                        return false if not product_sign.complete or exhausted
+                        return true if product_sign.proven
+                        comparison_chain: (complete: bool, proven: bool) = proof_comparison_chain_goal_with_work(left, operator, right, facts, budget, exhausted)
+                        if not comparison_chain.complete or exhausted:
+                            exhausted <- true
+                            return false
+                        return true if comparison_chain.proven
+                        strict_shift: (complete: bool, proven: bool) = proof_strict_shift_goal_with_work(left, operator, right, facts, budget, exhausted)
+                        return false if not strict_shift.complete or exhausted
+                        return true if strict_shift.proven
+                        sum_bound: (complete: bool, proven: bool) = proof_sum_bound_goal_with_work(left, operator, right, facts, budget, exhausted)
+                        return false if not sum_bound.complete or exhausted
                         return true if:
-                            proof_primitive_comparison(left, right, facts) and proof_linear_arithmetic_goal(left, operator, right, facts)
-                            proof_product_sign_goal(left, operator, right, facts)
-                            proof_comparison_chain_goal(left, operator, right, facts)
-                            proof_strict_shift_goal(left, operator, right, facts)
-                            proof_sum_bound_goal(left, operator, right, facts)
-                            proof_unsigned_nonnegative_goal(left, operator, right, facts)
+                            sum_bound.proven
                             (proof_place_alias_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
                             (proof_field_place_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-                        # Antisymmetry: over integers `a == b` is `a <= b and a >= b`, each of
-                        # which a chain or generalized tier may close where equality has none.
-                        # Kernel mirror in `proof_kernel_replay_goal_depth_remaining`.
-                        if operator == TokenKind.EqEq and split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT and proof_primitive_comparison(left, right, facts):
-                            return true if (proof_goal_depth(facts, Ast::Expr.Binary(left, TokenKind.LtEq, right, position), annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write}) and (proof_goal_depth(facts, Ast::Expr.Binary(left, TokenKind.GtEq, right, position), annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})
+                        if operator == TokenKind.EqEq and split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
+                            primitive: (complete: bool, proven: bool) = proof_primitive_comparison_with_work(left, right, facts, budget, exhausted)
+                            if not primitive.complete or exhausted:
+                                exhausted <- true
+                                return false
+                            if primitive.primitive:
+                                return true if (proof_goal_depth(facts, Ast::Expr.Binary(left, TokenKind.LtEq, right, position), annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write}) and (proof_goal_depth(facts, Ast::Expr.Binary(left, TokenKind.GtEq, right, position), annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})
                         return true if (proof_comparison_congruence_fact(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-                        # Congruence is the last equality tier and runs only after the
-                        # fixed-width safety guards above rejected every wrapping premise/goal.
+                        # Congruence runs last after fixed-width guards reject wrapping premises/goals.
                         return proof_congruence_goal_with_work(facts, goal, annotations, budget, exhausted) if operator == TokenKind.EqEq
                         return false
                 _:
                     pass
             return false
-
-        # A search that ends because a fixed budget ran out is not the same answer as one that
-        # ends because no rule applies. Callers that report a verdict take the second entry point
-        # so the two can be told apart downstream; `exhausted` is advisory and never widens what
-        # is provable.

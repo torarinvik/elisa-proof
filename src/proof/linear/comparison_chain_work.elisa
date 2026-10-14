@@ -1,0 +1,210 @@
+# Shared-budget producer mirror of structural comparison-chain reasoning. The kernel
+# independently replays the resulting certificate and keeps its own canonical relation reader.
+extend ElisaProof:
+    private:
+        def proof_comparison_chain_goal_with_work(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            goal_operator: mutable TokenKind = operator
+            lower: mutable Ast::Expr = left
+            upper: mutable Ast::Expr = right
+            if operator == TokenKind.Gt:
+                goal_operator <- TokenKind.Lt
+                lower <- right
+                upper <- left
+            if operator == TokenKind.GtEq:
+                goal_operator <- TokenKind.LtEq
+                lower <- right
+                upper <- left
+            return (true, false) if not proof_chain_ascending(goal_operator)
+            lower_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(lower, budget, exhausted)
+            return (false, false) if not lower_cost.complete or exhausted
+            upper_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(upper, budget, exhausted)
+            return (false, false) if not upper_cost.complete or exhausted
+            return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, lower_cost.cost)
+            return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, upper_cost.cost)
+            lower_affine: ProofAffine = proof_affine_expression(lower)
+            upper_affine: ProofAffine = proof_affine_expression(upper)
+            return (true, false) if lower_affine.known and lower_affine.base != "" and upper_affine.known and upper_affine.base != ""
+            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+            return (false, false) if not marker_result.complete or exhausted
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(marker_result.witnesses, budget, exhausted)
+            return (false, false) if not marker_scale.complete or exhausted
+            fact_scan_cost: mutable usize = 0
+            for fact in facts |fact, fact_scan_cost, budget, exhausted|:
+                cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                return (false, false) if not cost.complete or exhausted
+                remaining: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - fact_scan_cost
+                return (false, false) if cost.cost >= remaining
+                fact_scan_cost <- fact_scan_cost + cost.cost + 1
+            lower_witness: (complete: bool, witnessed: bool) = proof_linear_search_scalar_term_witnessed(lower, marker_result.witnesses, 0, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+            return (false, false) if not lower_witness.complete or exhausted
+            return (true, false) if not lower_witness.witnessed
+            upper_witness: (complete: bool, witnessed: bool) = proof_linear_search_scalar_term_witnessed(upper, marker_result.witnesses, 0, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+            return (false, false) if not upper_witness.complete or exhausted
+            return (true, false) if not upper_witness.witnessed
+            lower_middles: mutable darray[Ast::Expr] = []
+            lower_operators: mutable darray[TokenKind] = []
+            for fact in facts |fact, lower, facts, lower_middles, lower_operators, budget, exhausted|:
+                break if lower_middles.count >= PROOF_CHAIN_CANDIDATE_BUDGET
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                step: (complete: bool, known: bool, middle: Ast::Expr, operator: TokenKind) = proof_chain_step_with_work(fact, lower, true, facts, marker_result.witnesses, marker_scale.scale, fact_scan_cost, budget, exhausted, 0)
+                return (false, false) if not step.complete or exhausted
+                continue if not step.known
+                lower_middles.push(step.middle)
+                lower_operators.push(step.operator)
+            if not proof_chain_equal_hops_with_work(facts, lower, true, marker_result.witnesses, marker_scale.scale, fact_scan_cost, &lower_middles, &lower_operators, budget, exhausted):
+                return (false, false)
+            return (true, false) if lower_middles.count == 0
+            upper_middles: mutable darray[Ast::Expr] = [upper]
+            upper_operators: mutable darray[TokenKind] = [TokenKind.LtEq]
+            for fact in facts |fact, upper, facts, upper_middles, upper_operators, budget, exhausted|:
+                break if upper_middles.count >= PROOF_CHAIN_CANDIDATE_BUDGET
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                step: (complete: bool, known: bool, middle: Ast::Expr, operator: TokenKind) = proof_chain_step_with_work(fact, upper, false, facts, marker_result.witnesses, marker_scale.scale, fact_scan_cost, budget, exhausted, 0)
+                return (false, false) if not step.complete or exhausted
+                continue if not step.known
+                upper_middles.push(step.middle)
+                upper_operators.push(step.operator)
+            if not proof_chain_equal_hops_with_work(facts, upper, false, marker_result.witnesses, marker_scale.scale, fact_scan_cost, &upper_middles, &upper_operators, budget, exhausted):
+                return (false, false)
+            return (true, false) if upper_middles.count == 0
+            for first_index in 0..<lower_middles.count |first_index, goal_operator, lower_middles, lower_operators, upper_middles, upper_operators, marker_result, budget, exhausted|:
+                for second_index in 0..<upper_middles.count |second_index, first_index, goal_operator, lower_middles, lower_operators, upper_middles, upper_operators, marker_result, budget, exhausted|:
+                    return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                    continue if not proof_chain_discharges(lower_operators[first_index], upper_operators[second_index], goal_operator)
+                    equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(lower_middles[first_index], upper_middles[second_index], budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return (false, false) if not equal.complete or exhausted
+                    continue if not equal.matches
+                    witness: (complete: bool, witnessed: bool) = proof_linear_search_scalar_term_witnessed(lower_middles[first_index], marker_result.witnesses, 0, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return (false, false) if not witness.complete or exhausted
+                    return (true, true) if witness.witnessed
+            return (true, false)
+
+        def proof_chain_equal_hops_with_work(facts: darray[Ast::Expr]&, anchor: Ast::Expr, from_lower: bool, markers: ProofScalarWitnesses&, marker_scale: usize, fact_scan_cost: usize, middles: mutable darray[Ast::Expr]&, operators: mutable darray[TokenKind]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            for equality in facts |facts, anchor, from_lower, markers, marker_scale, fact_scan_cost, middles, operators, budget, exhausted|:
+                break if middles.count >= PROOF_CHAIN_CANDIDATE_BUDGET
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                other: (complete: bool, known: bool, value: Ast::Expr) = proof_chain_equal_other_with_work(equality, anchor, budget)
+                return false if not other.complete or exhausted
+                continue if not other.known
+                witnessed: (complete: bool, witnessed: bool) = proof_linear_search_scalar_term_witnessed(other.value, markers, 0, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                return false if not witnessed.complete or exhausted
+                continue if not witnessed.witnessed
+                for fact in facts |fact, other, from_lower, facts, markers, marker_scale, fact_scan_cost, middles, operators, budget, exhausted|:
+                    break if middles.count >= PROOF_CHAIN_CANDIDATE_BUDGET
+                    return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                    step: (complete: bool, known: bool, middle: Ast::Expr, operator: TokenKind) = proof_chain_step_with_work(fact, other.value, from_lower, facts, markers, marker_scale, fact_scan_cost, budget, exhausted, 0)
+                    return false if not step.complete or exhausted
+                    continue if not step.known
+                    middles.push(step.middle)
+                    operators.push(step.operator)
+            return not exhausted
+
+        def proof_chain_equal_other_with_work(fact: Ast::Expr, anchor: Ast::Expr, budget: mutable usize&) -> (complete: bool, known: bool, value: Ast::Expr):
+            match fact:
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (true, false, Ast::Expr.Invalid) if operator != TokenKind.EqEq
+                    left_match: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(left, anchor, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return (false, false, Ast::Expr.Invalid) if not left_match.complete
+                    if left_match.matches:
+                        right_match: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(right, anchor, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                        return (false, false, Ast::Expr.Invalid) if not right_match.complete
+                        return (true, true, right) if not right_match.matches
+                        return (true, false, Ast::Expr.Invalid)
+                    right_match: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(right, anchor, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return (false, false, Ast::Expr.Invalid) if not right_match.complete
+                    if right_match.matches:
+                        return (true, true, left)
+                    return (true, false, Ast::Expr.Invalid)
+                _:
+                    return (true, false, Ast::Expr.Invalid)
+
+        def proof_chain_step_with_work(fact: Ast::Expr, anchor: Ast::Expr, from_lower: bool, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, fact_scan_cost: usize, budget: mutable usize&, exhausted: mutable bool&, depth: usize) -> (complete: bool, known: bool, middle: Ast::Expr, operator: TokenKind):
+            unknown: (complete: bool, known: bool, middle: Ast::Expr, operator: TokenKind) = (true, false, Ast::Expr.Invalid, TokenKind.Lt)
+            return (false, false, Ast::Expr.Invalid, TokenKind.Lt) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            return unknown if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match fact:
+                Ast::Expr.Paren(inner, _):
+                    return proof_chain_step_with_work(inner, anchor, from_lower, facts, markers, marker_scale, fact_scan_cost, budget, exhausted, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    return proof_negated_chain_step_with_work(operand, anchor, from_lower, facts, markers, marker_scale, fact_scan_cost, budget, exhausted, depth + 1)
+                Ast::Expr.Binary(fact_left, fact_operator, fact_right, _):
+                    if fact_operator == TokenKind.EqEq:
+                        if from_lower:
+                            left_match: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(fact_left, anchor, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                            return (false, false, Ast::Expr.Invalid, TokenKind.Lt) if not left_match.complete
+                            return (true, true, fact_right, TokenKind.LtEq) if left_match.matches
+                            right_match: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(fact_right, anchor, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                            return (false, false, Ast::Expr.Invalid, TokenKind.Lt) if not right_match.complete
+                            return (true, true, fact_left, TokenKind.LtEq) if right_match.matches
+                            return unknown
+                        right_match: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(fact_right, anchor, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                        return (false, false, Ast::Expr.Invalid, TokenKind.Lt) if not right_match.complete
+                        return (true, true, fact_left, TokenKind.LtEq) if right_match.matches
+                        left_match: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(fact_left, anchor, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                        return (false, false, Ast::Expr.Invalid, TokenKind.Lt) if not left_match.complete
+                        return (true, true, fact_right, TokenKind.LtEq) if left_match.matches
+                        return unknown
+                    ascending: bool = proof_chain_ascending(fact_operator)
+                    normalized: TokenKind = fact_operator
+                    low: mutable Ast::Expr = fact_left
+                    high: mutable Ast::Expr = fact_right
+                    if fact_operator == TokenKind.Gt:
+                        ascending <- true
+                        normalized <- TokenKind.Lt
+                        low <- fact_right
+                        high <- fact_left
+                    if fact_operator == TokenKind.GtEq:
+                        ascending <- true
+                        normalized <- TokenKind.LtEq
+                        low <- fact_right
+                        high <- fact_left
+                    return unknown if not ascending
+                    if from_lower:
+                        equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(low, anchor, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                        return (false, false, Ast::Expr.Invalid, TokenKind.Lt) if not equal.complete
+                        return (true, true, high, normalized) if equal.matches
+                        return unknown
+                    equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(high, anchor, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return (false, false, Ast::Expr.Invalid, TokenKind.Lt) if not equal.complete
+                    return (true, true, low, normalized) if equal.matches
+                    return unknown
+                _:
+                    return unknown
+
+        def proof_negated_chain_step_with_work(operand: Ast::Expr, anchor: Ast::Expr, from_lower: bool, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, fact_scan_cost: usize, budget: mutable usize&, exhausted: mutable bool&, depth: usize) -> (complete: bool, known: bool, middle: Ast::Expr, operator: TokenKind):
+            unknown: (complete: bool, known: bool, middle: Ast::Expr, operator: TokenKind) = (true, false, Ast::Expr.Invalid, TokenKind.Lt)
+            return (false, false, Ast::Expr.Invalid, TokenKind.Lt) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            return unknown if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match operand:
+                Ast::Expr.Paren(inner, _):
+                    return proof_negated_chain_step_with_work(inner, anchor, from_lower, facts, markers, marker_scale, fact_scan_cost, budget, exhausted, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    left_integer: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(left, facts, markers, marker_scale, fact_scan_cost, 0, budget, exhausted)
+                    return (false, false, Ast::Expr.Invalid, TokenKind.Lt) if not left_integer.complete or exhausted
+                    return unknown if not left_integer.integer
+                    right_integer: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(right, facts, markers, marker_scale, fact_scan_cost, 0, budget, exhausted)
+                    return (false, false, Ast::Expr.Invalid, TokenKind.Lt) if not right_integer.complete or exhausted
+                    return unknown if not right_integer.integer
+                    low: mutable Ast::Expr = left
+                    high: mutable Ast::Expr = right
+                    strict: mutable bool = false
+                    if operator == TokenKind.Lt or operator == TokenKind.LtEq:
+                        low <- right
+                        high <- left
+                        strict <- operator == TokenKind.LtEq
+                    elif operator == TokenKind.Gt or operator == TokenKind.GtEq:
+                        strict <- operator == TokenKind.GtEq
+                    else:
+                        return unknown
+                    step_operator: TokenKind = TokenKind.Lt if strict else TokenKind.LtEq
+                    if from_lower:
+                        equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(low, anchor, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                        return (false, false, Ast::Expr.Invalid, TokenKind.Lt) if not equal.complete
+                        return (true, true, high, step_operator) if equal.matches
+                        return unknown
+                    equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(high, anchor, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return (false, false, Ast::Expr.Invalid, TokenKind.Lt) if not equal.complete
+                    return (true, true, low, step_operator) if equal.matches
+                    return unknown
+                _:
+                    return unknown

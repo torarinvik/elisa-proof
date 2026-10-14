@@ -1,0 +1,358 @@
+# Shared-budget adapters for bounded source goal rules that still use pure fact-frame readers.
+extend ElisaProof:
+    private:
+        def proof_linear_goal_frame_cost_with_work(goal: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, cost: usize, goal_cost: usize):
+            goal_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(goal, budget, exhausted)
+            return (false, 0, 0) if not goal_cost.complete or exhausted or goal_cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT
+            total: mutable usize = goal_cost.cost
+            for fact in facts |total, budget, exhausted|:
+                fact_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                return (false, 0, 0) if not fact_cost.complete or exhausted or fact_cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - total
+                total <- total + fact_cost.cost
+            return (true, total, goal_cost.cost)
+
+        def proof_scalar_disequality_goal_with_work(goal: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            measured_goal: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(goal, budget, exhausted)
+            return (false, false) if not measured_goal.complete or exhausted
+            applicable: bool = match measured_goal.expression:
+                Ast::Expr.Binary(_, TokenKind.BangEq, _, _) | Ast::Expr.Binary(_, TokenKind.Or, _, _): true
+                _: false
+            return (true, false) if not applicable
+            markers: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+            return (false, false) if not markers.complete or exhausted
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers.witnesses, budget, exhausted)
+            return (false, false) if not marker_scale.complete or exhausted
+            match measured_goal.expression:
+                Ast::Expr.Binary(term, TokenKind.BangEq, constant, _):
+                    signed: (complete: bool, known: bool, term: Ast::Expr, value: i64, width: i64) = proof_disequality_literal_term_with_work(measured_goal.expression, markers.witnesses, marker_scale.scale, true, budget, exhausted)
+                    return (false, false) if not signed.complete
+                    if signed.known:
+                        result: (complete: bool, proven: bool) = proof_disequality_from_equality_with_work(signed.term, signed.value, signed.width, true, facts, markers.witnesses, marker_scale.scale, budget, exhausted)
+                        return result if not result.complete or result.proven
+                    unsigned: (complete: bool, known: bool, term: Ast::Expr, value: i64, width: i64) = proof_disequality_literal_term_with_work(measured_goal.expression, markers.witnesses, marker_scale.scale, false, budget, exhausted)
+                    return (false, false) if not unsigned.complete
+                    return proof_disequality_from_equality_with_work(unsigned.term, unsigned.value, unsigned.width, false, facts, markers.witnesses, marker_scale.scale, budget, exhausted) if unsigned.known
+                    return (true, false)
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    first_signed: (complete: bool, known: bool, term: Ast::Expr, value: i64, width: i64) = proof_disequality_literal_term_with_work(left, markers.witnesses, marker_scale.scale, true, budget, exhausted)
+                    return (false, false) if not first_signed.complete
+                    second_signed: (complete: bool, known: bool, term: Ast::Expr, value: i64, width: i64) = proof_disequality_literal_term_with_work(right, markers.witnesses, marker_scale.scale, true, budget, exhausted)
+                    return (false, false) if not second_signed.complete
+                    if first_signed.known and second_signed.known and first_signed.value != second_signed.value:
+                        equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(first_signed.term, second_signed.term, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                        return (false, false) if not equal.complete
+                        return (true, true) if equal.matches
+                    first_unsigned: (complete: bool, known: bool, term: Ast::Expr, value: i64, width: i64) = proof_disequality_literal_term_with_work(left, markers.witnesses, marker_scale.scale, false, budget, exhausted)
+                    return (false, false) if not first_unsigned.complete
+                    second_unsigned: (complete: bool, known: bool, term: Ast::Expr, value: i64, width: i64) = proof_disequality_literal_term_with_work(right, markers.witnesses, marker_scale.scale, false, budget, exhausted)
+                    return (false, false) if not second_unsigned.complete
+                    if first_unsigned.known and second_unsigned.known and first_unsigned.value != second_unsigned.value:
+                        equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(first_unsigned.term, second_unsigned.term, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                        return (false, false) if not equal.complete
+                        return (true, true) if equal.matches
+                    return (true, false)
+                _:
+                    return (true, false)
+
+        def proof_disequality_literal_term_with_work(expression: Ast::Expr, markers: ProofScalarWitnesses&, marker_scale: usize, signed_only: bool, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, known: bool, term: Ast::Expr, value: i64, width: i64):
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(expression, budget, exhausted)
+            return (false, false, Ast::Expr.Invalid, 0, 0) if not stripped.complete
+            match stripped.expression:
+                Ast::Expr.Binary(term, TokenKind.BangEq, constant, _):
+                    width: i64 = proof_signed_width_in_expression_with_work(term, markers, 0, budget, exhausted) if signed_only else proof_unsigned_width_in_expression_with_work(term, markers, budget, exhausted)
+                    return (false, false, Ast::Expr.Invalid, 0, 0) if exhausted
+                    return (true, false, Ast::Expr.Invalid, 0, 0) if width == 0
+                    signed_value: (complete: bool, known: bool, value: i64) = proof_signed_disequality_literal_with_work(constant, budget, exhausted) if signed_only else (true, false, 0)
+                    unsigned_value: (known: bool, value: i64) = proof_constant_int_with_work(constant, 0, budget, exhausted) if not signed_only else (false, 0)
+                    return (false, false, Ast::Expr.Invalid, 0, 0) if exhausted or signed_only and not signed_value.complete
+                    known: bool = signed_value.known if signed_only else unsigned_value.known
+                    value: i64 = signed_value.value if signed_only else unsigned_value.value
+                    return (true, false, Ast::Expr.Invalid, 0, width) if not known
+                    fits: bool = value >= ElisaProofKernelCore::proof_kernel_signed_width_min(width) and value <= ElisaProofKernelCore::proof_kernel_signed_width_max(width) if signed_only else proof_unsigned_constants_fit_with_work(constant, width, 0, budget, exhausted)
+                    return (false, false, Ast::Expr.Invalid, 0, 0) if exhausted
+                    return (true, false, Ast::Expr.Invalid, 0, width) if not fits
+                    primitive: (complete: bool, matches: bool) = proof_linear_safety_comparison_with_work(term, constant, markers, marker_scale, budget, exhausted)
+                    return (false, false, Ast::Expr.Invalid, 0, 0) if not primitive.complete
+                    return (true, primitive.matches, term, value, width)
+                _:
+                    return (true, false, Ast::Expr.Invalid, 0, 0)
+
+        def proof_signed_disequality_literal_with_work(expression: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, known: bool, value: i64):
+            cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(expression, budget, exhausted)
+            return (false, false, 0) if not cost.complete
+            return (false, false, 0) if not proof_linear_safety_work_charge_scaled(budget, exhausted, cost.cost, 2)
+            parsed: (known: bool, value: i64) = proof_signed_literal_comparison_constant(expression)
+            return (true, parsed.known, parsed.value)
+
+        def proof_disequality_from_equality_with_work(goal_term: Ast::Expr, target: i64, width: i64, signed_only: bool, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            for fact in facts |fact, goal_term, target, width, signed_only, markers, marker_scale, budget, exhausted|:
+                stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(fact, budget, exhausted)
+                return (false, false) if not stripped.complete
+                match stripped.expression:
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        left_equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(goal_term, left, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                        return (false, false) if not left_equal.complete
+                        right_equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(goal_term, right, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true) if not left_equal.matches else (true, false)
+                        return (false, false) if not right_equal.complete
+                        continue if not left_equal.matches and not right_equal.matches
+                        primitive: (complete: bool, matches: bool) = proof_linear_safety_comparison_with_work(left, right, markers, marker_scale, budget, exhausted)
+                        return (false, false) if not primitive.complete or exhausted
+                        continue if not primitive.matches
+                        candidate: Ast::Expr = right if left_equal.matches else left
+                        signed_value: (complete: bool, known: bool, value: i64) = proof_signed_disequality_literal_with_work(candidate, budget, exhausted) if signed_only else (true, false, 0)
+                        unsigned_value: (known: bool, value: i64) = proof_constant_int_with_work(candidate, 0, budget, exhausted) if not signed_only else (false, 0)
+                        return (false, false) if exhausted or signed_only and not signed_value.complete
+                        known: bool = signed_value.known if signed_only else unsigned_value.known
+                        value: i64 = signed_value.value if signed_only else unsigned_value.value
+                        continue if not known
+                        fits: bool = value >= ElisaProofKernelCore::proof_kernel_signed_width_min(width) and value <= ElisaProofKernelCore::proof_kernel_signed_width_max(width) if signed_only else proof_unsigned_constants_fit_with_work(candidate, width, 0, budget, exhausted)
+                        return (false, false) if exhausted
+                        return (true, true) if fits and value != target
+                    _:
+                        pass
+            return (not exhausted, false)
+
+        def proof_unsigned_goal_identity_with_work(goal: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(goal, budget, exhausted)
+            return (false, false) if not stripped.complete or exhausted
+            match stripped.expression:
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (true, false) if not proof_is_comparison(operator)
+                    marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+                    return (false, false) if not marker_result.complete or exhausted
+                    marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(marker_result.witnesses, budget, exhausted)
+                    return (false, false) if not marker_scale.complete or exhausted
+                    primitive: (complete: bool, matches: bool) = proof_linear_safety_comparison_with_work(left, right, marker_result.witnesses, marker_scale.scale, budget, exhausted)
+                    return (false, false) if not primitive.complete or exhausted
+                    return (true, false) if not primitive.matches or not proof_is_true_comparison(operator)
+                    term_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(left, budget, exhausted)
+                    return (false, false) if not term_cost.complete
+                    right_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(right, budget, exhausted)
+                    return (false, false) if not right_cost.complete or right_cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - term_cost.cost
+                    combined_cost: usize = term_cost.cost + right_cost.cost
+                    # Definitional rewriting may recheck full subtrees and constant operands
+                    # at each recursive step. Bound that quadratic scan independently from the
+                    # marker-by-term product already charged by the primitive comparison.
+                    return (false, false) if not proof_linear_safety_work_charge_product4_with_work(budget, exhausted, combined_cost, combined_cost, 1, 1, 32)
+                    return (true, proof_definitionally_equal(left, right))
+                _:
+                    return (true, false)
+
+        def proof_unsigned_sum_upper_shape_with_work(goal: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            stripped_goal: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(goal, budget, exhausted)
+            return (false, false) if not stripped_goal.complete or exhausted
+            match stripped_goal.expression:
+                Ast::Expr.Binary(sum, operator, bound, _):
+                    return (true, false) if operator != TokenKind.Lt and operator != TokenKind.LtEq
+                    stripped_sum: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(sum, budget, exhausted)
+                    return (false, false) if not stripped_sum.complete or exhausted
+                    match stripped_sum.expression:
+                        Ast::Expr.Binary(first, TokenKind.Plus, second, _):
+                            width: i64 = proof_unsigned_width_in_expression_with_work(sum, markers, budget, exhausted)
+                            return (false, false) if exhausted
+                            return (true, false) if width == 0
+                            witness: (complete: bool, known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness_with_work(first, second, facts, markers, budget, exhausted)
+                            return (false, false) if not witness.complete or exhausted
+                            return (true, false) if not witness.known or operator == TokenKind.Lt and not witness.strict
+                            same_bound: bool = proof_unsigned_witness_terms_equal_with_work(witness.bound, bound, budget, exhausted)
+                            return (false, false) if exhausted
+                            return (true, false) if not same_bound
+                            nameable: (complete: bool, nameable: bool) = proof_unsigned_peer_nameable_with_work(witness.bound, budget, exhausted)
+                            return (false, false) if not nameable.complete
+                            peer_width: (complete: bool, matches: bool) = proof_unsigned_peer_width_matches_with_work(witness.bound, width, markers, budget, exhausted)
+                            return (false, false) if not peer_width.complete or exhausted
+                            return (true, true) if nameable.nameable and peer_width.matches
+                            bound_view: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(witness.bound, budget, exhausted)
+                            return (false, false) if not bound_view.complete or exhausted
+                            match bound_view.expression:
+                                Ast::Expr.IntLit(value, _):
+                                    return (true, value >= 0 and value <= proof_unsigned_width_max(width))
+                                _:
+                                    return (true, false)
+                        _:
+                            return (true, false)
+                _:
+                    return (true, false)
+
+        def proof_unsigned_unit_increment_order_shape_with_work(goal: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            stripped_goal: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(goal, budget, exhausted)
+            return (false, false) if not stripped_goal.complete or exhausted
+            match stripped_goal.expression:
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (true, false) if operator != TokenKind.LtEq and operator != TokenKind.GtEq
+                    increment: Ast::Expr = right if operator == TokenKind.LtEq else left
+                    base: Ast::Expr = left if operator == TokenKind.LtEq else right
+                    stripped_increment: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(increment, budget, exhausted)
+                    return (false, false) if not stripped_increment.complete or exhausted
+                    match stripped_increment.expression:
+                        Ast::Expr.Binary(first, TokenKind.Plus, second, _):
+                            shifted: (known: bool, base: Ast::Expr) = proof_unsigned_unit_increment_base_with_work(first, second, budget, exhausted)
+                            return (false, false) if exhausted
+                            return (true, false) if not shifted.known
+                            same_base: bool = proof_unsigned_witness_terms_equal_with_work(shifted.base, base, budget, exhausted)
+                            return (false, false) if exhausted
+                            return (true, false) if not same_base
+                            increment_width: i64 = proof_unsigned_width_in_expression_with_work(increment, markers, budget, exhausted)
+                            return (false, false) if exhausted
+                            return (true, false) if increment_width == 0
+                            base_width: i64 = proof_unsigned_width_in_expression_with_work(base, markers, budget, exhausted)
+                            return (false, false) if exhausted
+                            return (true, false) if base_width != increment_width
+                            safe: bool = proof_unsigned_expression_safe_with_facts_work(increment, facts, budget, exhausted)
+                            return (false, false) if exhausted
+                            return (true, safe)
+                        _:
+                            return (true, false)
+                _:
+                    return (true, false)
+
+        def proof_unsigned_legacy_goal_shapes_with_work(goal: Ast::Expr, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(goal, budget, exhausted)
+            return (false, false) if not stripped.complete or exhausted
+            applicable: bool = match stripped.expression:
+                Ast::Expr.Binary(_, TokenKind.Lt, _, _) | Ast::Expr.Binary(_, TokenKind.LtEq, _, _) | Ast::Expr.Binary(_, TokenKind.Gt, _, _) | Ast::Expr.Binary(_, TokenKind.GtEq, _, _): true
+                _: false
+            return (true, false) if not applicable
+            markers: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+            return (false, false) if not markers.complete or exhausted
+            sum_upper: (complete: bool, proven: bool) = proof_unsigned_sum_upper_shape_with_work(goal, facts, markers.witnesses, budget, exhausted)
+            return (false, false) if not sum_upper.complete or exhausted
+            return (true, true) if sum_upper.proven
+            unit_increment: (complete: bool, proven: bool) = proof_unsigned_unit_increment_order_shape_with_work(goal, facts, markers.witnesses, budget, exhausted)
+            return (false, false) if not unit_increment.complete or exhausted
+            return (true, true) if unit_increment.proven
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers.witnesses, budget, exhausted)
+            return (false, false) if not marker_scale.complete or exhausted
+            strict_progress: (complete: bool, proven: bool) = proof_unsigned_strict_progress_shape_with_work(goal, facts, markers.witnesses, marker_scale.scale, budget, exhausted)
+            return (false, false) if not strict_progress.complete or exhausted
+            return (true, strict_progress.proven)
+
+        def proof_signed_product_factor_with_work(product: Ast::Expr, base: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, known: bool, factor: Ast::Expr):
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(product, budget, exhausted)
+            return (false, false, Ast::Expr.Invalid) if not stripped.complete or exhausted
+            match stripped.expression:
+                Ast::Expr.Binary(first, TokenKind.Star, second, _):
+                    first_match: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(first, base, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return (false, false, Ast::Expr.Invalid) if not first_match.complete
+                    return (true, true, second) if first_match.matches
+                    second_match: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(second, base, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return (false, false, Ast::Expr.Invalid) if not second_match.complete
+                    return (true, true, first) if second_match.matches
+                _:
+                    pass
+            return (true, false, Ast::Expr.Invalid)
+
+        def proof_product_bound_literal_with_work(expression: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, literal: bool):
+            return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(_, _), _):
+                    return (true, true)
+                _:
+                    return (true, false)
+
+        def proof_product_direct_bound_with_work(expression: Ast::Expr, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, found: bool):
+            return (true, false) if depth >= 64
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(expression, budget, exhausted)
+            return (false, false) if not stripped.complete or exhausted
+            match stripped.expression:
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    first: (complete: bool, found: bool) = proof_product_direct_bound_with_work(left, depth + 1, budget, exhausted)
+                    return first if not first.complete or first.found
+                    return proof_product_direct_bound_with_work(right, depth + 1, budget, exhausted)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (true, false) if not proof_is_order_operator(operator)
+                    left_name: sview = proof_ident_name(left)
+                    if left_name != "":
+                        return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, sview_len(left_name))
+                        literal: (complete: bool, found: bool) = proof_product_bound_literal_with_work(right, budget, exhausted)
+                        return (false, false) if not literal.complete
+                        return (true, true) if literal.literal
+                    right_name: sview = proof_ident_name(right)
+                    if right_name != "":
+                        return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, sview_len(right_name))
+                        literal: (complete: bool, found: bool) = proof_product_bound_literal_with_work(left, budget, exhausted)
+                        return (false, false) if not literal.complete
+                        return (true, true) if literal.literal
+                    return (true, false)
+                _:
+                    return (true, false)
+
+        def proof_signed_product_comparison_supported_with_work(product: Ast::Expr, base: Ast::Expr, factor: Ast::Expr, product_ge_base: bool, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, supported: bool):
+            base_width: i64 = proof_signed_width_in_expression_with_work(base, markers, 0, budget, exhausted)
+            return (false, false) if exhausted
+            factor_width: i64 = proof_signed_width_in_expression_with_work(factor, markers, 0, budget, exhausted)
+            return (false, false) if exhausted
+            return (true, false) if base_width <= 0 or factor_width != base_width
+            base_scalar: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(base, markers, marker_scale, budget, exhausted)
+            return (false, false) if not base_scalar.complete
+            return (true, false) if not base_scalar.matches
+            factor_scalar: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(factor, markers, marker_scale, budget, exhausted)
+            return (false, false) if not factor_scalar.complete
+            return (true, false) if not factor_scalar.matches
+            fact_scan_cost: mutable usize = 0
+            for fact in facts |fact, fact_scan_cost, budget, exhausted|:
+                cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                return (false, false) if not cost.complete or exhausted or cost.cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT - fact_scan_cost
+                fact_scan_cost <- fact_scan_cost + cost.cost + 1
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |fact, facts, markers, marker_scale, fact_scan_cost, bounds, budget, exhausted|:
+                direct_bound: (complete: bool, found: bool) = proof_product_direct_bound_with_work(fact, 0, budget, exhausted)
+                return (false, false) if not direct_bound.complete or exhausted
+                if direct_bound.found:
+                    return (false, false) if not proof_collect_bounds_marked_with_work(fact, facts, markers, marker_scale, fact_scan_cost, &bounds, budget, exhausted)
+            base_range: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval_with_work(base, bounds, 0, budget, exhausted)
+            return (false, false) if exhausted
+            factor_range: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval_with_work(factor, bounds, 0, budget, exhausted)
+            return (false, false) if exhausted
+            grows: bool = (base_range.has_lower and base_range.lower >= 0 and factor_range.has_lower and factor_range.lower >= 1) or (base_range.has_upper and base_range.upper <= 0 and factor_range.has_upper and factor_range.upper <= 1)
+            shrinks: bool = (base_range.has_lower and base_range.lower >= 0 and factor_range.has_upper and factor_range.upper <= 1) or (base_range.has_upper and base_range.upper <= 0 and factor_range.has_lower and factor_range.lower >= 1)
+            product_safe: bool = proof_signed_expression_safe_with_bounds_work(product, facts, bounds, 0, markers, budget, exhausted)
+            return (false, false) if exhausted
+            return (true, (grows if product_ge_base else shrinks) and product_safe)
+
+        def proof_signed_product_candidate_with_work(product: Ast::Expr, base: Ast::Expr, factor: Ast::Expr, product_ge_base: bool, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, supported: bool):
+            markers_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+            return (false, false) if not markers_result.complete or exhausted
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers_result.witnesses, budget, exhausted)
+            return (false, false) if not marker_scale.complete or exhausted
+            return proof_signed_product_comparison_supported_with_work(product, base, factor, product_ge_base, facts, markers_result.witnesses, marker_scale.scale, budget, exhausted)
+
+        def proof_signed_product_growth_with_work(goal: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(goal, budget, exhausted)
+            return (false, false) if not stripped.complete or exhausted
+            left: mutable Ast::Expr = Ast::Expr.Invalid
+            right: mutable Ast::Expr = Ast::Expr.Invalid
+            operator: mutable TokenKind = TokenKind.Eof
+            match stripped.expression:
+                Ast::Expr.Binary(parsed_left, parsed_operator, parsed_right, _):
+                    left <- parsed_left
+                    operator <- parsed_operator
+                    right <- parsed_right
+                _:
+                    return (true, false)
+            return (true, false) if operator != TokenKind.GtEq and operator != TokenKind.LtEq
+            left_factor: (complete: bool, known: bool, factor: Ast::Expr) = proof_signed_product_factor_with_work(left, right, budget, exhausted)
+            return (false, false) if not left_factor.complete or exhausted
+            if left_factor.known:
+                checked: (complete: bool, supported: bool) = proof_signed_product_candidate_with_work(left, right, left_factor.factor, operator == TokenKind.GtEq, facts, budget, exhausted)
+                return (false, false) if not checked.complete or exhausted
+                return (true, true) if checked.supported
+            right_factor: (complete: bool, known: bool, factor: Ast::Expr) = proof_signed_product_factor_with_work(right, left, budget, exhausted)
+            return (false, false) if not right_factor.complete or exhausted
+            if right_factor.known:
+                return proof_signed_product_candidate_with_work(right, left, right_factor.factor, operator == TokenKind.LtEq, facts, budget, exhausted)
+            return (true, false)
+
+        def proof_unsigned_span_descent_with_work(goal: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(goal, budget, exhausted)
+            return (false, false) if not stripped.complete or exhausted
+            applicable: bool = match stripped.expression:
+                Ast::Expr.Binary(_, TokenKind.Lt, _, _): true
+                _: false
+            return (true, false) if not applicable
+            frame_cost: (complete: bool, cost: usize, goal_cost: usize) = proof_linear_goal_frame_cost_with_work(goal, facts, budget, exhausted)
+            return (false, false) if not frame_cost.complete
+            # Order-fact normalization rebuilds the marker index for each conjunct, including
+            # conjuncts nested inside one premise; reserve the quadratic frame scan.
+            return (false, false) if not proof_linear_safety_work_charge_product4_with_work(budget, exhausted, frame_cost.cost, frame_cost.cost, 1, 1, 2)
+            return (true, proof_unsigned_span_descent(facts, goal))

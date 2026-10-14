@@ -1,61 +1,194 @@
 extend ElisaProof:
     public:
-        def proof_unsigned_named_condition_refuted(condition: Ast::Expr, facts: darray[Ast::Expr]&, truth: bool) -> bool:
-            work: mutable usize = 4096
-            return proof_condition_refuted_depth(condition, facts, truth, 0, &work)
+        def proof_unsigned_named_condition_refutations_with_work(condition: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, true_refuted: bool, false_refuted: bool):
+            markers_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+            if not markers_result.complete or exhausted:
+                exhausted <- true
+                return (false, false, false)
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers_result.witnesses, budget, exhausted)
+            if not marker_scale.complete or exhausted:
+                exhausted <- true
+                return (false, false, false)
+            fact_scan_cost: mutable usize = 0
+            for fact in facts |fact, fact_scan_cost, budget, exhausted|:
+                cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                if not cost.complete or cost.cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT or fact_scan_cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - cost.cost - 1:
+                    exhausted <- true
+                    return (false, false, false)
+                return (false, false, false) if not proof_linear_safety_work_charge(budget, exhausted, cost.cost + 1)
+                fact_scan_cost <- fact_scan_cost + cost.cost + 1
+            true_result: (complete: bool, refuted: bool) = proof_condition_refuted_depth_with_work(condition, facts, markers_result.witnesses, marker_scale.scale, fact_scan_cost, true, 0, budget, exhausted)
+            if not true_result.complete:
+                exhausted <- true
+                return (false, false, false)
+            false_result: (complete: bool, refuted: bool) = proof_condition_refuted_depth_with_work(condition, facts, markers_result.witnesses, marker_scale.scale, fact_scan_cost, false, 0, budget, exhausted)
+            if not false_result.complete:
+                exhausted <- true
+                return (false, false, false)
+            return (true, true_result.refuted, false_result.refuted)
 
-        def proof_condition_refuted_depth(condition: Ast::Expr, facts: darray[Ast::Expr]&, truth: bool, depth: usize, work: mutable usize&) -> bool:
-            requires depth <= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
-            decreases PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT - depth
-            return false if depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT or work == 0
-            work <- work - 1
+        def proof_condition_refuted_depth_with_work(condition: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, fact_scan_cost: usize, truth: bool, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, refuted: bool):
+            return (true, false) if depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
+            return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
             match condition:
                 Ast::Expr.Binary(a, operator, b, _):
                     if operator == TokenKind.And:
-                        left: bool = proof_condition_refuted_depth(a, facts, truth, depth + 1, work)
-                        right: bool = proof_condition_refuted_depth(b, facts, truth, depth + 1, work)
-                        return (left or right) if truth else (left and right)
+                        left: (complete: bool, refuted: bool) = proof_condition_refuted_depth_with_work(a, facts, markers, marker_scale, fact_scan_cost, truth, depth + 1, budget, exhausted)
+                        if not left.complete:
+                            exhausted <- true
+                            return (false, false)
+                        right: (complete: bool, refuted: bool) = proof_condition_refuted_depth_with_work(b, facts, markers, marker_scale, fact_scan_cost, truth, depth + 1, budget, exhausted)
+                        if not right.complete:
+                            exhausted <- true
+                            return (false, false)
+                        return (true, left.refuted or right.refuted) if truth
+                        return (true, left.refuted and right.refuted)
                     if operator == TokenKind.Or:
-                        left: bool = proof_condition_refuted_depth(a, facts, truth, depth + 1, work)
-                        right: bool = proof_condition_refuted_depth(b, facts, truth, depth + 1, work)
-                        return (left and right) if truth else (left or right)
-                    if (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and proof_primitive_comparison(a, b, facts):
+                        left: (complete: bool, refuted: bool) = proof_condition_refuted_depth_with_work(a, facts, markers, marker_scale, fact_scan_cost, truth, depth + 1, budget, exhausted)
+                        if not left.complete:
+                            exhausted <- true
+                            return (false, false)
+                        right: (complete: bool, refuted: bool) = proof_condition_refuted_depth_with_work(b, facts, markers, marker_scale, fact_scan_cost, truth, depth + 1, budget, exhausted)
+                        if not right.complete:
+                            exhausted <- true
+                            return (false, false)
+                        return (true, left.refuted and right.refuted) if truth
+                        return (true, left.refuted or right.refuted)
+                    is_equality: bool = operator == TokenKind.EqEq or operator == TokenKind.BangEq
+                    is_order: bool = proof_is_order_operator(operator)
+                    return (true, false) if not is_equality and not is_order
+                    return (true, false) if is_order and (proof_ident_name(a) == "" or proof_ident_name(b) == "")
+                    primitive: (complete: bool, primitive: bool) = proof_linear_search_primitive_comparison(a, b, markers, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    if not primitive.complete or exhausted:
+                        exhausted <- true
+                        return (false, false)
+                    if is_equality and primitive.primitive:
                         desired: TokenKind = proof_comparison_negation(operator) if truth else operator
                         for fact in facts |fact, facts, a, b, desired|:
+                            return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
                             match fact:
                                 Ast::Expr.Binary(x, op, y, _):
-                                    return true if op == desired and proof_primitive_comparison(x, y, facts) and proof_expr_equal(x, a) and proof_expr_equal(y, b)
+                                    if op == desired:
+                                        matched: (complete: bool, primitive: bool) = proof_linear_search_primitive_comparison(x, y, markers, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                                        if not matched.complete or exhausted:
+                                            exhausted <- true
+                                            return (false, false)
+                                        if matched.primitive:
+                                            left_equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(x, a, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                                            if not left_equal.complete or exhausted:
+                                                exhausted <- true
+                                                return (false, false)
+                                            right_equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(y, b, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                                            if not right_equal.complete or exhausted:
+                                                exhausted <- true
+                                                return (false, false)
+                                            return (true, true) if left_equal.matches and right_equal.matches
                                 _:
                                     pass
-                    return false if not proof_is_order_operator(operator) or proof_ident_name(a) == "" or proof_ident_name(b) == ""
-                    width: i64 = proof_peer_unsigned_width(a, facts)
-                    return false if:
+                    if not is_order:
+                        return (true, false)
+                    width: i64 = proof_peer_unsigned_width_with_work(a, markers, budget, exhausted)
+                    return (false, false) if exhausted
+                    other_width: i64 = proof_peer_unsigned_width_with_work(b, markers, budget, exhausted)
+                    return (false, false) if exhausted
+                    return (true, false) if:
                         width != 8 and width != 16 and width != 32 and width != 64
-                        proof_peer_unsigned_width(b, facts) != width or not proof_primitive_comparison(a, b, facts)
+                        other_width != width or not primitive.primitive
                     desired: TokenKind = proof_comparison_negation(operator) if truth else operator
                     for fact in facts |fact, facts, a, b, desired|:
-                        order = proof_readable_order(fact, facts)
-                        return true if order.known and order.operator == desired and proof_expr_equal(order.left, a) and proof_expr_equal(order.right, b)
+                        return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                        order_left: mutable Ast::Expr = fact
+                        order_right: mutable Ast::Expr = fact
+                        order_operator: mutable TokenKind = TokenKind.Eof
+                        match fact:
+                            Ast::Expr.Binary(x, op, y, _):
+                                order_left <- x
+                                order_right <- y
+                                order_operator <- op if proof_is_order_operator(op)
+                                if proof_is_order_operator(op):
+                                    matched: (complete: bool, primitive: bool) = proof_linear_search_primitive_comparison(x, y, markers, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                                    if not matched.complete or exhausted:
+                                        exhausted <- true
+                                        return (false, false)
+                                    order_operator <- op if matched.primitive
+                                    order_operator <- TokenKind.Eof if not matched.primitive
+                            Ast::Expr.Unary(TokenKind.Not, Ast::Expr.Binary(x, op, y, _), _):
+                                negated: TokenKind = proof_comparison_negation(op)
+                                if proof_is_order_operator(negated):
+                                    left_integer: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(x, facts, markers, marker_scale, fact_scan_cost, 0, budget, exhausted)
+                                    if not left_integer.complete:
+                                        exhausted <- true
+                                        return (false, false)
+                                    right_integer: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(y, facts, markers, marker_scale, fact_scan_cost, 0, budget, exhausted)
+                                    if not right_integer.complete:
+                                        exhausted <- true
+                                        return (false, false)
+                                    if left_integer.integer and right_integer.integer:
+                                        order_left <- x
+                                        order_right <- y
+                                        order_operator <- negated
+                            _:
+                                pass
+                        if order_operator == desired:
+                            left_equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(order_left, a, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                            if not left_equal.complete or exhausted:
+                                exhausted <- true
+                                return (false, false)
+                            right_equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(order_right, b, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                            if not right_equal.complete or exhausted:
+                                exhausted <- true
+                                return (false, false)
+                            return (true, true) if left_equal.matches and right_equal.matches
                 _:
                     pass
-            return false
+            return (not exhausted, false)
         # Case analysis is logical, not signed interpretation of the arms.
         # Both branches must prove, using the existing split and work budgets.
+        def proof_conditional_expression_view_with_work(expression: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, conditional: bool, expression: Ast::Expr):
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(expression, budget, exhausted)
+            return (false, false, Ast::Expr.Invalid) if not stripped.complete or exhausted
+            match stripped.expression:
+                Ast::Expr.If(_, _, _, _):
+                    return (true, true, stripped.expression)
+                _:
+                    return (true, false, stripped.expression)
+
+        def proof_conditional_operand_present_with_work(left: Ast::Expr, right: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, present: bool):
+            left_view: (complete: bool, conditional: bool, expression: Ast::Expr) = proof_conditional_expression_view_with_work(left, budget, exhausted)
+            return (false, false) if not left_view.complete or exhausted
+            return (true, true) if left_view.conditional
+            right_view: (complete: bool, conditional: bool, expression: Ast::Expr) = proof_conditional_expression_view_with_work(right, budget, exhausted)
+            return (false, false) if not right_view.complete or exhausted
+            return (true, left_view.conditional or right_view.conditional)
+
         def proof_conditional_comparison_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool can[Global.Read, Global.Write]:
             match goal:
                 Ast::Expr.Binary(left, operator, right, position):
-                    return false if:
-                        not proof_is_comparison(operator)
-                        not proof_expression_is_conditional(left) and not proof_expression_is_conditional(right)
+                    return false if not proof_is_comparison(operator)
+                    left_view: (complete: bool, conditional: bool, expression: Ast::Expr) = proof_conditional_expression_view_with_work(left, budget, exhausted)
+                    if not left_view.complete or exhausted:
+                        exhausted <- true
+                        return false
+                    right_view: (complete: bool, conditional: bool, expression: Ast::Expr) = proof_conditional_expression_view_with_work(right, budget, exhausted)
+                    if not right_view.complete or exhausted:
+                        exhausted <- true
+                        return false
+                    return false if not left_view.conditional and not right_view.conditional
                     if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
                         exhausted <- true
                         return false
                     # Null equality is a typed proposition, not scalar pointer
                     # arithmetic. Both arms still require separate proofs.
-                    null_test: bool = (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and (proof_ident_name(proof_strip_parens(left)) == "null" or proof_ident_name(proof_strip_parens(right)) == "null")
-                    return false if not null_test and not proof_primitive_comparison(left, right, facts)
-                    match left:
+                    null_test: bool = (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and (proof_ident_name(left_view.expression) == "null" or proof_ident_name(right_view.expression) == "null")
+                    if not null_test:
+                        primitive: (complete: bool, proven: bool) = proof_primitive_comparison_with_work(left, right, facts, budget, exhausted)
+                        if not primitive.complete or exhausted:
+                            exhausted <- true
+                            return false
+                        return false if not primitive.primitive
+                    match left_view.expression:
                         Ast::Expr.If(condition, then_expression, else_expression, _):
+                            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, 2) or not proof_linear_safety_work_charge(budget, exhausted, 2)
                             then_facts: mutable darray[Ast::Expr] = []
                             else_facts: mutable darray[Ast::Expr] = []
                             then_facts.extend(facts)
@@ -64,21 +197,34 @@ extend ElisaProof:
                             else_facts.push(Ast::Expr.Unary(TokenKind.Not, condition, position))
                             then_goal: Ast::Expr = Ast::Expr.Binary(then_expression, operator, right, position)
                             else_goal: Ast::Expr = Ast::Expr.Binary(else_expression, operator, right, position)
-                            return true if (proof_unsigned_named_condition_refuted(condition, facts, true) or (proof_goal_depth(then_facts, then_goal, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})) and (proof_unsigned_named_condition_refuted(condition, facts, false) or (proof_goal_depth(else_facts, else_goal, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write}))
+                            refutations: (complete: bool, true_refuted: bool, false_refuted: bool) = proof_unsigned_named_condition_refutations_with_work(condition, facts, budget, exhausted)
+                            return false if not refutations.complete or exhausted
+                            then_proven: bool = refutations.true_refuted or (proof_goal_depth(then_facts, then_goal, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})
+                            return false if not then_proven or exhausted
+                            else_proven: bool = refutations.false_refuted or (proof_goal_depth(else_facts, else_goal, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})
+                            return false if exhausted
+                            return else_proven
                         _:
                             pass
-                    match right:
+                    match right_view.expression:
                         Ast::Expr.If(condition, then_expression, else_expression, _):
+                            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, 2) or not proof_linear_safety_work_charge(budget, exhausted, 2)
                             then_facts: mutable darray[Ast::Expr] = []
                             else_facts: mutable darray[Ast::Expr] = []
                             then_facts.extend(facts)
                             else_facts.extend(facts)
                             then_facts.push(condition)
                             else_facts.push(Ast::Expr.Unary(TokenKind.Not, condition, position))
-                            mirror_null: bool = null_test and proof_ident_name(proof_strip_parens(left)) == "null"
+                            mirror_null: bool = null_test and proof_ident_name(left_view.expression) == "null"
                             then_goal: Ast::Expr = Ast::Expr.Binary(then_expression if mirror_null else left, operator, left if mirror_null else then_expression, position)
                             else_goal: Ast::Expr = Ast::Expr.Binary(else_expression if mirror_null else left, operator, left if mirror_null else else_expression, position)
-                            return true if (proof_unsigned_named_condition_refuted(condition, facts, true) or (proof_goal_depth(then_facts, then_goal, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})) and (proof_unsigned_named_condition_refuted(condition, facts, false) or (proof_goal_depth(else_facts, else_goal, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write}))
+                            refutations: (complete: bool, true_refuted: bool, false_refuted: bool) = proof_unsigned_named_condition_refutations_with_work(condition, facts, budget, exhausted)
+                            return false if not refutations.complete or exhausted
+                            then_proven: bool = refutations.true_refuted or (proof_goal_depth(then_facts, then_goal, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})
+                            return false if not then_proven or exhausted
+                            else_proven: bool = refutations.false_refuted or (proof_goal_depth(else_facts, else_goal, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})
+                            return false if exhausted
+                            return else_proven
                         _:
                             pass
                 _:

@@ -1,53 +1,72 @@
 extend ElisaProof:
     private:
-        # Literal truth of an alternative: 1 for `true`, `not false`, or a reflexive `==`/`<=`/`>=`
-        # over one witnessed primitive term; 2 for `false`, `not true`, or a reflexive
-        # `!=`/`<`/`>`; 0 otherwise. A disjunction loses its false alternatives and is `true`
-        # when any alternative is, so a call summary instantiated with a literal or repeated
-        # argument (`false or last != last or r == 0`) needs no case split. `changed` reports
-        # that an alternative was removed. The kernel mirror is `proof_kernel_replay_disjunct_prune`.
-        def proof_disjunct_prune(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> (truth: i64, changed: bool, pruned: Ast::Expr):
-            return (0, false, expression) if depth >= 32
-            stripped: Ast::Expr = proof_strip_parens(expression)
-            match stripped:
+        # Return 1 for a known-true alternative, 2 for known-false, and 0 otherwise. Only
+        # reflexive comparisons over witnessed primitive terms are evaluated by this pruning rule.
+        def proof_disjunct_prune_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, markers: mutable ProofScalarWitnesses&, markers_ready: mutable bool&, budget: mutable usize&, exhausted: mutable bool&, depth: usize) -> (complete: bool, truth: i64, changed: bool, pruned: Ast::Expr):
+            return (true, 0, false, expression) if depth >= 32
+            return (false, 0, false, expression) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_disjunct_prune_with_work(inner, facts, markers, markers_ready, budget, exhausted, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.Or, right, position):
-                    left_result: (truth: i64, changed: bool, pruned: Ast::Expr) = proof_disjunct_prune(left, facts, depth + 1)
-                    right_result: (truth: i64, changed: bool, pruned: Ast::Expr) = proof_disjunct_prune(right, facts, depth + 1)
-                    return (1, true, stripped) if left_result.truth == 1 or right_result.truth == 1
-                    return (right_result.truth, true, right_result.pruned) if left_result.truth == 2
-                    return (left_result.truth, true, left_result.pruned) if right_result.truth == 2
-                    return (0, false, expression) if not left_result.changed and not right_result.changed
-                    return (0, true, Ast::Expr.Binary(left_result.pruned, TokenKind.Or, right_result.pruned, position))
+                    left_result: (complete: bool, truth: i64, changed: bool, pruned: Ast::Expr) = proof_disjunct_prune_with_work(left, facts, markers, markers_ready, budget, exhausted, depth + 1)
+                    return (false, 0, false, expression) if not left_result.complete
+                    right_result: (complete: bool, truth: i64, changed: bool, pruned: Ast::Expr) = proof_disjunct_prune_with_work(right, facts, markers, markers_ready, budget, exhausted, depth + 1)
+                    return (false, 0, false, expression) if not right_result.complete
+                    return (true, 1, true, expression) if left_result.truth == 1 or right_result.truth == 1
+                    return (true, right_result.truth, true, right_result.pruned) if left_result.truth == 2
+                    return (true, left_result.truth, true, left_result.pruned) if right_result.truth == 2
+                    return (true, 0, false, expression) if not left_result.changed and not right_result.changed
+                    return (false, 0, false, expression) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                    return (true, 0, true, Ast::Expr.Binary(left_result.pruned, TokenKind.Or, right_result.pruned, position))
                 Ast::Expr.BoolLit(value, _):
-                    return (1 if value else 2, false, stripped)
+                    return (true, 1 if value else 2, false, expression)
                 Ast::Expr.Unary(TokenKind.Not, Ast::Expr.BoolLit(value, _), _):
-                    return (2 if value else 1, false, stripped)
+                    return (false, 0, false, expression) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                    return (true, 2 if value else 1, false, expression)
                 Ast::Expr.Binary(left, operator, right, _):
                     reflexive_true: bool = operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq
                     reflexive_false: bool = operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.Gt
-                    return (0, false, expression) if:
-                        not reflexive_true and not reflexive_false
-                        not proof_expr_equal(left, right) or not proof_primitive_comparison(left, right, facts)
-                    return (1 if reflexive_true else 2, false, stripped)
+                    return (true, 0, false, expression) if not reflexive_true and not reflexive_false
+                    equality: (complete: bool, equal: bool) = proof_disjunction_expr_equal_with_work(left, right, budget, exhausted)
+                    return (false, 0, false, expression) if not equality.complete
+                    return (true, 0, false, expression) if not equality.equal
+                    if not markers_ready:
+                        built: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, false, budget, exhausted)
+                        return (false, 0, false, expression) if not built.complete
+                        markers <- built.witnesses
+                        markers_ready <- true
+                    primitive: (complete: bool, primitive: bool) = proof_linear_search_primitive_comparison(left, right, markers, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return (false, 0, false, expression) if not primitive.complete
+                    return (true, 0, false, expression) if not primitive.primitive
+                    return (true, 1 if reflexive_true else 2, false, expression)
                 _:
-                    return (0, false, expression)
+                    return (true, 0, false, expression)
+            return (true, 0, false, expression)
 
-        # Facts with literally decided alternatives pruned; a disjunction that is literally true is
-        # dropped. False when nothing changed.
-        def proof_disjunct_prune_facts(facts: darray[Ast::Expr]&, pruned: mutable darray[Ast::Expr]&) -> bool:
+        # The source mirror charges each recursive visit and uses the existing metered equality
+        # and scalar-witness readers instead of repeatedly decoding the premise list.
+        def proof_disjunct_prune_facts_with_work(facts: darray[Ast::Expr]&, pruned: mutable darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, changed: bool):
+            markers: mutable ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], name_unsigned_widths: [], signed_terms: [], signed_widths: [], element_terms: [], element_depths: [], element_widths: [], unsigned_terms: [], unsigned_widths: [], name_hashes: [], name_slots: [], sorted_name_indices: [], signed_hashes: [], signed_slots: [], unsigned_hashes: [], unsigned_slots: []}
+            markers_ready: mutable bool = false
             changed: mutable bool = false
-            for fact in facts |fact, facts, pruned, changed|:
-                result: (truth: i64, changed: bool, pruned: Ast::Expr) = proof_disjunct_prune(fact, facts, 0)
+            for fact in facts |fact, facts, markers, markers_ready, pruned, changed, budget, exhausted|:
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                result: (complete: bool, truth: i64, changed: bool, pruned: Ast::Expr) = proof_disjunct_prune_with_work(fact, facts, markers, markers_ready, budget, exhausted, 0)
+                return (false, false) if not result.complete
                 if result.changed:
                     changed <- true
-                    pruned.push(result.pruned) if result.truth != 1
+                    if result.truth != 1:
+                        return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                        pruned.push(result.pruned)
                 else:
+                    return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
                     pruned.push(fact)
-            return changed
+            return (true, changed)
 
-        # The premise added when proving `A or B` from `not A => B`. A witnessed primitive
-        # comparison becomes its complement (`frame != last` gives `frame == last`), which the
-        # arithmetic tiers read directly; any other alternative is kept as `not A`. The kernel
+        # The premise added when proving `A or B` from `not A => B`. Exact equality complements
+        # and witnessed integer order complements may be emitted directly; floating orderings
+        # stay under explicit `not` because NaN makes their converse non-equivalent. The kernel
         # mirror is `proof_kernel_replay_disjunct_negation`.
         def proof_disjunct_negation(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> Ast::Expr:
             stripped: Ast::Expr = proof_strip_parens(expression)
@@ -55,7 +74,12 @@ extend ElisaProof:
                 Ast::Expr.Binary(left, operator, right, position):
                     if proof_is_comparison(operator) and proof_primitive_comparison(left, right, facts):
                         complement: TokenKind = proof_comparison_negation(operator)
-                        return Ast::Expr.Binary(left, complement, right, position) if complement != TokenKind.Eof
+                        equality: bool = operator == TokenKind.EqEq or operator == TokenKind.BangEq
+                        integer_order: bool = proof_is_order_operator(operator) and proof_disjunction_denial_integer_term(left, facts, 0) and proof_disjunction_denial_integer_term(right, facts, 0)
+                        # IEEE order comparisons are unordered for NaN, so flipping the operator
+                        # is not an exact negation. Retain `not expression` unless integer order
+                        # is witnessed; equality and inequality remain exact Boolean complements.
+                        return Ast::Expr.Binary(left, complement, right, position) if complement != TokenKind.Eof and (equality or integer_order)
                     return Ast::Expr.Unary(TokenKind.Not, expression, position)
                 Ast::Expr.Unary(TokenKind.Not, inner, _):
                     return inner

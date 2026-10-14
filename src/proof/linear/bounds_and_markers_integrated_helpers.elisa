@@ -55,6 +55,9 @@ extend ElisaProof:
             if markers.signed_terms.count != markers.signed_widths.count:
                 exhausted <- true
                 return 0
+            indexed: (indexed: bool, width: i64) = proof_scalar_witness_indexed_term_width_with_work(term, markers.signed_terms, markers.signed_widths, markers.signed_hashes, markers.signed_slots, &budget, &exhausted)
+            return 0 if exhausted
+            return indexed.width if indexed.indexed
             for index in 0..<markers.signed_terms.count |index, term, markers, budget, exhausted|:
                 return 0 if not proof_linear_safety_work_charge(budget, exhausted, 1)
                 equal: bool = proof_unsigned_witness_terms_equal_with_work(markers.signed_terms[index], term, budget, exhausted)
@@ -131,31 +134,33 @@ extend ElisaProof:
                     return 0
 
         def proof_unsigned_witness_terms_equal_with_work(left: Ast::Expr, right: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            left_nodes: mutable usize = 0
-            right_nodes: mutable usize = 0
-            return false if:
-                not proof_linear_safety_expression_shape_with_work(left, 0, &left_nodes, &budget, &exhausted)
-                not proof_linear_safety_expression_shape_with_work(right, 0, &right_nodes, &budget, &exhausted)
-            if left_nodes > PROOF_LINEAR_SAFETY_WORK_LIMIT or right_nodes > PROOF_LINEAR_SAFETY_WORK_LIMIT - left_nodes:
+            left_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(left, budget, exhausted)
+            return false if not left_cost.complete
+            right_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(right, budget, exhausted)
+            return false if not right_cost.complete
+            if right_cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - left_cost.cost:
                 exhausted <- true
                 return false
-            combined: usize = left_nodes + right_nodes
+            combined: usize = left_cost.cost + right_cost.cost
             return false if:
-                combined < left_nodes
+                combined < left_cost.cost
                 not proof_linear_safety_work_charge_scaled(budget, exhausted, combined, 5)
             return proof_expr_equal(left, right)
 
         def proof_unsigned_place_marker_width_with_work(term: Ast::Expr, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> i64:
             return 0 if exhausted
-            if markers.place_terms.count != markers.place_widths.count:
+            if markers.unsigned_terms.count != markers.unsigned_widths.count:
                 exhausted <- true
                 return 0
+            indexed: (indexed: bool, width: i64) = proof_scalar_witness_indexed_term_width_with_work(term, markers.unsigned_terms, markers.unsigned_widths, markers.unsigned_hashes, markers.unsigned_slots, &budget, &exhausted)
+            return 0 if exhausted
+            return indexed.width if indexed.indexed
             width: mutable i64 = 0
-            for index in 0..<markers.place_terms.count |index, markers, term, width, budget, exhausted|:
+            for index in 0..<markers.unsigned_terms.count |index, markers, term, width, budget, exhausted|:
                 return 0 if not proof_linear_safety_work_charge(budget, exhausted, 1)
-                candidate: Ast::Expr = markers.place_terms[index]
+                candidate: Ast::Expr = markers.unsigned_terms[index]
                 if proof_unsigned_witness_terms_equal_with_work(candidate, term, budget, exhausted):
-                    current_width: i64 = markers.place_widths[index]
+                    current_width: i64 = markers.unsigned_widths[index]
                     width <- current_width if width == 0 or current_width < width
                 return 0 if exhausted
             return width
@@ -353,9 +358,8 @@ extend ElisaProof:
                 _:
                     return true
 
-        # Work-aware mirror of the narrow integer-order recognizer. Scalar checks use the
-        # already-indexed marker set; the remaining width-marker readers are reserved against
-        # the pre-counted fact AST cost before their legacy exact scans run.
+        # Work-aware mirror of the narrow integer-order recognizer. Scalar and width checks use
+        # the already-indexed marker set; only the integer-type marker scan remains fact-based.
         def proof_disjunction_denial_integer_term_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, fact_scan_cost: usize, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, integer: bool):
             return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
             return (true, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
@@ -389,21 +393,32 @@ extend ElisaProof:
                     return (true, false) if not left_integer.integer
                     return proof_disjunction_denial_integer_term_with_work(right, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
                 Ast::Expr.Ident(name, _):
-                    return (false, false) if not proof_linear_safety_fact_term_scan_with_work(expression, facts, fact_scan_cost, 1, budget, exhausted)
-                    for fact in facts |expression, fact_scan_cost, budget, exhausted|:
+                    return (false, false) if not proof_linear_safety_fact_scan_with_work(fact_scan_cost, 1, budget, exhausted)
+                    for fact in facts |expression, budget, exhausted|:
                         integer: (known: bool, term: Ast::Expr) = proof_marker_argument(fact, "__elisa_primitive_integer_type")
-                        return (true, true) if integer.known and proof_expr_equal(integer.term, expression)
-                    return (false, false) if not proof_linear_safety_fact_term_scan_with_work(expression, facts, fact_scan_cost, 2, budget, exhausted)
-                    return (true, proof_unsigned_marker_width_for_name(facts, name) != 0 or proof_signed_marker_width_for_term(facts, expression) != 0)
+                        if integer.known and proof_unsigned_witness_terms_equal_with_work(integer.term, expression, budget, exhausted):
+                            return (true, true)
+                        return (false, false) if exhausted
+                    unsigned_width: i64 = proof_scalar_witness_unsigned_width_with_work(markers, name, budget, exhausted)
+                    return (false, false) if exhausted
+                    signed_width: i64 = proof_signed_marker_width_for_term_with_work(expression, markers, budget, exhausted)
+                    return (false, false) if exhausted
+                    return (true, unsigned_width != 0 or signed_width != 0)
                 Ast::Expr.Field(_, _, _) | Ast::Expr.Tuple(_, _):
-                    return (false, false) if not proof_linear_safety_fact_term_scan_with_work(expression, facts, fact_scan_cost, 2, budget, exhausted)
-                    return (true, proof_unsigned_place_marker_width(facts, expression) != 0 or proof_signed_marker_width_for_term(facts, expression) != 0)
+                    unsigned_width: i64 = proof_unsigned_place_marker_width_with_work(expression, markers, budget, exhausted)
+                    return (false, false) if exhausted
+                    signed_width: i64 = proof_signed_marker_width_for_term_with_work(expression, markers, budget, exhausted)
+                    return (false, false) if exhausted
+                    return (true, unsigned_width != 0 or signed_width != 0)
                 Ast::Expr.Call(_, _, _, _):
                     witnessed: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(expression, markers, marker_scale, budget, exhausted)
                     return (false, false) if not witnessed.complete
                     return (true, false) if not witnessed.matches
-                    return (false, false) if not proof_linear_safety_fact_term_scan_with_work(expression, facts, fact_scan_cost, 2, budget, exhausted)
-                    return (true, proof_unsigned_place_marker_width(facts, expression) != 0 or proof_signed_marker_width_for_term(facts, expression) != 0)
+                    unsigned_width: i64 = proof_unsigned_place_marker_width_with_work(expression, markers, budget, exhausted)
+                    return (false, false) if exhausted
+                    signed_width: i64 = proof_signed_marker_width_for_term_with_work(expression, markers, budget, exhausted)
+                    return (false, false) if exhausted
+                    return (true, unsigned_width != 0 or signed_width != 0)
                 _:
                     return (true, false)
 
@@ -418,13 +433,9 @@ extend ElisaProof:
             return (false, false) if not proof_linear_safety_charge_cross_with_work(budget, exhausted, cost.cost, cost.cost, (marker_scale + 1) * 8)
             return (true, proof_scalar_term_witnessed_in(expression, markers, 0))
 
-        def proof_linear_safety_fact_term_scan_with_work(term: Ast::Expr, facts: darray[Ast::Expr]&, fact_scan_cost: usize, passes: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            term_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(term, budget, exhausted)
-            return false if not term_cost.complete
-            for pass_index in 0..<passes |pass_index, facts, fact_scan_cost, term_cost, budget, exhausted|:
-                return false if:
-                    not proof_linear_safety_work_charge(budget, exhausted, fact_scan_cost)
-                    not proof_linear_safety_work_charge_scaled(budget, exhausted, term_cost.cost, facts.count)
+        def proof_linear_safety_fact_scan_with_work(fact_scan_cost: usize, passes: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            for pass_index in 0..<passes |pass_index, fact_scan_cost, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, fact_scan_cost)
             return true
 
         def proof_collect_comparison_bounds_with_work(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, markers: ProofScalarWitnesses&, marker_scale: usize, bounds: mutable darray[ProofBound]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:

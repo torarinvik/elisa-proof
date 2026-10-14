@@ -124,54 +124,16 @@ extend ElisaProof:
             proof_linear_hint_index_disable(report)
             sentinel
 
-        def proof_linear_hint_expression_charge(report: mutable ProofReport&, expression: Ast::Expr) -> (ok: bool, cost: usize):
+        def proof_linear_hint_expression_charge(report: mutable ProofReport&, expression: Ast::Expr) -> bool:
             cost: mutable usize = 0
-            return (false, 0) if:
+            return false if:
                 not proof_replay_summary_expr_cost(expression, &cost, report.analysis_1.linear_hint_index.work_used, 0)
                 report.analysis_1.linear_hint_index.work_used > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT
             remaining: usize = PROOF_LINEAR_HINT_INDEX_WORK_LIMIT - report.analysis_1.linear_hint_index.work_used
-            return (false, 0) if:
-                cost > remaining / 3
-                not proof_linear_hint_index_charge(report, cost * 3)
-            (true, cost)
-
-        # Bound the producer-side trace lookup before invoking its linear authoritative scan.
-        # Root-compatible records can each reach `proof_expr_equal`, so reserve a full exact
-        # comparison for every active trace using the largest trace expression observed here.
-        def proof_linear_hint_trace_lookup_reserve(report: mutable ProofReport&, owner: sview, fact_cost: usize) -> bool:
-            count: usize = report.analysis_1.traces.records.count
-            start: mutable usize = report.analysis_1.traces.active_start
-            start <- 0 if start > count
-            trace_count: usize = count - start
-            owner_bytes: usize = sview_len(owner)
-            return false if owner_bytes >= PROOF_LINEAR_HINT_INDEX_WORK_LIMIT
-            trace_name_bytes: mutable usize = 0
-            maximum_trace_cost: mutable usize = 0
-            for trace_index in start..<count |trace_index, count, owner, report, trace_name_bytes, maximum_trace_cost|:
-                return false if not proof_linear_hint_index_charge(report, 1)
-                trace: ProofFactTrace = report.analysis_1.traces.records[trace_index]
-                trace_name_length: usize = sview_len(trace.name)
-                return false if trace_name_length > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT - trace_name_bytes
-                trace_name_bytes <- trace_name_bytes + trace_name_length
-                trace_cost: mutable usize = 0
-                return false if:
-                    not proof_replay_summary_expr_cost(trace.expression, &trace_cost, report.analysis_1.linear_hint_index.work_used, 0)
-                    not proof_linear_hint_index_charge(report, trace_cost)
-                maximum_trace_cost <- trace_cost if trace_cost > maximum_trace_cost
-            # The actual scan compares every owner name before it can test roots. Charge loop
-            # visits and both sides' name bytes, including records that will not match.
-            per_scan: usize = 1 + owner_bytes
-            return false if trace_count > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT / per_scan
-            scan_work: usize = trace_count * per_scan
             return false if:
-                trace_name_bytes > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT - scan_work
-                not proof_linear_hint_index_charge(report, scan_work + trace_name_bytes)
-            # Each trace may pass the cheap root filter and enter the five-pass proof comparator.
-            pair_cost: usize = fact_cost + maximum_trace_cost
-            return false if pair_cost > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT / 6
-            per_candidate: usize = pair_cost * 6
-            return false if trace_count > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT / per_candidate
-            proof_linear_hint_index_charge(report, trace_count * per_candidate)
+                cost > remaining
+                not proof_linear_hint_index_charge(report, cost)
+            true
 
         # The facts a goal attempt would capture, in report order (see `proof_add_goal_attempt`).
         def proof_linear_hint_captured(facts: darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, captured: mutable darray[Ast::Expr]&) -> bool:
@@ -179,16 +141,17 @@ extend ElisaProof:
                 if not proof_linear_hint_index_charge(report, 1):
                     proof_linear_hint_index_disable(report)
                     return false
-                fact_cost: (ok: bool, cost: usize) = proof_linear_hint_expression_charge(report, fact)
-                if not fact_cost.ok:
+                fact_cost: bool = proof_linear_hint_expression_charge(report, fact)
+                if not fact_cost:
                     proof_linear_hint_index_disable(report)
                     return false
-                continue if not proof_kernel_expression_supported(fact)
-                if not proof_linear_hint_trace_lookup_reserve(report, name, fact_cost.cost):
+                traced: (complete: bool, index: usize) = proof_certificate_fact_trace_index_with_work(report, fact, name, &report.analysis_1.linear_hint_index.work_used)
+                if not traced.complete:
                     proof_linear_hint_index_disable(report)
                     return false
-                trace_index: usize = proof_certificate_fact_trace_index(report, fact, name)
-                captured.push(fact) if trace_index < report.analysis_1.traces.records.count
+                if traced.index < report.analysis_1.traces.records.count:
+                    trace_root: usize = report.analysis_1.traces.records[traced.index].kernel_expression
+                    captured.push(fact) if trace_root < report.analysis_1.kernel.nodes.count
             return true
 
         def proof_linear_hint_certificate(facts: darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, name: sview) -> (found: bool, certificate: Ast::Expr):
@@ -228,47 +191,56 @@ extend ElisaProof:
             rows.provenance.clear()
             row_facts.clear()
             equalities.clear()
-            # Bound the complete export before its repeated fact/name/width scans. Row conversion
-            # uses the 64-term normalized-difference collector; the 512-term FM collector is a
-            # separate solver path. Keep this conservative E-squared reserve aligned with the
-            # collector and width lookups until those operations charge actual work.
-            total_expression_cost: mutable usize = 0
-            goal_cost: (complete: bool, cost: usize) = proof_replay_summary_expr_cost_with_work(goal, work)
-            return false if not goal_cost.complete
-            total_expression_cost <- goal_cost.cost
-            for fact in facts |fact, total_expression_cost, work|:
-                fact_cost: (complete: bool, cost: usize) = proof_replay_summary_expr_cost_with_work(fact, work)
-                return false if not fact_cost.complete or fact_cost.cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - total_expression_cost
-                total_expression_cost <- total_expression_cost + fact_cost.cost
-            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            linear_row_work_factor: usize = 256
-            linear_row_input_count: usize = facts.count + 1
-            remaining_work: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            return false if linear_row_input_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / linear_row_work_factor
-            input_factor: usize = linear_row_work_factor * linear_row_input_count
-            return false if total_expression_cost == 0 or remaining_work <= 1152
-            linear_available: usize = (remaining_work - 1152) / 4
-            return false if total_expression_cost > linear_available / input_factor / total_expression_cost
-            linear_work: usize = input_factor * total_expression_cost * total_expression_cost + 1152
-            return false if not proof_replay_source_work_charge(linear_work, work)
-            return false if not proof_linear_fact_names(goal, true, facts, atoms)
-            for fact in facts |fact, facts, atoms|:
+            # Build width witnesses once and meter each subsequent candidate/name/row walk as it
+            # runs. The former E-squared reservation charged a pessimistic whole-search bound
+            # before discovering whether facts were relevant or even linear.
+            markers_remaining: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work if work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT else 0
+            markers_allowance: usize = markers_remaining if markers_remaining < PROOF_LINEAR_SAFETY_WORK_LIMIT else PROOF_LINEAR_SAFETY_WORK_LIMIT
+            marker_start: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - markers_allowance
+            marker_work: mutable usize = marker_start
+            marker_exhausted: mutable bool = false
+            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, &marker_work, &marker_exhausted)
+            marker_spent: usize = marker_work - marker_start if marker_work >= marker_start else markers_allowance
+            return false if not proof_linear_search_width_debit(&work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, marker_spent)
+            return false if not marker_result.complete or marker_exhausted
+            markers: ProofScalarWitnesses = marker_result.witnesses
+            return false if not proof_linear_fact_names_with_search_work(goal, true, facts, markers, &atoms, &work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, true)
+            for fact in facts |fact, facts, atoms, markers, work|:
+                return false if not proof_linear_search_take_work(&work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 1)
                 continue if proof_linear_certificate_marker(fact)
                 names: mutable darray[sview] = []
-                continue if not proof_linear_fact_names(fact, false, facts, &names)
-                for name in names |name, atoms|:
-                    atoms.push(name) if not any atom in atoms where atom == name
-            return false if:
-                atoms.count == 0 or atoms.count > ProofLinearExportLimit::ATOMS
-                not proof_linear_row(goal, 1, true, facts, atoms, rows)
+                parsed: bool = proof_linear_fact_names_with_search_work(fact, false, facts, markers, &names, &work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, true)
+                return false if not parsed and work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                continue if not parsed
+                for name in names |name, atoms, work|:
+                    present: (complete: bool, found: bool) = proof_linear_search_name_in(name, atoms, &work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, true)
+                    return false if not present.complete
+                    atoms.push(name) if not present.found
+            return false if atoms.count == 0 or atoms.count > ProofLinearExportLimit::ATOMS
+            goal_row: mutable ProofLinearRows = ProofLinearRows{coefficients: [], constants: [], provenance: []}
+            return false if not proof_linear_search_row(goal, 1, true, facts, markers, atoms, &goal_row, &work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, true)
+            return false if goal_row.constants.count != 1 or goal_row.coefficients.count != atoms.count
+            return false if not proof_linear_search_take_work(&work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, atoms.count + 3)
+            rows.coefficients.extend(goal_row.coefficients)
+            rows.constants.push(goal_row.constants[0])
             row_facts.push(-1)
             equalities.push(false)
-            for fact_index in 0..<facts.count |fact_index, facts, atoms, rows, row_facts, equalities|:
+            for fact_index in 0..<facts.count |fact_index, facts, atoms, markers, rows, row_facts, equalities, work|:
+                break if row_facts.count >= ProofLinearExportLimit::ROWS
+                return false if not proof_linear_search_take_work(&work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 1)
                 fact: Ast::Expr = facts[fact_index]
                 continue if proof_linear_certificate_marker(fact)
-                continue if row_facts.count >= ProofLinearExportLimit::ROWS
-                if proof_linear_row(fact, 1, false, facts, atoms, rows):
+                row: mutable ProofLinearRows = ProofLinearRows{coefficients: [], constants: [], provenance: []}
+                parsed: bool = proof_linear_search_row(fact, 1, false, facts, markers, atoms, &row, &work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, true)
+                return false if not parsed and work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                if parsed:
+                    return false if row.constants.count != 1 or row.coefficients.count != atoms.count
+                    return false if not proof_linear_search_take_work(&work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, atoms.count + 3)
+                    rows.coefficients.extend(row.coefficients)
+                    rows.constants.push(row.constants[0])
                     row_facts.push(fact_index.i64())
                     probe: mutable ProofLinearRows = ProofLinearRows{coefficients: [], constants: [], provenance: []}
-                    equalities.push(proof_linear_row(fact, -1, false, facts, atoms, &probe))
+                    equality: bool = proof_linear_search_row(fact, -1, false, facts, markers, atoms, &probe, &work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, true)
+                    return false if not equality and work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    equalities.push(equality)
             return true

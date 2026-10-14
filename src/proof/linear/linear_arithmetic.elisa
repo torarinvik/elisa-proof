@@ -160,8 +160,16 @@ extend ElisaProof:
                     pass
 
         def proof_linear_fm_gcd(left: i64, right: i64) -> i64:
-            a: mutable i64 = left if left >= 0 else 0 - left
-            b: mutable i64 = right if right >= 0 else 0 - right
+            a: mutable i64 = left
+            b: mutable i64 = right
+            if a < 0:
+                magnitude: (known: bool, value: i64) = proof_sub_safe(0, a)
+                return 1 if not magnitude.known
+                a <- magnitude.value
+            if b < 0:
+                magnitude: (known: bool, value: i64) = proof_sub_safe(0, b)
+                return 1 if not magnitude.known
+                b <- magnitude.value
             for step in 0..<128 |step, a, b|:
                 break if b == 0
                 remainder: i64 = a % b
@@ -226,7 +234,9 @@ extend ElisaProof:
                         continue if lower >= 0
                         return false if next_count >= PROOF_LINEAR_FM_ROW_LIMIT
                         divisor: i64 = proof_linear_fm_gcd(upper, lower)
-                        positive_scale: i64 = (0 - lower) / divisor
+                        negated_lower: (known: bool, value: i64) = proof_sub_safe(0, lower)
+                        return false if not negated_lower.known
+                        positive_scale: i64 = negated_lower.value / divisor
                         negative_scale: i64 = upper / divisor
                         for column in 0..<width |column, positive, negative, positive_scale, negative_scale, width, rows, next|:
                             first: (known: bool, value: i64) = proof_mul_safe(positive_scale, rows[positive * width + column])
@@ -312,79 +322,6 @@ extend ElisaProof:
             # The operands of a non-disequality are never read; the fact fills them without
             # allocating a new term per fact and search level.
             return (false, fact, fact)
-
-        # Case-split pruning: an alternative of a disjunctive fact that the other facts refute is
-        # removed before the splitter opens it, and a disjunction with an alternative they entail
-        # (truth 1) is dropped as redundant. Only signed facts that pass the signed wrap guard
-        # are read, since this runs before the goal-level guards. Truth 2 is refuted.
-        def proof_linear_prune(expression: Ast::Expr, facts: darray[Ast::Expr]&, base_terms: darray[ProofNormalTerm]&, base_spans: darray[ProofLinearSpan]&, depth: usize) -> (truth: i64, changed: bool, pruned: Ast::Expr):
-            return (0, false, expression) if depth >= 32
-            stripped: Ast::Expr = proof_strip_parens(expression)
-            match stripped:
-                Ast::Expr.Binary(left, TokenKind.Or, right, position):
-                    left_result: (truth: i64, changed: bool, pruned: Ast::Expr) = proof_linear_prune(left, facts, base_terms, base_spans, depth + 1)
-                    right_result: (truth: i64, changed: bool, pruned: Ast::Expr) = proof_linear_prune(right, facts, base_terms, base_spans, depth + 1)
-                    return (2, true, stripped) if left_result.truth == 2 and right_result.truth == 2
-                    return (1, true, stripped) if left_result.truth == 1 or right_result.truth == 1
-                    return (right_result.truth, true, right_result.pruned) if left_result.truth == 2
-                    return (left_result.truth, true, left_result.pruned) if right_result.truth == 2
-                    return (0, false, expression) if not left_result.changed and not right_result.changed
-                    return (0, true, Ast::Expr.Binary(left_result.pruned, TokenKind.Or, right_result.pruned, position))
-                Ast::Expr.Binary(left, operator, right, _):
-                    return (0, false, expression) if:
-                        not proof_is_comparison(operator) or operator == TokenKind.BangEq
-                        not proof_primitive_comparison(left, right, facts) or not proof_signed_expression_safe(stripped, facts)
-                    terms: mutable darray[ProofNormalTerm] = []
-                    spans: mutable darray[ProofLinearSpan] = []
-                    terms.extend(base_terms)
-                    spans.extend(base_spans)
-                    return (0, false, expression) if not proof_linear_push_comparison(left, operator, right, true, facts, &terms, &spans)
-                    return (2, false, stripped) if proof_linear_refutes(terms, spans)
-                    # An alternative the other facts entail makes its whole disjunction redundant.
-                    negated: TokenKind = proof_comparison_negation(operator)
-                    return (0, false, expression) if negated == TokenKind.BangEq or negated == TokenKind.Eof
-                    entail_terms: mutable darray[ProofNormalTerm] = []
-                    entail_spans: mutable darray[ProofLinearSpan] = []
-                    entail_terms.extend(base_terms)
-                    entail_spans.extend(base_spans)
-                    return (0, false, expression) if not proof_linear_push_comparison(left, negated, right, true, facts, &entail_terms, &entail_spans)
-                    return (1, true, stripped) if proof_linear_refutes(entail_terms, entail_spans)
-                    return (0, false, expression)
-                _:
-                    return (0, false, expression)
-
-        # 0 when nothing changed, 1 when `pruned` lost refuted alternatives, 2 when a
-        # disjunctive fact lost all of them (the facts are inconsistent). The base system is
-        # read from the facts that are not disjunctions. Kernel mirror:
-        # `proof_kernel_replay_linear_prune_facts`.
-        def proof_linear_prune_facts(facts: darray[Ast::Expr]&, pruned: mutable darray[Ast::Expr]&) -> i64:
-            base: mutable darray[Ast::Expr] = []
-            disjunctive: mutable bool = false
-            for fact in facts |fact, base, disjunctive|:
-                if proof_linear_is_or(fact):
-                    disjunctive <- true
-                else:
-                    base.push(fact)
-            return 0 if not disjunctive
-            base_terms: mutable darray[ProofNormalTerm] = []
-            base_spans: mutable darray[ProofLinearSpan] = []
-            proof_linear_fact_constraints(base, true, 2, &base_terms, &base_spans)
-            return 0 if base_spans.count == 0
-            changed: mutable bool = false
-            for fact in facts |fact, facts, base_terms, base_spans, pruned, changed|:
-                if proof_linear_is_or(fact):
-                    result: (truth: i64, changed: bool, pruned: Ast::Expr) = proof_linear_prune(fact, facts, base_terms, base_spans, 0)
-                    return 2 if result.truth == 2
-                    if result.truth == 1:
-                        changed <- true
-                        continue
-                    if result.changed:
-                        changed <- true
-                        pruned.push(result.pruned)
-                        continue
-                pruned.push(fact)
-            return 1 if changed
-            return 0
 
         def proof_linear_is_or(expression: Ast::Expr) -> bool:
             match proof_strip_parens(expression):

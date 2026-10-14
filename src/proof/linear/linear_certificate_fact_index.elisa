@@ -1,0 +1,109 @@
+# Per-invocation index for exact premise membership during certificate validation. Hashes only
+# route candidates; exact proof expression equality remains authoritative on every hit.
+extend ElisaProof:
+    private:
+        struct ProofLinearCertificateFactIndex:
+            hashes: mutable darray[u32]
+            heads: mutable darray[usize]
+            next_rows: mutable darray[usize]
+            valid: bool
+
+        def proof_linear_certificate_fact_index_build(facts: darray[Ast::Expr]&, work: mutable usize&, work_limit: usize) -> (complete: bool, index: ProofLinearCertificateFactIndex) can[Memory.Allocate]:
+            empty: ProofLinearCertificateFactIndex = ProofLinearCertificateFactIndex{hashes: [], heads: [], next_rows: [], valid: false}
+            count: usize = facts.count
+            return (true, ProofLinearCertificateFactIndex{hashes: [], heads: [], next_rows: [], valid: true}) if count == 0
+            if count > work_limit / 4:
+                work <- work_limit
+                return (false, empty)
+            target: usize = count * 2
+            capacity: mutable usize = 1
+            while capacity < target |capacity, target, work, work_limit|:
+                return (false, empty) if not proof_linear_search_width_debit(&work, work_limit, 1)
+                return (false, empty) if capacity > work_limit / 4
+                capacity <- capacity * 2
+            return (false, empty) if not proof_linear_search_width_debit(&work, work_limit, capacity)
+            hashes: mutable darray[u32] = []
+            hashes.resize(capacity)
+            return (false, empty) if not proof_linear_search_width_debit(&work, work_limit, capacity)
+            heads: mutable darray[usize] = []
+            heads.resize(capacity)
+            for slot in 0..<capacity |slot, heads, capacity, count, work, work_limit|:
+                return (false, empty) if not proof_linear_search_width_debit(&work, work_limit, 1)
+                heads[slot] <- count
+            return (false, empty) if not proof_linear_search_width_debit(&work, work_limit, count)
+            next_rows: mutable darray[usize] = []
+            next_rows.resize(count)
+            for row in 0..<count |row, facts, hashes, heads, next_rows, capacity, count, work, work_limit|:
+                return (false, empty) if not proof_linear_search_width_debit(&work, work_limit, 1)
+                shape: (complete: bool, nodes: usize, cost: usize) = proof_linear_search_expression_shape_charge(facts[row], &work, work_limit)
+                return (false, empty) if not shape.complete
+                # Hashing revisits every supported node and identifier after the shape walk.
+                return (false, empty) if not proof_linear_search_width_debit(&work, work_limit, shape.cost)
+                hash: u32 = proof_expr_shape_hash(facts[row], 0)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, heads, hashes, next_rows, row, count, capacity, work, work_limit, placed|:
+                    return (false, empty) if not proof_linear_search_width_debit(&work, work_limit, 1)
+                    current: usize = heads[slot]
+                    return (false, empty) if current > count
+                    if current == count:
+                        hashes[slot] <- hash
+                        next_rows[row] <- count
+                        heads[slot] <- row
+                        placed <- true
+                        break
+                    if hashes[slot] == hash:
+                        next_rows[row] <- current
+                        heads[slot] <- row
+                        placed <- true
+                        break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (false, empty) if not placed
+            return (true, ProofLinearCertificateFactIndex{hashes: hashes, heads: heads, next_rows: next_rows, valid: true})
+
+        def proof_linear_certificate_fact_index_contains(index: ProofLinearCertificateFactIndex, facts: darray[Ast::Expr]&, wanted: Ast::Expr, work: mutable usize&, work_limit: usize) -> (complete: bool, found: bool):
+            # The first certificate candidate is checked before building the shared index, so
+            # an early premise hit can close without paying the whole-fact hashing setup.
+            # Keep that path bounded with the same exact comparator used for indexed hits.
+            if not index.valid:
+                for fact in facts |fact, wanted, work, work_limit|:
+                    return (false, false) if not proof_linear_search_width_debit(&work, work_limit, 1)
+                    equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(fact, wanted, &work, work_limit, true)
+                    return (false, false) if not equal.complete
+                    return (true, true) if equal.matches
+                return (true, false)
+            return (true, false) if facts.count == 0
+            return (false, false) if index.hashes.count != index.heads.count or index.next_rows.count != facts.count or index.hashes.count == 0
+            shape: (complete: bool, nodes: usize, cost: usize) = proof_linear_search_expression_shape_charge(wanted, &work, work_limit)
+            return (false, false) if not shape.complete
+            # Keep query hashing inside the same caller-limited search budget.
+            return (false, false) if not proof_linear_search_width_debit(&work, work_limit, shape.cost)
+            hash: u32 = proof_expr_shape_hash(wanted, 0)
+            capacity: usize = index.hashes.count
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, hash, index, facts, wanted, capacity, work, work_limit|:
+                return (false, false) if not proof_linear_search_width_debit(&work, work_limit, 1)
+                row: usize = index.heads[slot]
+                return (false, false) if row > facts.count
+                return (true, false) if row == facts.count
+                if index.hashes[slot] == hash:
+                    visited: mutable usize = 0
+                    current: mutable usize = row
+                    while current < facts.count and visited < facts.count |current, visited, facts, index, wanted, work, work_limit|:
+                        return (false, false) if not proof_linear_search_width_debit(&work, work_limit, 1)
+                        equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(facts[current], wanted, &work, work_limit, true)
+                        return (false, false) if not equal.complete
+                        return (true, true) if equal.matches
+                        next: usize = index.next_rows[current]
+                        return (false, false) if next > facts.count
+                        return (true, false) if next == facts.count
+                        current <- next
+                        visited <- visited + 1
+                    return (false, false) if visited >= facts.count
+                    return (true, false)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (true, false)

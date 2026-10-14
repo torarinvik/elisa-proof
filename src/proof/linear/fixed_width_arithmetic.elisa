@@ -2,29 +2,6 @@ extend ElisaProof:
     private:
         const PROOF_CROSS_WIDTH_SAFE_INTEGER_MAX: i64 = ElisaProofKernelCore::PROOF_KERNEL_I8_MAX
 
-        def proof_signed_i64_only_context(facts: darray[Ast::Expr]&) -> bool:
-            has_i64_type: mutable bool = false
-            for fact in facts |fact, has_i64_type|:
-                match proof_marker_callee_name(fact):
-                    "__elisa_signed_type_bound":
-                        signed = proof_signed_marker_info(fact)
-                        return false if signed.known and signed.width != ElisaProofKernelCore::PROOF_KERNEL_I64_WIDTH
-                        has_i64_type <- true if signed.known
-                    "__elisa_unsigned_type_bound":
-                        unsigned = proof_unsigned_marker_info(fact)
-                        return false if unsigned.known
-                        place = proof_unsigned_place_marker_info(fact)
-                        return false if place.known
-                    "__elisa_primitive_scalar_element":
-                        element = proof_element_marker_info(fact)
-                        return false if element.known and element.width > 0
-                    "__elisa_untrusted_operator_type":
-                        untrusted = proof_untrusted_operator_marker_info(fact)
-                        return false if untrusted.known
-                    _:
-                        pass
-            return has_i64_type
-
         # A comparison between closed safe constants has the same truth value in every supported
         # integer width and consumes no premise, so unrelated unsigned facts in scope must not
         # suppress it. The kernel replays it through its constant-comparison rule.
@@ -63,26 +40,6 @@ extend ElisaProof:
                     return a.value <= b.value if operator == TokenKind.Gt
                     return a.value > b.value if operator == TokenKind.LtEq
                     return a.value < b.value if operator == TokenKind.GtEq
-                    return false
-                _:
-                    return false
-
-        def proof_closed_signed_i64_comparison(goal: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
-            return false if:
-                proof_has_ambiguous_integer_constant(goal, 0)
-                not proof_signed_i64_only_context(facts)
-            match goal:
-                Ast::Expr.Binary(left, operator, right, _):
-                    return false if not proof_is_comparison(operator)
-                    a: (known: bool, value: i64) = proof_constant_int(left)
-                    b: (known: bool, value: i64) = proof_constant_int(right)
-                    return false if not a.known or not b.known
-                    return a.value == b.value if operator == TokenKind.EqEq
-                    return a.value != b.value if operator == TokenKind.BangEq
-                    return a.value < b.value if operator == TokenKind.Lt
-                    return a.value > b.value if operator == TokenKind.Gt
-                    return a.value <= b.value if operator == TokenKind.LtEq
-                    return a.value >= b.value if operator == TokenKind.GtEq
                     return false
                 _:
                     return false
@@ -201,39 +158,6 @@ extend ElisaProof:
             children: mutable darray[usize] = []
             root: usize = proof_kernel_encode_annotated(expression, &nodes, &children, annotations)
             return ElisaProofKernelCore::typed_constant_expression_unsigned_width(&nodes, root) == width or ElisaProofKernelCore::contextual_constant_expression_unsigned_width(&nodes, root) == width
-
-        # Direct nonnegative literals compare alike at every representable width.
-        # Negative payloads without retained sorts remain outside this rule.
-        def proof_closed_literal_comparison(goal: Ast::Expr) -> bool:
-            match proof_strip_parens(goal):
-                Ast::Expr.Binary(left, operator, right, _):
-                    return false if not proof_is_comparison(operator)
-                    match proof_strip_parens(left):
-                        Ast::Expr.IntLit(left_value, _):
-                            match proof_strip_parens(right):
-                                Ast::Expr.IntLit(right_value, _):
-                                    return false if left_value < 0 or right_value < 0
-                                    return left_value == right_value if operator == TokenKind.EqEq
-                                    return left_value != right_value if operator == TokenKind.BangEq
-                                    return left_value < right_value if operator == TokenKind.Lt
-                                    return left_value > right_value if operator == TokenKind.Gt
-                                    return left_value <= right_value if operator == TokenKind.LtEq
-                                    return left_value >= right_value if operator == TokenKind.GtEq
-                                    return false
-                                _:
-                                    return false
-                        Ast::Expr.StringLit(left_value, _):
-                            match proof_strip_parens(right):
-                                Ast::Expr.StringLit(right_value, _):
-                                    return left_value == right_value if operator == TokenKind.EqEq
-                                    return left_value != right_value if operator == TokenKind.BangEq
-                                    return false
-                                _:
-                                    return false
-                        _:
-                            return false
-                _:
-                    return false
 
         def proof_signed_add_type_bounds(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> void:
             for fact in facts |fact, bounds|:
@@ -528,68 +452,6 @@ extend ElisaProof:
         # literal is a non-negative payload and every intermediate result fits. A negative width
         # is unsigned: its floor is zero, so a subtraction that would wrap is refused, and a
         # 64-bit value above the i64 ceiling is unrepresentable here and refused too.
-        def proof_signed_constant_at_width(expression: Ast::Expr, width: i64, depth: usize) -> (known: bool, value: i64):
-            return (false, 0) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            unsigned: bool = width < 0
-            minimum: i64 = 0 if unsigned else ElisaProofKernelCore::proof_kernel_signed_width_min(width)
-            maximum: i64 = proof_unsigned_width_max(0 - width) if unsigned else ElisaProofKernelCore::proof_kernel_signed_width_max(width)
-            return (false, 0) if (minimum == 0 and not unsigned) or maximum <= 0
-            match expression:
-                Ast::Expr.IntLit(value, _):
-                    return (value >= 0 and value <= maximum, value)
-                Ast::Expr.Paren(inner, _):
-                    return proof_signed_constant_at_width(inner, width, depth + 1)
-                Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(value, _), _) if not unsigned and value > maximum:
-                    # The signed minimum is written `-(MAX+1)`. Its payload alone is out of width,
-                    # but in two's complement `-(MAX+1)` and its wrapped reading `-(MIN)` are both
-                    # MIN, so the one literal one past the maximum has a single typed value.
-                    return (value - 1 == maximum, minimum)
-                Ast::Expr.Unary(operator, operand, _):
-                    inner: (known: bool, value: i64) = proof_signed_constant_at_width(operand, width, depth + 1)
-                    return (false, 0) if not inner.known
-                    return inner if operator == TokenKind.Plus
-                    return (false, 0) if operator != TokenKind.Minus
-                    # Every non-negative value within the width negates within it.
-                    negated: (known: bool, value: i64) = proof_sub_safe(0, inner.value)
-                    return (negated.known and negated.value >= minimum and negated.value <= maximum, negated.value)
-                Ast::Expr.Binary(left, operator, right, _):
-                    left_value: (known: bool, value: i64) = proof_signed_constant_at_width(left, width, depth + 1)
-                    right_value: (known: bool, value: i64) = proof_signed_constant_at_width(right, width, depth + 1)
-                    return (false, 0) if not left_value.known or not right_value.known
-                    result: mutable (known: bool, value: i64) = (false, 0)
-                    result <- proof_add_safe(left_value.value, right_value.value) if operator == TokenKind.Plus
-                    result <- proof_sub_safe(left_value.value, right_value.value) if operator == TokenKind.Minus
-                    result <- proof_mul_safe(left_value.value, right_value.value) if operator == TokenKind.Star
-                    # Truncating division and remainder of in-width operands stay in width, except
-                    # `min / -1`, which the range check below refuses like any other overflow.
-                    result <- proof_div_safe(left_value.value, right_value.value) if operator == TokenKind.Slash
-                    result <- proof_mod_safe(left_value.value, right_value.value) if operator == TokenKind.Percent
-                    return (result.known and result.value >= minimum and result.value <= maximum, result.value)
-                _:
-                    return (false, 0)
-
-        def proof_ambiguous_constant_at_width(expression: Ast::Expr, facts: darray[Ast::Expr]&, width: i64, depth: usize) -> bool:
-            return true if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            if proof_closed_integer_arithmetic(expression, depth):
-                # The typed reading only widens the untyped guard: a closed form the width evaluator
-                # does not model, such as a shift, is still judged by the untyped guard.
-                constant: (known: bool, value: i64) = proof_signed_constant_at_width(expression, width, 0)
-                return false if constant.known
-                return proof_has_ambiguous_integer_constant(expression, depth)
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    return proof_ambiguous_constant_at_width(inner, facts, width, depth + 1)
-                Ast::Expr.Unary(operator, operand, _):
-                    return proof_ambiguous_constant_at_width(operand, facts, width, depth + 1) if operator == TokenKind.Minus or operator == TokenKind.Plus
-                Ast::Expr.Binary(left, operator, right, _):
-                    if operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent:
-                        return proof_ambiguous_constant_at_width(left, facts, width, depth + 1) or proof_ambiguous_constant_at_width(right, facts, width, depth + 1)
-                Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return true if proof_has_ambiguous_integer_constant_in(condition, facts, depth + 1)
-                    return proof_ambiguous_constant_at_width(then_expression, facts, width, depth + 1) or proof_ambiguous_constant_at_width(else_expression, facts, width, depth + 1)
-                _:
-                    pass
-            return proof_has_ambiguous_integer_constant(expression, depth)
 
 include "./fixed_width_arithmetic_integrated_helpers.elisa"
 

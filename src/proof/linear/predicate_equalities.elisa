@@ -1,42 +1,71 @@
 extend ElisaProof:
     private:
-        def proof_unsigned_nonzero_lower_bound(goal: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+        def proof_unsigned_nonzero_lower_bound_with_work(goal: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            goal_result: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(goal, budget, exhausted)
+            return (false, false) if not goal_result.complete
             term: mutable Ast::Expr = Ast::Expr.Invalid
-            match proof_strip_parens(goal):
+            match goal_result.expression:
                 Ast::Expr.Binary(left, operator, right, _):
-                    a = proof_constant_int(left)
-                    b = proof_constant_int(right)
+                    a: (known: bool, value: i64) = proof_constant_int_with_work(left, 0, budget, exhausted)
+                    return (false, false) if exhausted
+                    b: (known: bool, value: i64) = proof_constant_int_with_work(right, 0, budget, exhausted)
+                    return (false, false) if exhausted
                     if a.known and ((operator == TokenKind.LtEq and a.value == 1) or (operator == TokenKind.Lt and a.value == 0)):
                         term <- right
                     elif b.known and ((operator == TokenKind.GtEq and b.value == 1) or (operator == TokenKind.Gt and b.value == 0)):
                         term <- left
                     else:
-                        return false
-                    return false if not proof_primitive_comparison(left, right, facts)
+                        return (true, false)
                 _:
-                    return false
-            return false if proof_unsigned_width_in_expression(term, facts) == 0
-            for fact in facts |fact, term, facts|:
-                candidate: mutable Ast::Expr = proof_strip_parens(fact)
+                    return (true, false)
+            markers_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+            return (false, false) if not markers_result.complete or exhausted
+            scale_result: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers_result.witnesses, budget, exhausted)
+            return (false, false) if not scale_result.complete or exhausted
+            match goal_result.expression:
+                Ast::Expr.Binary(left, _, right, _):
+                    comparison: (complete: bool, matches: bool) = proof_linear_safety_comparison_with_work(left, right, markers_result.witnesses, scale_result.scale, budget, exhausted)
+                    return (false, false) if not comparison.complete
+                    return (true, false) if not comparison.matches
+                _:
+                    return (true, false)
+            width: i64 = proof_unsigned_width_in_expression_with_work(term, markers_result.witnesses, budget, exhausted)
+            return (false, false) if exhausted
+            return (true, false) if width == 0
+            for fact in facts |fact, term, markers_result, scale_result, budget, exhausted|:
+                candidate_result: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(fact, budget, exhausted)
+                return (false, false) if not candidate_result.complete
+                candidate: Ast::Expr = candidate_result.expression
                 negated: mutable bool = false
                 match candidate:
                     Ast::Expr.Unary(TokenKind.Not, inner, _):
-                        candidate <- proof_strip_parens(inner)
+                        nested_result: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(inner, budget, exhausted)
+                        return (false, false) if not nested_result.complete
+                        candidate <- nested_result.expression
                         negated <- true
                     _:
                         pass
                 match candidate:
                     Ast::Expr.Binary(left, operator, right, _):
                         continue if (not negated and operator != TokenKind.BangEq) or (negated and operator != TokenKind.EqEq)
-                        continue if not proof_primitive_comparison(left, right, facts)
-                        a = proof_constant_int(left)
-                        b = proof_constant_int(right)
-                        return true if:
-                            a.known and a.value == 0 and proof_expr_equal(right, term)
-                            b.known and b.value == 0 and proof_expr_equal(left, term)
+                        comparison: (complete: bool, matches: bool) = proof_linear_safety_comparison_with_work(left, right, markers_result.witnesses, scale_result.scale, budget, exhausted)
+                        return (false, false) if not comparison.complete
+                        continue if not comparison.matches
+                        a: (known: bool, value: i64) = proof_constant_int_with_work(left, 0, budget, exhausted)
+                        return (false, false) if exhausted
+                        b: (known: bool, value: i64) = proof_constant_int_with_work(right, 0, budget, exhausted)
+                        return (false, false) if exhausted
+                        if a.known and a.value == 0:
+                            equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(right, term, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                            return (false, false) if not equal.complete
+                            return (true, true) if equal.matches
+                        if b.known and b.value == 0:
+                            equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(left, term, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                            return (false, false) if not equal.complete
+                            return (true, true) if equal.matches
                     _:
                         pass
-            return false
+            return (true, false)
 
         # Mirror an independently checked intermediate assertion: primitive
         # strict order implies disequality, even when a conditional call
@@ -104,31 +133,6 @@ extend ElisaProof:
                 _:
                     pass
             return false
-
-        # Make independently justified call-summary consequences available to
-        # equality/congruence search; this does not identify different calls.
-        def proof_goal_with_call_consequences(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool can[Global.Read, Global.Write]:
-            derived: mutable darray[Ast::Expr] = []
-            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
-            for fact in facts |facts, markers, derived|:
-                match proof_strip_parens(fact):
-                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
-                        continue if not proof_primitive_comparison_marked(left, right, markers)
-                        for orientation in 0..<2 |orientation, left, right, facts, derived|:
-                            consequence: Ast::Expr = right if orientation == 0 else left
-                            continue if proof_expr_has_call(consequence) or proof_expr_has_move(consequence)
-                            present: mutable bool = false
-                            for premise in facts |premise, consequence, present|:
-                                present <- true if proof_fact_contains(premise, consequence)
-                            continue if present or not proof_fact_proves_call_summary(facts, consequence)
-                            derived.push(consequence)
-                    _:
-                        pass
-            return false if derived.count == 0
-            enriched: mutable darray[Ast::Expr] = []
-            enriched.extend(facts)
-            enriched.extend(derived)
-            return (proof_goal_depth(&enriched, goal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write})
 
         # Weakening removes unused quantified premises from the entire recursive
         # proof context, not merely from the machine-arithmetic safety checks.

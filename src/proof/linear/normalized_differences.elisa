@@ -44,6 +44,220 @@ extend ElisaProof:
                 _:
                     return false
 
+        # Certificate production already builds this witness index once. Use indexed width
+        # lookup while normalizing candidate rows instead of rescanning every fact at each AST
+        # node. An incomplete indexed lookup rejects the candidate rather than treating an
+        # unknown width as absent.
+        def proof_normal_term_has_width_with_witnesses(expression: Ast::Expr, markers: ProofScalarWitnesses&) -> (complete: bool, has_width: bool):
+            work: mutable usize = 0
+            exhausted: mutable bool = false
+            signed_width: i64 = proof_signed_width_in_expression_with_work(expression, markers, 0, &work, &exhausted)
+            return (false, false) if exhausted
+            return (true, true) if signed_width != 0
+            unsigned_width: i64 = proof_unsigned_width_in_expression_with_work(expression, markers, &work, &exhausted)
+            return (false, false) if exhausted
+            return (true, unsigned_width != 0)
+
+        def proof_normal_comparison_signed_with_witnesses(left: Ast::Expr, right: Ast::Expr, markers: ProofScalarWitnesses&) -> (complete: bool, signed: bool):
+            work: mutable usize = 0
+            exhausted: mutable bool = false
+            left_width: i64 = proof_signed_width_in_expression_with_work(left, markers, 0, &work, &exhausted)
+            return (false, false) if exhausted
+            return (true, true) if left_width != 0
+            right_width: i64 = proof_signed_width_in_expression_with_work(right, markers, 0, &work, &exhausted)
+            return (false, false) if exhausted
+            return (true, right_width != 0)
+
+        def proof_collect_normal_terms_with_witnesses(expression: Ast::Expr, sign: i64, signed: bool, markers: ProofScalarWitnesses&, terms: mutable darray[ProofNormalTerm]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or terms.count >= PROOF_NORMAL_TERM_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_collect_normal_terms_with_witnesses(inner, sign, signed, markers, terms, depth + 1)
+                Ast::Expr.IntLit(value, _):
+                    return false if value < 0
+                    terms.push(ProofNormalTerm{name: "", coefficient: value if sign > 0 else 0 - value})
+                    return true
+                Ast::Expr.Ident(name, _):
+                    width: (complete: bool, has_width: bool) = proof_normal_term_has_width_with_witnesses(expression, markers)
+                    return false if name == "" or not width.complete or not width.has_width
+                    terms.push(ProofNormalTerm{name: name, coefficient: sign})
+                    return true
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    negated: (known: bool, value: i64) = proof_signed_negated_literal(expression, signed)
+                    if negated.known:
+                        terms.push(ProofNormalTerm{name: "", coefficient: negated.value if sign > 0 else 0 - negated.value})
+                        return true
+                    width: (complete: bool, has_width: bool) = proof_normal_term_has_width_with_witnesses(expression, markers)
+                    return false if not width.complete or not width.has_width
+                    return proof_collect_normal_terms_with_witnesses(operand, sign if operator == TokenKind.Plus else 0 - sign, signed, markers, terms, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.Star and metered:
+                        literal_left: (complete: bool, known: bool, value: i64) = proof_linear_literal_with_work(left, &work, work_limit, true, 0)
+                        literal_right: (complete: bool, known: bool, value: i64) = proof_linear_literal_with_work(right, &work, work_limit, true, 0)
+                        return false if not literal_left.complete or not literal_right.complete
+                        if literal_left.known and literal_right.known and (literal_left.value <= 1 or literal_right.value <= 1):
+                            product: (known: bool, value: i64) = proof_mul_safe(literal_left.value, literal_right.value)
+                            return false if not product.known
+                            scaled_product: (known: bool, value: i64) = proof_mul_safe(product.value, sign)
+                            return false if not scaled_product.known or not proof_linear_search_width_debit(&work, work_limit, 1)
+                            terms.push(ProofNormalTerm{name: "", coefficient: scaled_product.value})
+                            return true
+                        width: (complete: bool, has_width: bool) = proof_normal_term_has_width_with_witnesses_work(expression, facts, markers, &work, work_limit, true)
+                        return false if not width.complete or not width.has_width
+                        if literal_left.known:
+                            scaled: (known: bool, value: i64) = proof_mul_safe(literal_left.value, sign)
+                            return false if not scaled.known
+                            return proof_collect_normal_terms_with_witnesses_work(right, scaled.value, signed, facts, markers, terms, depth + 1, &work, work_limit, metered)
+                        if literal_right.known:
+                            scaled: (known: bool, value: i64) = proof_mul_safe(literal_right.value, sign)
+                            return false if not scaled.known
+                            return proof_collect_normal_terms_with_witnesses_work(left, scaled.value, signed, facts, markers, terms, depth + 1, &work, work_limit, metered)
+                        return false
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    width: (complete: bool, has_width: bool) = proof_normal_term_has_width_with_witnesses(expression, markers)
+                    return false if not width.complete or not width.has_width
+                    return false if not proof_collect_normal_terms_with_witnesses(left, sign, signed, markers, terms, depth + 1)
+                    return proof_collect_normal_terms_with_witnesses(right, sign if operator == TokenKind.Plus else 0 - sign, signed, markers, terms, depth + 1)
+                _:
+                    return false
+
+        def proof_linear_search_width_debit(work: mutable usize&, work_limit: usize, amount: usize) -> bool:
+            return false if work > work_limit
+            if amount > work_limit - work:
+                work <- work_limit
+                return false
+            work <- work + amount
+            return true
+
+        # Give a nested width walk only the portion of the shared search allowance that
+        # remains. The width readers use the linear safety ceiling internally, so offsetting
+        # their local counter makes that fixed ceiling enforce the smaller caller allowance
+        # while the walk is in progress, not after it has completed.
+        def proof_linear_search_width_local_start(work: usize, work_limit: usize) -> (complete: bool, baseline: usize):
+            return (false, PROOF_LINEAR_SAFETY_WORK_LIMIT) if work >= work_limit
+            remaining: usize = work_limit - work
+            allowance: usize = remaining if remaining < PROOF_LINEAR_SAFETY_WORK_LIMIT else PROOF_LINEAR_SAFETY_WORK_LIMIT
+            return (true, PROOF_LINEAR_SAFETY_WORK_LIMIT - allowance)
+
+        # Search variants meter each indexed query and feed its measured local safety work into
+        # the shared tactic allowance. The per-query cap prevents one malformed equality from
+        # monopolizing a search; the tactic meter still governs the sum across all queries.
+        def proof_normal_term_has_width_with_witnesses_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, has_width: bool):
+            return (true, proof_normal_term_has_width(expression, facts)) if not metered
+            start: (complete: bool, baseline: usize) = proof_linear_search_width_local_start(work, work_limit)
+            return (false, false) if not start.complete
+            local_work: mutable usize = start.baseline
+            exhausted: mutable bool = false
+            signed_width: i64 = proof_signed_width_in_expression_with_work(expression, markers, 0, &local_work, &exhausted)
+            if exhausted:
+                work <- work_limit
+                return (false, false)
+            return (false, false) if not proof_linear_search_width_debit(&work, work_limit, local_work - start.baseline)
+            return (true, true) if signed_width != 0
+            start <- proof_linear_search_width_local_start(work, work_limit)
+            return (false, false) if not start.complete
+            local_work <- start.baseline
+            exhausted <- false
+            unsigned_width: i64 = proof_unsigned_width_in_expression_with_work(expression, markers, &local_work, &exhausted)
+            if exhausted:
+                work <- work_limit
+                return (false, false)
+            return (false, false) if not proof_linear_search_width_debit(&work, work_limit, local_work - start.baseline)
+            return (true, unsigned_width != 0)
+
+        def proof_linear_literal_with_work(expression: Ast::Expr, work: mutable usize&, work_limit: usize, metered: bool, depth: usize) -> (complete: bool, known: bool, value: i64):
+            return (false, false, 0) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return (false, false, 0) if metered and not proof_linear_search_width_debit(&work, work_limit, 1)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_linear_literal_with_work(inner, &work, work_limit, metered, depth + 1)
+                Ast::Expr.IntLit(value, _):
+                    return (true, true, value) if value >= 0
+                    return (true, false, 0)
+                _:
+                    return (true, false, 0)
+
+        def proof_normal_comparison_signed_with_witnesses_work(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, signed: bool):
+            return (true, proof_normal_comparison_signed(left, right, facts)) if not metered
+            start: (complete: bool, baseline: usize) = proof_linear_search_width_local_start(work, work_limit)
+            return (false, false) if not start.complete
+            local_work: mutable usize = start.baseline
+            exhausted: mutable bool = false
+            left_width: i64 = proof_signed_width_in_expression_with_work(left, markers, 0, &local_work, &exhausted)
+            if exhausted:
+                work <- work_limit
+                return (false, false)
+            return (false, false) if not proof_linear_search_width_debit(&work, work_limit, local_work - start.baseline)
+            return (true, true) if left_width != 0
+            start <- proof_linear_search_width_local_start(work, work_limit)
+            return (false, false) if not start.complete
+            local_work <- start.baseline
+            exhausted <- false
+            right_width: i64 = proof_signed_width_in_expression_with_work(right, markers, 0, &local_work, &exhausted)
+            if exhausted:
+                work <- work_limit
+                return (false, false)
+            return (false, false) if not proof_linear_search_width_debit(&work, work_limit, local_work - start.baseline)
+            return (true, right_width != 0)
+
+        def proof_collect_normal_terms_with_witnesses_work(expression: Ast::Expr, sign: i64, signed: bool, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, terms: mutable darray[ProofNormalTerm]&, depth: usize, work: mutable usize&, work_limit: usize, metered: bool) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or terms.count >= PROOF_NORMAL_TERM_LIMIT
+            return false if metered and not proof_linear_search_width_debit(&work, work_limit, 1)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_collect_normal_terms_with_witnesses_work(inner, sign, signed, facts, markers, terms, depth + 1, &work, work_limit, metered)
+                Ast::Expr.IntLit(value, _):
+                    return false if value < 0
+                    terms.push(ProofNormalTerm{name: "", coefficient: value if sign > 0 else 0 - value})
+                    return true
+                Ast::Expr.Ident(name, _):
+                    width: (complete: bool, has_width: bool) = proof_normal_term_has_width_with_witnesses_work(expression, facts, markers, &work, work_limit, metered)
+                    return false if name == "" or not width.complete or not width.has_width
+                    terms.push(ProofNormalTerm{name: name, coefficient: sign})
+                    return true
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    negated: (known: bool, value: i64) = proof_signed_negated_literal(expression, signed)
+                    if negated.known:
+                        terms.push(ProofNormalTerm{name: "", coefficient: negated.value if sign > 0 else 0 - negated.value})
+                        return true
+                    width: (complete: bool, has_width: bool) = proof_normal_term_has_width_with_witnesses_work(expression, facts, markers, &work, work_limit, metered)
+                    return false if not width.complete or not width.has_width
+                    return proof_collect_normal_terms_with_witnesses_work(operand, sign if operator == TokenKind.Plus else 0 - sign, signed, facts, markers, terms, depth + 1, &work, work_limit, metered)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.Star:
+                        left_literal: (complete: bool, known: bool, value: i64) = proof_linear_literal_with_work(left, &work, work_limit, metered, 0)
+                        return false if not left_literal.complete
+                        right_literal: (complete: bool, known: bool, value: i64) = proof_linear_literal_with_work(right, &work, work_limit, metered, 0)
+                        return false if not right_literal.complete
+                        if left_literal.known and right_literal.known and (left_literal.value <= 1 or right_literal.value <= 1):
+                            product: (known: bool, value: i64) = proof_mul_safe(left_literal.value, right_literal.value)
+                            return false if not product.known
+                            scaled: (known: bool, value: i64) = proof_mul_safe(product.value, sign)
+                            return false if not scaled.known
+                            terms.push(ProofNormalTerm{name: "", coefficient: scaled.value})
+                            return true
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star
+                    width: (complete: bool, has_width: bool) = proof_normal_term_has_width_with_witnesses_work(expression, facts, markers, &work, work_limit, metered)
+                    return false if not width.complete or not width.has_width
+                    if operator == TokenKind.Star:
+                        left_scale: (complete: bool, known: bool, value: i64) = proof_linear_literal_with_work(left, &work, work_limit, metered, 0)
+                        return false if not left_scale.complete
+                        if left_scale.known:
+                            scaled: (known: bool, value: i64) = proof_mul_safe(left_scale.value, sign)
+                            return false if not scaled.known
+                            return proof_collect_normal_terms_with_witnesses_work(right, scaled.value, signed, facts, markers, terms, depth + 1, &work, work_limit, metered)
+                        right_scale: (complete: bool, known: bool, value: i64) = proof_linear_literal_with_work(right, &work, work_limit, metered, 0)
+                        return false if not right_scale.complete or not right_scale.known
+                        scaled: (known: bool, value: i64) = proof_mul_safe(right_scale.value, sign)
+                        return false if not scaled.known
+                        return proof_collect_normal_terms_with_witnesses_work(left, scaled.value, signed, facts, markers, terms, depth + 1, &work, work_limit, metered)
+                    return false if not proof_collect_normal_terms_with_witnesses_work(left, sign, signed, facts, markers, terms, depth + 1, &work, work_limit, metered)
+                    return proof_collect_normal_terms_with_witnesses_work(right, sign if operator == TokenKind.Plus else 0 - sign, signed, facts, markers, terms, depth + 1, &work, work_limit, metered)
+                _:
+                    return false
+
         # `-literal` has no width of its own, but in a comparison one of whose sides is signed
         # it is read at that side's width, where the negation of a non-negative i64 literal is
         # exact. The ambiguity guard admitted the goal at that width; an unsigned comparison is

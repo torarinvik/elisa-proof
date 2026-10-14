@@ -27,7 +27,7 @@ extend ElisaProof:
                     # can be in range at i64 width but invalid/poison at a narrower fixed width;
                     # a shift by fewer than 7 whose result stays small is the same at every width.
                     return (false, 0) if (operator == TokenKind.LShift or operator == TokenKind.RShift) and right_value.value >= 7
-                    result: (known: bool, value: i64) = proof_constant_int(expression)
+                    result: (known: bool, value: i64) = proof_constant_binary(operator, left_value.known, left_value.value, right_value.known, right_value.value)
                     return (false, 0) if not result.known or result.value < 0 or result.value > PROOF_CROSS_WIDTH_SAFE_INTEGER_MAX
                     return result
                 _:
@@ -82,32 +82,115 @@ extend ElisaProof:
                 _:
                     return (false, 0)
 
-        def proof_closed_signed_literal_comparison(goal: Ast::Expr) -> bool:
-            comparison: mutable Ast::Expr = proof_strip_parens(goal)
-            match comparison:
-                Ast::Expr.Unary(TokenKind.Not, operand, position):
-                    match proof_strip_parens(operand):
-                        Ast::Expr.Binary(left, operator, right, _):
-                            complement: TokenKind = proof_comparison_negation(operator)
-                            return false if complement == TokenKind.Eof
-                            comparison <- Ast::Expr.Binary(left, complement, right, position)
+        def proof_nonnegative_literal_constant_with_work(expression: Ast::Expr, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, known: bool, value: i64):
+            return (false, false, 0) if:
+                exhausted
+                not proof_linear_safety_work_charge(budget, exhausted, 1)
+            return (true, false, 0) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return (true, value >= 0, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_nonnegative_literal_constant_with_work(inner, depth + 1, budget, exhausted)
+                Ast::Expr.Unary(TokenKind.Plus, operand, _):
+                    return proof_nonnegative_literal_constant_with_work(operand, depth + 1, budget, exhausted)
+                _:
+                    return (true, false, 0)
+
+        def proof_signed_literal_comparison_constant_with_work(expression: Ast::Expr, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, known: bool, value: i64):
+            return (false, false, 0) if:
+                exhausted
+                not proof_linear_safety_work_charge(budget, exhausted, 1)
+            return (true, false, 0) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return (true, value >= 0, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_signed_literal_comparison_constant_with_work(inner, depth + 1, budget, exhausted)
+                Ast::Expr.Unary(TokenKind.Plus, operand, _):
+                    return proof_signed_literal_comparison_constant_with_work(operand, depth + 1, budget, exhausted)
+                Ast::Expr.Unary(TokenKind.Minus, operand, _):
+                    magnitude: (complete: bool, known: bool, value: i64) = proof_nonnegative_literal_constant_with_work(operand, depth + 1, budget, exhausted)
+                    return (false, false, 0) if not magnitude.complete or exhausted
+                    return (false, false, 0) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                    return (false, false, 0) if not magnitude.known or magnitude.value == proof_i64_min()
+                    return (true, true, 0 - magnitude.value)
+                _:
+                    return (true, false, 0)
+
+        def proof_closed_signed_literal_comparison_with_work(goal: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            left: mutable Ast::Expr = Ast::Expr.Invalid
+            right: mutable Ast::Expr = Ast::Expr.Invalid
+            operator: mutable TokenKind = TokenKind.Eof
+            match goal:
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    inner: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(operand, budget, exhausted)
+                    if not inner.complete or exhausted:
+                        exhausted <- true
+                        return false
+                    match inner.expression:
+                        Ast::Expr.Binary(parsed_left, parsed_operator, parsed_right, _):
+                            operator <- proof_comparison_negation(parsed_operator)
+                            return false if operator == TokenKind.Eof
+                            left <- parsed_left
+                            right <- parsed_right
                         _:
                             return false
+                Ast::Expr.Binary(parsed_left, parsed_operator, parsed_right, _):
+                    left <- parsed_left
+                    operator <- parsed_operator
+                    right <- parsed_right
                 _:
-                    pass
-            match comparison:
+                    return false
+            return false if not proof_is_comparison(operator)
+            a: (complete: bool, known: bool, value: i64) = proof_signed_literal_comparison_constant_with_work(left, 0, budget, exhausted)
+            return false if not a.complete or exhausted
+            b: (complete: bool, known: bool, value: i64) = proof_signed_literal_comparison_constant_with_work(right, 0, budget, exhausted)
+            return false if not b.complete or exhausted or not a.known or not b.known
+            return a.value == b.value if operator == TokenKind.EqEq
+            return a.value != b.value if operator == TokenKind.BangEq
+            return a.value < b.value if operator == TokenKind.Lt
+            return a.value > b.value if operator == TokenKind.Gt
+            return a.value <= b.value if operator == TokenKind.LtEq
+            return a.value >= b.value if operator == TokenKind.GtEq
+            return false
+
+        def proof_closed_literal_comparison_with_work(goal: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            match goal:
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if not proof_is_comparison(operator)
-                    a: (known: bool, value: i64) = proof_signed_literal_comparison_constant(left)
-                    b: (known: bool, value: i64) = proof_signed_literal_comparison_constant(right)
-                    return false if not a.known or not b.known
-                    return a.value == b.value if operator == TokenKind.EqEq
-                    return a.value != b.value if operator == TokenKind.BangEq
-                    return a.value < b.value if operator == TokenKind.Lt
-                    return a.value > b.value if operator == TokenKind.Gt
-                    return a.value <= b.value if operator == TokenKind.LtEq
-                    return a.value >= b.value if operator == TokenKind.GtEq
-                    return false
+                    left_view: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(left, budget, exhausted)
+                    return false if not left_view.complete or exhausted
+                    right_view: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(right, budget, exhausted)
+                    return false if not right_view.complete or exhausted
+                    match left_view.expression:
+                        Ast::Expr.IntLit(left_value, _):
+                            match right_view.expression:
+                                Ast::Expr.IntLit(right_value, _):
+                                    return false if left_value < 0 or right_value < 0
+                                    return left_value == right_value if operator == TokenKind.EqEq
+                                    return left_value != right_value if operator == TokenKind.BangEq
+                                    return left_value < right_value if operator == TokenKind.Lt
+                                    return left_value > right_value if operator == TokenKind.Gt
+                                    return left_value <= right_value if operator == TokenKind.LtEq
+                                    return left_value >= right_value if operator == TokenKind.GtEq
+                                    return false
+                                _:
+                                    return false
+                        Ast::Expr.StringLit(left_value, _):
+                            return false if operator != TokenKind.EqEq and operator != TokenKind.BangEq
+                            match right_view.expression:
+                                Ast::Expr.StringLit(right_text, _):
+                                    return false if:
+                                        not proof_linear_safety_work_charge(budget, exhausted, sview_len(left_value))
+                                        not proof_linear_safety_work_charge(budget, exhausted, sview_len(right_text))
+                                    equal: bool = left_value == right_text
+                                    return equal if operator == TokenKind.EqEq
+                                    return not equal
+                                _:
+                                    return false
+                        _:
+                            return false
                 _:
                     return false
 

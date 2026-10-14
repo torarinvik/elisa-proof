@@ -1,0 +1,168 @@
+# Work-metered replacement for unsigned strict-progress shape scans.
+extend ElisaProof:
+    private:
+        def proof_unsigned_fact_scan_cost_with_work(facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, cost: usize):
+            total: mutable usize = 0
+            for fact in facts |fact, total, budget, exhausted|:
+                return (false, 0) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                measured: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                return (false, 0) if not measured.complete
+                if total >= PROOF_LINEAR_SAFETY_WORK_LIMIT or measured.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - total - 1:
+                    exhausted <- true
+                    return (false, 0)
+                total <- total + measured.cost + 1
+            return (true, total)
+
+        def proof_unsigned_progress_positive_with_work(step: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, positive: bool):
+            orders: mutable darray[Ast::Expr] = []
+            fact_scan_cost: mutable usize = 0
+            fact_scan_cost_ready: mutable bool = false
+            for fact in facts |orders, budget, exhausted|:
+                return (false, false) if not proof_unsigned_conjuncts_with_work(fact, &orders, 0, budget, exhausted)
+            for fact in orders |step, facts, markers, marker_scale, fact_scan_cost, fact_scan_cost_ready, budget, exhausted|:
+                stripped: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(fact, budget, exhausted)
+                return (false, false) if not stripped.complete or exhausted
+                left: mutable Ast::Expr = Ast::Expr.Invalid
+                right: mutable Ast::Expr = Ast::Expr.Invalid
+                operator: mutable TokenKind = TokenKind.Eof
+                negated: bool = false
+                match stripped.expression:
+                    Ast::Expr.Binary(order_left, order_operator, order_right, _):
+                        left <- order_left
+                        right <- order_right
+                        operator <- order_operator
+                    Ast::Expr.Unary(TokenKind.Not, operand, _):
+                        inner: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(operand, budget, exhausted)
+                        return (false, false) if not inner.complete or exhausted
+                        match inner.expression:
+                            Ast::Expr.Binary(order_left, order_operator, order_right, _):
+                                left <- order_left
+                                right <- order_right
+                                operator <- proof_comparison_negation(order_operator)
+                                negated <- true
+                            _:
+                                continue
+                    _:
+                        continue
+                continue if operator != TokenKind.Lt and operator != TokenKind.Gt
+                left_scalar: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(left, markers, marker_scale, budget, exhausted)
+                return (false, false) if not left_scalar.complete
+                right_scalar: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(right, markers, marker_scale, budget, exhausted)
+                return (false, false) if not right_scalar.complete
+                continue if not left_scalar.matches or not right_scalar.matches
+                if negated:
+                    if not fact_scan_cost_ready:
+                        measured_facts: (complete: bool, cost: usize) = proof_unsigned_fact_scan_cost_with_work(facts, budget, exhausted)
+                        return (false, false) if not measured_facts.complete
+                        fact_scan_cost <- measured_facts.cost
+                        fact_scan_cost_ready <- true
+                    left_integer: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(left, facts, markers, marker_scale, fact_scan_cost, 0, budget, exhausted)
+                    return (false, false) if not left_integer.complete
+                    right_integer: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(right, facts, markers, marker_scale, fact_scan_cost, 0, budget, exhausted)
+                    return (false, false) if not right_integer.complete
+                    continue if not left_integer.integer or not right_integer.integer
+                low: Ast::Expr = right if operator == TokenKind.Gt else left
+                high: Ast::Expr = left if operator == TokenKind.Gt else right
+                zero: (known: bool, value: i64) = proof_constant_int_with_work(low, 0, budget, exhausted)
+                return (false, false) if exhausted
+                continue if not zero.known or zero.value != 0
+                equal: (complete: bool, matches: bool) = proof_unsigned_witness_terms_equal_with_work(high, step, budget, exhausted)
+                return (false, false) if exhausted
+                return (true, true) if equal.matches
+            return (not exhausted, false)
+
+        def proof_unsigned_sum_range_safe_with_work(sum: Ast::Expr, first: Ast::Expr, second: Ast::Expr, width: i64, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, safe: bool):
+            witness: (complete: bool, known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness_with_work(first, second, facts, markers, budget, exhausted)
+            return (false, false) if not witness.complete or exhausted
+            return (true, false) if not witness.known
+            nameable: (complete: bool, nameable: bool) = proof_unsigned_peer_nameable_with_work(witness.bound, budget, exhausted)
+            return (false, false) if not nameable.complete
+            width_match: (complete: bool, matches: bool) = proof_unsigned_peer_width_matches_with_work(witness.bound, width, markers, budget, exhausted)
+            return (false, false) if not width_match.complete or exhausted
+            return (true, true) if nameable.nameable and width_match.matches
+            bound: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(witness.bound, budget, exhausted)
+            return (false, false) if not bound.complete or exhausted
+            match bound.expression:
+                Ast::Expr.IntLit(value, _):
+                    return (true, value >= 0 and value <= proof_unsigned_width_max(width))
+                _:
+                    return (true, false)
+
+        def proof_unsigned_nonwrapping_sum_progress_with_work(sum: Ast::Expr, base: Ast::Expr, strict: bool, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            sum_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(sum, budget, exhausted)
+            return (false, false) if not sum_view.complete or exhausted
+            match sum_view.expression:
+                Ast::Expr.Binary(left, TokenKind.Plus, right, _):
+                    left_eq: (complete: bool, matches: bool) = proof_unsigned_witness_terms_equal_with_work(base, left, budget, exhausted)
+                    return (false, false) if exhausted
+                    right_eq: (complete: bool, matches: bool) = proof_unsigned_witness_terms_equal_with_work(base, right, budget, exhausted) if not left_eq.matches else (true, false)
+                    return (false, false) if exhausted
+                    return (true, false) if not left_eq.matches and not right_eq.matches
+                    step: Ast::Expr = right if left_eq.matches else left
+                    base_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(base, budget, exhausted)
+                    step_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(step, budget, exhausted)
+                    return (false, false) if not base_view.complete or not step_view.complete or exhausted
+                    base_name: sview = proof_ident_name(base_view.expression)
+                    step_name: sview = proof_ident_name(step_view.expression)
+                    return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, sview_len(base_name)) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(step_name))
+                    return (true, false) if base_name == "" or step_name == ""
+                    width: i64 = proof_unsigned_width_in_expression_with_work(sum, markers, budget, exhausted)
+                    return (false, false) if exhausted
+                    return (true, false) if width <= 0
+                    base_width: (complete: bool, matches: bool) = proof_unsigned_peer_width_matches_with_work(base, width, markers, budget, exhausted)
+                    return (false, false) if not base_width.complete
+                    return (true, false) if not base_width.matches
+                    step_width: (complete: bool, matches: bool) = proof_unsigned_peer_width_matches_with_work(step, width, markers, budget, exhausted)
+                    return (false, false) if not step_width.complete or exhausted
+                    return (true, false) if not step_width.matches
+                    if strict:
+                        positive: (complete: bool, positive: bool) = proof_unsigned_progress_positive_with_work(step, facts, markers, marker_scale, budget, exhausted)
+                        return (false, false) if not positive.complete or exhausted
+                        return (true, false) if not positive.positive
+                    return proof_unsigned_sum_range_safe_with_work(sum, left, right, width, facts, markers, budget, exhausted)
+                _:
+                    return (true, false)
+
+        def proof_unsigned_strict_progress_shape_with_work(goal: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            goal_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(goal, budget, exhausted)
+            return (false, false) if not goal_view.complete or exhausted
+            match goal_view.expression:
+                Ast::Expr.Binary(left, TokenKind.GtEq, right, _):
+                    return proof_unsigned_nonwrapping_sum_progress_with_work(left, right, false, facts, markers, marker_scale, budget, exhausted)
+                Ast::Expr.Binary(left, TokenKind.LtEq, right, _):
+                    return proof_unsigned_nonwrapping_sum_progress_with_work(right, left, false, facts, markers, marker_scale, budget, exhausted)
+                Ast::Expr.Binary(left, TokenKind.Gt, right, _):
+                    return proof_unsigned_nonwrapping_sum_progress_with_work(left, right, true, facts, markers, marker_scale, budget, exhausted)
+                Ast::Expr.Binary(left, TokenKind.Lt, right, _):
+                    direct: (complete: bool, proven: bool) = proof_unsigned_nonwrapping_sum_progress_with_work(right, left, true, facts, markers, marker_scale, budget, exhausted)
+                    return direct if not direct.complete or direct.proven
+                    lower_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(left, budget, exhausted)
+                    upper_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(right, budget, exhausted)
+                    return (false, false) if not lower_view.complete or not upper_view.complete or exhausted
+                    match lower_view.expression:
+                        Ast::Expr.Binary(lower_cap, TokenKind.Minus, lower_term, _):
+                            match upper_view.expression:
+                                Ast::Expr.Binary(upper_cap, TokenKind.Minus, upper_term, _):
+                                    same_cap: bool = proof_unsigned_witness_terms_equal_with_work(lower_cap, upper_cap, budget, exhausted)
+                                    return (false, false) if exhausted
+                                    return (true, false) if not same_cap
+                                    positive: (complete: bool, proven: bool) = proof_unsigned_nonwrapping_sum_progress_with_work(lower_term, upper_term, true, facts, markers, marker_scale, budget, exhausted)
+                                    return (false, false) if not positive.complete or exhausted or not positive.proven
+                                    sum_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(lower_term, budget, exhausted)
+                                    return (false, false) if not sum_view.complete or exhausted
+                                    match sum_view.expression:
+                                        Ast::Expr.Binary(first, TokenKind.Plus, second, _):
+                                            witness: (complete: bool, known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness_with_work(first, second, facts, markers, budget, exhausted)
+                                            return (false, false) if not witness.complete or exhausted
+                                            return (true, false) if not witness.known
+                                            equal: (complete: bool, matches: bool) = proof_unsigned_witness_terms_equal_with_work(witness.bound, lower_cap, budget, exhausted)
+                                            return (false, false) if exhausted
+                                            return (true, equal.matches)
+                                        _:
+                                            return (true, false)
+                                _:
+                                    return (true, false)
+                        _:
+                            return (true, false)
+                _:
+                    return (true, false)

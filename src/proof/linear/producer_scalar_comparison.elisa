@@ -1,0 +1,266 @@
+# Producer-only metered mirror of primitive scalar comparisons. The checker keeps using its
+# independent canonical `proof_primitive_comparison_marked` implementation.
+extend ElisaProof:
+    private:
+        def proof_linear_search_expression_shape_charge(expression: Ast::Expr, work: mutable usize&, work_limit: usize) -> (complete: bool, nodes: usize, cost: usize):
+            remaining: usize = work_limit - work if work <= work_limit else 0
+            allowance: usize = remaining if remaining < PROOF_LINEAR_SAFETY_WORK_LIMIT else PROOF_LINEAR_SAFETY_WORK_LIMIT
+            start: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - allowance
+            local_work: mutable usize = start
+            exhausted: mutable bool = false
+            nodes: mutable usize = 0
+            complete: bool = proof_linear_safety_expression_shape_with_work(expression, 0, &nodes, &local_work, &exhausted)
+            spent: usize = local_work - start if local_work >= start else allowance
+            if not proof_linear_search_width_debit(&work, work_limit, spent):
+                return (false, nodes, spent)
+            if not complete or exhausted:
+                work <- work_limit
+                return (false, nodes, spent)
+            return (true, nodes, spent)
+
+        def proof_linear_search_expr_equal_with_work(left: Ast::Expr, right: Ast::Expr, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, matches: bool):
+            return (true, proof_expr_equal(left, right)) if not metered
+            left_shape: (complete: bool, nodes: usize, cost: usize) = proof_linear_search_expression_shape_charge(left, &work, work_limit)
+            return (false, false) if not left_shape.complete
+            right_shape: (complete: bool, nodes: usize, cost: usize) = proof_linear_search_expression_shape_charge(right, &work, work_limit)
+            return (false, false) if not right_shape.complete
+            combined: usize = left_shape.nodes + right_shape.nodes
+            return (false, false) if combined < left_shape.nodes
+            combined_cost: usize = left_shape.cost + right_shape.cost
+            return (false, false) if combined_cost < left_shape.cost
+            # Equality runs several shape-sensitive passes. Reserve their text work as well as
+            # their node work so long identifiers cannot multiply outside the shared meter.
+            return (false, false) if not proof_linear_search_width_debit(&work, work_limit, combined_cost * 5)
+            return (true, proof_expr_equal(left, right))
+
+        def proof_linear_search_field_equal_with_work(expression: Ast::Expr, object: Ast::Expr, field: sview, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, matches: bool):
+            return (true, proof_expr_equal_field(expression, object, field)) if not metered
+            expression_shape: (complete: bool, nodes: usize, cost: usize) = proof_linear_search_expression_shape_charge(expression, &work, work_limit)
+            return (false, false) if not expression_shape.complete
+            object_shape: (complete: bool, nodes: usize, cost: usize) = proof_linear_search_expression_shape_charge(object, &work, work_limit)
+            return (false, false) if not object_shape.complete
+            combined: usize = expression_shape.nodes + object_shape.nodes
+            return (false, false) if combined < expression_shape.nodes
+            combined_cost: usize = expression_shape.cost + object_shape.cost + sview_len(field)
+            return (false, false) if combined_cost < expression_shape.cost or combined_cost < object_shape.cost
+            return (false, false) if not proof_linear_search_width_debit(&work, work_limit, combined_cost * 5)
+            return (false, false) if not proof_linear_search_width_debit(&work, work_limit, sview_len(field))
+            return (true, proof_expr_equal_field(expression, object, field))
+
+        def proof_linear_search_scalar_name_witnessed(markers: ProofScalarWitnesses&, name: sview, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, witnessed: bool):
+            return (true, proof_scalar_witnesses_name(markers, name)) if not metered
+            return (false, false) if markers.names.count != markers.name_unsigned_widths.count
+            return (true, false) if name == ""
+            return (false, false) if not proof_linear_search_width_debit(&work, work_limit, 1 + sview_len(name))
+            capacity: usize = markers.name_slots.count
+            return (false, false) if capacity == 0 and markers.names.count != 0
+            return (true, false) if capacity == 0
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            reached_empty: mutable bool = false
+            while probes < capacity |probes, slot, wanted_hash, name, markers, capacity, work, work_limit|:
+                return (false, false) if not proof_linear_search_width_debit(&work, work_limit, 1)
+                current: usize = markers.name_slots[slot]
+                return (false, false) if current > markers.names.count
+                if current == markers.names.count:
+                    reached_empty <- true
+                    break
+                if markers.name_hashes.count != markers.names.count:
+                    return (false, false)
+                if markers.name_hashes[current] == wanted_hash:
+                    candidate: sview = markers.names[current]
+                    return (false, false) if not proof_linear_search_width_debit(&work, work_limit, sview_len(candidate) + sview_len(name))
+                    return (true, true) if candidate == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            # When a bounded builder cannot place a collision-heavy name, it records a sorted
+            # exact fallback. Search it on both an exhausted probe chain and an early empty slot.
+            return (true, false) if reached_empty and markers.sorted_name_indices.count == 0
+            return (false, false) if markers.sorted_name_indices.count == 0
+            lower: mutable usize = 0
+            upper: mutable usize = markers.sorted_name_indices.count
+            while lower < upper |lower, upper, name, markers, work, work_limit|:
+                return (false, false) if not proof_linear_search_width_debit(&work, work_limit, 1)
+                middle: usize = lower + (upper - lower) / 2
+                current_index: usize = markers.sorted_name_indices[middle]
+                return (false, false) if current_index >= markers.names.count
+                current: sview = markers.names[current_index]
+                return (false, false) if not proof_linear_search_width_debit(&work, work_limit, sview_len(current) + sview_len(name))
+                return (true, true) if current == name
+                if proof_scalar_witness_name_less(current, name):
+                    lower <- middle + 1
+                else:
+                    upper <- middle
+            return (true, false)
+
+        def proof_linear_search_indexed_container_path(expression: Ast::Expr, root: mutable Ast::Expr&, indexes: mutable darray[Ast::Expr]&, depth: usize, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, known: bool):
+            return (true, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return (false, false) if metered and not proof_linear_search_width_debit(&work, work_limit, 1)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_linear_search_indexed_container_path(inner, &root, &indexes, depth + 1, &work, work_limit, metered)
+                Ast::Expr.Index(object, index, _):
+                    parent: (complete: bool, known: bool) = proof_linear_search_indexed_container_path(object, &root, &indexes, depth + 1, &work, work_limit, metered)
+                    return parent if not parent.complete or not parent.known
+                    indexes.push(index)
+                    return (true, true)
+                Ast::Expr.IndexN(object, arguments, _):
+                    parent: (complete: bool, known: bool) = proof_linear_search_indexed_container_path(object, &root, &indexes, depth + 1, &work, work_limit, metered)
+                    return parent if not parent.complete or not parent.known
+                    for argument in arguments |indexes, work, work_limit, metered|:
+                        return (false, false) if metered and not proof_linear_search_width_debit(&work, work_limit, 1)
+                        indexes.push(argument)
+                    return (true, true)
+                _:
+                    root <- expression
+                    return (true, true)
+
+        def proof_linear_search_untrusted_applies(expression: Ast::Expr, marked_term: Ast::Expr, depth: usize, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, applies: bool):
+            return (true, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return (false, false) if metered and not proof_linear_search_width_debit(&work, work_limit, 1)
+            match expression:
+                Ast::Expr.Field(object, field_name, _):
+                    container: mutable Ast::Expr = object
+                    indexes: mutable darray[Ast::Expr] = []
+                    path: (complete: bool, known: bool) = proof_linear_search_indexed_container_path(object, &container, &indexes, depth + 1, &work, work_limit, metered)
+                    return (false, false) if not path.complete
+                    return (true, false) if not path.known or indexes.count == 0
+                    match marked_term:
+                        Ast::Expr.Field(marked_container, marked_field, _):
+                            field_match: (complete: bool, equal: bool) = proof_linear_search_name_equal(field_name, marked_field, &work, work_limit, metered)
+                            return (false, false) if not field_match.complete
+                            return (true, false) if not field_match.equal
+                            equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(container, marked_container, &work, work_limit, metered)
+                            return (equal.complete, equal.matches)
+                        _:
+                            return (true, false)
+                _:
+                    equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(marked_term, expression, &work, work_limit, metered)
+                    return (equal.complete, equal.matches)
+
+        def proof_linear_search_element_remaining(expression: Ast::Expr, markers: ProofScalarWitnesses&, depth: usize, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, remaining: i64):
+            return (true, -1) if depth > PROOF_CONGRUENCE_SCAN_DEPTH
+            return (false, -1) if metered and not proof_linear_search_width_debit(&work, work_limit, 1)
+            if markers.element_terms.count != markers.element_depths.count:
+                return (false, -1)
+            element: mutable usize = 0
+            while element < markers.element_terms.count |element, markers, expression, work, work_limit, metered|:
+                return (false, -1) if metered and not proof_linear_search_width_debit(&work, work_limit, 1)
+                equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(markers.element_terms[element], expression, &work, work_limit, metered)
+                return (false, -1) if not equal.complete
+                return (true, markers.element_depths[element]) if equal.matches
+                element <- element + 1
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_linear_search_element_remaining(inner, markers, depth + 1, &work, work_limit, metered)
+                Ast::Expr.Field(object, field_name, _):
+                    container: mutable Ast::Expr = object
+                    indexes: mutable darray[Ast::Expr] = []
+                    path: (complete: bool, known: bool) = proof_linear_search_indexed_container_path(object, &container, &indexes, depth + 1, &work, work_limit, metered)
+                    return (false, -1) if not path.complete
+                    return (true, -1) if not path.known or indexes.count == 0
+                    element <- 0
+                    while element < markers.element_terms.count |element, container, field_name, indexes, markers, depth, work, work_limit, metered|:
+                        return (false, -1) if metered and not proof_linear_search_width_debit(&work, work_limit, 1)
+                        field_equal: (complete: bool, matches: bool) = proof_linear_search_field_equal_with_work(markers.element_terms[element], container, field_name, &work, work_limit, metered)
+                        return (false, -1) if not field_equal.complete
+                        if field_equal.matches:
+                            marker_depth: i64 = markers.element_depths[element]
+                            return (true, -1) if marker_depth < indexes.count.i64()
+                            for index in indexes |markers, depth, work, work_limit, metered|:
+                                witnessed: (complete: bool, witnessed: bool) = proof_linear_search_scalar_term_witnessed(index, markers, depth + 1, &work, work_limit, metered)
+                                return (false, -1) if not witnessed.complete
+                                return (true, -1) if not witnessed.witnessed
+                            return (true, marker_depth - indexes.count.i64())
+                        element <- element + 1
+                    return (true, -1)
+                Ast::Expr.Index(object, index, _):
+                    remaining: (complete: bool, remaining: i64) = proof_linear_search_element_remaining(object, markers, depth + 1, &work, work_limit, metered)
+                    return (false, -1) if not remaining.complete
+                    return (true, -1) if remaining.remaining < 1
+                    witnessed: (complete: bool, witnessed: bool) = proof_linear_search_scalar_term_witnessed(index, markers, depth + 1, &work, work_limit, metered)
+                    return (false, -1) if not witnessed.complete
+                    return (true, remaining.remaining - 1) if witnessed.witnessed
+                    return (true, -1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    remaining: (complete: bool, remaining: i64) = proof_linear_search_element_remaining(object, markers, depth + 1, &work, work_limit, metered)
+                    return (false, -1) if not remaining.complete
+                    return (true, -1) if remaining.remaining < arguments.count.i64()
+                    for argument in arguments |markers, depth, work, work_limit, metered|:
+                        witnessed: (complete: bool, witnessed: bool) = proof_linear_search_scalar_term_witnessed(argument, markers, depth + 1, &work, work_limit, metered)
+                        return (false, -1) if not witnessed.complete
+                        return (true, -1) if not witnessed.witnessed
+                    return (true, remaining.remaining - arguments.count.i64())
+                _:
+                    return (true, -1)
+
+        def proof_linear_search_scalar_term_witnessed(expression: Ast::Expr, markers: ProofScalarWitnesses&, depth: usize, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, witnessed: bool):
+            return (true, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return (false, false) if metered and not proof_linear_search_width_debit(&work, work_limit, 1)
+            for untrusted_term in markers.untrusted_terms |expression, depth, work, work_limit, metered|:
+                applies: (complete: bool, applies: bool) = proof_linear_search_untrusted_applies(expression, untrusted_term, depth + 1, &work, work_limit, metered)
+                return (false, false) if not applies.complete
+                return (true, false) if applies.applies
+            match expression:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.CharLit(_, _):
+                    return (true, true)
+                _:
+                    pass
+            for scalar_term in markers.scalar_terms |expression, work, work_limit, metered|:
+                return (false, false) if metered and not proof_linear_search_width_debit(&work, work_limit, 1)
+                equal: (complete: bool, matches: bool) = proof_linear_search_expr_equal_with_work(scalar_term, expression, &work, work_limit, metered)
+                return (false, false) if not equal.complete
+                return (true, true) if equal.matches
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_linear_search_scalar_term_witnessed(inner, markers, depth + 1, &work, work_limit, metered)
+                Ast::Expr.Ident(name, _):
+                    return proof_linear_search_scalar_name_witnessed(markers, name, &work, work_limit, metered)
+                Ast::Expr.Index(_, _, _) | Ast::Expr.IndexN(_, _, _):
+                    remaining: (complete: bool, remaining: i64) = proof_linear_search_element_remaining(expression, markers, depth + 1, &work, work_limit, metered)
+                    return (false, false) if not remaining.complete
+                    return (true, remaining.remaining == 0)
+                Ast::Expr.Field(object, field_name, _):
+                    count_field: (complete: bool, equal: bool) = proof_linear_search_name_equal(field_name, "count", &work, work_limit, metered)
+                    return (false, false) if not count_field.complete
+                    return (true, true) if count_field.equal and proof_expr_is_collection_literal(object)
+                    remaining: (complete: bool, remaining: i64) = proof_linear_search_element_remaining(expression, markers, depth + 1, &work, work_limit, metered)
+                    return (false, false) if not remaining.complete
+                    return (true, remaining.remaining == 0)
+                Ast::Expr.Unary(operator, operand, _):
+                    return (true, false) if not proof_congruent_unary_operator(operator)
+                    return proof_linear_search_scalar_term_witnessed(operand, markers, depth + 1, &work, work_limit, metered)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (true, false) if not proof_congruent_binary_operator(operator)
+                    left_result: (complete: bool, witnessed: bool) = proof_linear_search_scalar_term_witnessed(left, markers, depth + 1, &work, work_limit, metered)
+                    return (false, false) if not left_result.complete
+                    return (true, false) if not left_result.witnessed
+                    return proof_linear_search_scalar_term_witnessed(right, markers, depth + 1, &work, work_limit, metered)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    condition_result: (complete: bool, witnessed: bool) = proof_linear_search_scalar_term_witnessed(condition, markers, depth + 1, &work, work_limit, metered)
+                    return (false, false) if not condition_result.complete
+                    return (true, false) if not condition_result.witnessed
+                    then_result: (complete: bool, witnessed: bool) = proof_linear_search_scalar_term_witnessed(then_expression, markers, depth + 1, &work, work_limit, metered)
+                    return (false, false) if not then_result.complete
+                    return (true, false) if not then_result.witnessed
+                    return proof_linear_search_scalar_term_witnessed(else_expression, markers, depth + 1, &work, work_limit, metered)
+                Ast::Expr.Call(_, _, _, _):
+                    return (true, false)
+                _:
+                    return (true, false)
+
+    public:
+        def proof_linear_search_marker_parse_charge(expression: Ast::Expr, work: mutable usize&, work_limit: usize) -> bool:
+            shape: (complete: bool, nodes: usize, cost: usize) = proof_linear_search_expression_shape_charge(expression, &work, work_limit)
+            return false if not shape.complete
+            return proof_linear_search_width_debit(&work, work_limit, shape.cost * 5)
+
+        def proof_linear_search_primitive_comparison(left: Ast::Expr, right: Ast::Expr, markers: ProofScalarWitnesses&, work: mutable usize&, work_limit: usize, metered: bool) -> (complete: bool, primitive: bool):
+            return (true, proof_primitive_comparison_marked(left, right, markers)) if not metered
+            left_result: (complete: bool, witnessed: bool) = proof_linear_search_scalar_term_witnessed(left, markers, 0, &work, work_limit, true)
+            return (false, false) if not left_result.complete
+            return (true, false) if not left_result.witnessed
+            right_result: (complete: bool, witnessed: bool) = proof_linear_search_scalar_term_witnessed(right, markers, 0, &work, work_limit, true)
+            return (false, false) if not right_result.complete
+            return (true, left_result.witnessed and right_result.witnessed)

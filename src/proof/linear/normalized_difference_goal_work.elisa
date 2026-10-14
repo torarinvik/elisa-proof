@@ -1,0 +1,353 @@
+# Goal-depth's cancellation tier shares its caller's meter from scalar witness construction
+# through affine graph closure.
+extend ElisaProof:
+    private:
+        def proof_primitive_comparison_with_work(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, primitive: bool):
+            built: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, false, budget, exhausted)
+            return (false, false) if not built.complete or exhausted
+            result: (complete: bool, primitive: bool) = proof_linear_search_primitive_comparison(left, right, built.witnesses, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+            if not result.complete or exhausted:
+                exhausted <- true
+                return (false, false)
+            result
+
+        def proof_cancelled_difference_goal_with_work(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            built: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+            return (false, false) if not built.complete or exhausted
+            primitive: (complete: bool, primitive: bool) = proof_linear_search_primitive_comparison(left, right, built.witnesses, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+            if not primitive.complete or exhausted:
+                exhausted <- true
+                return (false, false)
+            return (true, false) if not primitive.primitive
+            result: (complete: bool, proven: bool) = proof_normalized_difference_goal_with_work(left, operator, right, facts, built.witnesses, budget, exhausted)
+            if not result.complete or exhausted:
+                exhausted <- true
+                return (false, false)
+            result
+
+        # This source-side syntax gate keeps the producer's established normal-difference
+        # language (+/-) in step with the independent kernel reader.
+        def proof_normal_terms_supported_with_work(expression: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Plus, inner, _) | Ast::Expr.Unary(TokenKind.Minus, inner, _):
+                    return proof_normal_terms_supported_with_work(inner, budget, exhausted, depth + 1)
+                Ast::Expr.IntLit(value, _):
+                    return value >= 0
+                Ast::Expr.Ident(name, _):
+                    return name != ""
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    return false if not proof_normal_terms_supported_with_work(left, budget, exhausted, depth + 1)
+                    return proof_normal_terms_supported_with_work(right, budget, exhausted, depth + 1)
+                _:
+                    return false
+
+        def proof_collect_goal_normal_terms_with_work(expression: Ast::Expr, sign: i64, signed: bool, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, terms: mutable darray[ProofNormalTerm]&, budget: mutable usize&, exhausted: mutable bool&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or terms.count >= PROOF_NORMAL_TERM_LIMIT or not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_collect_goal_normal_terms_with_work(inner, sign, signed, facts, markers, terms, budget, exhausted, depth + 1)
+                Ast::Expr.IntLit(value, _):
+                    return false if value < 0
+                    terms.push(ProofNormalTerm{name: "", coefficient: value if sign > 0 else 0 - value})
+                    return true
+                Ast::Expr.Ident(name, _):
+                    width: (complete: bool, has_width: bool) = proof_normal_term_has_width_with_witnesses_work(expression, facts, markers, &budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return false if not width.complete or not width.has_width or name == "" or exhausted
+                    terms.push(ProofNormalTerm{name: name, coefficient: sign})
+                    return true
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    negated: (known: bool, value: i64) = proof_signed_negated_literal(expression, signed)
+                    if negated.known:
+                        terms.push(ProofNormalTerm{name: "", coefficient: negated.value if sign > 0 else 0 - negated.value})
+                        return true
+                    width: (complete: bool, has_width: bool) = proof_normal_term_has_width_with_witnesses_work(expression, facts, markers, &budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return false if not width.complete or not width.has_width or exhausted
+                    return proof_collect_goal_normal_terms_with_work(operand, sign if operator == TokenKind.Plus else 0 - sign, signed, facts, markers, terms, budget, exhausted, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    width: (complete: bool, has_width: bool) = proof_normal_term_has_width_with_witnesses_work(expression, facts, markers, &budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+                    return false if not width.complete or not width.has_width or exhausted
+                    return false if not proof_collect_goal_normal_terms_with_work(left, sign, signed, facts, markers, terms, budget, exhausted, depth + 1)
+                    return proof_collect_goal_normal_terms_with_work(right, sign if operator == TokenKind.Plus else 0 - sign, signed, facts, markers, terms, budget, exhausted, depth + 1)
+                _:
+                    return false
+
+        def proof_normal_terms_reduce_with_work(terms: darray<ProofNormalTerm>&, input_operator: TokenKind, scaled: bool, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, known: bool, first: ProofAffine, second: ProofAffine, operator: TokenKind):
+            empty: ProofAffine = ProofAffine{known: false, base: "", offset: 0, negative: false}
+            constant: mutable i64 = 0
+            positive: mutable sview = ""
+            negative: mutable sview = ""
+            name: mutable sview = ""
+            scale: mutable i64 = 0
+            for index in 0..<terms.count |index, terms, constant, positive, negative, name, scale, budget, exhausted|:
+                return (false, false, empty, empty, input_operator) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                term: ProofNormalTerm = terms[index]
+                if term.name == "":
+                    folded: (known: bool, value: i64) = proof_add_safe(constant, term.coefficient)
+                    return (true, false, empty, empty, input_operator) if not folded.known
+                    constant <- folded.value
+                    continue
+                seen: mutable bool = false
+                for earlier in 0..<index |earlier, index, terms, term, seen, budget, exhausted|:
+                    amount: usize = 1 + sview_len(terms[earlier].name) + sview_len(term.name)
+                    return (false, false, empty, empty, input_operator) if not proof_linear_safety_work_charge(budget, exhausted, amount)
+                    seen <- true if terms[earlier].name == term.name
+                continue if seen
+                total: mutable i64 = 0
+                for later in index..<terms.count |later, terms, term, total, budget, exhausted|:
+                    amount: usize = 1 + sview_len(terms[later].name) + sview_len(term.name)
+                    return (false, false, empty, empty, input_operator) if not proof_linear_safety_work_charge(budget, exhausted, amount)
+                    total <- total + terms[later].coefficient if terms[later].name == term.name
+                continue if total == 0
+                if scaled:
+                    return (true, false, empty, empty, input_operator) if name != ""
+                    name <- term.name
+                    scale <- total
+                elif total == 1:
+                    return (true, false, empty, empty, input_operator) if positive != ""
+                    positive <- term.name
+                elif total == -1:
+                    return (true, false, empty, empty, input_operator) if negative != ""
+                    negative <- term.name
+                else:
+                    return (true, false, empty, empty, input_operator)
+            if not scaled:
+                return (true, true, ProofAffine{known: true, base: positive, offset: constant, negative: false}, ProofAffine{known: true, base: negative, offset: 0, negative: false}, input_operator)
+            return (true, false, empty, empty, input_operator) if name == "" or scale == 1 or scale == -1 or scale == 0
+            if input_operator == TokenKind.EqEq:
+                quotient: i64 = constant / scale
+                product: (known: bool, value: i64) = proof_mul_safe(quotient, scale)
+                return (true, false, empty, empty, input_operator) if not product.known or product.value != constant
+                return (true, true, ProofAffine{known: true, base: name, offset: quotient, negative: false}, empty, TokenKind.EqEq)
+            coefficient: mutable i64 = scale
+            offset: mutable i64 = constant
+            if input_operator == TokenKind.Lt or input_operator == TokenKind.Gt or input_operator == TokenKind.GtEq:
+                if input_operator == TokenKind.Gt or input_operator == TokenKind.GtEq:
+                    coefficient <- 0 - scale
+                    flipped: (known: bool, value: i64) = proof_sub_safe(0, constant)
+                    return (true, false, empty, empty, input_operator) if not flipped.known
+                    offset <- flipped.value
+                if input_operator == TokenKind.Lt or input_operator == TokenKind.Gt:
+                    stepped: (known: bool, value: i64) = proof_add_safe(offset, 1)
+                    return (true, false, empty, empty, input_operator) if not stepped.known
+                    offset <- stepped.value
+            elif input_operator != TokenKind.LtEq:
+                return (true, false, empty, empty, input_operator)
+            negated: (known: bool, value: i64) = proof_sub_safe(0, offset)
+            return (true, false, empty, empty, input_operator) if not negated.known
+            if coefficient > 0:
+                upper: (known: bool, value: i64) = proof_floor_quotient(negated.value, coefficient)
+                return (true, false, empty, empty, input_operator) if not upper.known
+                shifted: (known: bool, value: i64) = proof_sub_safe(0, upper.value)
+                return (true, false, empty, empty, input_operator) if not shifted.known
+                return (true, true, ProofAffine{known: true, base: name, offset: shifted.value, negative: false}, empty, TokenKind.LtEq)
+            floor: (known: bool, value: i64) = proof_floor_quotient(negated.value, 0 - coefficient)
+            return (true, false, empty, empty, input_operator) if not floor.known
+            lower: (known: bool, value: i64) = proof_sub_safe(0, floor.value)
+            return (true, false, empty, empty, input_operator) if not lower.known
+            (true, true, empty, ProofAffine{known: true, base: name, offset: 0, negative: false}, TokenKind.LtEq)
+
+        def proof_difference_node_index_with_work(nodes: darray<sview>&, name: sview, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, index: usize):
+            index: mutable usize = 0
+            while index < nodes.count |index, nodes, name, budget, exhausted|:
+                amount: usize = 1 + sview_len(nodes[index]) + sview_len(name)
+                return (false, nodes.count) if not proof_linear_safety_work_charge(budget, exhausted, amount)
+                return (true, index) if nodes[index] == name
+                index <- index + 1
+            return (true, nodes.count)
+
+        def proof_difference_affine_safe_with_work(affine: ProofAffine, bounds: darray<ProofBound>&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, safe: bool):
+            return (true, false) if not affine.known
+            return (true, true) if affine.base == "" or (not affine.negative and affine.offset == 0)
+            bound: ProofBound = proof_linear_safety_bound_for_with_work(bounds, affine.base, budget, exhausted)
+            return (false, false) if exhausted
+            if affine.negative:
+                return (true, false) if not bound.has_lower or not bound.has_upper
+                negated_upper: (known: bool, value: i64) = proof_sub_safe(0, bound.upper)
+                negated_lower: (known: bool, value: i64) = proof_sub_safe(0, bound.lower)
+                return (true, false) if not negated_upper.known or not negated_lower.known
+                lower: (known: bool, value: i64) = proof_add_safe(negated_upper.value, affine.offset)
+                upper: (known: bool, value: i64) = proof_add_safe(negated_lower.value, affine.offset)
+                return (true, lower.known and upper.known)
+            if affine.offset > 0:
+                limit: (known: bool, value: i64) = proof_sub_safe(proof_i64_max(), affine.offset)
+                return (true, limit.known and bound.has_upper and bound.upper <= limit.value)
+            limit: (known: bool, value: i64) = proof_sub_safe(proof_i64_min(), affine.offset)
+            return (true, limit.known and bound.has_lower and bound.lower >= limit.value)
+
+        def proof_difference_affine_unsigned_peer_safe_with_work(affine: ProofAffine, constraints: darray<ProofDifference>&, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, safe: bool):
+            return (true, false) if not affine.known or affine.negative or affine.offset != 1 or affine.base == ""
+            width: i64 = proof_scalar_witness_unsigned_width_with_work(markers, affine.base, budget, exhausted)
+            return (false, false) if exhausted
+            return (true, false) if width == 0
+            for constraint in constraints |constraint, affine, width, markers, budget, exhausted|:
+                amount: usize = 1 + sview_len(constraint.left) + sview_len(constraint.right) + sview_len(affine.base)
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, amount)
+                continue if constraint.left != affine.base or constraint.right == "" or constraint.bound > -1
+                peer_width: i64 = proof_scalar_witness_unsigned_width_with_work(markers, constraint.right, budget, exhausted)
+                return (false, false) if exhausted
+                return (true, true) if peer_width == width
+            return (true, false)
+
+        def proof_difference_affine_query_with_work(nodes: darray<sview>&, matrix: darray<i64>&, known: darray<bool>&, first: ProofAffine, second: ProofAffine, bound: i64, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            left: sview = ""
+            right: sview = ""
+            if first.base == "" and second.base == "":
+                pass
+            elif first.base == "":
+                right <- second.base if not second.negative else ""
+                left <- second.base if second.negative else ""
+            elif second.base == "":
+                left <- first.base if not first.negative else ""
+                right <- first.base if first.negative else ""
+            else:
+                return (true, false) if first.negative != second.negative
+                left <- second.base if first.negative else first.base
+                right <- first.base if first.negative else second.base
+            left_index: (complete: bool, index: usize) = proof_difference_node_index_with_work(nodes, left, budget, exhausted)
+            return (false, false) if not left_index.complete
+            right_index: (complete: bool, index: usize) = proof_difference_node_index_with_work(nodes, right, budget, exhausted)
+            return (false, false) if not right_index.complete
+            return (true, false) if left_index.index >= nodes.count or right_index.index >= nodes.count
+            slot: usize = left_index.index * nodes.count + right_index.index
+            (true, known[slot] and matrix[slot] <= bound)
+
+        def proof_difference_affine_goal_with_work(left: ProofAffine, operator: TokenKind, right: ProofAffine, facts: darray<Ast::Expr>&, markers: ProofScalarWitnesses&, certified: bool, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            return (true, false) if not proof_is_comparison(operator) or operator == TokenKind.BangEq or not left.known or not right.known
+            bounds: mutable darray<ProofBound> = []
+            return (false, false) if not proof_collect_fact_bounds_with_work(facts, markers, &bounds, budget, exhausted) or exhausted
+            return (false, false) if not proof_close_equalities_with_work(facts, markers, &bounds, budget, exhausted) or exhausted
+            fact_nodes: mutable usize = 0
+            bound_nodes: mutable usize = 0
+            return (false, false) if not proof_linear_safety_fact_shape_total_with_work(facts, &fact_nodes, budget, exhausted)
+            return (false, false) if not proof_linear_safety_bound_shape_total_with_work(bounds, &bound_nodes, budget, exhausted)
+            constraints: mutable darray<ProofDifference> = []
+            for fact in facts |fact, bounds, facts, markers, fact_nodes, bound_nodes, constraints, budget, exhausted|:
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                return (false, false) if not proof_collect_difference_constraints_marked_work_inner(fact, bounds, facts, markers, fact_nodes, bound_nodes, &constraints, 0, budget, exhausted) or exhausted
+            return (true, false) if constraints.count > PROOF_LINEAR_MAX_DIFFERENCE_CONSTRAINTS
+            return (false, false) if not proof_close_bounds_through_differences_with_work(constraints, &bounds, budget, exhausted) or exhausted
+            if not certified:
+                left_safe: (complete: bool, safe: bool) = proof_difference_affine_safe_with_work(left, bounds, budget, exhausted)
+                return (false, false) if not left_safe.complete or exhausted
+                if not left_safe.safe:
+                    peer_safe: (complete: bool, safe: bool) = proof_difference_affine_unsigned_peer_safe_with_work(left, constraints, markers, budget, exhausted)
+                    return (false, false) if not peer_safe.complete or exhausted
+                    return (true, false) if not peer_safe.safe
+                right_safe: (complete: bool, safe: bool) = proof_difference_affine_safe_with_work(right, bounds, budget, exhausted)
+                return (false, false) if not right_safe.complete or exhausted
+                if not right_safe.safe:
+                    peer_safe: (complete: bool, safe: bool) = proof_difference_affine_unsigned_peer_safe_with_work(right, constraints, markers, budget, exhausted)
+                    return (false, false) if not peer_safe.complete or exhausted
+                    return (true, false) if not peer_safe.safe
+            for affine in [left, right] |affine, bounds, constraints, budget, exhausted|:
+                continue if affine.base == ""
+                bound: ProofBound = proof_linear_safety_bound_for_with_work(bounds, affine.base, budget, exhausted)
+                return (false, false) if exhausted
+                if bound.has_upper:
+                    return (false, false) if not proof_difference_constraint_push_with_work(affine.base, "", bound.upper, &constraints, budget, exhausted)
+                if bound.has_lower:
+                    negated: (known: bool, value: i64) = proof_sub_safe(0, bound.lower)
+                    if negated.known:
+                        return (false, false) if not proof_difference_constraint_push_with_work("", affine.base, negated.value, &constraints, budget, exhausted)
+            nodes: mutable darray<sview> = [""]
+            for constraint in constraints |constraint, nodes, budget, exhausted|:
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                for name in [constraint.left, constraint.right] |name, nodes, budget, exhausted|:
+                    continue if name == ""
+                    found: (complete: bool, index: usize) = proof_difference_node_index_with_work(nodes, name, budget, exhausted)
+                    return (false, false) if not found.complete
+                    if found.index == nodes.count:
+                        return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1 + sview_len(name))
+                        nodes.push(name)
+            return (true, false) if nodes.count > PROOF_LINEAR_DIFFERENCE_NODE_LIMIT
+            matrix: mutable darray<i64> = []
+            known: mutable darray<bool> = []
+            matrix_size: usize = nodes.count * nodes.count
+            return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, matrix_size)
+            matrix.resize(matrix_size)
+            known.resize(matrix_size)
+            for index in 0..<matrix_size |index, matrix, known, budget, exhausted|:
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                matrix[index] <- 0
+                known[index] <- false
+            for index in 0..<nodes.count |index, nodes, matrix, known, budget, exhausted|:
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                slot: usize = index * nodes.count + index
+                matrix[slot] <- 0
+                known[slot] <- true
+            for constraint in constraints |constraint, nodes, matrix, known, budget, exhausted|:
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                first: (complete: bool, index: usize) = proof_difference_node_index_with_work(nodes, constraint.left, budget, exhausted)
+                second: (complete: bool, index: usize) = proof_difference_node_index_with_work(nodes, constraint.right, budget, exhausted)
+                return (false, false) if not first.complete or not second.complete or exhausted or first.index >= nodes.count or second.index >= nodes.count
+                slot: usize = first.index * nodes.count + second.index
+                matrix[slot] <- constraint.bound if not known[slot] or constraint.bound < matrix[slot]
+                known[slot] <- true
+            for pivot in 0..<nodes.count |pivot, nodes, matrix, known, budget, exhausted|:
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                for source in 0..<nodes.count |source, pivot, nodes, matrix, known, budget, exhausted|:
+                    return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                    first_slot: usize = source * nodes.count + pivot
+                    continue if not known[first_slot]
+                    for target in 0..<nodes.count |target, source, pivot, nodes, matrix, known, budget, exhausted|:
+                        return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                        second_slot: usize = pivot * nodes.count + target
+                        continue if not known[second_slot]
+                        combined: (known: bool, value: i64) = proof_add_safe(matrix[first_slot], matrix[second_slot])
+                        continue if not combined.known
+                        result_slot: usize = source * nodes.count + target
+                        matrix[result_slot] <- combined.value if not known[result_slot] or combined.value < matrix[result_slot]
+                        known[result_slot] <- true
+            target_bound: mutable i64 = 0
+            if operator == TokenKind.LtEq or operator == TokenKind.Lt:
+                difference: (known: bool, value: i64) = proof_sub_safe(right.offset, left.offset)
+                return (true, false) if not difference.known
+                target_bound <- difference.value
+                if operator == TokenKind.Lt:
+                    decremented: (known: bool, value: i64) = proof_sub_safe(target_bound, 1)
+                    return (true, false) if not decremented.known
+                    target_bound <- decremented.value
+            if operator == TokenKind.GtEq or operator == TokenKind.Gt:
+                difference: (known: bool, value: i64) = proof_sub_safe(left.offset, right.offset)
+                return (true, false) if not difference.known
+                target_bound <- difference.value
+                if operator == TokenKind.Gt:
+                    decremented: (known: bool, value: i64) = proof_sub_safe(target_bound, 1)
+                    return (true, false) if not decremented.known
+                    target_bound <- decremented.value
+            if operator == TokenKind.EqEq:
+                forward: (known: bool, value: i64) = proof_sub_safe(right.offset, left.offset)
+                reverse: (known: bool, value: i64) = proof_sub_safe(left.offset, right.offset)
+                return (true, false) if not forward.known or not reverse.known
+                first_query: (complete: bool, proven: bool) = proof_difference_affine_query_with_work(nodes, matrix, known, left, right, forward.value, budget, exhausted)
+                return (false, false) if not first_query.complete
+                return (true, false) if not first_query.proven
+                return proof_difference_affine_query_with_work(nodes, matrix, known, right, left, reverse.value, budget, exhausted)
+            proof_difference_affine_query_with_work(nodes, matrix, known, left, right, target_bound, budget, exhausted) if operator == TokenKind.LtEq or operator == TokenKind.Lt else proof_difference_affine_query_with_work(nodes, matrix, known, right, left, target_bound, budget, exhausted)
+
+        def proof_normalized_difference_goal_with_work(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray<Ast::Expr>&, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, proven: bool):
+            return (true, false) if not proof_is_comparison(operator) or operator == TokenKind.BangEq
+            supported_left: bool = proof_normal_terms_supported_with_work(left, budget, exhausted, 0)
+            supported_right: bool = proof_normal_terms_supported_with_work(right, budget, exhausted, 0)
+            if exhausted:
+                return (false, false)
+            return (true, false) if not supported_left or not supported_right
+            signed_result: (complete: bool, signed: bool) = proof_normal_comparison_signed_with_witnesses_work(left, right, facts, markers, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)
+            return (false, false) if not signed_result.complete or exhausted
+            terms: mutable darray<ProofNormalTerm> = []
+            return (true, false) if not proof_collect_goal_normal_terms_with_work(left, 1, signed_result.signed, facts, markers, &terms, budget, exhausted, 0)
+            return (false, false) if exhausted
+            return (true, false) if not proof_collect_goal_normal_terms_with_work(right, -1, signed_result.signed, facts, markers, &terms, budget, exhausted, 0)
+            return (false, false) if exhausted
+            normal: (complete: bool, known: bool, first: ProofAffine, second: ProofAffine, operator: TokenKind) = proof_normal_terms_reduce_with_work(terms, operator, false, budget, exhausted)
+            return (false, false) if not normal.complete or exhausted
+            if normal.known:
+                return proof_difference_affine_goal_with_work(normal.first, normal.operator, normal.second, facts, markers, true, budget, exhausted)
+            scaled: (complete: bool, known: bool, first: ProofAffine, second: ProofAffine, operator: TokenKind) = proof_normal_terms_reduce_with_work(terms, operator, true, budget, exhausted)
+            return (false, false) if not scaled.complete or exhausted
+            return (true, false) if not scaled.known
+            proof_difference_affine_goal_with_work(scaled.first, scaled.operator, scaled.second, facts, markers, true, budget, exhausted)

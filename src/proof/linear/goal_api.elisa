@@ -27,10 +27,10 @@ extend ElisaProof:
         # Find potential literal-width probes in one bottom-up walk. The previous detector
         # rescanned each nested comparison's subtrees and queried literal annotations before
         # reserving cubic work; a deeply nested expression could therefore spend quadratic work
-        # outside the budget. This deliberately over-approximates closed literals, so it only
-        # reserves extra fuel and cannot change proof acceptance.
+        # outside the budget. This deliberately over-approximates closed literals, and treats a
+        # depth cutoff as requiring validation, so it only reserves extra fuel or declines.
         def proof_goal_literal_width_probe(expression: Ast::Expr, depth: usize) -> (contains_integer: bool, required: bool):
-            return (false, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return (true, true) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _):
                     return proof_goal_literal_width_probe(inner, depth + 1)
@@ -46,6 +46,9 @@ extend ElisaProof:
                     return (left_result.contains_integer or right_result.contains_integer, left_result.required or right_result.required or (candidate and (left_result.contains_integer or right_result.contains_integer)))
                 Ast::Expr.IntLit(_, _):
                     return (true, false)
+                Ast::Expr.Field(Ast::Expr.Array(elements, _), "count", _):
+                    return (true, false) if proof_small_literal_count(elements.count).known
+                    return (false, false)
                 _:
                     return (false, false)
 
@@ -54,65 +57,81 @@ extend ElisaProof:
                 return true if proof_fact_contains(fact, goal)
             return false
 
-        # Float mode may still contain integer bounds. Admit those using exact integer
-        # type witnesses, and drop every numeric premise involving an IEEE value.
-        def proof_float_integer_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
-            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.BoolLit(_, _):
-                    return true
-                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
-                    return proof_float_integer_fragment(inner, facts, depth + 1)
-                Ast::Expr.Binary(left, operator, right, _):
-                    return proof_float_integer_fragment(left, facts, depth + 1) and proof_float_integer_fragment(right, facts, depth + 1) if operator == TokenKind.And or operator == TokenKind.Or
-                    comparison: bool = operator == TokenKind.EqEq or operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.LtEq or operator == TokenKind.Gt or operator == TokenKind.GtEq
-                    return comparison and proof_primitive_comparison(left, right, facts) and proof_disjunction_denial_integer_term(left, facts, depth + 1) and proof_disjunction_denial_integer_term(right, facts, depth + 1)
-                _:
+        # Mirror `proof_float_goal` through the work-aware fact containment reader, so float
+        # mode debits exact structural comparisons and preserves unused budget for fallback.
+        def proof_float_goal_with_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            for fact in facts |fact, goal, budget, exhausted|:
+                contains: (complete: bool, contains: bool) = proof_linear_fact_contains_with_work(fact, goal, 0, budget, exhausted)
+                if not contains.complete:
+                    budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                    exhausted <- true
                     return false
+                return true if contains.contains
+            return false
 
-        def proof_float_integer_marker(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
-            return true if proof_unsigned_place_marker_info(expression).known or proof_signed_marker_info(expression).known or proof_signed_place_marker_info(expression).known
-            match expression:
-                Ast::Expr.Call(callee, arguments, _, _):
-                    return false if proof_ident_name(callee) != "__elisa_primitive_scalar_type" or arguments.count != 1
-                    return proof_disjunction_denial_integer_term(arguments[0], facts, 0)
-                _:
-                    return false
-
-        def proof_float_integer_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, exhausted: mutable bool&) -> bool:
-            return false if not proof_float_integer_fragment(goal, facts, 0)
-            integers: mutable darray[Ast::Expr] = []
-            for fact in facts |integers|:
-                integers.push(fact) if proof_float_integer_marker(fact, facts) or proof_float_integer_fragment(fact, facts, 0)
-            return false if not proof_state_literals_fit(integers, goal, annotations)
-            budget: mutable usize = 0
-            return (proof_goal_depth(integers, goal, annotations, operator_mask, 0, budget, 0, exhausted) can Global{Read,Write})
-
-        def proof_goal_with_operator_mask_and_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+        def proof_goal_with_operator_mask_and_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, literals_preflighted: bool, literal_width_required: bool, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             if (proof_float_mode can Global.Read):
-                return proof_float_goal(facts, goal) or proof_float_propositional_goal(facts, goal, operator_mask)
-            return false if not proof_state_literals_fit(facts, goal, annotations)
+                return true if proof_float_goal_with_work(facts, goal, budget, exhausted)
+                return false if exhausted
+                return (proof_float_propositional_goal_with_shared_work(facts, goal, operator_mask, &budget, PROOF_LINEAR_SAFETY_WORK_LIMIT) can Global.Read)
+            if literals_preflighted:
+                return false if literal_width_required and not proof_state_literals_fit(facts, goal, annotations)
+            else:
+                return false if not proof_goal_literals_fit_with_work(facts, goal, annotations, budget, exhausted)
+                return false if exhausted
             return (proof_goal_depth(facts, goal, annotations, operator_mask, 0, budget, 0, exhausted) can Global{Read,Write})
+
+        def proof_goal_literals_fit_with_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            goal_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(goal, budget, exhausted)
+            return false if not goal_cost.complete or exhausted
+            total_cost: mutable usize = goal_cost.cost
+            for fact in facts |fact, total_cost, budget, exhausted|:
+                fact_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                return false if not fact_cost.complete or exhausted or fact_cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - total_cost
+                total_cost <- total_cost + fact_cost.cost
+            for annotation in annotations |annotation, total_cost, budget, exhausted|:
+                owner_cost: usize = sview_len(annotation.owner)
+                annotation_name_cost: usize = sview_len(annotation.name)
+                return false if total_cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT or owner_cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT - total_cost
+                remaining: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - total_cost - owner_cost
+                return false if annotation_name_cost >= remaining
+                name_cost: usize = owner_cost + annotation_name_cost + 1
+                return false if not proof_linear_safety_work_charge(budget, exhausted, name_cost)
+                total_cost <- total_cost + name_cost
+            # This single-pass probe determines whether any literal can require a type-width
+            # check. Its work is charged independently from shape measurement above.
+            return false if not proof_linear_safety_work_charge(budget, exhausted, total_cost)
+            goal_probe: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(goal, 0)
+            required: mutable bool = goal_probe.required
+            for fact in facts |fact, required|:
+                probe: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(fact, 0)
+                required <- required or probe.required
+            return true if not required
+            # The legacy literal validator may revisit subtrees and rescan all marker facts
+            # for each arithmetic node. Reserve the product before invoking it.
+            return false if not proof_linear_safety_work_charge_product4_with_work(budget, exhausted, total_cost, total_cost, total_cost, 1, 1)
+            proof_state_literals_fit(facts, goal, annotations)
 
         def proof_goal_with_operator_mask(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, exhausted: mutable bool&) -> bool:
             budget: mutable usize = 0
-            return (proof_goal_with_operator_mask_and_work(facts, goal, annotations, operator_mask, &budget, &exhausted) can Global{Read,Write})
+            return (proof_goal_with_operator_mask_and_work(facts, goal, annotations, operator_mask, false, false, &budget, &exhausted) can Global{Read,Write})
 
-        def proof_goal_fact_is_disjunction(fact: Ast::Expr) -> bool:
-            match fact:
-                Ast::Expr.Binary(_, operator, _, _):
-                    return operator == TokenKind.Or
-                Ast::Expr.Paren(inner, _):
-                    return proof_goal_fact_is_disjunction(inner)
+        def proof_goal_fact_is_disjunction_with_work(fact: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, is_disjunction: bool):
+            stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(fact, budget, exhausted)
+            return (false, false) if not stripped.complete
+            match stripped.expression:
+                Ast::Expr.Binary(_, TokenKind.Or, _, _):
+                    return (true, true)
                 Ast::Expr.Unary(TokenKind.Not, inner, _):
-                    match proof_strip_parens(inner):
+                    equality: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(inner, budget, exhausted)
+                    return (false, false) if not equality.complete
+                    match equality.expression:
                         Ast::Expr.Binary(_, TokenKind.And, _, _):
-                            return true
+                            return (true, true)
                         _:
-                            pass
+                            return (true, false)
                 _:
-                    return false
-            return false
+                    return (true, false)
 
     public:
         def proof_goal_with_limits(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, exhausted: mutable bool&) -> bool can[Global.Read, Global.Write]:
@@ -180,15 +199,17 @@ extend ElisaProof:
                 cubic_cost: usize = square_cost * shape_cost
                 return false if not proof_goal_tactic_preflight_charge_scaled(&preflight_work, cubic_cost, 2)
             plain: mutable darray[Ast::Expr] = []
-            for fact in facts |plain|:
-                plain.push(fact) if not proof_goal_fact_is_disjunction(fact)
+            for fact in facts |plain, budget, exhausted|:
+                disjunction: (complete: bool, is_disjunction: bool) = proof_goal_fact_is_disjunction_with_work(fact, &budget, &exhausted)
+                return false if not disjunction.complete or exhausted
+                plain.push(fact) if not disjunction.is_disjunction
             if plain.count < facts.count:
-                plain_proven: bool = (proof_goal_with_operator_mask_and_work(plain, goal, annotations, operator_mask, &budget, &exhausted) can Global{Read,Write})
+                plain_proven: bool = (proof_goal_with_operator_mask_and_work(plain, goal, annotations, operator_mask, true, width_probe_required, &budget, &exhausted) can Global{Read,Write})
                 return true if plain_proven
                 return false if exhausted or budget >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS
-            return (proof_goal_with_operator_mask_and_work(facts, goal, annotations, operator_mask, &budget, &exhausted) can Global{Read,Write})
+            return (proof_goal_with_operator_mask_and_work(facts, goal, annotations, operator_mask, true, width_probe_required, &budget, &exhausted) can Global{Read,Write})
 
-        def proof_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+        def proof_goal_with_precomputed_operator_mask(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize) -> bool can[Global.Read, Global.Write]:
             # Dropping hypotheses only weakens them, so facts without a disjunction are tried
             # first: their search has no case splits, and most goals beside a disjunctive loop
             # update (`found <- index if c == 32 or c == 9 ...`) or a helper summary
@@ -197,10 +218,18 @@ extend ElisaProof:
             # same cheap attempt. Splitting first made such loops ~17x slower. The full facts
             # remain the fallback.
             plain: mutable darray[Ast::Expr] = []
-            for fact in facts |plain|:
-                plain.push(fact) if not proof_goal_fact_is_disjunction(fact)
-            if plain.count < facts.count:
-                cheap: mutable bool = false
-                return true if (proof_goal_with_limits(plain, goal, annotations, &cheap) can Global{Read,Write})
+            budget: mutable usize = 0
             exhausted: mutable bool = false
-            return (proof_goal_with_limits(facts, goal, annotations, &exhausted) can Global{Read,Write})
+            for fact in facts |plain, budget, exhausted|:
+                disjunction: (complete: bool, is_disjunction: bool) = proof_goal_fact_is_disjunction_with_work(fact, &budget, &exhausted)
+                return false if not disjunction.complete or exhausted
+                plain.push(fact) if not disjunction.is_disjunction
+            if plain.count < facts.count:
+                plain_proven: bool = (proof_goal_with_operator_mask_and_work(plain, goal, annotations, operator_mask, false, false, &budget, &exhausted) can Global{Read,Write})
+                return true if plain_proven
+                return false if exhausted
+            return (proof_goal_with_operator_mask_and_work(facts, goal, annotations, operator_mask, false, false, &budget, &exhausted) can Global{Read,Write})
+
+        def proof_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+            operator_mask: usize = proof_source_primitive_operator_mask(annotations)
+            return (proof_goal_with_precomputed_operator_mask(facts, goal, annotations, operator_mask) can Global{Read,Write})

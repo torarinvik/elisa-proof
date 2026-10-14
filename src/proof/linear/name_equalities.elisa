@@ -1,29 +1,23 @@
 const PROOF_LINEAR_NAME_EQUALITY_VISIT_LIMIT: usize = 65536
-const PROOF_LINEAR_NAME_EQUALITY_ROOT_LIMIT: usize = 32
 const PROOF_LINEAR_NAME_EQUALITY_FACT_LIMIT: usize = 256
 
 extend ElisaProof:
     public:
-        # Collect only explicit identifier equalities. This is deliberately narrower than
-        # general expression rewriting: a positive `x == y` fact is safe to use as an alias,
-        # while inventing a canonical form for calls, references, or arithmetic could cross
-        # effects and fixed-width overflow boundaries.
-        def proof_collect_name_equalities(expression: Ast::Expr, markers: ProofScalarWitnesses&, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&) -> void:
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    proof_collect_name_equalities(inner, markers, left_names, right_names)
-                Ast::Expr.Binary(left, operator, right, position):
-                    if operator == TokenKind.And:
-                        proof_collect_name_equalities(left, markers, left_names, right_names)
-                        proof_collect_name_equalities(right, markers, left_names, right_names)
-                    if operator == TokenKind.EqEq:
-                        left_name: sview = proof_ident_name(left)
-                        right_name: sview = proof_ident_name(right)
-                        if left_name != "" and right_name != "" and proof_primitive_comparison_marked(left, right, markers):
-                            left_names.push(left_name)
-                            right_names.push(right_name)
-                _:
-                    pass
+        def proof_name_equality_sort_from_facts(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> i64:
+            name: sview = proof_ident_name(expression)
+            return 0 if name == ""
+            budget: mutable usize = 0
+            exhausted: mutable bool = false
+            indexed: (complete: bool, index: ProofNameEqualitySortIndex) = proof_name_equality_sort_index_build(facts, &budget, &exhausted)
+            return 0 if not indexed.complete or exhausted
+            width: i64 = proof_name_equality_sort_index_lookup(indexed.index, name, &budget, &exhausted)
+            return 0 if exhausted
+            width
+
+        def proof_name_equality_sort_with_work(expression: Ast::Expr, index: ProofNameEqualitySortIndex, budget: mutable usize&, exhausted: mutable bool&) -> i64:
+            return 0 if exhausted
+            name: sview = proof_ident_name(expression)
+            proof_name_equality_sort_index_lookup(index, name, budget, exhausted)
 
         # Charge a bounded structural scan before a scalar comparison can walk the
         # candidate terms against every retained witness marker.
@@ -42,7 +36,10 @@ extend ElisaProof:
 
         def proof_linear_safety_marker_scale_with_work(markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, scale: usize):
             scale: mutable usize = 0
-            if markers.names.count != markers.name_unsigned_widths.count or markers.names.count != markers.name_hashes.count or (markers.sorted_name_indices.count != 0 and markers.names.count != markers.sorted_name_indices.count) or markers.element_terms.count != markers.element_depths.count or markers.element_terms.count != markers.element_widths.count or markers.signed_terms.count != markers.signed_widths.count or markers.place_terms.count != markers.place_widths.count:
+            if markers.names.count != markers.name_unsigned_widths.count or markers.names.count != markers.name_hashes.count or (markers.sorted_name_indices.count != 0 and markers.names.count != markers.sorted_name_indices.count) or markers.element_terms.count != markers.element_depths.count or markers.element_terms.count != markers.element_widths.count or markers.signed_terms.count != markers.signed_widths.count or markers.unsigned_terms.count != markers.unsigned_widths.count:
+                exhausted <- true
+                return (false, 0)
+            if (markers.signed_hashes.count != 0 and markers.signed_hashes.count != markers.signed_terms.count) or (markers.signed_slots.count != 0 and markers.signed_slots.count < markers.signed_terms.count) or (markers.unsigned_hashes.count != 0 and markers.unsigned_hashes.count != markers.unsigned_terms.count) or (markers.unsigned_slots.count != 0 and markers.unsigned_slots.count < markers.unsigned_terms.count) or ((markers.signed_hashes.count == 0) != (markers.signed_slots.count == 0)) or ((markers.unsigned_hashes.count == 0) != (markers.unsigned_slots.count == 0)):
                 exhausted <- true
                 return (false, 0)
             if markers.names.count == 0:
@@ -103,42 +100,6 @@ extend ElisaProof:
                 index <- index + 1
             return (true, names.count)
 
-        def proof_bound_index_with_work(bounds: darray[ProofBound]&, name: sview, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, index: usize):
-            index: mutable usize = 0
-            while index < bounds.count |index, bounds, name, budget, exhausted|:
-                return (false, bounds.count) if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(name))
-                return (true, index) if not bounds[index].term_key and bounds[index].name == name
-                index <- index + 1
-            return (true, bounds.count)
-
-        def proof_equalities_add_lower_with_work(bounds: mutable darray[ProofBound]&, name: sview, value: i64, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            return true if name == ""
-            found: (complete: bool, index: usize) = proof_bound_index_with_work(bounds, name, budget, exhausted)
-            return false if not found.complete
-            if found.index == bounds.count:
-                return false if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(name))
-                bounds <- bounds.push(ProofBound{name: name, term: Ast::Expr.Invalid, term_key: false, has_lower: true, lower: value, has_upper: false, upper: 0})
-                return true
-            return true if bounds[found.index].has_lower and value <= bounds[found.index].lower
-            return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
-            bounds[found.index].has_lower <- true
-            bounds[found.index].lower <- value
-            return true
-
-        def proof_equalities_add_upper_with_work(bounds: mutable darray[ProofBound]&, name: sview, value: i64, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            return true if name == ""
-            found: (complete: bool, index: usize) = proof_bound_index_with_work(bounds, name, budget, exhausted)
-            return false if not found.complete
-            if found.index == bounds.count:
-                return false if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(name))
-                bounds <- bounds.push(ProofBound{name: name, term: Ast::Expr.Invalid, term_key: false, has_lower: false, lower: 0, has_upper: true, upper: value})
-                return true
-            return true if bounds[found.index].has_upper and value >= bounds[found.index].upper
-            return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
-            bounds[found.index].has_upper <- true
-            bounds[found.index].upper <- value
-            return true
-
         # Work-aware sibling of the legacy closure. False means the shared work cap
         # stopped analysis; callers must treat the result as unknown.
         def proof_close_equalities_with_work(facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, bounds: mutable darray[ProofBound]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
@@ -146,30 +107,28 @@ extend ElisaProof:
             return false if not marker_scan.complete
             left_names: mutable darray[sview] = []
             right_names: mutable darray[sview] = []
+            sort_index_result: (complete: bool, index: ProofNameEqualitySortIndex) = proof_name_equality_sort_index_build(facts, budget, exhausted)
+            return false if not sort_index_result.complete
             root_checks: mutable usize = 0
-            for fact in facts |fact, markers, left_names, right_names, budget, exhausted, marker_scan|:
+            for fact in facts |fact, markers, sort_index_result, left_names, right_names, budget, exhausted, marker_scan|:
                 return false if:
                     not proof_linear_safety_work_charge(budget, exhausted, 1)
-                    not proof_collect_name_equalities_metered_with_work(fact, markers, marker_scan.scale, left_names, right_names, root_checks, PROOF_LINEAR_SAFETY_WORK_LIMIT, budget, exhausted, 0)
+                    not proof_collect_name_equalities_metered_with_work(fact, markers, sort_index_result.index, marker_scan.scale, left_names, right_names, root_checks, PROOF_LINEAR_SAFETY_WORK_LIMIT, budget, exhausted, 0)
 
             names: mutable darray[sview] = []
             edge_left: mutable darray[usize] = []
             edge_right: mutable darray[usize] = []
-            for edge in 0..<left_names.count |edge, left_names, right_names, names, edge_left, edge_right, budget, exhausted|:
-                left_index: (complete: bool, index: usize) = proof_alias_name_index_with_work(names, left_names[edge], budget, exhausted)
+            return false if left_names.count != right_names.count
+            vertex_index_result: (complete: bool, index: ProofNameEqualityVertexIndex) = proof_name_equality_vertex_index_build(left_names.count, budget, exhausted)
+            return false if not vertex_index_result.complete
+            vertex_index: mutable ProofNameEqualityVertexIndex = vertex_index_result.index
+            for edge in 0..<left_names.count |edge, left_names, right_names, names, edge_left, edge_right, vertex_index, budget, exhausted|:
+                left_index: (complete: bool, row: usize) = proof_name_equality_vertex_index_insert(&vertex_index, &names, left_names[edge], budget, exhausted)
                 return false if not left_index.complete
-                left_value: usize = left_index.index
-                if left_value == names.count:
-                    return false if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(left_names[edge]))
-                    names.push(left_names[edge])
-                    left_value <- names.count - 1
-                right_index: (complete: bool, index: usize) = proof_alias_name_index_with_work(names, right_names[edge], budget, exhausted)
+                left_value: usize = left_index.row
+                right_index: (complete: bool, row: usize) = proof_name_equality_vertex_index_insert(&vertex_index, &names, right_names[edge], budget, exhausted)
                 return false if not right_index.complete
-                right_value: usize = right_index.index
-                if right_value == names.count:
-                    return false if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(right_names[edge]))
-                    names.push(right_names[edge])
-                    right_value <- names.count - 1
+                right_value: usize = right_index.row
                 return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
                 edge_left.push(left_value)
                 edge_right.push(right_value)
@@ -193,6 +152,20 @@ extend ElisaProof:
             for name_index in 0..<names.count |name_index, names, visited, budget, exhausted|:
                 return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
                 visited.push(false)
+            bound_rows: mutable darray[usize] = []
+            bound_found: mutable darray[bool] = []
+            for name_index in 0..<names.count |name_index, names, bound_rows, bound_found, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 2)
+                bound_rows.push(0)
+                bound_found.push(false)
+            for bound_row in 0..<bounds.count |bound_row, bounds, names, vertex_index, bound_rows, bound_found, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                continue if bounds[bound_row].term_key or bounds[bound_row].name == ""
+                vertex: (complete: bool, found: bool, row: usize) = proof_name_equality_vertex_index_find(vertex_index, names, bounds[bound_row].name, budget, exhausted)
+                return false if not vertex.complete
+                if vertex.found and not bound_found[vertex.row]:
+                    bound_rows[vertex.row] <- bound_row
+                    bound_found[vertex.row] <- true
             for start in 0..<names.count |start, names, adjacency_heads, adjacency_names, adjacency_next, visited, bounds, budget, exhausted|:
                 return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
                 continue if visited[start]
@@ -220,40 +193,56 @@ extend ElisaProof:
                 lower: mutable i64 = 0
                 has_upper: mutable bool = false
                 upper: mutable i64 = 0
-                for member in members |member, members, names, bounds, has_lower, lower, has_upper, upper, budget, exhausted|:
+                for member in members |member, members, names, bounds, bound_rows, bound_found, has_lower, lower, has_upper, upper, budget, exhausted|:
                     return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
-                    bound_index: (complete: bool, index: usize) = proof_bound_index_with_work(bounds, names[member], budget, exhausted)
-                    return false if not bound_index.complete
-                    continue if bound_index.index == bounds.count
-                    bound: ProofBound = bounds[bound_index.index]
+                    continue if not bound_found[member]
+                    return false if bound_rows[member] >= bounds.count or bounds[bound_rows[member]].term_key or bounds[bound_rows[member]].name != names[member]
+                    bound: ProofBound = bounds[bound_rows[member]]
                     if bound.has_lower and (not has_lower or bound.lower > lower):
                         has_lower <- true
                         lower <- bound.lower
                     if bound.has_upper and (not has_upper or bound.upper < upper):
                         has_upper <- true
                         upper <- bound.upper
-                for member in members |member, members, names, bounds, has_lower, lower, has_upper, upper, budget, exhausted|:
+                for member in members |member, members, names, bounds, bound_rows, bound_found, has_lower, lower, has_upper, upper, budget, exhausted|:
                     return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
-                    if has_lower:
-                        return false if not proof_equalities_add_lower_with_work(bounds, names[member], lower, budget, exhausted)
-                    if has_upper:
-                        return false if not proof_equalities_add_upper_with_work(bounds, names[member], upper, budget, exhausted)
+                    if not bound_found[member] and (has_lower or has_upper):
+                        return false if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(names[member]))
+                        new_row: usize = bounds.count
+                        bounds.push(ProofBound{name: names[member], term: Ast::Expr.Invalid, term_key: false, has_lower: has_lower, lower: lower, has_upper: has_upper, upper: upper})
+                        bound_rows[member] <- new_row
+                        bound_found[member] <- true
+                    elif bound_found[member]:
+                        row: usize = bound_rows[member]
+                        return false if row >= bounds.count or bounds[row].term_key or bounds[row].name != names[member]
+                        if has_lower and (not bounds[row].has_lower or lower > bounds[row].lower):
+                            return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                            bounds[row].has_lower <- true
+                            bounds[row].lower <- lower
+                        if has_upper and (not bounds[row].has_upper or upper < bounds[row].upper):
+                            return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                            bounds[row].has_upper <- true
+                            bounds[row].upper <- upper
             return proof_tighten_disequality_bounds_with_work(facts, bounds, markers, budget, exhausted)
 
-        def proof_collect_name_equalities_metered_with_work(expression: Ast::Expr, markers: ProofScalarWitnesses&, marker_scale: usize, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&, root_checks: mutable usize&, root_limit: usize, budget: mutable usize&, exhausted: mutable bool&, depth: usize) -> bool:
+        def proof_collect_name_equalities_metered_with_work(expression: Ast::Expr, markers: ProofScalarWitnesses&, sort_index: ProofNameEqualitySortIndex, marker_scale: usize, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&, root_checks: mutable usize&, root_limit: usize, budget: mutable usize&, exhausted: mutable bool&, depth: usize) -> bool:
             return true if root_checks >= root_limit
             return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
             return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_collect_name_equalities_metered_with_work(inner, markers, marker_scale, left_names, right_names, root_checks, root_limit, budget, exhausted, depth + 1)
+                    return proof_collect_name_equalities_metered_with_work(inner, markers, sort_index, marker_scale, left_names, right_names, root_checks, root_limit, budget, exhausted, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And:
-                        return false if not proof_collect_name_equalities_metered_with_work(left, markers, marker_scale, left_names, right_names, root_checks, root_limit, budget, exhausted, depth + 1)
-                        return proof_collect_name_equalities_metered_with_work(right, markers, marker_scale, left_names, right_names, root_checks, root_limit, budget, exhausted, depth + 1)
+                        return false if not proof_collect_name_equalities_metered_with_work(left, markers, sort_index, marker_scale, left_names, right_names, root_checks, root_limit, budget, exhausted, depth + 1)
+                        return proof_collect_name_equalities_metered_with_work(right, markers, sort_index, marker_scale, left_names, right_names, root_checks, root_limit, budget, exhausted, depth + 1)
                     if operator == TokenKind.EqEq:
-                        left_name: sview = proof_ident_name(left)
-                        right_name: sview = proof_ident_name(right)
+                        left_view: (complete: bool, stripped: Ast::Expr) = proof_linear_strip_parens_with_work(left, budget, exhausted)
+                        return false if not left_view.complete
+                        right_view: (complete: bool, stripped: Ast::Expr) = proof_linear_strip_parens_with_work(right, budget, exhausted)
+                        return false if not right_view.complete
+                        left_name: sview = proof_ident_name(left_view.stripped)
+                        right_name: sview = proof_ident_name(right_view.stripped)
                         if left_name != "" and right_name != "":
                             root_checks <- root_checks + 1
                             comparison: (complete: bool, matches: bool) = proof_linear_safety_comparison_with_work(left, right, markers, marker_scale, budget, exhausted)
@@ -262,129 +251,29 @@ extend ElisaProof:
                                 not proof_linear_safety_work_charge(budget, exhausted, sview_len(left_name))
                                 not proof_linear_safety_work_charge(budget, exhausted, sview_len(right_name))
                             if comparison.matches:
-                                left_names.push(left_name)
-                                right_names.push(right_name)
+                                left_sort: i64 = proof_name_equality_sort_with_work(left_view.stripped, sort_index, budget, exhausted)
+                                return false if exhausted
+                                right_sort: i64 = proof_name_equality_sort_with_work(right_view.stripped, sort_index, budget, exhausted)
+                                return false if exhausted
+                                if left_sort != 0 and left_sort == right_sort:
+                                    left_names.push(left_name)
+                                    right_names.push(right_name)
                     return true
                 _:
                     return true
 
-        # Equality aliases also transport interval bounds. The graph is undirected: every
-        # name in a connected component has the same strongest lower and upper bounds.
+        # Compatibility entries share the same bounded closure as goal search.
         def proof_close_equalities(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> void:
-            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
-            proof_close_equalities_with_markers(facts, markers, bounds)
+            budget: mutable usize = 0
+            exhausted: mutable bool = false
+            markers: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, &budget, &exhausted)
+            return if not markers.complete or exhausted
+            proof_close_equalities_with_work(facts, markers.witnesses, bounds, &budget, &exhausted)
 
         def proof_close_equalities_with_markers(facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, bounds: mutable darray[ProofBound]&) -> void:
-            left_names: mutable darray[sview] = []
-            right_names: mutable darray[sview] = []
-            for fact in facts |left_names, right_names, markers|:
-                proof_collect_name_equalities(fact, markers, &left_names, &right_names)
-
-            # Repeatedly scanning every edge and looking up both bounds for every round is
-            # cubic in long chains. Intern edge endpoints and build adjacency lists once,
-            # then visit each connected component and merge its bounds in one pass.
-            names: mutable darray[sview] = []
-            edge_left: mutable darray[usize] = []
-            edge_right: mutable darray[usize] = []
-            for edge in 0..<left_names.count |edge, left_names, right_names, names, edge_left, edge_right|:
-                left_index: usize = proof_alias_name_index(names, left_names[edge])
-                if left_index == names.count:
-                    names.push(left_names[edge])
-                    left_index <- names.count - 1
-                right_index: usize = proof_alias_name_index(names, right_names[edge])
-                if right_index == names.count:
-                    names.push(right_names[edge])
-                    right_index <- names.count - 1
-                edge_left.push(left_index)
-                edge_right.push(right_index)
-
-            adjacency_heads: mutable darray[usize] = []
-            adjacency_names: mutable darray[usize] = []
-            adjacency_next: mutable darray[usize] = []
-            proof_alias_build_adjacency(names, edge_left, edge_right, &adjacency_heads, &adjacency_names, &adjacency_next)
-
-            visited: mutable darray[bool] = []
-            for name_index in 0..<names.count |name_index, names, visited|:
-                visited.push(false)
-
-            for start in 0..<names.count |start, names, adjacency_heads, adjacency_names, adjacency_next, visited, bounds|:
-                continue if visited[start]
-                queue: mutable darray[usize] = [start]
-                members: mutable darray[usize] = []
-                visited[start] <- true
-                cursor: mutable usize = 0
-                while cursor < queue.count |cursor, queue, members, adjacency_heads, adjacency_names, adjacency_next, visited|:
-                    current: usize = queue[cursor]
-                    members.push(current)
-                    arc: mutable usize = adjacency_heads[current]
-                    while arc != 0 |arc, adjacency_names, adjacency_next, queue, visited|:
-                        arc_index: usize = arc - 1
-                        neighbor: usize = adjacency_names[arc_index]
-                        if not visited[neighbor]:
-                            visited[neighbor] <- true
-                            queue.push(neighbor)
-                        arc <- adjacency_next[arc_index]
-                    cursor <- cursor + 1
-
-                has_lower: mutable bool = false
-                lower: mutable i64 = 0
-                has_upper: mutable bool = false
-                upper: mutable i64 = 0
-                for member in members |member, members, names, bounds, has_lower, lower, has_upper, upper|:
-                    bound_index: usize = proof_bound_index(bounds, names[member])
-                    continue if bound_index == bounds.count
-                    bound: ProofBound = bounds[bound_index]
-                    if bound.has_lower and (not has_lower or bound.lower > lower):
-                        has_lower <- true
-                        lower <- bound.lower
-                    if bound.has_upper and (not has_upper or bound.upper < upper):
-                        has_upper <- true
-                        upper <- bound.upper
-
-                for member in members |member, members, names, bounds, has_lower, lower, has_upper, upper|:
-                    proof_equalities_add_lower(bounds, names[member], lower) if has_lower
-                    proof_equalities_add_upper(bounds, names[member], upper) if has_upper
-            proof_tighten_disequality_bounds(facts, bounds)
-
-        def proof_alias_name_index(names: darray[sview]&, name: sview) -> usize:
-            index: mutable usize = 0
-            while index < names.count |index, names, name|:
-                return index if names[index] == name
-                index <- index + 1
-            return names.count
-
-        def proof_alias_build_adjacency(names: darray[sview]&, edge_left: darray[usize]&, edge_right: darray[usize]&, adjacency_heads: mutable darray[usize]&, adjacency_names: mutable darray[usize]&, adjacency_next: mutable darray[usize]&) -> void:
-            for name in names |name, names, adjacency_heads|:
-                adjacency_heads.push(0)
-            for edge in 0..<edge_left.count |edge, edge_left, edge_right, adjacency_heads, adjacency_names, adjacency_next|:
-                adjacency_names.push(edge_right[edge])
-                adjacency_next.push(adjacency_heads[edge_left[edge]])
-                adjacency_heads[edge_left[edge]] <- adjacency_names.count
-                adjacency_names.push(edge_left[edge])
-                adjacency_next.push(adjacency_heads[edge_right[edge]])
-                adjacency_heads[edge_right[edge]] <- adjacency_names.count
-
-        def proof_equalities_add_lower(bounds: mutable darray[ProofBound]&, name: sview, value: i64) -> bool:
-            return false if name == ""
-            index: usize = proof_bound_index(bounds, name)
-            if index == bounds.count:
-                bounds <- bounds.push(ProofBound{name: name, term: Ast::Expr.Invalid, term_key: false, has_lower: true, lower: value, has_upper: false, upper: 0})
-                return true
-            return false if bounds[index].has_lower and value <= bounds[index].lower
-            bounds[index].has_lower <- true
-            bounds[index].lower <- value
-            return true
-
-        def proof_equalities_add_upper(bounds: mutable darray[ProofBound]&, name: sview, value: i64) -> bool:
-            return false if name == ""
-            index: usize = proof_bound_index(bounds, name)
-            if index == bounds.count:
-                bounds <- bounds.push(ProofBound{name: name, term: Ast::Expr.Invalid, term_key: false, has_lower: false, lower: 0, has_upper: true, upper: value})
-                return true
-            return false if bounds[index].has_upper and value >= bounds[index].upper
-            bounds[index].has_upper <- true
-            bounds[index].upper <- value
-            return true
+            budget: mutable usize = 0
+            exhausted: mutable bool = false
+            proof_close_equalities_with_work(facts, markers, bounds, &budget, &exhausted)
 
         def proof_names_equal_from_facts(left_name: sview, right_name: sview, facts: darray[Ast::Expr]&) -> bool:
             budget: mutable usize = 0
@@ -408,15 +297,13 @@ extend ElisaProof:
                 bounded_facts.push(facts[fact_index])
             marker_count: mutable usize = 0
             marker_name_cost: mutable usize = 0
-            fact_scan_cost: mutable usize = 0
-            for fact in bounded_facts |fact, marker_count, marker_name_cost, fact_scan_cost, budget, exhausted|:
+            for fact in bounded_facts |fact, marker_count, marker_name_cost, budget, exhausted|:
                 cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
                 return false if:
                     not cost.complete
                     not proof_linear_safety_work_charge(budget, exhausted, 1)
                     not proof_linear_safety_work_charge_scaled(budget, exhausted, cost.cost, 2)
                 callee: sview = proof_marker_callee_name(fact)
-                fact_scan_cost <- fact_scan_cost + cost.cost + 1
                 if callee in {"__elisa_primitive_scalar_type", "__elisa_primitive_integer_type"}:
                     marker_count <- marker_count + 1
                     argument: (known: bool, term: Ast::Expr) = proof_marker_argument(fact, "__elisa_primitive_scalar_type")
@@ -432,37 +319,34 @@ extend ElisaProof:
             # performs at most the configured probe count per insertion; a collision fallback
             # sorts at most marker_count names, with byte comparisons bounded by this total.
             return false if:
-                not proof_linear_safety_work_charge(budget, exhausted, fact_scan_cost)
                 not proof_linear_safety_work_charge_scaled(budget, exhausted, marker_name_cost, PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT + marker_count)
             relation_left: mutable darray[sview] = []
             relation_right: mutable darray[sview] = []
             markers: ProofScalarWitnesses = proof_scalar_witness_markers(bounded_facts)
             marker_scan: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers, budget, exhausted)
             return false if not marker_scan.complete
+            sort_index_result: (complete: bool, index: ProofNameEqualitySortIndex) = proof_name_equality_sort_index_build(bounded_facts, budget, exhausted)
+            return false if not sort_index_result.complete
             root_checks: mutable usize = 0
-            for fact in bounded_facts |relation_left, relation_right, markers, marker_scan, root_checks, budget, exhausted|:
+            for fact in bounded_facts |relation_left, relation_right, markers, marker_scan, sort_index_result, root_checks, budget, exhausted|:
                 return false if:
                     not proof_linear_safety_work_charge(budget, exhausted, 1)
-                    not proof_collect_name_equalities_metered_with_work(fact, markers, marker_scan.scale, relation_left, relation_right, root_checks, PROOF_LINEAR_NAME_EQUALITY_ROOT_LIMIT, budget, exhausted, 0)
+                    not proof_collect_name_equalities_metered_with_work(fact, markers, sort_index_result.index, marker_scan.scale, relation_left, relation_right, root_checks, PROOF_LINEAR_SAFETY_WORK_LIMIT, budget, exhausted, 0)
 
             names: mutable darray[sview] = []
             edge_left: mutable darray[usize] = []
             edge_right: mutable darray[usize] = []
-            for edge in 0..<relation_left.count |edge, relation_left, relation_right, names, edge_left, edge_right, budget, exhausted|:
-                left_index: (complete: bool, index: usize) = proof_alias_name_index_with_work(names, relation_left[edge], budget, exhausted)
+            return false if relation_left.count != relation_right.count
+            vertex_index_result: (complete: bool, index: ProofNameEqualityVertexIndex) = proof_name_equality_vertex_index_build(relation_left.count, budget, exhausted)
+            return false if not vertex_index_result.complete
+            vertex_index: mutable ProofNameEqualityVertexIndex = vertex_index_result.index
+            for edge in 0..<relation_left.count |edge, relation_left, relation_right, names, edge_left, edge_right, vertex_index, budget, exhausted|:
+                left_index: (complete: bool, row: usize) = proof_name_equality_vertex_index_insert(&vertex_index, &names, relation_left[edge], budget, exhausted)
                 return false if not left_index.complete
-                left_value: usize = left_index.index
-                if left_value == names.count:
-                    return false if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(relation_left[edge]))
-                    names.push(relation_left[edge])
-                    left_value <- names.count - 1
-                right_index: (complete: bool, index: usize) = proof_alias_name_index_with_work(names, relation_right[edge], budget, exhausted)
+                left_value: usize = left_index.row
+                right_index: (complete: bool, row: usize) = proof_name_equality_vertex_index_insert(&vertex_index, &names, relation_right[edge], budget, exhausted)
                 return false if not right_index.complete
-                right_value: usize = right_index.index
-                if right_value == names.count:
-                    return false if not proof_linear_safety_work_charge(budget, exhausted, 1) or not proof_linear_safety_work_charge(budget, exhausted, sview_len(relation_right[edge]))
-                    names.push(relation_right[edge])
-                    right_value <- names.count - 1
+                right_value: usize = right_index.row
                 return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
                 edge_left.push(left_value)
                 edge_right.push(right_value)
