@@ -4,8 +4,8 @@ extend ElisaProof:
         def proof_report_postcondition_pattern_special_binders(pattern: Ast::Pattern, position: Ast::Pos, source: Ast::Expr, source_work: mutable usize&) -> (complete: bool, binds_result: bool, binds_old: bool):
             names: mutable darray[sview] = []
             values: mutable darray[Ast::Expr] = []
-            # Both callers precharge the enclosing expression, including this pattern walk and
-            # binding collection. Charge only the extra special-name comparisons below.
+            # The Match-arm caller reserves the recursive pattern walk and this binding
+            # collection before entering the helper. Charge the additional byte comparisons here.
             return (false, false, false) if not proof_bind_pattern(pattern, position, source, &names, &values)
             binds_result: mutable bool = false
             binds_old: mutable bool = false
@@ -21,6 +21,16 @@ extend ElisaProof:
             check_result <- false if binders.binds_result
             check_old <- false if binders.binds_old
             (true, check_result, check_old)
+
+        # The admission scanners charge an enclosing expression walk, but closed-pattern
+        # validation and binder collection each traverse the pattern again. The cost scan is
+        # also a pattern walk, so reserve all three before either helper starts.
+        def proof_report_match_pattern_closed_with_work(pattern: Ast::Pattern, source_work: mutable usize&) -> bool:
+            pattern_cost: mutable usize = 0
+            return false if not proof_replay_summary_pattern_cost(pattern, &pattern_cost, source_work, 0) or pattern_cost == 0
+            return false if pattern_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3
+            return false if not proof_report_source_work_charge(pattern_cost * 3, source_work)
+            proof_match_closed_pattern(pattern)
 
         def proof_report_goal_owner_is_source_declaration(report: ProofReport&, name: sview, owner_line: u32, owner_offset: u32, source_work: mutable usize&) -> bool:
             low: mutable usize = 0
@@ -99,7 +109,7 @@ extend ElisaProof:
                     return true if proof_report_postcondition_has_unsafe_source_shape_depth(scrutinee, depth + 1, check_result, check_old, allow_match_lowering, source_work)
                     for arm in arms:
                         return true if arm.body.count != 1
-                        return true if not proof_match_closed_pattern(arm.pattern)
+                        return true if not proof_report_match_pattern_closed_with_work(arm.pattern, source_work)
                         arm_visibility: (known: bool, check_result: bool, check_old: bool) = proof_report_postcondition_match_binder_visibility(arm.pattern, position, scrutinee, check_result, check_old, source_work)
                         return true if not arm_visibility.known
                         return true if arm.guard != Ast::Expr.Absent and proof_report_postcondition_has_unsafe_source_shape_depth(arm.guard, depth + 1, arm_visibility.check_result, arm_visibility.check_old, allow_match_lowering, source_work)
@@ -145,11 +155,13 @@ extend ElisaProof:
 
         def proof_report_postcondition_source_scan_depth(expression: Ast::Expr, depth: usize, result_visible: bool, old_visible: bool, has_result: mutable bool&, has_old: mutable bool&, has_match: mutable bool&, source_work: mutable usize&) -> bool:
             return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            return false if not proof_report_source_work_charge(1, source_work)
             return true if has_old or (has_result and has_match)
             match expression:
                 Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _):
                     return true
                 Ast::Expr.Ident(name, _):
+                    return false if not proof_report_source_work_charge(sview_len(name), source_work)
                     has_result <- true if result_visible and name == "result"
                     has_old <- true if old_visible and name == "old"
                     return true
@@ -199,7 +211,7 @@ extend ElisaProof:
                     return false if not proof_report_postcondition_source_scan_depth(scrutinee, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
                     return false if has_result
                     for arm in arms |position, depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
-                        return false if arm.body.count != 1 or not proof_match_closed_pattern(arm.pattern)
+                        return false if arm.body.count != 1 or not proof_report_match_pattern_closed_with_work(arm.pattern, source_work)
                         arm_visibility: (known: bool, check_result: bool, check_old: bool) = proof_report_postcondition_match_binder_visibility(arm.pattern, position, scrutinee, result_visible, old_visible, source_work)
                         return false if not arm_visibility.known
                         if arm.guard != Ast::Expr.Absent:
