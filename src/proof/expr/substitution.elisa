@@ -151,7 +151,9 @@ extend ElisaProof:
                     pass
             return (false, Ast::Expr.Invalid)
 
-        def proof_substitute[@r](expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]& @r) -> Ast::Expr @r:
+        def proof_substitute_depth_with_work[@r](expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]& @r, work: mutable usize&) -> Ast::Expr @r:
+            # The public entrypoint reserves traversal and growth; nested Match paths reserve separately.
+            return Ast::Expr.Invalid if work > PROOF_MATCH_LOWERING_WORK_LIMIT
             match expression:
                 Ast::Expr.Invalid:
                     return expression
@@ -169,7 +171,7 @@ extend ElisaProof:
                     return expression
                 Ast::Expr.Ident(name, position):
                     index: mutable usize = names.count
-                    while index > 0 |index, names, values|:
+                    while index > 0 |index, names, values, work|:
                         index <- index - 1
                         if index < values.count and names[index] == name:
                             # An omitted/default or otherwise unavailable argument is not a
@@ -186,20 +188,20 @@ extend ElisaProof:
                                     return values[index]
                     return expression
                 Ast::Expr.Paren(inner, position):
-                    return Ast::Expr.Paren(proof_substitute(inner, names, values), position)
+                    return Ast::Expr.Paren(proof_substitute_depth_with_work(inner, names, values, work), position)
                 Ast::Expr.Unary(operator, operand, position):
-                    return Ast::Expr.Unary(operator, proof_substitute(operand, names, values), position)
+                    return Ast::Expr.Unary(operator, proof_substitute_depth_with_work(operand, names, values, work), position)
                 Ast::Expr.Binary(left, operator, right, position):
-                    substituted_left: Ast::Expr = proof_substitute(left, names, values)
-                    substituted_right: Ast::Expr = proof_substitute(right, names, values)
+                    substituted_left: Ast::Expr = proof_substitute_depth_with_work(left, names, values, work)
+                    substituted_right: Ast::Expr = proof_substitute_depth_with_work(right, names, values, work)
                     return Ast::Expr.Binary(substituted_left, operator, substituted_right, position)
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     substituted: mutable darray[Ast::Expr] @r = []
-                    for argument in arguments |substituted, names, values|:
-                        substituted.push(proof_substitute(argument, names, values))
-                    return Ast::Expr.Call(proof_substitute(callee, names, values), substituted, argument_names, position)
+                    for argument in arguments |substituted, names, values, work|:
+                        substituted.push(proof_substitute_depth_with_work(argument, names, values, work))
+                    return Ast::Expr.Call(proof_substitute_depth_with_work(callee, names, values, work), substituted, argument_names, position)
                 Ast::Expr.Field(object, field, position):
-                    substituted_object: Ast::Expr = proof_substitute(object, names, values)
+                    substituted_object: Ast::Expr = proof_substitute_depth_with_work(object, names, values, work)
                     match substituted_object:
                         # Constructor projection is a definitional reduction, not a solver
                         # guess: `Box{value: x}.value` is exactly `x`. Positional or unknown
@@ -216,68 +218,70 @@ extend ElisaProof:
                             pass
                     return Ast::Expr.Field(substituted_object, field, position)
                 Ast::Expr.Scope(base, name, position):
-                    return Ast::Expr.Scope(proof_substitute(base, names, values), name, position)
+                    return Ast::Expr.Scope(proof_substitute_depth_with_work(base, names, values, work), name, position)
                 Ast::Expr.Index(object, index, position):
                     projected: (known: bool, value: Ast::Expr) = proof_substitute_scalar_reference_index(object, index, names, values)
                     return projected.value if projected.known
-                    return Ast::Expr.Index(proof_substitute(object, names, values), proof_substitute(index, names, values), position)
+                    return Ast::Expr.Index(proof_substitute_depth_with_work(object, names, values, work), proof_substitute_depth_with_work(index, names, values, work), position)
                 Ast::Expr.Slice(object, low, high, position):
-                    return Ast::Expr.Slice(proof_substitute(object, names, values), proof_substitute(low, names, values), proof_substitute(high, names, values), position)
+                    return Ast::Expr.Slice(proof_substitute_depth_with_work(object, names, values, work), proof_substitute_depth_with_work(low, names, values, work), proof_substitute_depth_with_work(high, names, values, work), position)
                 Ast::Expr.IndexN(object, arguments, position):
                     substituted_arguments: mutable darray[Ast::Expr] @r = []
-                    for argument in arguments |substituted_arguments, names, values|:
-                        substituted_arguments.push(proof_substitute(argument, names, values))
-                    return Ast::Expr.IndexN(proof_substitute(object, names, values), substituted_arguments, position)
+                    for argument in arguments |substituted_arguments, names, values, work|:
+                        substituted_arguments.push(proof_substitute_depth_with_work(argument, names, values, work))
+                    return Ast::Expr.IndexN(proof_substitute_depth_with_work(object, names, values, work), substituted_arguments, position)
                 Ast::Expr.Move(operand, position):
-                    return Ast::Expr.Move(proof_substitute(operand, names, values), position)
+                    return Ast::Expr.Move(proof_substitute_depth_with_work(operand, names, values, work), position)
                 Ast::Expr.RegionNew(operand, region, position):
-                    return Ast::Expr.RegionNew(proof_substitute(operand, names, values), region, position)
+                    return Ast::Expr.RegionNew(proof_substitute_depth_with_work(operand, names, values, work), region, position)
                 Ast::Expr.Array(elements, position):
                     substituted_elements: mutable darray[Ast::Expr] @r = []
-                    for element in elements |substituted_elements, names, values|:
-                        substituted_elements.push(proof_substitute(element, names, values))
+                    for element in elements |substituted_elements, names, values, work|:
+                        substituted_elements.push(proof_substitute_depth_with_work(element, names, values, work))
                     return Ast::Expr.Array(substituted_elements, position)
                 Ast::Expr.Tuple(elements, position):
                     substituted_elements: mutable darray[Ast::Expr] @r = []
-                    for element in elements |substituted_elements, names, values|:
-                        substituted_elements.push(proof_substitute(element, names, values))
+                    for element in elements |substituted_elements, names, values, work|:
+                        substituted_elements.push(proof_substitute_depth_with_work(element, names, values, work))
                     return Ast::Expr.Tuple(substituted_elements, position)
                 Ast::Expr.SetLit(elements, position):
                     substituted_elements: mutable darray[Ast::Expr] @r = []
-                    for element in elements |substituted_elements, names, values|:
-                        substituted_elements.push(proof_substitute(element, names, values))
+                    for element in elements |substituted_elements, names, values, work|:
+                        substituted_elements.push(proof_substitute_depth_with_work(element, names, values, work))
                     return Ast::Expr.SetLit(substituted_elements, position)
                 Ast::Expr.DictLit(entries, position):
                     substituted_entries: mutable darray[Ast::DictEntry] @r = []
-                    for entry in entries |substituted_entries, names, values|:
-                        substituted_entries.push(Ast::DictEntry{key: proof_substitute(entry.key, names, values), value: proof_substitute(entry.value, names, values)})
+                    for entry in entries |substituted_entries, names, values, work|:
+                        substituted_entries.push(Ast::DictEntry{key: proof_substitute_depth_with_work(entry.key, names, values, work), value: proof_substitute_depth_with_work(entry.value, names, values, work)})
                     return Ast::Expr.DictLit(substituted_entries, position)
                 Ast::Expr.Construct(type_expression, fields, position):
                     substituted_fields: mutable darray[Ast::FieldInit] @r = []
-                    for field in fields |substituted_fields, names, values|:
-                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute(field.value, names, values)})
+                    for field in fields |substituted_fields, names, values, work|:
+                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute_depth_with_work(field.value, names, values, work)})
                     # The constructor head is a type expression, not a value binding. Keep it
                     # lexical so a local with the same spelling cannot rewrite the type head.
                     return Ast::Expr.Construct(type_expression, substituted_fields, position)
                 Ast::Expr.RecordUpdate(base, fields, position):
                     substituted_fields: mutable darray[Ast::FieldInit] @r = []
-                    for field in fields |substituted_fields, names, values|:
-                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute(field.value, names, values)})
-                    return Ast::Expr.RecordUpdate(proof_substitute(base, names, values), substituted_fields, position)
+                    for field in fields |substituted_fields, names, values, work|:
+                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute_depth_with_work(field.value, names, values, work)})
+                    return Ast::Expr.RecordUpdate(proof_substitute_depth_with_work(base, names, values, work), substituted_fields, position)
                 Ast::Expr.If(condition, then_expr, else_expr, position):
-                    substituted_condition: Ast::Expr = proof_substitute(condition, names, values)
-                    substituted_then: Ast::Expr = proof_substitute(then_expr, names, values)
-                    substituted_else: Ast::Expr = proof_substitute(else_expr, names, values)
+                    substituted_condition: Ast::Expr = proof_substitute_depth_with_work(condition, names, values, work)
+                    substituted_then: Ast::Expr = proof_substitute_depth_with_work(then_expr, names, values, work)
+                    substituted_else: Ast::Expr = proof_substitute_depth_with_work(else_expr, names, values, work)
                     return Ast::Expr.If(substituted_condition, substituted_then, substituted_else, position)
                 Ast::Expr.Match(_, _, _):
-                    lowered: (known: bool, value: Ast::Expr) = proof_lower_value_match(expression)
-                    return proof_substitute(lowered.value, names, values) if lowered.known
+                    lowered: (known: bool, value: Ast::Expr) = proof_lower_value_match_with_work(expression, work)
+                    if lowered.known:
+                        return Ast::Expr.Invalid if not proof_substitution_reserve_work(lowered.value, names, values, [], [], work)
+                        return proof_substitute_depth_with_work(lowered.value, names, values, work)
                     return Ast::Expr.Invalid
                 Ast::Expr.GetElse(guarded, _, _):
                     # Control-flow recovery is checked separately on its failure path. On the
                     # successful path the expression contributes the guarded value, which is the
                     # exact value type exposed by Elisa's `get` construct.
-                    return proof_substitute(guarded, names, values)
+                    return proof_substitute_depth_with_work(guarded, names, values, work)
                 Ast::Expr.Comprehension(variable, iterable, condition, body, position):
                     return Ast::Expr.Invalid if proof_substitution_would_capture(variable, names, values)
                     shadow_names: mutable darray[sview] @r = []
@@ -286,9 +290,9 @@ extend ElisaProof:
                     shadow_values.extend(values)
                     shadow_names.push(variable)
                     shadow_values.push(Ast::Expr.Ident(variable, position))
-                    return Ast::Expr.Comprehension(variable, proof_substitute(iterable, names, values), proof_substitute(condition, shadow_names, shadow_values), proof_substitute(body, shadow_names, shadow_values), position)
+                    return Ast::Expr.Comprehension(variable, proof_substitute_depth_with_work(iterable, names, values, work), proof_substitute_depth_with_work(condition, shadow_names, shadow_values, work), proof_substitute_depth_with_work(body, shadow_names, shadow_values, work), position)
                 Ast::Expr.Refinement(base, predicate, position):
-                    return Ast::Expr.Refinement(proof_substitute(base, names, values), proof_substitute(predicate, names, values), position)
+                    return Ast::Expr.Refinement(proof_substitute_depth_with_work(base, names, values, work), proof_substitute_depth_with_work(predicate, names, values, work), position)
                 Ast::Expr.ShorthandMember(_, _):
                     return expression
                 Ast::Expr.Block(statements, value, captures, position):
@@ -298,24 +302,23 @@ extend ElisaProof:
                     shadow_values.extend(values)
                     substituted_statements: mutable darray[Ast::Stmt] @r = []
                     malformed: mutable bool = false
-                    for statement in statements |shadow_names, shadow_values, substituted_statements, names, values, malformed|:
+                    for statement in statements |shadow_names, shadow_values, substituted_statements, names, values, malformed, work|:
                         match statement:
                             Ast::Stmt.VarDecl(local_name, type_expression, initializer, statement_position):
                                 return Ast::Expr.Invalid if proof_substitution_would_capture(local_name, shadow_names, shadow_values)
-                                substituted_initializer: Ast::Expr = proof_substitute(initializer, shadow_names, shadow_values)
+                                substituted_initializer: Ast::Expr = proof_substitute_depth_with_work(initializer, shadow_names, shadow_values, work)
                                 substituted_statements.push(Ast::Stmt.VarDecl(local_name, type_expression, substituted_initializer, statement_position))
                                 shadow_names.push(local_name)
                                 shadow_values.push(Ast::Expr.Ident(local_name, statement_position))
                             _:
                                 malformed <- true
                     return Ast::Expr.Invalid if malformed
-                    return Ast::Expr.Block(substituted_statements, proof_substitute(value, shadow_names, shadow_values), captures, position)
+                    return Ast::Expr.Block(substituted_statements, proof_substitute_depth_with_work(value, shadow_names, shadow_values, work), captures, position)
                 _:
                     # A future AST form must never leak an uninstantiated formal into a
                     # caller's proof state. Keep the source node only for modeled leaves above;
                     # every other form becomes an opaque failure value.
                     return Ast::Expr.Invalid
-
         # Contract-aware substitution handles Elisa's pre-state operator before current-state
         # bindings are substituted. `old(x)` must see the entry value of x; substituting the
         # mutable local first would incorrectly turn it into the post-state expression.
@@ -343,30 +346,40 @@ extend ElisaProof:
                     return (false, Ast::Expr.Invalid)
 
         def proof_substitute_contract[@r](expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]& @r, old_names: darray[sview]&, old_values: darray[Ast::Expr]& @r) -> Ast::Expr @r:
+            work: mutable usize = 0
+            return proof_substitute_contract_with_work(expression, names, values, old_names, old_values, &work)
+
+        def proof_substitute_contract_with_work[@r](expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]& @r, old_names: darray[sview]&, old_values: darray[Ast::Expr]& @r, work: mutable usize&) -> Ast::Expr @r:
+            return Ast::Expr.Invalid if not proof_substitution_reserve_work(expression, names, values, old_names, old_values, work)
+            return proof_substitute_contract_depth_with_work(expression, names, values, old_names, old_values, work)
+
+        def proof_substitute_contract_depth_with_work[@r](expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]& @r, old_names: darray[sview]&, old_values: darray[Ast::Expr]& @r, work: mutable usize&) -> Ast::Expr @r:
+            # The contract entrypoint reserves this walk; old(...) and Match paths reserve nested passes.
+            return Ast::Expr.Invalid if work > PROOF_MATCH_LOWERING_WORK_LIMIT
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     if proof_ident_name(callee) == "old" and arguments.count == 1:
                         local_index: mutable usize = old_names.count
-                        while local_index < names.count |local_index, names, old_names, arguments|:
+                        while local_index < names.count |local_index, names, old_names, arguments, work|:
                             return Ast::Expr.Invalid if proof_expr_mentions_name(arguments[0], names[local_index])
                             local_index <- local_index + 1
                         reference_entry: (known: bool, value: Ast::Expr) = proof_substitute_old_scalar_reference_index(arguments[0], old_names, old_values)
                         return reference_entry.value if reference_entry.known
                         entry_count: (known: bool, value: Ast::Expr) = proof_substitute_old_entry_count(arguments[0], old_names, old_values)
                         return entry_count.value if entry_count.known
-                        return proof_substitute(arguments[0], old_names, old_values)
+                        return proof_substitute_with_work(arguments[0], old_names, old_values, work)
                     substituted: mutable darray[Ast::Expr] @r = []
-                    for argument in arguments |substituted, names, values, old_names, old_values|:
-                        substituted.push(proof_substitute_contract(argument, names, values, old_names, old_values))
-                    return Ast::Expr.Call(proof_substitute_contract(callee, names, values, old_names, old_values), substituted, argument_names, position)
+                    for argument in arguments |substituted, names, values, old_names, old_values, work|:
+                        substituted.push(proof_substitute_contract_depth_with_work(argument, names, values, old_names, old_values, work))
+                    return Ast::Expr.Call(proof_substitute_contract_depth_with_work(callee, names, values, old_names, old_values, work), substituted, argument_names, position)
                 Ast::Expr.Paren(inner, position):
-                    return Ast::Expr.Paren(proof_substitute_contract(inner, names, values, old_names, old_values), position)
+                    return Ast::Expr.Paren(proof_substitute_contract_depth_with_work(inner, names, values, old_names, old_values, work), position)
                 Ast::Expr.Unary(operator, operand, position):
-                    return Ast::Expr.Unary(operator, proof_substitute_contract(operand, names, values, old_names, old_values), position)
+                    return Ast::Expr.Unary(operator, proof_substitute_contract_depth_with_work(operand, names, values, old_names, old_values, work), position)
                 Ast::Expr.Binary(left, operator, right, position):
-                    return Ast::Expr.Binary(proof_substitute_contract(left, names, values, old_names, old_values), operator, proof_substitute_contract(right, names, values, old_names, old_values), position)
+                    return Ast::Expr.Binary(proof_substitute_contract_depth_with_work(left, names, values, old_names, old_values, work), operator, proof_substitute_contract_depth_with_work(right, names, values, old_names, old_values, work), position)
                 Ast::Expr.Field(object, field, position):
-                    substituted_object: Ast::Expr = proof_substitute_contract(object, names, values, old_names, old_values)
+                    substituted_object: Ast::Expr = proof_substitute_contract_depth_with_work(object, names, values, old_names, old_values, work)
                     match substituted_object:
                         Ast::Expr.Construct(_, fields, _):
                             return proof_project_record_field(substituted_object, field, position, 0)
@@ -380,57 +393,59 @@ extend ElisaProof:
                             pass
                     return Ast::Expr.Field(substituted_object, field, position)
                 Ast::Expr.Scope(base, name, position):
-                    return Ast::Expr.Scope(proof_substitute_contract(base, names, values, old_names, old_values), name, position)
+                    return Ast::Expr.Scope(proof_substitute_contract_depth_with_work(base, names, values, old_names, old_values, work), name, position)
                 Ast::Expr.Index(object, index, position):
                     projected: (known: bool, value: Ast::Expr) = proof_substitute_scalar_reference_index(object, index, names, values)
                     return projected.value if projected.known
-                    return Ast::Expr.Index(proof_substitute_contract(object, names, values, old_names, old_values), proof_substitute_contract(index, names, values, old_names, old_values), position)
+                    return Ast::Expr.Index(proof_substitute_contract_depth_with_work(object, names, values, old_names, old_values, work), proof_substitute_contract_depth_with_work(index, names, values, old_names, old_values, work), position)
                 Ast::Expr.Slice(object, low, high, position):
-                    return Ast::Expr.Slice(proof_substitute_contract(object, names, values, old_names, old_values), proof_substitute_contract(low, names, values, old_names, old_values), proof_substitute_contract(high, names, values, old_names, old_values), position)
+                    return Ast::Expr.Slice(proof_substitute_contract_depth_with_work(object, names, values, old_names, old_values, work), proof_substitute_contract_depth_with_work(low, names, values, old_names, old_values, work), proof_substitute_contract_depth_with_work(high, names, values, old_names, old_values, work), position)
                 Ast::Expr.IndexN(object, arguments, position):
                     substituted_arguments: mutable darray[Ast::Expr] @r = []
-                    for argument in arguments |substituted_arguments, names, values, old_names, old_values|:
-                        substituted_arguments.push(proof_substitute_contract(argument, names, values, old_names, old_values))
-                    return Ast::Expr.IndexN(proof_substitute_contract(object, names, values, old_names, old_values), substituted_arguments, position)
+                    for argument in arguments |substituted_arguments, names, values, old_names, old_values, work|:
+                        substituted_arguments.push(proof_substitute_contract_depth_with_work(argument, names, values, old_names, old_values, work))
+                    return Ast::Expr.IndexN(proof_substitute_contract_depth_with_work(object, names, values, old_names, old_values, work), substituted_arguments, position)
                 Ast::Expr.Move(operand, position):
-                    return Ast::Expr.Move(proof_substitute_contract(operand, names, values, old_names, old_values), position)
+                    return Ast::Expr.Move(proof_substitute_contract_depth_with_work(operand, names, values, old_names, old_values, work), position)
                 Ast::Expr.RegionNew(operand, region, position):
-                    return Ast::Expr.RegionNew(proof_substitute_contract(operand, names, values, old_names, old_values), region, position)
+                    return Ast::Expr.RegionNew(proof_substitute_contract_depth_with_work(operand, names, values, old_names, old_values, work), region, position)
                 Ast::Expr.Array(elements, position):
                     substituted_elements: mutable darray[Ast::Expr] @r = []
-                    for element in elements |substituted_elements, names, values, old_names, old_values|:
-                        substituted_elements.push(proof_substitute_contract(element, names, values, old_names, old_values))
+                    for element in elements |substituted_elements, names, values, old_names, old_values, work|:
+                        substituted_elements.push(proof_substitute_contract_depth_with_work(element, names, values, old_names, old_values, work))
                     return Ast::Expr.Array(substituted_elements, position)
                 Ast::Expr.Tuple(elements, position):
                     substituted_elements: mutable darray[Ast::Expr] @r = []
-                    for element in elements |substituted_elements, names, values, old_names, old_values|:
-                        substituted_elements.push(proof_substitute_contract(element, names, values, old_names, old_values))
+                    for element in elements |substituted_elements, names, values, old_names, old_values, work|:
+                        substituted_elements.push(proof_substitute_contract_depth_with_work(element, names, values, old_names, old_values, work))
                     return Ast::Expr.Tuple(substituted_elements, position)
                 Ast::Expr.SetLit(elements, position):
                     substituted_elements: mutable darray[Ast::Expr] @r = []
-                    for element in elements |substituted_elements, names, values, old_names, old_values|:
-                        substituted_elements.push(proof_substitute_contract(element, names, values, old_names, old_values))
+                    for element in elements |substituted_elements, names, values, old_names, old_values, work|:
+                        substituted_elements.push(proof_substitute_contract_depth_with_work(element, names, values, old_names, old_values, work))
                     return Ast::Expr.SetLit(substituted_elements, position)
                 Ast::Expr.DictLit(entries, position):
                     substituted_entries: mutable darray[Ast::DictEntry] @r = []
-                    for entry in entries |substituted_entries, names, values, old_names, old_values|:
-                        substituted_entries.push(Ast::DictEntry{key: proof_substitute_contract(entry.key, names, values, old_names, old_values), value: proof_substitute_contract(entry.value, names, values, old_names, old_values)})
+                    for entry in entries |substituted_entries, names, values, old_names, old_values, work|:
+                        substituted_entries.push(Ast::DictEntry{key: proof_substitute_contract_depth_with_work(entry.key, names, values, old_names, old_values, work), value: proof_substitute_contract_depth_with_work(entry.value, names, values, old_names, old_values, work)})
                     return Ast::Expr.DictLit(substituted_entries, position)
                 Ast::Expr.Construct(type_expression, fields, position):
                     substituted_fields: mutable darray[Ast::FieldInit] @r = []
-                    for field in fields |substituted_fields, names, values, old_names, old_values|:
-                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute_contract(field.value, names, values, old_names, old_values)})
+                    for field in fields |substituted_fields, names, values, old_names, old_values, work|:
+                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute_contract_depth_with_work(field.value, names, values, old_names, old_values, work)})
                     return Ast::Expr.Construct(type_expression, substituted_fields, position)
                 Ast::Expr.RecordUpdate(base, fields, position):
                     substituted_fields: mutable darray[Ast::FieldInit] @r = []
-                    for field in fields |substituted_fields, names, values, old_names, old_values|:
-                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute_contract(field.value, names, values, old_names, old_values)})
-                    return Ast::Expr.RecordUpdate(proof_substitute_contract(base, names, values, old_names, old_values), substituted_fields, position)
+                    for field in fields |substituted_fields, names, values, old_names, old_values, work|:
+                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute_contract_depth_with_work(field.value, names, values, old_names, old_values, work)})
+                    return Ast::Expr.RecordUpdate(proof_substitute_contract_depth_with_work(base, names, values, old_names, old_values, work), substituted_fields, position)
                 Ast::Expr.If(condition, then_expr, else_expr, position):
-                    return Ast::Expr.If(proof_substitute_contract(condition, names, values, old_names, old_values), proof_substitute_contract(then_expr, names, values, old_names, old_values), proof_substitute_contract(else_expr, names, values, old_names, old_values), position)
+                    return Ast::Expr.If(proof_substitute_contract_depth_with_work(condition, names, values, old_names, old_values, work), proof_substitute_contract_depth_with_work(then_expr, names, values, old_names, old_values, work), proof_substitute_contract_depth_with_work(else_expr, names, values, old_names, old_values, work), position)
                 Ast::Expr.Match(_, _, _):
-                    lowered: (known: bool, value: Ast::Expr) = proof_lower_value_match(expression)
-                    return proof_substitute_contract(lowered.value, names, values, old_names, old_values) if lowered.known
+                    lowered: (known: bool, value: Ast::Expr) = proof_lower_value_match_with_work(expression, work)
+                    if lowered.known:
+                        return Ast::Expr.Invalid if not proof_substitution_reserve_work(lowered.value, names, values, old_names, old_values, work)
+                        return proof_substitute_contract_depth_with_work(lowered.value, names, values, old_names, old_values, work)
                     return Ast::Expr.Invalid
                 Ast::Expr.Comprehension(variable, iterable, condition, body, position):
                     return Ast::Expr.Invalid if proof_substitution_would_capture(variable, names, values)
@@ -440,9 +455,9 @@ extend ElisaProof:
                     shadow_values.extend(values)
                     shadow_names.push(variable)
                     shadow_values.push(Ast::Expr.Ident(variable, position))
-                    return Ast::Expr.Comprehension(variable, proof_substitute_contract(iterable, names, values, old_names, old_values), proof_substitute_contract(condition, shadow_names, shadow_values, old_names, old_values), proof_substitute_contract(body, shadow_names, shadow_values, old_names, old_values), position)
+                    return Ast::Expr.Comprehension(variable, proof_substitute_contract_depth_with_work(iterable, names, values, old_names, old_values, work), proof_substitute_contract_depth_with_work(condition, shadow_names, shadow_values, old_names, old_values, work), proof_substitute_contract_depth_with_work(body, shadow_names, shadow_values, old_names, old_values, work), position)
                 Ast::Expr.Refinement(base, predicate, position):
-                    return Ast::Expr.Refinement(proof_substitute_contract(base, names, values, old_names, old_values), proof_substitute_contract(predicate, names, values, old_names, old_values), position)
+                    return Ast::Expr.Refinement(proof_substitute_contract_depth_with_work(base, names, values, old_names, old_values, work), proof_substitute_contract_depth_with_work(predicate, names, values, old_names, old_values, work), position)
                 Ast::Expr.ShorthandMember(_, _):
                     return expression
                 Ast::Expr.Block(statements, value, captures, position):
@@ -452,18 +467,18 @@ extend ElisaProof:
                     shadow_values.extend(values)
                     substituted_statements: mutable darray[Ast::Stmt] @r = []
                     malformed: mutable bool = false
-                    for statement in statements |shadow_names, shadow_values, substituted_statements, names, values, old_names, old_values, malformed|:
+                    for statement in statements |shadow_names, shadow_values, substituted_statements, names, values, old_names, old_values, malformed, work|:
                         match statement:
                             Ast::Stmt.VarDecl(local_name, type_expression, initializer, statement_position):
                                 return Ast::Expr.Invalid if proof_substitution_would_capture(local_name, shadow_names, shadow_values)
-                                substituted_initializer: Ast::Expr = proof_substitute_contract(initializer, shadow_names, shadow_values, old_names, old_values)
+                                substituted_initializer: Ast::Expr = proof_substitute_contract_depth_with_work(initializer, shadow_names, shadow_values, old_names, old_values, work)
                                 substituted_statements.push(Ast::Stmt.VarDecl(local_name, type_expression, substituted_initializer, statement_position))
                                 shadow_names.push(local_name)
                                 shadow_values.push(Ast::Expr.Ident(local_name, statement_position))
                             _:
                                 malformed <- true
                     return Ast::Expr.Invalid if malformed
-                    return Ast::Expr.Block(substituted_statements, proof_substitute_contract(value, shadow_names, shadow_values, old_names, old_values), captures, position)
+                    return Ast::Expr.Block(substituted_statements, proof_substitute_contract_depth_with_work(value, shadow_names, shadow_values, old_names, old_values, work), captures, position)
                 Ast::Expr.Invalid:
                     return expression
                 Ast::Expr.Absent:
@@ -479,12 +494,11 @@ extend ElisaProof:
                 Ast::Expr.BoolLit(_, _):
                     return expression
                 Ast::Expr.Ident(_, _):
-                    return proof_substitute(expression, names, values)
+                    return proof_substitute_with_work(expression, names, values, work)
                 _:
                     # Do not preserve an unmodeled contract expression: in particular, an
                     # unsupported node may contain `old(...)` or a formal that was not bound.
                     return Ast::Expr.Invalid
-
         # Substitute a contract in a lexical scope whose live bindings occupy the first
         # `scope_count` slots of the symbolic environment. Runtime bodies may append shadowing
         # locals to the same arrays, but those locals are not in scope for a loop invariant or
@@ -499,18 +513,11 @@ extend ElisaProof:
                     scoped_values.push(Ast::Expr.Invalid) if index >= values.count
             return proof_substitute_contract(expression, scoped_names, scoped_values, old_names, old_values)
 
-        # Function-level contracts are lexically outside the function body. They may refer to
-        # formals and `result`, but a local declared later in the body must not shadow a formal
-        # name inside `ensure`/`old(...)`. Build a parameter-only current environment from the
-        # stable prefix of the symbolic state; missing slots become Invalid so malformed state
-        # cannot turn into a proof.
+        # Function contracts use only formals and result; later body locals cannot shadow them.
         def proof_substitute_function_contract[@r](expression: Ast::Expr, parameter_names: darray[sview]&, values: darray[Ast::Expr]& @r, old_values: darray[Ast::Expr]& @r) -> Ast::Expr @r:
             return proof_substitute_scoped_contract(expression, parameter_names, values, parameter_names.count, parameter_names, old_values)
 
-        # `old(...)` can occur below expression-level match/catch/lambda/block nodes. Keep this
-        # traversal separate from call detection: an unsupported call is already conservative
-        # there, but missing an old-state reference would let a callee export a pre-state fact as
-        # if it were a post-state summary.
+        # Detect nested old-state references so callees cannot export pre-state facts as post-state.
         def proof_body_has_old(body: darray[Ast::Stmt]&) -> bool:
             return proof_body_has_old_depth(body, 0)
 
