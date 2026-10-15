@@ -35,9 +35,10 @@ assert "proof_kernel_replay_term_sort(nodes, children, environment, typing_index
 assert "current <- proof_kernel_replay_index_element_sort(current, environment, typing_index, work)" in (
     ROOT / "src/proof/kernel_replay/proposition_typing.elisa"
 ).read_text(encoding="utf-8")
-assert "return proof_kernel_replay_unknown_sort() if not receiver.known or receiver.family != \"container\"" in (
-    ROOT / "src/proof/kernel_replay/proposition_typing.elisa"
-).read_text(encoding="utf-8")
+assert "return proof_kernel_replay_unknown_sort() if not receiver.known or receiver.family != \"container\"" in function_body(
+    ROOT / "src/proof/kernel_replay/typing_binding_sort_helpers.elisa",
+    "proof_kernel_replay_index_element_sort",
+)
 assert "proof_kernel_replay_integral_sort(left_index_sort)" in typed_rule
 assert 'left_result_sort.family not in {"integer", "boolean", "character"}' in typed_rule
 assert "reachable: mutable darray[usize] = [left.right]" in typed_rule
