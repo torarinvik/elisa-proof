@@ -7,6 +7,7 @@ import sys
 MAX_SOURCE_BYTES = 16_777_216
 MAX_PATH_BYTES = 4096
 MAX_EINTR_RETRIES = 4
+READ_CHUNK_BYTES = 16_384
 try:
     ROOT = Path(__file__).resolve().parents[1]
 except (OSError, RuntimeError):
@@ -57,20 +58,35 @@ def read_bounded_utf8(path: Path) -> str:
             raise OSError("invalid source file size")
         if opened.st_size > MAX_SOURCE_BYTES:
             raise OSError("source file exceeds bounded reader limit")
+        if opened.st_size != named_before_open.st_size:
+            raise OSError("source file changed during open")
         named_after_open = retry_eintr(path.stat)
         if not same_file(opened, named_after_open):
             raise OSError("source path changed during open")
 
-        chunks: list[bytes] = []
-        remaining = MAX_SOURCE_BYTES + 1
-        while remaining:
-            chunk = retry_eintr(os.read, descriptor, remaining)
+        initial_size = opened.st_size
+        scratch_capacity = min(initial_size + 1, READ_CHUNK_BYTES)
+        source_bytes = bytearray(initial_size)
+        total_bytes = 0
+        while True:
+            remaining = MAX_SOURCE_BYTES - total_bytes
+            capacity = min(remaining + 1, scratch_capacity)
+            chunk = retry_eintr(os.read, descriptor, capacity)
             if not chunk:
                 break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        source_bytes = b"".join(chunks)
-        if len(source_bytes) > MAX_SOURCE_BYTES:
+            if len(chunk) > capacity:
+                raise OSError("read returned more bytes than requested")
+            if len(chunk) > remaining:
+                raise OSError("source file exceeds bounded reader limit")
+            if total_bytes > initial_size or len(chunk) > initial_size - total_bytes:
+                raise OSError("source file changed during read")
+            source_bytes[total_bytes : total_bytes + len(chunk)] = chunk
+            total_bytes += len(chunk)
+            if capacity < READ_CHUNK_BYTES:
+                current_opened = retry_eintr(os.fstat, descriptor)
+                if not stable_file(opened, current_opened):
+                    raise OSError("source file changed during read")
+        if total_bytes > MAX_SOURCE_BYTES:
             raise OSError("source file exceeds bounded reader limit")
 
         final_opened = retry_eintr(os.fstat, descriptor)
@@ -80,6 +96,7 @@ def read_bounded_utf8(path: Path) -> str:
     finally:
         os.close(descriptor)
 
+    del source_bytes[total_bytes:]
     return source_bytes.decode("utf-8")
 
 
