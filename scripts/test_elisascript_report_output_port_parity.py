@@ -1,0 +1,90 @@
+"""Pin source-level behavior shared by the active Python and ElisaScript port."""
+
+import ast
+import re
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+python_source = (ROOT / "scripts/test_report_output_loop_layout.py").read_text(encoding="utf-8")
+elisa_source = (ROOT / "scripts/elisascript/test_report_output_loop_layout.elisascript").read_text(encoding="utf-8")
+bounded_reader = (ROOT.parent / "elisa-script/src/runtime/bounded_text_posix.elisa").read_text(encoding="utf-8")
+reader_body = bounded_reader.split("def read_utf8(", 1)[1].split("def descriptor_shape", 1)[0]
+
+
+def python_assignment(name: str):
+    tree = ast.parse(python_source)
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in statement.targets
+        ):
+            return ast.literal_eval(statement.value)
+    raise AssertionError(f"Python assignment {name} not found")
+
+
+python_fragments = python_assignment("required")
+array_match = re.search(r"required:\s*darray\[sview\]\s*=\s*\[(.*?)\n\s*\]", elisa_source, re.S)
+assert array_match, "ElisaScript required fragment list is missing"
+elisa_fragments = tuple(
+    ast.literal_eval(line.strip().removesuffix(","))
+    for line in array_match.group(1).splitlines()
+    if line.strip()
+)
+assert python_fragments == elisa_fragments, (python_fragments, elisa_fragments)
+
+# The source-relative target must resolve identically from the Python reference and its
+# nested ElisaScript counterpart; otherwise matching fragment lists would check different files.
+assert "Path(__file__).resolve().parents[1]" in python_source
+for path_step in (
+    "path_real(path(Script::source_path()))",
+    "script_file.parent()",
+    "script_directory.parent()",
+    "scripts_directory.parent()",
+    'proof_root.joinpath("src/app/report_output_serialization_helpers.elisa")',
+):
+    assert path_step in elisa_source, path_step
+
+python_messages = {
+    ast.literal_eval(f'"{value}"') + "\n"
+    for value in re.findall(r'print\("([^"\n]*)"(?:,\s*file=sys\.stderr)?\)', python_source)
+}
+elisa_messages = set()
+for value in re.findall(r'(?:write_stderr|print)\("([^"\n]*)"\)', elisa_source):
+    message = ast.literal_eval(f'"{value}"')
+    elisa_messages.add(message if message.endswith("\n") else message + "\n")
+assert python_messages == elisa_messages, (python_messages, elisa_messages)
+
+assert python_assignment("MAX_SOURCE_BYTES") == 16_777_216
+assert python_assignment("MAX_PATH_BYTES") == 4096
+assert "EsBoundedText::read_utf8(source_file, 16777216)" in elisa_source
+assert "MAX_BYTES: usize = 16777216" in bounded_reader
+assert "PATH_BYTES: usize = 4096" in bounded_reader
+assert "chunk_capacity: usize = maximum_bytes + 1" in bounded_reader
+assert "opened.size < 0" in reader_body
+assert "chunk_capacity <- opened.size.usize() + 1 if opened.size.usize() < maximum_bytes" in reader_body
+assert "chunk_capacity <- Limits::READ_CHUNK_BYTES if chunk_capacity > Limits::READ_CHUNK_BYTES" in bounded_reader
+assert "chunk.reserve(chunk_capacity)" in bounded_reader
+assert "for _ in 0..<chunk_capacity |chunk|:" in bounded_reader
+assert reader_body.index("raise ReadError.LimitExceeded if maximum_bytes > Limits::MAX_BYTES") < reader_body.index("chunk_capacity: usize = maximum_bytes + 1")
+assert reader_body.index("chunk_capacity <- opened.size.usize() + 1") < reader_body.index("chunk_capacity <- Limits::READ_CHUNK_BYTES") < reader_body.index("chunk.reserve(chunk_capacity)")
+assert reader_body.index("if read_count > remaining:") < reader_body.index("for offset in 0..<read_count |bytes, chunk|:")
+assert 'getattr(os, "O_NONBLOCK"' in python_source and 'getattr(os, "O_CLOEXEC"' in python_source
+assert "DarwinOpenFlags::NONBLOCK" in bounded_reader and "DarwinOpenFlags::CLOSE_ON_EXEC" in bounded_reader
+assert "b\"\\0\" in path_bytes" in python_source
+assert "sview_contains_byte(path_text, 0)" in bounded_reader
+assert "st_mtime_ns" in python_source and "st_ctime_ns" in python_source
+for timestamp_field in ("modify_time", "change_time"):
+    assert f"left.{timestamp_field}.seconds == right.{timestamp_field}.seconds" in bounded_reader
+    assert f"left.{timestamp_field}.nanoseconds == right.{timestamp_field}.nanoseconds" in bounded_reader
+assert "stat.S_ISREG" in python_source and "DarwinStatMode::REGULAR" in bounded_reader
+assert 'text.replace("\\r\\n", "\\n").replace("\\r", "\\n")' in python_source
+assert 'source.replace("\\r\\n", "\\n")' in elisa_source
+assert 'crlf_normalized.replace("\\r", "\\n")' in elisa_source
+assert 'source_bytes.decode("utf-8")' in python_source
+assert "text_is_valid_utf8(contents)" in bounded_reader
+assert "The returned view owns permanent backing storage so it can outlive this reader frame." in bounded_reader
+assert "owned_text: cstr = string_view_copy(contents)" in bounded_reader
+assert "return sview(owned_bytes, 0, len(contents).i64())" in bounded_reader
+assert bounded_reader.index("text_is_valid_utf8(contents)") < bounded_reader.index("owned_text: cstr = string_view_copy(contents)") < bounded_reader.index("return sview(owned_bytes, 0, len(contents).i64())")
+
+print("report-output Python/ElisaScript port: fragments, diagnostics, UTF-8 and bounds match")
