@@ -1,6 +1,111 @@
 # Validate resource-call events against source call sites and complete owner inventories.
 extend ElisaProof:
     private:
+        # Call allocations have no independent source position. Build one dense reverse index
+        # for the replay cache, then bind each indexed parent to its exact source call below.
+        def proof_replay_resource_call_allocation_index_walk_with_work(report: ProofReport&, root: usize, resource_root: usize, parents: mutable darray[usize]&, owners: mutable darray[usize]&, present: mutable darray[bool]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
+            node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
+            return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
+            is_call: mutable bool = node.kind == "resource-call"
+            if not is_call:
+                return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
+                is_call <- node.kind == "resource-call-lend"
+            if is_call:
+                return false if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start or node.auxiliary > node.children_count
+                for index in 0..<node.auxiliary |index, node, report, root, resource_root, parents, owners, present, source_work|:
+                    return false if not proof_replay_owner_work_charge(1, source_work)
+                    child: usize = report.analysis_1.kernel.children[node.children_start + index]
+                    return false if child >= report.analysis_1.kernel.nodes.count
+                    argument: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[child]
+                    return false if not proof_replay_owner_work_charge(sview_len(argument.kind), source_work) or not proof_replay_owner_work_charge(sview_len(argument.operator), source_work)
+                    continue if argument.kind != "resource-call-arg" or argument.operator != "region-new"
+                    allocation_root: usize = argument.left
+                    return false if allocation_root >= parents.count or allocation_root >= owners.count or allocation_root >= present.count or present[allocation_root]
+                    return false if not proof_replay_owner_work_charge(3, source_work)
+                    parents[allocation_root] <- root
+                    owners[allocation_root] <- resource_root
+                    present[allocation_root] <- true
+                return true
+            return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
+            is_container: mutable bool = node.kind == "resource-safety"
+            if not is_container:
+                return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
+                is_container <- node.kind == "resource-scope"
+            if not is_container:
+                return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
+                is_container <- node.kind == "resource-alternatives"
+            return true if not is_container
+            return false if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
+            for index in 0..<node.children_count |index, node, report, resource_root, parents, owners, present, source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                child: usize = report.analysis_1.kernel.children[node.children_start + index]
+                return false if not proof_replay_resource_call_allocation_index_walk_with_work(report, child, resource_root, parents, owners, present, source_work, depth + 1)
+            return true
+
+        def proof_replay_resource_call_allocation_index_ensure_with_work(report: ProofReport&, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            node_count: usize = report.analysis_1.kernel.nodes.count
+            if cache.resource_call_allocation_index_attempted:
+                return false if not cache.resource_call_allocation_index_complete
+                cached_node_count: usize = cache.resource_call_allocation_index_node_count
+                if cache.resource_call_allocation_parent_by_node.count != cached_node_count or cache.resource_call_allocation_owner_by_node.count != cached_node_count or cache.resource_call_allocation_present_by_node.count != cached_node_count or node_count < cached_node_count:
+                    cache.resource_call_allocation_index_complete <- false
+                    return false
+                return true if node_count == cached_node_count
+            else:
+                cache.resource_call_allocation_index_attempted <- true
+                cache.resource_call_allocation_index_node_count <- 0
+            cache.resource_call_allocation_index_complete <- false
+            # Bound all three dense arrays and their initialization before allocating. Separate
+            # charges avoid multiplication overflow and keep resource exhaustion fail-closed.
+            # The cache is shared across a certificate batch, where kernel rules may append
+            # derived nodes. Extend only over that suffix; the original resource roots are never
+            # rescanned for each later certificate.
+            return false if node_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3
+            indexed_count: usize = cache.resource_call_allocation_index_node_count
+            return false if indexed_count > node_count
+            new_count: usize = node_count - indexed_count
+            return false if:
+                not proof_replay_owner_work_charge(new_count, source_work)
+                not proof_replay_owner_work_charge(new_count, source_work)
+                not proof_replay_owner_work_charge(new_count, source_work)
+                not proof_replay_owner_work_charge(new_count, source_work)
+                not proof_replay_owner_work_charge(new_count, source_work)
+                not proof_replay_owner_work_charge(new_count, source_work)
+            cache.resource_call_allocation_parent_by_node.resize(node_count)
+            cache.resource_call_allocation_owner_by_node.resize(node_count)
+            cache.resource_call_allocation_present_by_node.resize(node_count)
+            for node_index in indexed_count..<node_count |node_index, cache|:
+                cache.resource_call_allocation_parent_by_node[node_index] <- 0
+                cache.resource_call_allocation_owner_by_node[node_index] <- 0
+                cache.resource_call_allocation_present_by_node[node_index] <- false
+            for node_index in indexed_count..<node_count |node_index, report, cache, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[node_index]
+                return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
+                continue if node.kind != "resource-safety"
+                return false if not proof_replay_resource_call_allocation_index_walk_with_work(report, node_index, node_index, cache.resource_call_allocation_parent_by_node, cache.resource_call_allocation_owner_by_node, cache.resource_call_allocation_present_by_node, source_work, 0)
+            cache.resource_call_allocation_index_node_count <- node_count
+            cache.resource_call_allocation_index_complete <- true
+            return true
+
+        def proof_replay_resource_call_allocation_source_valid_with_work(report: mutable ProofReport&, resource_root: usize, allocation_root: usize, event: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if not proof_replay_owner_work_charge(sview_len(event.kind), source_work)
+            return false if not proof_replay_owner_work_charge(sview_len(event.secondary_name), source_work)
+            return false if event.kind != "resource-region-call-alloc" or allocation_root >= report.analysis_1.kernel.nodes.count or owner == "" or owner_line == 0 or owner_offset > 4294967295
+            return false if event.secondary_name == "" or event.left >= report.analysis_1.kernel.nodes.count
+            allocation: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[allocation_root]
+            return false if not proof_replay_owner_work_charge(sview_len(allocation.kind), source_work)
+            return false if not proof_replay_owner_work_charge(sview_len(allocation.secondary_name), source_work)
+            return false if allocation.kind != event.kind or allocation.left != event.left or allocation.secondary_name != event.secondary_name
+            return false if not proof_replay_resource_call_allocation_index_ensure_with_work(report, source_work, cache)
+            return false if cache.resource_call_allocation_parent_by_node.count != report.analysis_1.kernel.nodes.count or cache.resource_call_allocation_owner_by_node.count != report.analysis_1.kernel.nodes.count or cache.resource_call_allocation_present_by_node.count != report.analysis_1.kernel.nodes.count
+            return false if not cache.resource_call_allocation_present_by_node[allocation_root]
+            parent_root: usize = cache.resource_call_allocation_parent_by_node[allocation_root]
+            return false if cache.resource_call_allocation_owner_by_node[allocation_root] != resource_root or parent_root >= report.analysis_1.kernel.nodes.count
+            parent: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[parent_root]
+            return proof_replay_resource_call_site_matches_owner_with_work(report, resource_root, parent, owner, owner_line, owner_offset, owner_module, source_work, cache)
+
         def proof_replay_resource_call_site_matches_owner_with_work(report: mutable ProofReport&, resource_root: usize, event: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
             return false if event.value < 0 or event.value > 4294967295 or owner == "" or owner_line == 0 or owner_offset > 4294967295 or event.name == ""
             return false if event.kind != "resource-call" and event.kind != "resource-call-lend"
@@ -14,8 +119,8 @@ extend ElisaProof:
             caller_entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[caller_owner.row]
             return false if not proof_replay_owner_work_charge(sview_len(caller_entry.owner), source_work) or not proof_replay_owner_work_charge(sview_len(owner_module), source_work)
             return false if caller_entry.owner != owner_module
-            parameters: darray[Ast::ParamDecl] = []
-            body: darray[Ast::Stmt] = []
+            parameters: mutable darray[Ast::ParamDecl] = []
+            body: mutable darray[Ast::Stmt] = []
             match caller_entry.declaration:
                 Ast::Decl.Func(_, declared_parameters, _, declared_body, _, _, _):
                     parameters <- declared_parameters
@@ -25,7 +130,7 @@ extend ElisaProof:
             calls: mutable darray[sview] = []
             call_position: Ast::Pos = Ast::Pos{line: 0, column: 0, offset: event.value.usize().u32(), end_line: 0, end_column: 0, end_offset: 0}
             selected: mutable (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) = (false, Ast::Expr.Invalid, "", 0, 0)
-            scoped: (known: bool, expression: Ast::Expr, callee: Ast::Expr) = (false, Ast::Expr.Invalid, Ast::Expr.Invalid)
+            scoped: mutable (known: bool, expression: Ast::Expr, callee: Ast::Expr) = (false, Ast::Expr.Invalid, Ast::Expr.Invalid)
             cached_selection: (complete: bool, ambiguous: bool, selected: (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32)) = proof_replay_resource_call_owner_snapshot_select(report, cache, caller_owner.row, owner, owner_line, owner_offset.u32(), event.value.usize(), source_work)
             return false if not cached_selection.complete or cached_selection.ambiguous
             selected <- cached_selection.selected if cached_selection.selected.known
@@ -96,8 +201,8 @@ extend ElisaProof:
             return false if not located.complete or located.matches != 1 or located.row >= cache.deterministic_calls.declaration_index.entries.count
             entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[located.row]
             return false if entry.owner != owner_module
-            parameters: darray[Ast::ParamDecl] = []
-            body: darray[Ast::Stmt] = []
+            parameters: mutable darray[Ast::ParamDecl] = []
+            body: mutable darray[Ast::Stmt] = []
             match entry.declaration:
                 Ast::Decl.Func(_, declared_parameters, _, declared_body, _, _, _):
                     parameters <- declared_parameters

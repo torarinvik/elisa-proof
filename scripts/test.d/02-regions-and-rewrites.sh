@@ -28,13 +28,13 @@ if [[ "$region_generic_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: region-polymorphic new[r] call/result was not replayed\n' >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/region_new_call_argument.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = [node["kind"] for node in report["kernel"]["nodes"]]; assert "resource-region-call-alloc" in kinds and any(node["kind"] == "resource-call-arg" and node["operator"] == "region-new" for node in report["kernel"]["nodes"])'
+run_json_report "$ROOT_DIR/examples/region_new_call_argument.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; nodes = report["kernel"]["nodes"]; allocations = [node for node in nodes if node["kind"] == "resource-region-call-alloc"]; assert allocations and all(0 < node["value"] <= 4294967295 for node in allocations); assert any(node["kind"] == "resource-call-arg" and node["operator"] == "region-new" for node in nodes)'
 region_new_call_probe_status=${PIPESTATUS[1]}
 if [[ "$region_new_call_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: direct new[r] call temporary was not independently replayed\n' >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/region_new_mutable_call_argument.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "resource-region-call-alloc" for node in report["kernel"]["nodes"])'
+run_json_report "$ROOT_DIR/examples/region_new_mutable_call_argument.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; allocations = [node for node in report["kernel"]["nodes"] if node["kind"] == "resource-region-call-alloc"]; assert allocations and all(0 < node["value"] <= 4294967295 for node in allocations)'
 region_new_mutable_call_probe_status=${PIPESTATUS[1]}
 if [[ "$region_new_mutable_call_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: mutable new[r] call temporary was not independently replayed\n' >&2

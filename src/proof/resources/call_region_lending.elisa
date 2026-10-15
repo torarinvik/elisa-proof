@@ -123,8 +123,20 @@ extend ElisaProof:
             valid <- report.analysis_1.kernel.nodes[encoded].kind != "unsupported" if valid
             proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "a region-call allocation requires an active lexical region and a kernel-replayable operand") if not valid
             event: mutable usize = report.analysis_1.kernel.nodes.count
-            proof_resource_record_event(state, report, "resource-region-call-alloc", "", encoded, "", region, 0) if valid
-            event <- state.evidence.trace_events[state.evidence.trace_events.count - 1] if valid and state.evidence.trace_events.count > 0
+            trace_event_count: usize = state.evidence.trace_events.count
+            if valid:
+                proof_resource_record_event(state, report, "resource-region-call-alloc", "", encoded, "", region, 0)
+                if state.evidence.trace_events.count == trace_event_count + 1:
+                    event <- state.evidence.trace_events[trace_event_count]
+                    if event < report.analysis_1.kernel.nodes.count:
+                        # RegionNew stores the `new` keyword span, not the full argument span.
+                        # Use the furthest positioned operand descendant so replay orders this
+                        # allocation after any resource effects performed while evaluating it.
+                        allocation_end: mutable usize = position.end_offset.usize()
+                        allocation_work: mutable usize = 0
+                        operand_end_known: bool = proof_replay_resource_return_expr_end_with_work(operand, &allocation_work, 0, &allocation_end)
+                        report.analysis_1.kernel.nodes[event].value <- -1 if not operand_end_known or allocation_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or allocation_end > 4294967295
+                        report.analysis_1.kernel.nodes[event].value <- allocation_end.i64() if operand_end_known and allocation_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT and allocation_end <= 4294967295
             return event
 
         def proof_resource_record_call[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, callee_name: sview, callee_root: usize, function_index: usize, mapped: darray[Ast::Expr]&, allocation_roots: darray[usize]&, call_position: Ast::Pos, functions: ProofFunctionTable&) -> bool can[Global{Read,Write}]:
@@ -181,16 +193,25 @@ extend ElisaProof:
         # function's own parameter modes; it is recorded in the trace so replay checks the claim's
         # shape rather than having the call disappear from the certificate.
         def proof_resource_call_lend_storage_is_confined(functions: ProofFunctionTable&, callee_index: usize) -> bool:
+            function_count: usize = functions.lookup.source.names.count
             return false if:
+                callee_index >= function_count
+                functions.parameters.metadata.param_starts.count != function_count or functions.parameters.metadata.param_counts.count != function_count
                 callee_index >= functions.parameters.metadata.param_starts.count or callee_index >= functions.parameters.metadata.param_counts.count
                 callee_index >= functions.returns.return_reference_free.count or not functions.returns.return_reference_free[callee_index]
                 callee_index >= functions.returns.return_borrowed_view_free.count or not functions.returns.return_borrowed_view_free[callee_index]
                 callee_index >= functions.returns.return_type_marker_complete.count or not functions.returns.return_type_marker_complete[callee_index]
             parameter_start: usize = functions.parameters.metadata.param_starts[callee_index]
             parameter_count: usize = functions.parameters.metadata.param_counts[callee_index]
+            parameter_total: usize = functions.parameters.metadata.all_params.count
+            return false if:
+                parameter_start > parameter_total or parameter_count > parameter_total - parameter_start
+                functions.parameters.metadata.all_parameter_references.count != parameter_total
+                functions.parameters.metadata.all_parameter_mutable_references.count != parameter_total
+                functions.parameters.metadata.all_parameter_type_marker_complete.count != parameter_total
             for offset in 0..<parameter_count |offset, functions, parameter_start|:
                 slot: usize = parameter_start + offset
-                return false if slot >= functions.parameters.metadata.all_parameter_references.count or slot >= functions.parameters.metadata.all_parameter_mutable_references.count or slot >= functions.parameters.metadata.all_parameter_type_marker_complete.count or not functions.parameters.metadata.all_parameter_type_marker_complete[slot]
+                return false if not functions.parameters.metadata.all_parameter_type_marker_complete[slot]
                 if functions.parameters.metadata.all_parameter_references[slot] and functions.parameters.metadata.all_parameter_mutable_references[slot]:
                     return false if slot >= functions.parameters.metadata.all_parameter_target_borrowed_view_free.count or not functions.parameters.metadata.all_parameter_target_borrowed_view_free[slot]
                 if functions.parameters.metadata.all_parameter_references[slot] and not functions.parameters.metadata.all_parameter_mutable_references[slot]:
@@ -201,19 +222,29 @@ extend ElisaProof:
             return true
 
         def proof_resource_call_summary_views_are_confined(functions: ProofFunctionTable&, callee_index: usize) -> bool:
+            function_count: usize = functions.lookup.source.names.count
             return false if callee_index >= functions.returns.return_borrowed_view_free.count
             if not functions.returns.return_borrowed_view_free[callee_index]:
                 # Reference returns and the exact sview result have dedicated provenance
                 # witnesses. Other by-value views have no resource-call-result encoding.
                 return false if callee_index >= functions.returns.return_references.count or callee_index >= functions.returns.return_sviews.count
                 return false if not functions.returns.return_references[callee_index] and not functions.returns.return_sviews[callee_index]
-            return false if callee_index >= functions.parameters.metadata.param_starts.count or callee_index >= functions.parameters.metadata.param_counts.count
+            return false if:
+                callee_index >= function_count
+                functions.parameters.metadata.param_starts.count != function_count or functions.parameters.metadata.param_counts.count != function_count
+                callee_index >= functions.parameters.metadata.param_starts.count or callee_index >= functions.parameters.metadata.param_counts.count
             parameter_start: usize = functions.parameters.metadata.param_starts[callee_index]
             parameter_count: usize = functions.parameters.metadata.param_counts[callee_index]
+            parameter_total: usize = functions.parameters.metadata.all_params.count
+            return false if:
+                parameter_start > parameter_total or parameter_count > parameter_total - parameter_start
+                functions.parameters.metadata.all_parameter_references.count != parameter_total
+                functions.parameters.metadata.all_parameter_mutable_references.count != parameter_total
+                functions.parameters.metadata.all_parameter_type_marker_complete.count != parameter_total
             for offset in 0..<parameter_count |offset, functions, parameter_start|:
                 slot: usize = parameter_start + offset
-                return false if slot >= functions.parameters.metadata.all_parameter_type_marker_complete.count or not functions.parameters.metadata.all_parameter_type_marker_complete[slot]
-                if slot < functions.parameters.metadata.all_parameter_references.count and functions.parameters.metadata.all_parameter_references[slot] and slot < functions.parameters.metadata.all_parameter_mutable_references.count and functions.parameters.metadata.all_parameter_mutable_references[slot]:
+                return false if not functions.parameters.metadata.all_parameter_type_marker_complete[slot]
+                if functions.parameters.metadata.all_parameter_references[slot] and functions.parameters.metadata.all_parameter_mutable_references[slot]:
                     return false if slot >= functions.parameters.metadata.all_parameter_target_borrowed_view_free.count or not functions.parameters.metadata.all_parameter_target_borrowed_view_free[slot]
             true
 
@@ -250,14 +281,19 @@ extend ElisaProof:
             return true
 
         def proof_resource_call_is_confined_lend[@s, @r](functions: ProofFunctionTable&, callee_index: usize, mapped: darray[Ast::Expr]&, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r) -> bool can[Global{Read,Write}]:
+            function_count: usize = functions.lookup.source.names.count
             return false if:
+                callee_index >= function_count
+                functions.parameters.metadata.param_counts.count != function_count or functions.parameters.metadata.param_starts.count != function_count
                 callee_index >= functions.parameters.metadata.param_counts.count or callee_index >= functions.parameters.metadata.param_starts.count
                 mapped.count != functions.parameters.metadata.param_counts[callee_index]
             parameter_start: usize = functions.parameters.metadata.param_starts[callee_index]
-            parameter_reference_count: usize = functions.parameters.metadata.all_parameter_references.count
+            parameter_total: usize = functions.parameters.metadata.all_params.count
             return false if:
-                parameter_start > parameter_reference_count or mapped.count > parameter_reference_count - parameter_start
-                parameter_reference_count != functions.parameters.metadata.all_parameter_type_marker_complete.count
+                parameter_start > parameter_total or mapped.count > parameter_total - parameter_start
+                functions.parameters.metadata.all_parameter_references.count != parameter_total
+                functions.parameters.metadata.all_parameter_mutable_references.count != parameter_total
+                functions.parameters.metadata.all_parameter_type_marker_complete.count != parameter_total
             has_reference_formal: mutable bool = false
             for parameter_index in 0..<mapped.count |parameter_index, functions, parameter_start, has_reference_formal|:
                 slot: usize = parameter_start + parameter_index

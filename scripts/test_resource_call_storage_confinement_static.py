@@ -66,6 +66,10 @@ call_field_dispatch = function_body(ROOT / "src/proof/replay/source_call_binding
 assert "not selector.pure_conversion and not selector.numeric_selector" in call_field_dispatch
 assert "proof_replay_call_field_conversion_selector_with_work(method, work)" in call_field_dispatch
 assert "if not selector.numeric_selector" in call_field_dispatch
+numeric_selector = function_body(ROOT / "src/proof/check/fact_call_shapes.elisa", "proof_fact_numeric_cast_target_index")
+assert '"int" ->' in numeric_selector and '"uintptr" ->' in numeric_selector
+assert "return proof_builtin_scalar_type_name(receiver_type_name)" in call_field_dispatch
+assert "call_target.conversions.field_conversion_custom_cast_present" in call_field_dispatch
 field_method_charge = function_body(ROOT / "src/proof/replay/source_call_bindings.elisa", "proof_replay_call_field_method_check_charge")
 assert "proof_replay_call_work_add(work, 1)" in field_method_charge
 assert "proof_replay_call_work_add(work, sview_len(method))" in field_method_charge
@@ -76,6 +80,36 @@ assert "method_declared.present" in call_field_dispatch
 assert "call_target.conversions.field_conversion_custom_cast_present" in call_field_dispatch
 resource_name_counts = function_body(ROOT / "src/proof/replay/resource_call_name_counts.elisa", "proof_replay_resource_call_name_counts_match")
 assert "proof_replay_resource_call_name_is_irrelevant_with_work(report, operator_source" in resource_name_counts
+assert "index.source_counts[row] > index.event_counts[row]" in resource_name_counts
+assert "and not proof_replay_resource_call_name_is_irrelevant_with_work" in resource_name_counts
+assert "omission_sources_clear" in resource_name_counts
+opaque_targets = function_body(
+    ROOT / "src/proof/replay/resource_call_source_validation.elisa",
+    "proof_replay_resource_call_has_opaque_target_with_work",
+)
+assert "Ast::Decl.Import(_, _) | Ast::Decl.Invalid" in opaque_targets
+assert "proof_replay_summary_has_unresolved_import" in resource_name_counts
+omission_classifier = function_body(
+    ROOT / "src/proof/replay/resource_call_shadow_validation.elisa",
+    "proof_replay_resource_call_name_is_irrelevant_with_work",
+)
+for omission_gate in (
+    "not omission_sources_clear",
+    "proof_replay_resource_call_group_has_nonfunction(index, wanted, source_work)",
+    "proof_replay_resource_call_shadow_name_in_statements(owner_body, wanted, source_work, 0)",
+    "entry.name != wanted or not entry.is_function or entry.is_lemma",
+    "not proof_replay_resource_call_pure_function(report, operator_source, index, aliases, entry, source_work, 0)",
+):
+    assert omission_gate in omission_classifier, omission_gate
+assert "not scalar_parameter.complete or not scalar_parameter.scalar" in omission_classifier
+assert "markers.reference or markers.mutable_reference or markers.is_mutable" in omission_classifier
+assert "syntax.has_reference" in omission_classifier
+assert "sview_parameter.sview_type" in omission_classifier
+assert "return_type is not declared_return_type" in omission_classifier
+assert "not scalar_return.complete or not scalar_return.scalar" in omission_classifier
+assert "return_markers.reference or return_markers.mutable_reference or return_markers.is_mutable" in omission_classifier
+assert "return_syntax.has_reference" in omission_classifier
+assert "sview_return.sview_type" in omission_classifier
 resource_coverage = function_body(ROOT / "src/proof/replay/resource_call_site_validation.elisa", "proof_replay_resource_call_coverage_for_owner_with_work")
 assert "proof_replay_resource_call_name_counts_match(cache.resource_call_owner_snapshots[located.row].source_calls, event_names, report, cache.scratch, cache.deterministic_calls.declaration_index, cache.deterministic_calls.alias_index, parameters, body, source_work)" in resource_coverage
 assert "proof_replay_source_call_target_context(parameters, cache.scratch.source.source_annotations, &cache.scratch, entry.name, entry.owner, owner_line, owner_offset, source_work, true, true)" in resource_coverage

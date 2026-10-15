@@ -31,7 +31,8 @@ region_flow = ROOT / "src/proof/resources/region_flow.elisa"
 
 lookup = body(places, "proof_resource_summary_root_for_function")
 for requirement in (
-    "function_index >= functions.lookup.names.count",
+    "function_index >= functions.lookup.source.names.count",
+    "function_index >= functions.lookup.source.owner_modules.count",
     "function_index >= functions.summaries.verified.count",
     "not functions.summaries.verified[function_index]",
     "function_index >= functions.summaries.resource_summary_roots.count",

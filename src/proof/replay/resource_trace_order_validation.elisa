@@ -168,6 +168,7 @@ extend ElisaProof:
                         if not (expression is Ast::Expr.Absent):
                             return false if not proof_replay_resource_return_expr_end_with_work(expression, source_work, 0, &finish)
                         return false if start == 0 or finish < start or return_starts.count > 0 and start <= last_return_start
+                        return false if not proof_replay_owner_work_charge(4, source_work)
                         return_starts.push(start)
                         return_ends.push(finish)
                         last_return_start <- start
@@ -179,6 +180,7 @@ extend ElisaProof:
                         start: usize = position.offset.usize()
                         finish: usize = position.end_offset.usize()
                         return false if start == 0 or finish < start or block_starts.count > 0 and start <= last_block_start
+                        return false if not proof_replay_owner_work_charge(4, source_work)
                         block_starts.push(start)
                         block_ends.push(finish)
                         last_block_start <- start
@@ -186,17 +188,20 @@ extend ElisaProof:
                             return false if binding != "" and nested.count != 0 or binding == "" and clause.count == 0
                             region_name: sview = binding if binding != "" else clause[0]
                             return false if region_name == "" or not proof_replay_owner_work_charge(sview_len(region_name), source_work)
+                            return false if not proof_replay_owner_work_charge(4, source_work)
                             expected_region_open_offsets.push(start)
                             expected_region_open_names.push(region_name)
                             lexical_region: bool = binding == ""
                             return false if not proof_replay_resource_order_statement_spans_build_with_work(nested, block_starts, block_ends, return_starts, return_ends, expected_region_open_offsets, expected_region_open_names, expected_region_close_offsets, expected_region_close_names, last_block_start, last_return_start, source_work, depth + 1)
                             if lexical_region:
+                                return false if not proof_replay_owner_work_charge(4, source_work)
                                 expected_region_close_offsets.push(start)
                                 expected_region_close_names.push(region_name)
                             continue
                         if kind == "destroy":
                             region_name: sview = clause[0] if clause.count > 0 else binding
                             return false if region_name == "" or not proof_replay_owner_work_charge(sview_len(region_name), source_work)
+                            return false if not proof_replay_owner_work_charge(4, source_work)
                             expected_region_close_offsets.push(start)
                             expected_region_close_names.push(region_name)
                             continue
@@ -236,104 +241,126 @@ extend ElisaProof:
             return (false, 0)
 
         def proof_replay_resource_event_offsets_ordered_with_work(report: ProofReport&, root: usize, owner_root: usize, body: darray[Ast::Stmt]&, block_starts: darray[usize]&, block_ends: darray[usize]&, return_starts: darray[usize]&, return_ends: darray[usize]&, actual_region_open_offsets: mutable darray[usize]&, actual_region_open_names: mutable darray[sview]&, actual_region_close_offsets: mutable darray[usize]&, actual_region_close_names: mutable darray[sview]&, prior_return_allocations: mutable darray[usize]&, previous_offset: mutable usize&, has_previous: mutable bool&, source_work: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count
-            return false if owner_root >= report.analysis_1.kernel.nodes.count
-            return false if not proof_replay_owner_work_charge(1, source_work)
-            node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
-            owner_node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[owner_root]
-            return false if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
-            # This dispatch checks containers, transitions, and positioned event kinds; charge
-            # for every possible comparison against the serialized node tag.
-            return false if not proof_replay_resource_event_kind_dispatch_work(node.kind, "", 32, source_work)
-            if node.kind in {"resource-safety", "resource-scope", "resource-alternatives"}:
-                for index in 0..<node.children_count |index, report, node, owner_root, body, block_starts, block_ends, return_starts, return_ends, actual_region_open_offsets, actual_region_open_names, actual_region_close_offsets, actual_region_close_names, prior_return_allocations, previous_offset, has_previous, source_work, depth|:
-                    return false if not proof_replay_owner_work_charge(1, source_work)
-                    child: usize = report.analysis_1.kernel.children[node.children_start + index]
-                    return false if not proof_replay_resource_event_offsets_ordered_with_work(report, child, owner_root, body, block_starts, block_ends, return_starts, return_ends, actual_region_open_offsets, actual_region_open_names, actual_region_close_offsets, actual_region_close_names, prior_return_allocations, previous_offset, has_previous, source_work, depth + 1)
-                return true
-            # Disjointness children are logical premises, not transitions in the source
-            # execution trace. Their provenance is checked by the separate fact validator.
-            return true if node.kind == "resource-disjoint"
-            # All remaining nodes are transition leaves. Check this before the implicit-close
-            # fast path so no special event can bypass the source-order walk's leaf invariant.
-            return false if node.children_start != 0 or node.children_count != 0
-            if node.kind == "resource-region-return":
-                return false if node.left >= report.analysis_1.kernel.nodes.count
-                witness_kind: sview = report.analysis_1.kernel.nodes[node.left].kind
-                return false if not proof_replay_owner_work_charge(sview_len(witness_kind), source_work)
-                if witness_kind == "resource-region-return-alloc":
-                    witnessed_before_marker: mutable bool = false
-                    for prior_root in prior_return_allocations |prior_root, node, prior_return_allocations, witnessed_before_marker, source_work|:
-                        return false if not proof_replay_owner_work_charge(1, source_work)
-                        witnessed_before_marker <- true if prior_root == node.left
-                    return false if not witnessed_before_marker
-            if node.kind == "resource-region-open":
-                return false if not proof_replay_owner_work_charge(sview_len(node.name), source_work)
-                actual_region_open_offsets.push(node.value.usize())
-                actual_region_open_names.push(node.name)
-            if node.kind == "resource-region-close" and node.value > 0:
-                return false if not proof_replay_owner_work_charge(sview_len(node.name), source_work)
-                actual_region_close_offsets.push(node.value.usize())
-                actual_region_close_names.push(node.name)
-            # Writes carry the assignment's parser-owned offset too. Omitting them allowed a
-            # trace to move an authenticated write across a move or region transition while
-            # retaining individually valid source witnesses.
-            positioned: bool = node.kind in {"resource-region-open", "resource-region-close", "resource-region-alloc-discard", "resource-region-return-alloc", "resource-region-rebind-alloc", "resource-region-assign", "resource-use", "resource-write", "resource-move", "resource-region-return", "resource-call", "resource-call-lend"} or node.kind == "resource-bind" and node.value > 0
-            if positioned:
-                return false if node.value < 0 or node.value > 4294967295
-                return true if node.kind == "resource-region-close" and node.value == 0 and node.auxiliary == 0
-                return false if node.value == 0
-                current_offset: usize = node.value.usize()
-                if node.kind == "resource-region-assign":
-                    assignment_matches: mutable usize = 0
-                    assignment_value: mutable Ast::Expr = Ast::Expr.Invalid
-                    return false if not proof_replay_resource_event_find_statements_with_work(body, current_offset, node.kind, node.name, assignment_matches, assignment_value, source_work, 0)
-                    return false if assignment_matches != 1 or assignment_value is Ast::Expr.Invalid
-                    assignment_end: mutable usize = current_offset
-                    return false if not proof_replay_resource_return_expr_end_with_work(assignment_value, source_work, 0, &assignment_end) or assignment_end < current_offset
-                    current_offset <- assignment_end
-                if node.kind == "resource-region-rebind-alloc":
-                    assignment_matches: mutable usize = 0
-                    assignment_value: mutable Ast::Expr = Ast::Expr.Invalid
-                    return false if not proof_replay_resource_event_find_statements_with_work(body, current_offset, node.kind, node.name, assignment_matches, assignment_value, source_work, 0)
-                    return false if assignment_matches != 1 or assignment_value is Ast::Expr.Invalid
-                    assignment_end: mutable usize = current_offset
-                    return false if not proof_replay_resource_return_expr_end_with_work(assignment_value, source_work, 0, &assignment_end) or assignment_end < current_offset
-                    current_offset <- assignment_end
-                if node.kind == "resource-call" or node.kind == "resource-call-lend":
-                    call_position: Ast::Pos = Ast::Pos{line: 0, column: 0, offset: current_offset.u32(), end_line: 0, end_column: 0, end_offset: 0}
-                    frame_work: mutable usize = 0
-                    selected: (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) = ElisaProofFrameSource::source_call_at_owner_with_work(report.source.source_declarations, report.source.source_annotations, owner_node.name, owner_node.right.u32(), owner_node.value.u32(), call_position, &frame_work)
-                    frame_work_charged: bool = proof_replay_owner_work_charge(frame_work, source_work)
-                    return false if not frame_work_charged or not selected.known
-                    call_end: mutable usize = 0
-                    return false if not proof_replay_resource_return_expr_end_with_work(selected.expression, source_work, 0, &call_end)
-                    return false if call_end < current_offset
-                    current_offset <- call_end
-                if node.kind == "resource-move":
-                    # The parser positions `move` at its keyword, before the operand. The
-                    # producer visits the operand first (emitting its resource-use events),
-                    # then emits the move transition. Compare the move at the end of that
-                    # evaluated operand so valid `move x` traces remain ordered and later
-                    # sibling effects still cannot cross the transition.
-                    move_matches: mutable usize = 0
-                    move_operand: mutable Ast::Expr = Ast::Expr.Invalid
-                    return false if not proof_replay_resource_event_find_statements_with_work(body, current_offset, "resource-move", node.name, move_matches, move_operand, source_work, 0)
-                    return false if move_matches != 1 or move_operand is Ast::Expr.Invalid
-                    move_end: mutable usize = current_offset
-                    return false if not proof_replay_resource_return_expr_end_with_work(move_operand, source_work, 0, &move_end) or move_end < current_offset
-                    current_offset <- move_end
-                if node.kind == "resource-region-close" or node.kind == "resource-region-return" or node.kind == "resource-region-return-alloc":
-                    span: (complete: bool, end_offset: usize) = proof_replay_resource_order_statement_end_lookup_with_work(block_starts, block_ends, current_offset, source_work) if node.kind == "resource-region-close" else proof_replay_resource_order_statement_end_lookup_with_work(return_starts, return_ends, current_offset, source_work)
-                    return false if not span.complete or span.end_offset < current_offset
-                    current_offset <- span.end_offset
-                return false if has_previous and current_offset < previous_offset
-                previous_offset <- current_offset
-                has_previous <- true
-            if node.kind == "resource-region-return-alloc":
+            can Abort.Panic:
+                return false if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count
+                return false if owner_root >= report.analysis_1.kernel.nodes.count
                 return false if not proof_replay_owner_work_charge(1, source_work)
-                prior_return_allocations.push(root)
-            true
+                node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
+                owner_node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[owner_root]
+                return false if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
+                # This dispatch checks containers, transitions, and positioned event kinds; charge
+                # for every possible comparison against the serialized node tag.
+                return false if not proof_replay_resource_event_kind_dispatch_work(node.kind, "", 32, source_work)
+                if node.kind in {"resource-safety", "resource-scope", "resource-alternatives"}:
+                    for index in 0..<node.children_count |index, report, node, owner_root, body, block_starts, block_ends, return_starts, return_ends, actual_region_open_offsets, actual_region_open_names, actual_region_close_offsets, actual_region_close_names, prior_return_allocations, previous_offset, has_previous, source_work, depth|:
+                        return false if not proof_replay_owner_work_charge(1, source_work)
+                        child: usize = report.analysis_1.kernel.children[node.children_start + index]
+                        return false if not proof_replay_resource_event_offsets_ordered_with_work(report, child, owner_root, body, block_starts, block_ends, return_starts, return_ends, actual_region_open_offsets, actual_region_open_names, actual_region_close_offsets, actual_region_close_names, prior_return_allocations, previous_offset, has_previous, source_work, depth + 1)
+                    return true
+                # Disjointness children are logical premises, not transitions in the source
+                # execution trace. Their provenance is checked by the separate fact validator.
+                return true if node.kind == "resource-disjoint"
+                # All remaining nodes are transition leaves. Check this before the implicit-close
+                # fast path so no special event can bypass the source-order walk's leaf invariant.
+                return false if node.children_start != 0 or node.children_count != 0
+                if node.kind == "resource-region-return":
+                    return false if node.left >= report.analysis_1.kernel.nodes.count
+                    witness_kind: sview = report.analysis_1.kernel.nodes[node.left].kind
+                    return false if not proof_replay_owner_work_charge(sview_len(witness_kind), source_work)
+                    if witness_kind == "resource-region-return-alloc":
+                        witnessed_before_marker: mutable bool = false
+                        for prior_root in prior_return_allocations |prior_root, node, prior_return_allocations, witnessed_before_marker, source_work|:
+                            return false if not proof_replay_owner_work_charge(1, source_work)
+                            witnessed_before_marker <- true if prior_root == node.left
+                        return false if not witnessed_before_marker
+                if node.kind == "resource-region-open":
+                    return false if not proof_replay_owner_work_charge(sview_len(node.name), source_work)
+                    return false if not proof_replay_owner_work_charge(4, source_work)
+                    actual_region_open_offsets.push(node.value.usize())
+                    actual_region_open_names.push(node.name)
+                if node.kind == "resource-region-close" and node.value > 0:
+                    return false if not proof_replay_owner_work_charge(sview_len(node.name), source_work)
+                    return false if not proof_replay_owner_work_charge(4, source_work)
+                    actual_region_close_offsets.push(node.value.usize())
+                    actual_region_close_names.push(node.name)
+                # Writes carry the assignment's parser-owned offset too. Omitting them allowed a
+                # trace to move an authenticated write across a move or region transition while
+                # retaining individually valid source witnesses.
+                positioned: bool = node.kind in {"resource-region-open", "resource-region-close", "resource-region-alloc", "resource-region-alloc-discard", "resource-region-call-alloc", "resource-region-return-alloc", "resource-region-rebind-alloc", "resource-region-assign", "resource-use", "resource-write", "resource-move", "resource-region-return", "resource-call", "resource-call-lend"} or node.kind == "resource-bind" and node.value > 0
+                if positioned:
+                    return false if node.value < 0 or node.value > 4294967295
+                    return true if node.kind == "resource-region-close" and node.value == 0 and node.auxiliary == 0
+                    return false if node.value == 0
+                    current_offset: mutable usize = node.value.usize()
+                    if node.kind == "resource-region-alloc":
+                        # The allocation transition is emitted after the initializer has been
+                        # evaluated. Compare it at the initializer's end, while retaining the
+                        # declaration start in the event for exact source binding.
+                        allocation_matches: mutable usize = 0
+                        allocation_initializer: mutable Ast::Expr = Ast::Expr.Invalid
+                        return false if not proof_replay_resource_event_find_statements_with_work(body, current_offset, "resource-region-alloc-inventory", node.name, allocation_matches, allocation_initializer, source_work, 0)
+                        return false if allocation_matches != 1 or allocation_initializer is Ast::Expr.Invalid
+                        allocation_end: mutable usize = current_offset
+                        return false if not proof_replay_resource_return_expr_end_with_work(allocation_initializer, source_work, 0, &allocation_end) or allocation_end < current_offset
+                        current_offset <- allocation_end
+                    if node.kind == "resource-region-alloc-discard":
+                        discarded_matches: mutable usize = 0
+                        discarded_allocation: mutable Ast::Expr = Ast::Expr.Invalid
+                        return false if not proof_replay_resource_event_find_statements_with_work(body, current_offset, node.kind, node.secondary_name, discarded_matches, discarded_allocation, source_work, 0)
+                        return false if discarded_matches != 1 or discarded_allocation is Ast::Expr.Invalid
+                        discarded_end: mutable usize = current_offset
+                        return false if not proof_replay_resource_return_expr_end_with_work(discarded_allocation, source_work, 0, &discarded_end) or discarded_end < current_offset
+                        current_offset <- discarded_end
+                    if node.kind == "resource-region-assign":
+                        assignment_matches: mutable usize = 0
+                        assignment_value: mutable Ast::Expr = Ast::Expr.Invalid
+                        return false if not proof_replay_resource_event_find_statements_with_work(body, current_offset, node.kind, node.name, assignment_matches, assignment_value, source_work, 0)
+                        return false if assignment_matches != 1 or assignment_value is Ast::Expr.Invalid
+                        assignment_end: mutable usize = current_offset
+                        return false if not proof_replay_resource_return_expr_end_with_work(assignment_value, source_work, 0, &assignment_end) or assignment_end < current_offset
+                        current_offset <- assignment_end
+                    if node.kind == "resource-region-rebind-alloc":
+                        assignment_matches: mutable usize = 0
+                        assignment_value: mutable Ast::Expr = Ast::Expr.Invalid
+                        return false if not proof_replay_resource_event_find_statements_with_work(body, current_offset, node.kind, node.name, assignment_matches, assignment_value, source_work, 0)
+                        return false if assignment_matches != 1 or assignment_value is Ast::Expr.Invalid
+                        assignment_end: mutable usize = current_offset
+                        return false if not proof_replay_resource_return_expr_end_with_work(assignment_value, source_work, 0, &assignment_end) or assignment_end < current_offset
+                        current_offset <- assignment_end
+                    if node.kind == "resource-call" or node.kind == "resource-call-lend":
+                        call_position: Ast::Pos = Ast::Pos{line: 0, column: 0, offset: current_offset.u32(), end_line: 0, end_column: 0, end_offset: 0}
+                        frame_work: mutable usize = 0
+                        selected: (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) = ElisaProofFrameSource::source_call_at_owner_with_work(report.source.source_declarations, report.source.source_annotations, owner_node.name, owner_node.right.u32(), owner_node.value.u32(), call_position, &frame_work)
+                        frame_work_charged: bool = proof_replay_owner_work_charge(frame_work, source_work)
+                        return false if not frame_work_charged or not selected.known
+                        call_end: mutable usize = 0
+                        return false if not proof_replay_resource_return_expr_end_with_work(selected.expression, source_work, 0, &call_end)
+                        return false if call_end < current_offset
+                        current_offset <- call_end
+                    if node.kind == "resource-move":
+                        # The parser positions `move` at its keyword, before the operand. The
+                        # producer visits the operand first (emitting its resource-use events),
+                        # then emits the move transition. Compare the move at the end of that
+                        # evaluated operand so valid `move x` traces remain ordered and later
+                        # sibling effects still cannot cross the transition.
+                        move_matches: mutable usize = 0
+                        move_operand: mutable Ast::Expr = Ast::Expr.Invalid
+                        return false if not proof_replay_resource_event_find_statements_with_work(body, current_offset, "resource-move", node.name, move_matches, move_operand, source_work, 0)
+                        return false if move_matches != 1 or move_operand is Ast::Expr.Invalid
+                        move_end: mutable usize = current_offset
+                        return false if not proof_replay_resource_return_expr_end_with_work(move_operand, source_work, 0, &move_end) or move_end < current_offset
+                        current_offset <- move_end
+                    if node.kind == "resource-region-close" or node.kind == "resource-region-return" or node.kind == "resource-region-return-alloc":
+                        span: (complete: bool, end_offset: usize) = proof_replay_resource_order_statement_end_lookup_with_work(block_starts, block_ends, current_offset, source_work) if node.kind == "resource-region-close" else proof_replay_resource_order_statement_end_lookup_with_work(return_starts, return_ends, current_offset, source_work)
+                        return false if not span.complete or span.end_offset < current_offset
+                        current_offset <- span.end_offset
+                    return false if proof_goal_bool_ref_value(has_previous) and current_offset < previous_offset
+                    previous_offset <- current_offset
+                    has_previous <- true
+                if node.kind == "resource-region-return-alloc":
+                    return false if not proof_replay_owner_work_charge(2, source_work)
+                    prior_return_allocations.push(root)
+                true
 
         def proof_replay_resource_event_offsets_ordered_for_owner_with_work(report: ProofReport&, root: usize, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
             return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
@@ -341,7 +368,7 @@ extend ElisaProof:
             return false if not located.complete or located.matches != 1 or located.row >= cache.deterministic_calls.declaration_index.entries.count
             entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[located.row]
             return false if entry.owner != owner_module
-            body: darray[Ast::Stmt] = []
+            body: mutable darray[Ast::Stmt] = []
             match entry.declaration:
                 Ast::Decl.Func(_, _, _, declared_body, _, _, _):
                     body <- declared_body

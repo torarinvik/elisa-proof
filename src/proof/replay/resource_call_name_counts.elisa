@@ -1,10 +1,10 @@
 # Bounded source/event occurrence counts for resource-call admission.
 struct ProofReplayResourceCallNameCounts:
-    names: darray[sview]
-    hashes: darray[u32]
-    source_counts: darray[usize]
-    event_counts: darray[usize]
-    slots: darray[usize]
+    names: mutable darray[sview]
+    hashes: mutable darray[u32]
+    source_counts: mutable darray[usize]
+    event_counts: mutable darray[usize]
+    slots: mutable darray[usize]
 
 extend ElisaProof:
     private:
@@ -14,18 +14,31 @@ extend ElisaProof:
         def proof_replay_resource_call_names_at_with_work(report: ProofReport&, root: usize, names: mutable darray[sview]&, offsets: mutable darray[usize]&, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
             node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
-            # The branches below may compare this untrusted tag against one disjoint name, two
-            # event names, and three container names. Reserve for every comparison.
-            return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work) or not proof_replay_owner_work_charge(sview_len(node.kind), source_work) or not proof_replay_owner_work_charge(sview_len(node.kind), source_work) or not proof_replay_owner_work_charge(sview_len(node.kind), source_work) or not proof_replay_owner_work_charge(sview_len(node.kind), source_work) or not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
             return false if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
+            return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
             return true if node.kind == "resource-disjoint"
-            if node.kind == "resource-call" or node.kind == "resource-call-lend":
+            return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
+            is_event: mutable bool = node.kind == "resource-call"
+            if not is_event:
+                return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
+                is_event <- node.kind == "resource-call-lend"
+            if is_event:
                 return false if node.value < 0 or node.value > 4294967295
-                return false if not proof_replay_owner_work_charge(sview_len(node.name), source_work) or not proof_replay_owner_work_charge(1, source_work)
+                # Charge both retained rows (name and offset), including their bounded
+                # dynamic-array storage, before either append can grow an array.
+                return false if not proof_replay_owner_work_charge(sview_len(node.name), source_work) or not proof_replay_owner_work_charge(4, source_work)
                 names.push(node.name)
                 offsets.push(node.value.usize())
                 return true
-            if node.kind not in {"resource-safety", "resource-scope", "resource-alternatives"}:
+            return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
+            is_container: mutable bool = node.kind == "resource-safety"
+            if not is_container:
+                return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
+                is_container <- node.kind == "resource-scope"
+            if not is_container:
+                return false if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
+                is_container <- node.kind == "resource-alternatives"
+            if not is_container:
                 return false if node.children_start != 0 or node.children_count != 0
                 return true
             for index in 0..<node.children_count |index, report, node, names, offsets, source_work, depth|:
@@ -40,14 +53,15 @@ extend ElisaProof:
         def proof_replay_resource_call_event_offsets_unique_with_work(offsets: darray[usize]&, source_work: mutable usize&) -> bool:
             return true if offsets.count == 0
             capacity: usize = proof_name_index_capacity(offsets.count)
-            return false if capacity == 0 or capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
-            return false if not proof_replay_owner_work_charge(capacity * 2, source_work)
+            # Two dense arrays are resized and both are initialized per slot. Reserve
+            # all four units before allocation so a partially built table cannot hide work.
+            return false if capacity == 0 or capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+            return false if not proof_replay_owner_work_charge(capacity * 4, source_work)
             values: mutable darray[usize] = []
             occupied: mutable darray[bool] = []
             values.resize(capacity)
             occupied.resize(capacity)
-            for slot in 0..<capacity |slot, values, occupied, source_work|:
-                return false if not proof_replay_owner_work_charge(1, source_work)
+            for slot in 0..<capacity |slot, values, occupied|:
                 values[slot] <- 0
                 occupied[slot] <- false
             for offset in offsets |offset, values, occupied, capacity, source_work|:
@@ -59,6 +73,7 @@ extend ElisaProof:
                 while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, offset, values, occupied, capacity, source_work, inserted|:
                     return false if not proof_replay_owner_work_charge(1, source_work)
                     if not occupied[slot]:
+                        return false if not proof_replay_owner_work_charge(2, source_work)
                         values[slot] <- offset
                         occupied[slot] <- true
                         inserted <- true
@@ -81,6 +96,10 @@ extend ElisaProof:
                 if encoded == 0:
                     row: usize = index.names.count
                     return false if row >= capacity
+                    # Four vector appends, the slot link, and one initial count write.
+                    # Debit only actual new rows so repeated names pay their scan cost
+                    # without being charged for storage that is never allocated.
+                    return false if not proof_replay_owner_work_charge(10, source_work)
                     index.names.push(name)
                     index.hashes.push(hash)
                     index.source_counts.push(0)
@@ -94,6 +113,7 @@ extend ElisaProof:
                 if index.hashes[row] == hash:
                     return false if not proof_replay_owner_work_charge(sview_len(index.names[row]), source_work)
                     if index.names[row] == name:
+                        return false if not proof_replay_owner_work_charge(1, source_work)
                         index.event_counts[row] <- index.event_counts[row] + 1 if is_event
                         index.source_counts[row] <- index.source_counts[row] + 1 if not is_event
                         return true
@@ -102,12 +122,15 @@ extend ElisaProof:
             return false
 
         def proof_replay_resource_call_name_counts_match(source_calls: darray[sview]&, event_names: darray[sview]&, report: mutable ProofReport&, operator_source: mutable ProofReport&, declarations: ProofReplayDeterministicDeclarationIndex&, aliases: ProofModuleAliasIndex&, owner_parameters: darray[Ast::ParamDecl]&, owner_body: darray[Ast::Stmt]&, source_work: mutable usize&) -> bool:
-            return false if source_calls.count > 18446744073709551615 - event_names.count
+            return false if source_calls.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or event_names.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_calls.count
             total: usize = source_calls.count + event_names.count
             return true if total == 0
             capacity: usize = proof_name_index_capacity(total)
-            return false if capacity == 0 or total > (18446744073709551615 - capacity) / 4
-            return false if not proof_replay_owner_work_charge(capacity + total * 4, source_work)
+            # Allocate and initialize the slot array before scanning. New name rows are
+            # charged at their insertion point, while duplicate occurrences pay only
+            # their bounded scan/probe and counter-update costs.
+            return false if capacity == 0 or capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+            return false if not proof_replay_owner_work_charge(capacity * 2, source_work)
             index: mutable ProofReplayResourceCallNameCounts = ProofReplayResourceCallNameCounts{names: [], hashes: [], source_counts: [], event_counts: [], slots: []}
             index.slots.resize(capacity)
             for slot in 0..<capacity |slot, index|:
@@ -116,7 +139,7 @@ extend ElisaProof:
                 return false if not proof_replay_resource_call_name_count_add(&index, name, false, capacity, source_work)
             for name in event_names |index, capacity, source_work|:
                 return false if not proof_replay_resource_call_name_count_add(&index, name, true, capacity, source_work)
-            has_omissions: bool = false
+            has_omissions: mutable bool = false
             for row in 0..<index.names.count |row, index, has_omissions, source_work|:
                 return false if not proof_replay_owner_work_charge(1, source_work)
                 has_omissions <- true if index.source_counts[row] > index.event_counts[row]
@@ -129,6 +152,7 @@ extend ElisaProof:
                     return false if not proof_replay_owner_work_charge(import_work, source_work)
                     omission_sources_clear <- false if annotation_import
             for row in 0..<index.names.count |row, index, report, operator_source, declarations, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
                 return false if index.source_counts[row] < index.event_counts[row]
                 return false if index.source_counts[row] > index.event_counts[row] and not proof_replay_resource_call_name_is_irrelevant_with_work(report, operator_source, declarations, aliases, index.names[row], source_work, omission_sources_clear, owner_parameters, owner_body)
             return true
