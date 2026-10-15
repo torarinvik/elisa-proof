@@ -24,7 +24,7 @@ from build_manifest_hashes import tree_digest
 from build_manifest import stage1_provenance_revision
 from perf_build_provenance import require_clean_toolchain, verify_build_artifacts
 from stage1_provenance_validation import validate_stage0_build_info
-from verify_product_pair import resolve_pair_with_manifests
+from verify_product_pair import resolve_pair_with_manifests, shared_build_identity
 
 
 PRODUCTS = ("elisa-proof", "elisa-proof-replay")
@@ -190,6 +190,15 @@ def validate_frontend_metadata(
     return str(manifests[PRODUCTS[0]]["compiler"]["stage"])
 
 
+def qualification_build_identity(manifests: dict[str, dict]) -> dict:
+    """Return the exact shared toolchain/build identity recorded by qualification."""
+    proof_identity = shared_build_identity(manifests[PRODUCTS[0]])
+    replay_identity = shared_build_identity(manifests[PRODUCTS[1]])
+    if proof_identity != replay_identity:
+        raise ValueError("proof and replay manifests describe different toolchain/build identities")
+    return proof_identity
+
+
 def verify_stage0_binary(manifest: dict, pinned_revision: str, label: str) -> str:
     compiler = manifest.get("compiler", {})
     product = compiler.get("product", {})
@@ -253,6 +262,11 @@ def qualify_prebuilt(root: Path, snapshot_root: Path, compiler_snapshot: Path,
             )
             if product_revision != snapshot_revision:
                 raise ValueError(f"{role} Stage1 product source differs from the pinned frontend")
+    # Retain the full checked common build identity in the qualification result. The
+    # manifests already require proof/replay agreement; surfacing these fields makes
+    # the qualification record sufficient to reproduce and audit the exact toolchain,
+    # runtime, target, optimization, and compiler invocation.
+    common_build_identity = qualification_build_identity(manifests)
     return {
         "generation": generation,
         "proof_binary": str(binaries[PRODUCTS[0]]),
@@ -263,6 +277,7 @@ def qualify_prebuilt(root: Path, snapshot_root: Path, compiler_snapshot: Path,
         "frontend_revision": snapshot_revision,
         "frontend_snapshot_sha256": compiler_snapshot_digest,
         "compiler_stage": compiler_stage,
+        "shared_build_identity": common_build_identity,
         "proof_binary_sha256": manifests[PRODUCTS[0]]["binary"]["sha256"],
         "replay_binary_sha256": manifests[PRODUCTS[1]]["binary"]["sha256"],
     }

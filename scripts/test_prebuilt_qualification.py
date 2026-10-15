@@ -11,13 +11,14 @@ from unittest.mock import patch
 import prebuilt_qualification
 
 from prebuilt_qualification import (
-    validate_compiler_snapshot_tree, validate_frontend_metadata, validate_source_metadata,
-    validate_stage0_build_info,
+    qualification_build_identity, validate_compiler_snapshot_tree,
+    validate_frontend_metadata, validate_source_metadata, validate_stage0_build_info,
 )
 
 
 def manifest(stage="stage1"):
     return {
+        "schema": "elisa-proof-build-manifest-v1",
         "proof": {
             "head": "a" * 40,
             "source_dirty": False,
@@ -28,8 +29,20 @@ def manifest(stage="stage1"):
             "stage": stage,
             "stage1_revision": "b" * 40 if stage == "stage1" else None,
             "source_revision": "b" * 40 if stage == "stage1" else "c" * 40,
+            "source_tree_sha256": "1" * 64 if stage == "stage1" else None,
+            "build_recipe_sha256": "2" * 64 if stage == "stage1" else None,
             "source_dirty": False,
+            "executable": {"sha256": "3" * 64, "bytes": 101},
+            "product": {"sha256": "4" * 64, "bytes": 202},
         },
+        "runtime": {"sha256": "5" * 64, "bytes": 303},
+        "profile_hooks": {"sha256": "6" * 64, "bytes": 404},
+        "native_link_inputs": [{"sha256": "9" * 64, "bytes": 505}],
+        "target": "arm64-apple-darwin",
+        "optimization": "O2",
+        "compile_mode": "strict",
+        "compiler_flags": ["-emit", "obj", "-O2"],
+        "binary": {"sha256": "8" * 64},
     }
 
 
@@ -91,6 +104,29 @@ with tempfile.TemporaryDirectory(prefix="elisa-prebuilt-qualification-") as dire
     digest = validate_source_metadata(pair, source, snapshot, "a" * 40, False)
     assert digest == proof_manifest["proof"]["source_tree_sha256"]
     assert validate_frontend_metadata(pair, "b" * 40, "b" * 40, "c" * 40, "e" * 40) == "stage1"
+    build_identity = qualification_build_identity(pair)
+    assert build_identity["compiler"]["product"] == {"sha256": "4" * 64, "bytes": 202}
+    assert build_identity["compiler"]["executable"] == {"sha256": "3" * 64, "bytes": 101}
+    assert build_identity["runtime"]["sha256"] == "5" * 64
+    assert build_identity["profile_hooks"]["sha256"] == "6" * 64
+    assert build_identity["native_link_inputs"] == [{"sha256": "9" * 64, "bytes": 505}]
+    assert build_identity["compiler_flags"] == ["-emit", "obj", "-O2"]
+    mismatched_build_identity = {role: deepcopy(value) for role, value in pair.items()}
+    mismatched_build_identity["elisa-proof-replay"]["compiler"]["product"]["sha256"] = "7" * 64
+    try:
+        qualification_build_identity(mismatched_build_identity)
+    except ValueError as error:
+        assert "different toolchain/build identities" in str(error)
+    else:
+        raise AssertionError("qualification record accepted different compiler products")
+    mismatched_native_inputs = {role: deepcopy(value) for role, value in pair.items()}
+    mismatched_native_inputs["elisa-proof-replay"]["native_link_inputs"][0]["sha256"] = "a" * 64
+    try:
+        qualification_build_identity(mismatched_native_inputs)
+    except ValueError as error:
+        assert "different toolchain/build identities" in str(error)
+    else:
+        raise AssertionError("qualification record accepted different native link inputs")
 
     mixed_stage_pair = {role: deepcopy(value) for role, value in pair.items()}
     mixed_stage_pair["elisa-proof-replay"]["compiler"] = {
@@ -263,5 +299,51 @@ with tempfile.TemporaryDirectory(prefix="elisa-prebuilt-qualification-") as dire
         assert "modified sources" in str(error)
     else:
         raise AssertionError("prebuilt gate accepted a Stage0 binary built from dirty sources")
+
+with tempfile.TemporaryDirectory(prefix="elisa-qualification-record-") as directory:
+    root = Path(directory) / "proof"
+    snapshot_root = Path(directory) / "snapshot"
+    compiler_snapshot = Path(directory) / "compiler-snapshot"
+    compiler_repository = Path(directory) / "compiler-repository"
+    for base in (root, snapshot_root):
+        source = base / "src/main.elisa"
+        source.parent.mkdir(parents=True)
+        source.write_text("def exact() -> bool: return true\n", encoding="utf-8")
+    compiler_snapshot.mkdir()
+    (compiler_snapshot / ".rev").write_text("b" * 40 + "\n", encoding="ascii")
+    (root / "ELISA_COMPILER_REV").write_text("b" * 40 + "\n", encoding="ascii")
+    (root / "ELISA_STAGE0_REV").write_text("c" * 40 + "\n", encoding="ascii")
+    stage0_manifest = manifest("stage0")
+    stage0_pair = {
+        "elisa-proof": deepcopy(stage0_manifest),
+        "elisa-proof-replay": deepcopy(stage0_manifest),
+    }
+    from build_manifest_hashes import tree_digest
+    source_digest = tree_digest(str(root / "src"))
+    for value in stage0_pair.values():
+        value["proof"]["source_tree_sha256"] = source_digest
+    binaries = {role: Path(directory) / role for role in stage0_pair}
+
+    def fake_git(path, *arguments):
+        if arguments[:2] == ("rev-parse", "HEAD"):
+            return "a" * 40
+        if arguments[:2] == ("rev-parse", "b" * 40 + "^{tree}"):
+            return "e" * 40
+        return ""
+
+    with (
+        patch.object(prebuilt_qualification, "_read_pair", return_value=("d" * 32, stage0_pair, binaries)),
+        patch.object(prebuilt_qualification, "_git", side_effect=fake_git),
+        patch.object(prebuilt_qualification, "_pinned_compiler_archive", return_value=b""),
+        patch.object(prebuilt_qualification, "validate_compiler_snapshot_tree", return_value="9" * 64),
+        patch.object(prebuilt_qualification, "verify_stage0_binary", return_value="c" * 40),
+        patch.object(prebuilt_qualification, "verify_build_artifacts"),
+    ):
+        qualified = prebuilt_qualification.qualify_prebuilt(
+            root, snapshot_root, compiler_snapshot, compiler_repository,
+        )
+    assert qualified["shared_build_identity"]["compiler"]["product"]["sha256"] == "4" * 64
+    assert qualified["shared_build_identity"]["runtime"]["sha256"] == "5" * 64
+    assert qualified["shared_build_identity"]["target"] == "arm64-apple-darwin"
 
 print("prebuilt qualification: exact proof/compiler snapshots, pins, and Stage0/Stage1 provenance are enforced")

@@ -149,6 +149,8 @@ manifest_checksum_temp_of() { printf '%s\n' "$(manifest_temp_of "$1").sha256"; }
 DEFAULT_PROFILE_HOOKS_OBJ="$ROOT_DIR/build/profile_hooks.o"
 PROFILE_HOOKS_OBJ="${ELISA_PROFILE_HOOKS_OBJ:-$DEFAULT_PROFILE_HOOKS_OBJ}"
 PROFILE_HOOKS_TEMP="$ROOT_DIR/build/profile_hooks.$BUILD_TOKEN.o"
+PORTABLE_FILE_OBJ="$ROOT_DIR/build/portable_file_posix.o"
+PORTABLE_FILE_TEMP="$ROOT_DIR/build/portable_file_posix.$BUILD_TOKEN.o"
 
 COMPILE_PIDS=()
 cleanup_build() {
@@ -161,7 +163,7 @@ cleanup_build() {
             "$(proof_binary_of "$index")" "$(manifest_temp_of "$index")" \
             "$(manifest_checksum_temp_of "$index")"
     done
-    rm -f "$PROFILE_HOOKS_TEMP" "$BUILD_LOCK/pid"
+    rm -f "$PROFILE_HOOKS_TEMP" "$PORTABLE_FILE_TEMP" "$BUILD_LOCK/pid"
     [[ -z "$PAIR_OUTPUT_TEMP" ]] || rm -f "$PAIR_OUTPUT_TEMP"
     rmdir "$BUILD_LOCK" 2>/dev/null || true
 }
@@ -231,6 +233,7 @@ if [[ ! -f "$PROFILE_HOOKS_OBJ" || ! -f "$PROFILE_HOOKS_STAMP" || "$(<"$PROFILE_
     mv -f "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_OBJ"
     printf '%s %s\n' "$profile_hooks_clang" "$(elisa_sha256 "$PROFILE_HOOKS_OBJ" | cut -d' ' -f1)" > "$PROFILE_HOOKS_STAMP"
 fi
+. "$ROOT_DIR/scripts/native_link_inputs.sh"
 # Objects are shared across checkouts and agents, keyed by everything the compile reads: the
 # source snapshot, the pinned compiler revision and binary, and every compile flag. A hit skips
 # only the compile; linking, signing and the manifest below run as usual.
@@ -286,6 +289,12 @@ assert_snapshot_runtime_selection() {
 build_identity_of() {
     local index="$1" object_key="$2" flags input sign_version
     local -a identity_args=(--identity-link-input "$PROFILE_HOOKS_OBJ" --identity-link-input "$PROFILE_HOOKS_SOURCE")
+    if [[ -f "$PORTABLE_FILE_OBJ" ]]; then
+        identity_args+=(--identity-link-input "$PORTABLE_FILE_OBJ" \
+            --identity-recipe "$ROOT_DIR/scripts/native_link_inputs.sh" \
+            --identity-recipe "$ROOT_DIR/src/app/portable_file_posix.c" \
+            --identity-recipe "$PORTABLE_FILE_SNAPSHOT_SOURCE")
+    fi
     [[ -n "$RUNTIME_OBJ" ]] && identity_args+=(--identity-link-input "$RUNTIME_OBJ")
     if [[ -n "${ELISA_EXTRA_LINK_INPUTS:-}" ]]; then
         local -a identity_extra_inputs=()
@@ -299,6 +308,7 @@ build_identity_of() {
         identity_args+=(--identity-recipe "$recipe")
     done
     flags="$(printf '%q ' "${ELISA_DEAD_STRIP_LINK[@]}")"
+    [[ ! -f "$PORTABLE_FILE_OBJ" ]] || flags+=";portable-file-c=-std=c11_-O2"
     if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
         input="$(command -v codesign)"
         identity_args+=(--identity-link-input "$input")
@@ -325,6 +335,10 @@ assert_stage1_fresh() {
 assert_build_inputs_unchanged() {
     local boundary="$1" index current_object_key current_identity
     assert_snapshot_runtime_selection "$boundary" || return $?
+    if [[ -f "$PORTABLE_FILE_SNAPSHOT_SOURCE" ]] && ! cmp -s "$ROOT_DIR/src/app/portable_file_posix.c" "$PORTABLE_FILE_SNAPSHOT_SOURCE"; then
+        printf 'build: native portable-file helper changed across the %s boundary\n' "$boundary" >&2
+        return 2
+    fi
     assert_stage1_fresh || return $?
     for index in "${!PRODUCT_MAINS[@]}"; do
         current_object_key="$(object_key_of "${PRODUCT_MAINS[$index]}")" || return $?
@@ -471,6 +485,8 @@ if [[ "$compile_count" -gt 0 ]]; then
         fi
     done
 fi
+NATIVE_LINK_INPUT_ARGS=()
+[[ ! -f "$PORTABLE_FILE_OBJ" ]] || NATIVE_LINK_INPUT_ARGS+=(--native-link-input "$PORTABLE_FILE_OBJ")
 for index in "${!PRODUCT_MAINS[@]}"; do
     [[ "${SKIP_PRODUCTS[$index]}" == 1 ]] && continue
     PROOF_MAIN="${PRODUCT_MAINS[$index]}"
@@ -479,6 +495,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
     PROOF_BINARY="$(proof_binary_of "$index")"
     if [[ "${BINARY_REUSED[$index]}" != 1 ]]; then
         LINK_INPUTS=("$STAGE_OBJECT" "$PROFILE_HOOKS_OBJ")
+        [[ ! -f "$PORTABLE_FILE_OBJ" ]] || LINK_INPUTS+=("$PORTABLE_FILE_OBJ")
         [[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")
         # ELISA_EXTRA_LINK_INPUTS (space-separated objects) lets a host supply symbols the platform's
         # dead stripping would otherwise remove, such as unreachable native-callback entry points.
@@ -501,6 +518,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         --stage0-revision "$STAGE0_PINNED_REV" \
         --runtime "${RUNTIME_OBJ:-}" \
         --profile-hooks "$PROFILE_HOOKS_OBJ" \
+        ${NATIVE_LINK_INPUT_ARGS[@]+"${NATIVE_LINK_INPUT_ARGS[@]}"} \
         --target-clang "$CLANG_TOOL" \
         --frontend-repo "$COMPILER_SRC" \
         --frontend-revision "$RESOLVED_REV" \

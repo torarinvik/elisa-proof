@@ -156,7 +156,7 @@ with tempfile.TemporaryDirectory(prefix="elisa runtime input ") as directory:
     run = resolve(bare_stage1, home, ELISA_COMPILER_SRC=missing_root)
     expected = missing_root / "build/runtime/elisacore_runtime.o"
     assert run.returncode == 2 and run.stdout == "runtime=\n", (run.returncode, run.stdout, run.stderr)
-    assert run.stderr == f"Stage1 source runtime object not found: {expected}\n", run.stderr
+    assert run.stderr == f"Stage1 selected-source runtime object not found: {expected}\n", run.stderr
 
     # The real build entrypoint rejects an invalid explicit override before invoking its mock.
     missing_override = temp / "missing-build-runtime.o"

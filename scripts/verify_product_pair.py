@@ -26,6 +26,7 @@ BUILD_IDENTITY_FIELDS = (
     "compiler",
     "runtime",
     "profile_hooks",
+    "native_link_inputs",
     "target",
     "optimization",
     "compile_mode",
@@ -88,10 +89,13 @@ def shared_build_identity(manifest: dict) -> dict:
     compiler = manifest["compiler"]
     runtime = manifest["runtime"]
     profile_hooks = manifest["profile_hooks"]
+    native_link_inputs = manifest["native_link_inputs"]
     if not isinstance(frontend, dict) or not isinstance(compiler, dict):
         raise ValueError("build manifest has malformed frontend/compiler identity")
     if not isinstance(runtime, dict) or not isinstance(profile_hooks, dict):
         raise ValueError("build manifest has malformed runtime/profile-hook identity")
+    if not isinstance(native_link_inputs, list) or any(not isinstance(item, dict) for item in native_link_inputs):
+        raise ValueError("build manifest has malformed native link-input identity")
 
     frontend_revision = frontend.get("revision")
     frontend_tree = frontend.get("tree")
@@ -174,6 +178,8 @@ def shared_build_identity(manifest: dict) -> dict:
         "compiler": compiler_identity,
         "runtime": linked_artifact_identity("runtime", runtime),
         "profile_hooks": linked_artifact_identity("profile hooks", profile_hooks),
+        "native_link_inputs": [linked_artifact_identity("native link input", item)
+                               for item in native_link_inputs],
         "target": manifest["target"],
         "optimization": manifest["optimization"],
         "compile_mode": manifest["compile_mode"],

@@ -35,6 +35,7 @@ SHARED_IDENTITY = {
     },
     "runtime": {"path": "/toolchain/runtime.o", "sha256": "4" * 64, "bytes": 30},
     "profile_hooks": {"path": "/toolchain/profile_hooks.o", "sha256": "5" * 64, "bytes": 40},
+    "native_link_inputs": [{"path": "/toolchain/portable_file_posix.o", "sha256": "6" * 64, "bytes": 50}],
     "target": "arm64-fixture",
     "optimization": "O2",
     "compile_mode": "strict",

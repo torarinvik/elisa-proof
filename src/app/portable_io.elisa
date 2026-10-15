@@ -1,29 +1,36 @@
 # Source-neutral I/O and JSON rendering shared by the proof tool and the portable replay
 # checker. Nothing here may depend on the compiler AST, the lexer, or the ElisaProof report:
 # the replay executable includes this file without the compiler front end.
-extern open(path: cstr, flags: i64, ...) -> i64
+extern proof_open_regular_readonly(path: cstr, snapshot: u64&) -> i64
+extern proof_regular_file_stable(descriptor: i64, path: cstr, snapshot: u64&) -> i64
 extern close(fd: i64) -> i64
 extern read(fd: i64, buf: u8&, count: usize) -> i64
 
 const PROOF_INPUT_FILE_MAX_BYTES: usize = 67108864
 const PROOF_INPUT_FILE_CHUNK_SIZE: usize = 65536
+const PROOF_INPUT_FILE_READ_CALLS_PER_CHUNK: usize = 16
 const PROOF_RUNTIME_IDENTITY_DEPTH_LIMIT: usize = 128
 # Shared subterms are expanded, so a small DAG can name an exponentially long identity. Every
 # visit appends at least one byte, which makes this byte bound a bound on the visits too.
 const PROOF_RUNTIME_IDENTITY_BYTE_LIMIT: usize = 16777216
-const PROOF_POSIX_READ_ONLY_FLAGS: i64 = 0
-const PROOF_POSIX_DEFAULT_MODE: i64 = 0
 const PROOF_STDOUT_DESCRIPTOR: i64 = 1
 const PROOF_SYSCALL_FAILURE: i64 = -1
 
 def proof_read_file_checked_with_limit(path: cstr, max_bytes: usize) -> (ok: bool, contents: darray[u8]) can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Global{Read,Write}]:
     contents: mutable darray[u8] = []
     return (false, contents) if max_bytes > PROOF_INPUT_FILE_MAX_BYTES
-    descriptor: i64 = open(path, PROOF_POSIX_READ_ONLY_FLAGS, PROOF_POSIX_DEFAULT_MODE)
+    file_snapshot: mutable darray[u64] = [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64]
+    descriptor: i64 = proof_open_regular_readonly(path, &file_snapshot[0])
     return (false, contents) if descriptor == PROOF_SYSCALL_FAILURE
     chunk: mutable darray[u8] = []
     chunk.resize(PROOF_INPUT_FILE_CHUNK_SIZE)
-    while true |contents, chunk, descriptor|:
+    read_calls: mutable usize = 0
+    read_call_limit: usize = (max_bytes / PROOF_INPUT_FILE_CHUNK_SIZE + 2) * PROOF_INPUT_FILE_READ_CALLS_PER_CHUNK
+    while true |contents, chunk, descriptor, read_calls|:
+        if read_calls >= read_call_limit:
+            _ = close(descriptor)
+            return (false, [])
+        read_calls <- read_calls + 1
         remaining: usize = max_bytes - contents.count
         # Read at most one byte past the remaining allowance. That sentinel distinguishes an
         # exactly-at-limit file from an oversized file without consuming a full extra chunk.
@@ -44,7 +51,9 @@ def proof_read_file_checked_with_limit(path: cstr, max_bytes: usize) -> (ok: boo
         chunk.count <- amount_bytes
         contents.extend(chunk)
         chunk.count <- PROOF_INPUT_FILE_CHUNK_SIZE
-    _ = close(descriptor)
+    stable: bool = proof_regular_file_stable(descriptor, path, &file_snapshot[0]) != 0
+    closed: bool = close(descriptor) == 0
+    return (false, []) if not stable or not closed
     return (true, contents)
 
 def proof_read_file_checked(path: cstr) -> (ok: bool, contents: darray[u8]) can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Global{Read,Write}]:

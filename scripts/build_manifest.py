@@ -73,6 +73,7 @@ def main() -> int:
     parser.add_argument("--existing-manifest-sha256", default="")
     parser.add_argument("--recorded-build-identity", default="")
     parser.add_argument("--target-clang", default="clang")
+    parser.add_argument("--native-link-input", action="append", default=[])
     parser.add_argument("--effective-env-digest", action="store_true")
     for option in (
         "binary", "compiler", "stage", "stage1-revision", "runtime", "profile-hooks",
@@ -314,6 +315,7 @@ def main() -> int:
         },
         "runtime": file_digest(arguments.runtime),
         "profile_hooks": file_digest(arguments.profile_hooks),
+        "native_link_inputs": [file_digest(path) for path in arguments.native_link_input],
         "target": target_triple(arguments.target_clang),
         "optimization": arguments.opt_level,
         "compile_mode": arguments.compile_mode,

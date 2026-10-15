@@ -57,7 +57,8 @@ status=0
   xc elisa-proof-linux.o main.elisa
   wait "$replay_pid"
   echo "cross-compile: $(( $(date +%s) - t0 ))s"
-  rsync -az --timeout=120 -e "$RSH" "$WORK/elisa-proof-linux.o" "$WORK/elisa-proof-replay-linux.o" "$HOST":work/
+  rsync -az --timeout=120 -e "$RSH" "$WORK/elisa-proof-linux.o" "$WORK/elisa-proof-replay-linux.o" \
+    "$WORK/snap/elisa-proof/src/app/portable_file_posix.c" "$HOST":work/
   $RSH "$HOST" 'set -e; cd ~/work/elisa-proof; C=~/work/Elisa-compiler; mkdir -p build
     export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=$C  # rsynced checkout, other owner
     export LLVM_CONFIG=/usr/lib/llvm-19/bin/llvm-config PATH=$C/tools/linux_shim:$PATH
@@ -65,14 +66,15 @@ status=0
     mkdir "$stage"
     trap '\''rm -rf "$stage"'\'' EXIT
     clang -c -O2 -o build/profile_hooks.o $C/test/parity/profile_hooks.c
-    clang -Wl,-dead_strip -o "$stage/elisa-proof" ../elisa-proof-linux.o build/profile_hooks.o $C/build/runtime/elisacore_runtime.o
-    clang -Wl,-dead_strip -o "$stage/elisa-proof-replay" ../elisa-proof-replay-linux.o build/profile_hooks.o $C/build/runtime/elisacore_runtime.o
+    clang -std=c11 -c -O2 -o build/portable_file_posix.o ../portable_file_posix.c
+    clang -Wl,-dead_strip -o "$stage/elisa-proof" ../elisa-proof-linux.o build/profile_hooks.o build/portable_file_posix.o $C/build/runtime/elisacore_runtime.o
+    clang -Wl,-dead_strip -o "$stage/elisa-proof-replay" ../elisa-proof-replay-linux.o build/profile_hooks.o build/portable_file_posix.o $C/build/runtime/elisacore_runtime.o
     frontend_revision=$(git -C "$C" rev-parse HEAD)
     for product in elisa-proof elisa-proof-replay; do
       python3 scripts/build_manifest.py --pair-generation "$generation" \
         --binary "$stage/$product" --compiler "$C/scripts/elisac_stage1.sh" \
         --compiler-product "$C/bin/elisac-stage1" --compiler-root "$C" --stage stage1 --stage1-revision "" \
-        --runtime "$C/build/runtime/elisacore_runtime.o" --profile-hooks build/profile_hooks.o \
+        --runtime "$C/build/runtime/elisacore_runtime.o" --profile-hooks build/profile_hooks.o --native-link-input build/portable_file_posix.o \
         --frontend-repo "$C" --frontend-revision "$frontend_revision" --stage0-revision "$stage0_revision" --proof-root "$PWD" \
         --snapshot-root "$PWD" --opt-level '"$OPT"' --compile-mode strict --contract-flag "" \
         --installed-as "build/elisa-proof-generations/$generation/$product" \
