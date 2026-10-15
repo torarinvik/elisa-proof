@@ -37,6 +37,17 @@ resource_call_argument_guard = function_body(resource_source_path, "proof_replay
 assert "proof_replay_resource_lend_storage_is_confined_with_work(report, parameters, parameter_markers_by_index" in resource_call_argument_guard
 
 resource_purity_path = ROOT / "src/proof/replay/resource_call_pure_source.elisa"
+resource_conversion_source = (ROOT / "src/proof/resources/places_and_calls.elisa").read_text(encoding="utf-8")
+pure_conversion = function_body(ROOT / "src/proof/resources/places_and_calls.elisa", "proof_resource_pure_conversion")
+conversion_names = re.findall(r'"([A-Za-z0-9_]+)"', pure_conversion)
+conversion_count = re.search(r"PROOF_RESOURCE_PURE_CONVERSION_METHOD_COUNT: usize = (\d+)", resource_conversion_source)
+assert conversion_count is not None and int(conversion_count.group(1)) == len(conversion_names)
+assert len(conversion_names) == len(set(conversion_names))
+resource_expression_checker = function_body(ROOT / "src/proof/resources/expression_checker.elisa", "proof_resource_check_expression")
+assert "proof_runtime_builtin_numeric_cast(callee, arguments.count, functions)" in resource_expression_checker
+assert "functions.externs.custom_cast_hook_present" in resource_expression_checker
+assert resource_expression_checker.index("proof_runtime_builtin_numeric_cast(callee, arguments.count, functions)") < resource_expression_checker.index("proof_source_effect_field_conversion_lookup(report, method_call.method)")
+assert "numeric_cast.known or source_conversion_unshadowed" in resource_expression_checker
 resource_scalar_guard = function_body(resource_purity_path, "proof_replay_resource_call_scalar_type_with_work")
 assert "proof_replay_resource_scalar_type_with_work(expression, report, source_work, 0)" in resource_scalar_guard
 assert "not scalar.complete or not scalar.scalar" in resource_scalar_guard
@@ -44,6 +55,25 @@ assert "proof_replay_control_match_guard_scalar_type(expression)" in resource_sc
 resource_purity_function = function_body(resource_purity_path, "proof_replay_resource_call_pure_function")
 assert "proof_structural_typed_operator_statements_have_overload(body, parameters, declaration_line, operator_source, 0, entry.owner, true)" in resource_purity_function
 assert "or overloaded_operator" in resource_purity_function
+resource_pure_expr = function_body(resource_purity_path, "proof_replay_resource_call_pure_expr")
+assert "proof_replay_call_field_conversion_selector_with_work(method, source_work)" in resource_pure_expr
+assert "not selector.complete or not selector.numeric_selector" in resource_pure_expr
+assert "call_target.conversions.field_dispatch_imports_present" in resource_pure_expr
+assert "proof_replay_call_field_dispatch_is_accounted_for(callee_expression, arguments, labels, bindings, call_target, source_work)" in resource_pure_expr
+assert "return false if arguments.count != 0 or labels.count != 0" in resource_pure_expr
+assert "return proof_replay_resource_call_pure_expr(report, operator_source, index, aliases, owner_entry, owner_line, owner_offset, receiver, parameters, source_work, depth + 1)" in resource_pure_expr
+call_field_dispatch = function_body(ROOT / "src/proof/replay/source_call_bindings.elisa", "proof_replay_call_field_dispatch_is_accounted_for")
+assert "not selector.pure_conversion and not selector.numeric_selector" in call_field_dispatch
+assert "proof_replay_call_field_conversion_selector_with_work(method, work)" in call_field_dispatch
+assert "if not selector.numeric_selector" in call_field_dispatch
+field_method_charge = function_body(ROOT / "src/proof/replay/source_call_bindings.elisa", "proof_replay_call_field_method_check_charge")
+assert "proof_replay_call_work_add(work, 1)" in field_method_charge
+assert "proof_replay_call_work_add(work, sview_len(method))" in field_method_charge
+assert call_field_dispatch.count("proof_replay_call_field_method_check_charge(method, work)") == 2
+collection_builtin = function_body(ROOT / "src/proof/replay/source_call_bindings.elisa", "proof_replay_call_field_collection_builtin_is_modeled")
+assert collection_builtin.count("proof_replay_call_field_method_check_charge(method, work)") == 2
+assert "method_declared.present" in call_field_dispatch
+assert "call_target.conversions.field_conversion_custom_cast_present" in call_field_dispatch
 resource_name_counts = function_body(ROOT / "src/proof/replay/resource_call_name_counts.elisa", "proof_replay_resource_call_name_counts_match")
 assert "proof_replay_resource_call_name_is_irrelevant_with_work(report, operator_source" in resource_name_counts
 resource_coverage = function_body(ROOT / "src/proof/replay/resource_call_site_validation.elisa", "proof_replay_resource_call_coverage_for_owner_with_work")
@@ -51,6 +81,14 @@ assert "proof_replay_resource_call_name_counts_match(cache.resource_call_owner_s
 assert "proof_replay_source_call_target_context(parameters, cache.scratch.source.source_annotations, &cache.scratch, entry.name, entry.owner, owner_line, owner_offset, source_work, true, true)" in resource_coverage
 assert "proof_replay_source_calls_with_target_work(parameters, body, cache.scratch.source.source_annotations, &source_calls, call_target, source_work)" in resource_coverage
 assert "call_target.selection.unresolved_dispatch_found" in resource_coverage
+resource_site_match = function_body(ROOT / "src/proof/replay/resource_call_site_validation.elisa", "proof_replay_resource_call_site_matches_owner_with_work")
+assert "source_call_expression_at_owner_with_work" in resource_site_match
+assert "not selected.known and not scoped.known" in resource_site_match
+assert "proof_replay_resource_scoped_callee_row_with_work(report, owner_module, scoped.callee" in resource_site_match
+assert "callee_owner.matches != 1" in resource_site_match
+resource_event_walk = function_body(ROOT / "src/proof/replay/certificate_validation.elisa", "proof_replay_resource_event_facts_with_owner")
+assert "proof_replay_resource_call_coverage_for_owner_with_work(report, root, active_owner" in resource_event_walk
+assert "proof_replay_resource_event_facts_with_owner(report, node.left, node.left, 0, callee_root.name" in resource_event_walk
 
 resource_snapshot_path = ROOT / "src/proof/replay/resource_call_site_snapshot.elisa"
 resource_snapshot_select = function_body(resource_snapshot_path, "proof_replay_resource_call_owner_snapshot_select")

@@ -24,10 +24,11 @@ assert "report.analysis_2.replay_owner_offset_valid" in scoped_signature
 assert "proof_replay_deterministic_qualified_declaration" in scoped_signature
 assert "matches != 1" in scoped_signature
 assert "Ast::Expr.Scope(_, _, _):\n                                            return false if not proof_replay_call_result_binding_scoped_signature" in source
-call_bindings = (ROOT / "src/proof/replay/source_call_bindings.elisa").read_text(encoding="utf-8")
-scoped_target = call_bindings.split("def proof_replay_call_scoped_target_site(", 1)[1].split("\n        def ", 1)[0]
-scope_root = call_bindings.split("def proof_replay_call_scope_base_has_bound_root(", 1)[1].split("\n        def ", 1)[0]
+scoped_target_source = (ROOT / "src/proof/replay/source_call_scoped_target.elisa").read_text(encoding="utf-8")
+scoped_target = scoped_target_source.split("def proof_replay_call_scoped_target_site(", 1)[1].split("\n        def ", 1)[0]
+scope_root = scoped_target_source.split("def proof_replay_call_scope_base_has_bound_root(", 1)[1].split("\n        def ", 1)[0]
 assert "proof_replay_call_scope_base_has_bound_root(base, bindings, work, 0)" in scoped_target
+assert "return true if depth >= 96 or not proof_replay_call_work_add(work, 1)" in scope_root
 assert "bound == root_name" in scope_root
 assert "Ast::Expr.Scope(inner_base, _, _)" in scope_root
 assert "Ast::Expr.Paren" not in scope_root

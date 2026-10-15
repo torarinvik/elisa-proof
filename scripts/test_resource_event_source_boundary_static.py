@@ -47,7 +47,6 @@ for group in re.findall(r'node\.kind\s+in\s+\{([^}]*)\}', dispatch):
 
 explicitly_refused = {
     "resource-region-call-alloc",
-    "resource-region-rebind-alloc",
     "resource-region-bind",
     "resource-join-move",
     "resource-call-result",

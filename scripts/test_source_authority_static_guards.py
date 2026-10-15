@@ -132,8 +132,10 @@ assert 'matches <- 2' in owner_source  # Ambiguous/unsupported AST paths fail cl
 resource_root = function_body(
     ROOT / "src/proof/resources/state_and_regions.elisa", "proof_resource_finish"
 )
-assert "functions.lookup.lines[function_index].usize()" in resource_root
-assert "functions.lookup.offsets[function_index].i64()" in resource_root
+assert "functions.lookup.source.lines[function_index].usize()" in resource_root
+assert "functions.lookup.source.offsets[function_index].i64()" in resource_root
+assert "functions.lookup.lines[function_index]" not in resource_root
+assert "functions.lookup.offsets[function_index]" not in resource_root
 resource_shape = function_body(
     ROOT / "src/proof/kernel_replay/arena_shapes.elisa",
     "proof_kernel_replay_arena_resource_summary_shape",
@@ -231,9 +233,7 @@ resource_event_facts = function_body(
 assert 'if node.kind == "resource-call":' in resource_event_facts
 assert 'if node.kind == "resource-call-lend":' in resource_event_facts
 assert 'return false' in resource_event_facts[resource_event_facts.index('if node.kind == "resource-call":'):resource_event_facts.index('if node.kind == "resource-write":')]
-resource_calls = function_body(
-    resource_source_path, "proof_replay_resource_call_site_matches_owner_with_work"
-)
+resource_calls = function_body(ROOT / "src/proof/replay/resource_call_site_validation.elisa", "proof_replay_resource_call_site_matches_owner_with_work")
 assert "owner_line, owner_offset" in resource_calls
 assert "caller_entry.owner != owner_module" in resource_calls
 assert "proof_replay_resource_call_name_is_irrelevant_with_work" not in resource_calls

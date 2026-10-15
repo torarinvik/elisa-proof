@@ -4,7 +4,9 @@
 
 This is the active high-return sequence. Use the newest Elisa compiler that can produce a source-matched Stage1. Preserve expression-based Elisa, explicit local effect grants, contracts, and region/ownership checks. Keep performance timing skipped until the proof product passes correctness gates.
 
-1. **Recover a verifiable newest-compiler lane.** Proof `main` is `5710c14c4e8f00ebf4e20eb04c02d7640c54ee58` and matches `origin/main`; that commit adds replay guards, source-admission checks, and the first proof-local ElisaScript port. The working tree now has a smaller follow-up diff for source-authenticated operator purity and indexed-read guards; it remains unqualified. Elisa-compiler `main` and `origin/main` are `8b81a19e10bee7dee10feaa390ebf081d6641abc`; Elisa-core `main` and `origin/main` are `5241b2aed51641a217ca44ac4ee116ee66ac96e6`. Two guarded Stage1 seed attempts used the current compiler checkout with uncommitted source changes and failed at Stage0 without an artifact. The O3 log is `/private/tmp/elisa-seed-current-20261015.log`; the O0 log is `/private/tmp/elisa-seed-diagnostic-20261015.log`. Both report failure to infer `__rg_source_identity` at `emit_edir.elisa:1374` and dangling-reference diagnostics at `codegen_stmt_assign_place.elisa:260/582/587`; O0 did not reduce the failures. The O3 diagnostics also include many inferred-region lifetime errors in `semantic_api.elisa` and hidden-mutation errors in `semantic_parallel.elisa:151/229`. The compiler owner is correcting these source issues and inspecting borrow flow; no seed process was live at the latest check. The proof's `ELISA_COMPILER_REV` still pins `c5a6616a740434c2e2002582970b004b5ca0ecfa`, and `ELISA_STAGE0_REV` pins older Core `ba2691aa610b59d935b12d5e0d9005a0383cc9bf`; the installed Stage1 is stale (provenance source revision `f7b6c4a…`). Historical pinned-Core and c5a seed builds also failed without producing a Stage1, with region-inference, dangling-reference, and additional type/effect/hidden-mutation errors; the compiler owner's separate p165 attempt reported 490 lifetime diagnostics. Treat every candidate as unqualified until a source-matched build succeeds and its manifest is verified. Do not modify or clean up compiler-owner worktrees.
+1. **Recover a verifiable newest-compiler lane.** Proof `main` is `e8ef8db0df4efc2fb482dbd32408e3f8a03b1caf` and matches `origin/main`. Current uncommitted changes cover the ElisaScript port inventory/guard, resource-call snapshot static guards, local result-call provenance, and pure numeric selector replay; the source remains runtime-unqualified. Elisa-compiler `main` and `origin/main` are `8b81a19e10bee7dee10feaa390ebf081d6641abc`; Elisa-core `main` and `origin/main` are `5241b2aed51641a217ca44ac4ee116ee66ac96e6`. The two guarded seeds from the dirty compiler checkout failed at Stage0 without an artifact: O3 log `/private/tmp/elisa-seed-current-20261015.log` and O0 log `/private/tmp/elisa-seed-diagnostic-20261015.log`. Both report failure to infer `__rg_source_identity` at `emit_edir.elisa:1374` and dangling-reference diagnostics at `codegen_stmt_assign_place.elisa:260/582/587`; O3 also reports inferred-region lifetime errors in `semantic_api.elisa` and hidden-mutation errors in `semantic_parallel.elisa:151/229`. A separate clean worktree seed at compiler `8b81a19` with Core `5241b2` also failed Stage0 on missing `Global` effect grants in the compiler source and produced no Stage1. The proof's compiler pin remains `c5a6616a740434c2e2002582970b004b5ca0ecfa`, its Stage0 pin remains `ba2691aa610b59d935b12d5e0d9005a0383cc9bf`, and the installed Stage1 remains stale (source revision `f7b6c4a…`; schema v1 versus the pinned compiler's v5). Do not weaken provenance checks or claim runtime qualification. Preserve the current kernel and port changes as unqualified until a source-matched compiler build, manifest check, and focused binary controls pass. Keep performance timing skipped.
+
+   Earlier bounded port validation on 2026-10-15 used the then-clean canonical Elisa compiler at `5241b2aed51641a217ca44ac4ee116ee66ac96e6` (binary SHA-256 `8623ee8d…`). `scripts/test_report_output_loop_layout.elisascript` lowered successfully under a 256 MiB/120-second guard; the paired Python/ElisaScript source contract, reference behavior, nine focused replay guards, source-length check, and `git diff --check` passed. A later identity recheck now refuses that compiler path because its checkout is dirty, so do not reuse the prior binary identity for new runs. Runtime parity remains open. One bounded `Core 5241b2` launcher-build snapshot, matching the current vendored source, stopped at a parser diagnostic in `elisacore_runtime_concurrency.elisa:1123`. A separate supervised Oct 11 Stage1 build reported borrow-check errors in the interpreter; the port owner reports a clean October compiler run stopped on 1,314 Global-effect/protocol diagnostics. The clean `Elisa-compiler` main checkout at `be83d914` produced a Gen2 compiler binary with SHA-256 `b27bf697…`; its launcher build ran under the 1.5 GiB/360-second watchdog and timed out at 360.12 seconds with a 680,512 KiB peak and no diagnostics or executable. No current launcher artifact was produced, so retained older binaries were not used to claim parity; do not repeat the same build without a relevant source or compiler change.
 
 2. **Complete Global grant migration and qualify it.** The Go/Core implementation already enforces `Global.Read`/`Global.Write` on mutable fields under immutable aggregates and reference projections; commit `1547f32e` has focused regression coverage. The Elisa-written Stage1 implementation still needs parity: `ga_access_slot` currently records only Read when a write path reaches a global binding whose aggregate is immutable, even when the projected field is mutable. The compiler owner is tracking this in the active Stage1 worktree. Proof source uses grouped exported effect rows (`Global{Read,Write}`) and narrow local grants at each diagnosed call, plus two narrow `Global.Write` blocks for direct mutable-global assignments. The latest pinned-Core proof build reports zero missing Global grants and zero ungranted writes. All 13 focused source guards pass; the binary-dependent collision test still refuses the stale product. After lifetime-safe compilation, run the source-bound grant matrix and negative cases for reads, writes, aliases, fields, and indexed mutation. Never replace call-site grants with broad module or function grants.
 
@@ -29719,3 +29721,185 @@ reader to `Path.read_text()`, despite the parity guard and porting record requir
 `EsBoundedText::read_utf8`. Restored the reader include and bounded call. The Python reference stays
 authoritative until a matching runner proves equal exit status and output. `git diff --check` passes;
 no tests or runner were executed.
+
+### 23.27.1841 Bind the active port to the launcher execution facade (2026-10-15)
+
+The launcher runtime now exposes `EsBoundedText` through `src/ir/execution.elisa`, which the public
+driver includes. Removed the candidate's sibling-repository include and pinned the facade-to-driver
+path in its source contract, avoiding a runtime source dependency on a neighboring checkout. The
+focused source contract and both repository diff checks pass. The installed v0.1 launcher predates
+the facade change, so runtime parity is still unqualified and the Python reference remains.
+
+### 23.27.1841 Reject shadowed roots in scoped pure-helper calls (2026-10-15)
+
+Resource-call omission replay resolved scoped helper calls through the module-alias index but did
+not check whether a scalar parameter shadows the leading module-path identifier. The pure-helper
+subset has no local declarations, so replay now extracts the scoped root with bounded depth/work
+and rejects the purity proof when a parameter has that name. Diff and source-length checks pass;
+compiler and runtime qualification remain open under the validation hold.
+
+### 23.27.1842 Model intrinsic scalar casts in pure-call omission proofs (2026-10-15)
+
+Pure scalar helpers could not contain a field-style numeric cast such as `value.u32()`, so
+resource replay refused otherwise pure omitted-call candidates. The purity walker now admits these
+casts only after the shared call-dispatch checker confirms the receiver type, source conversion
+metadata, and absence of custom/imported dispatch, then recursively checks the receiver expression.
+Static diff and source-length checks pass; compiler/runtime qualification remains open.
+
+### 23.27.1846 Align replay conversion admission with all builtin numeric selectors (2026-10-15)
+
+Resource production recognizes all selectors in the shared numeric-cast table, including `int`
+and `uintptr`, before ordinary UFCS lookup. Replay's pure field-conversion dispatcher additionally
+required membership in the narrower pure-conversion list, so those two builtin casts were rejected
+as unresolved despite producer admission. The field-dispatch checker admits selectors in either
+set, while resource-purity omission proofs admit the numeric-selector set specifically; both paths
+require a place-rooted known scalar receiver and reject a possible custom `__cast__` hook. No tests
+or builds were run; source-matched runtime qualification remains open.
+
+### 23.27.1843 Keep the bounded-reader port's effect row minimal (2026-10-15)
+
+The active script candidate now uses the `read_text_bounded` builtin, whose registry contract
+requires `File.Read` and whose interpreter implementation keeps pointer operations inside the
+runtime. Removed the candidate's redundant caller-side `Unsafe.PointerCast` effect and refreshed
+its recorded source hash. The candidate remains unqualified; no compiler or runtime command was
+run.
+
+### 23.27.1844 Move the process-wait helper out of a constant module (2026-10-15)
+
+The pinned Core parser diagnosed a function declaration nested inside `const module ProcessWait`
+as invalid and then misparsed its return arrow. Moved the pure polling-limit helper to the enclosing
+private scope and updated its two call sites to reference the module constants. This source-level
+repair addresses that recorded diagnostic; no compiler or runtime command was run, and other
+reported parser incompatibilities remain unresolved.
+
+### 23.27.1845 Normalize the set-add lowering guard (2026-10-15)
+
+The recorded parser failure in `lower_ast.elisa` pointed to a set-add availability guard using the
+older `false return if` spelling and rechecking `method_name == "add"` inside its `add` branch.
+Rewrote it as `return false if not scripting_set_builtin_available(...)`; the branch already
+establishes the method name, so behavior is unchanged. Static review only; no compiler or runtime
+command was run.
+
+### 23.27.1846 Rebuild the current ElisaScript snapshot (2026-10-15)
+
+A bounded native-launcher build against a fresh `src/` and `vendor/` snapshot no longer reports the
+`ProcessWait` nested-function error after moving its helper to private scope. It exposed a separate
+`false return` at `src/ir/lower_ast.elisa:9849`; changed that statement to the equivalent `return
+false`. A second fresh bounded build cleared the lowerer parser error and reached the remaining
+vendored `atomic[T]{value: value}` parse failure at
+`vendor/elisa-compiler/elisacore_std/elisacore_runtime_concurrency.elisa:1123`. The second build
+exited 1 in 1.48 seconds at 385,600 KiB sampled peak RSS with no watchdog trip. No launcher was
+produced, so the port remains unqualified and the Python reference remains authoritative.
+
+### 23.27.1847 Split scoped source-call target checks (2026-10-15)
+
+`source_call_bindings.elisa` exceeded the 600-line source gate after the bounded scoped-root
+check was added. Moved the scoped target and root-shadow helpers into
+`source_call_scoped_target.elisa`, included immediately after their shared binding primitives and
+before call coverage. Updated the focused static guard. Source-length, diff, call-result alias,
+resource-call confinement, and active-port source parity checks pass; no runtime parity claim is
+made.
+
+### 23.27.1848 Scope generic-name shadows and meter field-cast dispatch (2026-10-15)
+
+Source conversion generic-name checks now resolve against the active function's exact line and
+offset and confirm the recorded generic rows for that owner. Replay similarly requires its active
+caller's exact declaration identity, preventing a same-line sibling's type parameter from
+shadowing a nominal type. The bounded resource-purity path now accounts for the spelling work of
+numeric-cast and pure-conversion selector checks before dispatch. Static diff and source-length
+checks pass; no compiler or runtime qualification was run.
+
+### 23.27.1849 Diagnose the remaining Core parser failure (2026-10-15)
+
+The bounded launcher build reported `expected }, got :` at
+`elisacore_runtime_concurrency.elisa:1123` for `atomic[T]{value: value}`. The pinned compiler's
+matched StructPy source uses a capitalized-name gate for generic brace constructors, while the
+older adapted parser snapshot in `elisa-script/vendor/elisa-compiler` parses brace construction as
+a postfix on any expression. This is a concrete syntax compatibility gap between the two parser
+implementations. Reconcile the grammar before attempting further port qualification.
+
+### 23.27.1850 Remove duplicate structural-owner hash metering (2026-10-15)
+
+Structural certificate owner lookup charged a query name as a self-comparison and then charged its
+length again before hashing. Replaced that artificial comparison with a single bounded length
+charge; actual collision comparisons still debit both compared names. Static diff and source-length
+checks pass; no tests or builds were run.
+
+### 23.27.1851 Parse the lowercase atomic generic literal (2026-10-15)
+
+The pinned parser only recognizes generic brace constructors with capitalized names, but the Core
+runtime declares `atomic[T]` as a lowercase builtin generic struct and initializes it with
+`atomic[T]{value: value}`. Added a parser exception for this existing builtin, reusing the regular
+generic type-argument and struct-field parsers. It leaves other lowercase indexed expressions on
+the record-update path. `gofmt` and diff checks pass; no tests/build ran, and the pinned validation
+lane remains disabled pending explicit reauthorization.
+
+### 23.27.1852 Admit producer-supported pure field conversions in replay (2026-10-15)
+
+Resource-call production admits source-checked pure conversions, but its replay purity walker
+required every field selector to be numeric before invoking the existing dispatch validator. That
+rejected producer-supported nonnumeric conversions such as `as_sview`. The walker now allows
+selectors that are either a pure conversion or a builtin numeric cast; the shared dispatch check
+still requires exact receiver typing and rejects declared/imported/custom cast overrides. Static
+diff and source-length checks pass; no tests or builds were run.
+
+### 23.27.1853 Restore linear-time fragment matching in the active port (2026-10-15)
+
+The candidate's generic `sview.contains` call uses a nested scan, which can take quadratic time on
+repetitive near-matches in a large bounded source file. Restored the proof-local KMP matcher so the
+four fixed-fragment searches are linear in source plus needle length; updated the source parity
+guard and porting record to pin the matcher. The candidate remains unqualified because the current
+launcher build is blocked by the lowercase `atomic[T]` generic-brace parse gap. No tests or builds
+were run.
+
+### 23.27.1854 Meter the qualified enum-member root read (2026-10-15)
+
+`proof_kernel_replay_qualified_enum_member_sort` read the candidate enum-member arena node before
+charging type work. Most callers had already charged that node through term traversal, but a
+numeric-cast receiver path called the helper directly, allowing one unmetered node read per such
+candidate. The helper now charges its own root read before dereferencing; repeated callers pay a
+small conservative extra unit. Static diff and source-length checks pass; no tests or builds were
+run.
+
+### 23.27.1855 Reject enum-tag uniqueness after work exhaustion (2026-10-15)
+
+Enum-tag uniqueness scanning could exhaust the shared type-work budget in a string comparison on
+its last environment row, then return true from the accumulated row counts without checking the
+meter. Added a final budget guard before the positive uniqueness result, matching the adjacent
+typed-enum-member lookup's fail-closed behavior. Static diff and source-length checks pass; no
+tests or builds were run.
+
+### 23.27.1856 Keep scalar pure-call witnesses within numeric casts (2026-10-15)
+
+The general field-conversion dispatcher may admit either a pure conversion or a builtin numeric
+cast, but the resource-purity walker uses that predicate to justify omission of a helper whose
+declared result is scalar. It does not independently infer the expression result type, so admitting
+`as_sview` there could cross the scalar-return boundary. The pure scalar walker now requires a
+numeric selector specifically; shared dispatch still verifies receiver type, import metadata, and
+custom-cast absence. Also charged the follow-up `as_sview`/`sview` and collection `clear`/`pop`
+method comparisons explicitly. Static guards and source-length check pass; runtime qualification
+remains open.
+
+### 23.27.1857 Record the self-hosted launcher retry timeout (2026-10-15)
+
+The current self-hosted Stage1 launcher retry terminated under its bounded wrapper after 360.12
+seconds with status -15 and peak RSS 680,512 KiB, below the 1.5 GiB memory cap. The log contains
+no compiler diagnostics and no launcher artifact was produced. The retry therefore provides no
+runtime-parity evidence; use a faster source-matched compiler path before another launcher build.
+
+### 23.27.1858 Preserve the kernel type-work exhaustion sentinel (2026-10-15)
+
+The shared `proof_kernel_replay_type_work_consume_amount` helper rejected charges that exceeded
+remaining work but left the counter below the budget. A caller could treat that rejection as a
+non-match and later form a positive result without an observable exhausted counter. Failed
+multi-unit charges now set the same `budget + 1` sentinel as single-unit exhaustion, with a
+postcondition tying success to an in-budget counter. Static diff and source-length checks pass;
+no tests or builds were run.
+
+### 23.27.1859 Reuse fail-closed charging in function-group indexing (2026-10-15)
+
+The function-group index had a second local text charger and a manual allocation charge that
+rejected over-budget work without setting the shared exhaustion sentinel. Both text and allocation
+charges now delegate to the shared amount charger. This keeps budget exhaustion visible to
+downstream positive-result checks. Static diff and source-length
+checks pass; no tests or builds were run.

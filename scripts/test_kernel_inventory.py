@@ -465,6 +465,14 @@ def main() -> int:
     if leaked:
         failures.append(f"kernel calls functions defined outside the kernel: {sorted(leaked)}")
 
+    proposition_comparisons = read(PROOF / "kernel_replay" / "proposition_comparisons.elisa")
+    enum_tag_membership = function_body(proposition_comparisons, "proof_kernel_replay_enum_tag_belongs_to_type")
+    budget_gate = "return false if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET"
+    if "not proof_kernel_replay_type_work_consume(work)" not in enum_tag_membership or "proof_kernel_replay_type_text_equal(binding.name, name, work)" not in enum_tag_membership:
+        failures.append("enum-tag source identity scans do not charge the shared type-work meter")
+    if budget_gate not in enum_tag_membership or enum_tag_membership.find(budget_gate) > enum_tag_membership.find("type_rows == 1 and tag_rows == 1"):
+        failures.append("enum-tag uniqueness can succeed after the type-work budget is exhausted")
+
     if failures:
         for failure in failures:
             print(f"kernel inventory: {failure}", file=sys.stderr)

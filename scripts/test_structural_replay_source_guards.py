@@ -39,8 +39,8 @@ generic_replay_owner_lookup = replay_generic_lookup.split("def proof_replay_call
 )[0]
 assert "field_conversion_generic_param_owner_known and not call_target.generics.field_conversion_generic_param_owner_offset_valid" in generic_replay_owner_lookup
 assert "generic_owner_line != call_target.generics.field_conversion_generic_param_line" in generic_replay_owner_lookup
-assert "report.context.current_goal_owner_offset <- functions.lookup.offsets[function_index]" in purity_index
-assert "report.context.current_goal_owner_offset <- functions.lookup.offsets[function_index]" in extern_effect
+assert "report.context.current_goal_owner_offset <- functions.lookup.source.offsets[function_index]" in purity_index
+assert "report.context.current_goal_owner_offset <- functions.lookup.source.offsets[function_index]" in extern_effect
 
 source_index_build = source_graph.split("def proof_replay_structural_source_index_build(", 1)[1].split(
     "def proof_replay_structural_source_lookup(", 1
