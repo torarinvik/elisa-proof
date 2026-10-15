@@ -91,6 +91,38 @@ extend ElisaProof:
                     not proof_replay_call_body(&arm.body, bindings, calls, call_index, call_target, work, depth + 1)
                 bindings.resize(mark)
             return true
+        # A bare scalar spelling is an intrinsic cast only when no parser-owned
+        # declaration or imported callable can shadow it. Imports remain opaque in
+        # this snapshot, so they fail closed for this ambiguity check.
+        def proof_replay_call_builtin_name_shadowed_in(declarations: darray[Ast::Decl]&, wanted: sview, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= 96 or not proof_replay_call_work_add(work, declarations.count)
+            for declaration in declarations |wanted, work, depth|:
+                return true if not proof_replay_call_work_add(work, 1)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, _) | Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return true if not proof_replay_call_work_add(work, sview_len(name)) or not proof_replay_call_work_add(work, sview_len(wanted))
+                        return true if name == wanted
+                    Ast::Decl.Import(_, _) | Ast::Decl.Invalid:
+                        return true
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return true if proof_replay_call_builtin_name_shadowed_in(nested, wanted, work, depth + 1)
+                    _:
+                        pass
+            false
+
+        def proof_replay_call_builtin_name_shadowed(name: sview, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&) -> bool:
+            return true if call_target.capture.builtin_call_shadow_names.count != call_target.capture.builtin_call_shadow_values.count
+            for row in 0..<call_target.capture.builtin_call_shadow_names.count |row, name, call_target, work|:
+                return true if not proof_replay_call_work_add(work, 1)
+                cached_name: sview = call_target.capture.builtin_call_shadow_names[row]
+                return true if not proof_replay_call_string_compare_charge(cached_name, name, work)
+                return call_target.capture.builtin_call_shadow_values[row] if cached_name == name
+            shadowed: bool = proof_replay_call_builtin_name_shadowed_in(call_target.capture.source_declarations, name, work, 0)
+            return true if not proof_replay_call_work_add(work, sview_len(name)) or not proof_replay_call_work_add(work, 2)
+            call_target.capture.builtin_call_shadow_names.push(name)
+            call_target.capture.builtin_call_shadow_values.push(shadowed)
+            shadowed
+
         def proof_replay_call_expression_with_index(expression: Ast::Expr, bindings: mutable darray[sview]&, calls: mutable darray[sview]&, call_index: mutable ProofReplayCallNameIndex&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 96 or not proof_replay_call_work_add(work, 1)
             match expression:
@@ -121,6 +153,14 @@ extend ElisaProof:
                                 return false if arguments.count != 1 or (argument_names.count != 0 and argument_names.count != arguments.count)
                                 for label in argument_names |label, work|:
                                     return false if not proof_replay_call_work_add(work, 1) or not proof_replay_call_work_add(work, sview_len(label)) or label != ""
+                                shadowed: mutable bool = false
+                                for bound in bindings |bound, name, shadowed, work|:
+                                    return false if not proof_replay_call_string_compare_charge(bound, name, work)
+                                    shadowed <- true if bound == name
+                                if shadowed or proof_replay_call_builtin_name_shadowed(name, call_target, work):
+                                    call_target.selection.unresolved_dispatch_found <- true
+                                for argument in arguments |bindings, calls, call_index, call_target, work, depth|:
+                                    return false if not proof_replay_call_expression_with_index(argument, bindings, calls, call_index, call_target, work, depth + 1)
                             else:
                                 return false if name == ""
                                 if call_target.capture.require_exact_call and position.offset.usize() == call_target.selection.offset:
