@@ -1,0 +1,529 @@
+# Parser-owned resolution for selected ordinary call-precondition attempts.
+# This bounded slice validates the selected producer row against one direct, unambiguous
+# source call and its imported body/signature requires clause. It intentionally refuses
+# module-qualified, overloaded, defaulted, named, and shadowed calls until those rules have
+# an independent source resolver.
+extend ElisaProof:
+    private:
+        const PROOF_REPORT_CALL_REQUIRES_RESOLUTION_DEPTH_LIMIT: usize = 64
+
+        def proof_report_call_requires_decl_find(declarations: darray[Ast::Decl]&, wanted_name: sview, wanted_line: u32, wanted_offset: u32, parameters: mutable darray[Ast::ParamDecl]&, body: mutable darray[Ast::Stmt]&, exact_count: mutable usize&, name_count: mutable usize&, line_count: mutable usize&, has_import: mutable bool&, target_nested: mutable bool&, work: mutable usize&, depth: usize, nested_scope: bool) -> bool:
+            return false if depth >= PROOF_REPORT_CALL_REQUIRES_RESOLUTION_DEPTH_LIMIT
+            for declaration in declarations |declaration, wanted_name, wanted_line, wanted_offset, parameters, body, exact_count, name_count, line_count, has_import, target_nested, work, depth, nested_scope|:
+                return false if not proof_report_source_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Func(name, function_parameters, _, function_body, _, _, position):
+                        return false if not proof_report_source_work_charge(sview_len(name), work) or not proof_report_source_work_charge(sview_len(wanted_name), work)
+                        name_count <- name_count + 1 if name == wanted_name
+                        line_count <- line_count + 1 if position.line == wanted_line
+                        if name == wanted_name and position.line == wanted_line and position.offset == wanted_offset:
+                            exact_count <- exact_count + 1
+                            parameters <- function_parameters
+                            body <- function_body
+                            target_nested <- true if nested_scope
+                    Ast::Decl.Extern(name, _, _, _, _, _, _, position):
+                        return false if not proof_report_source_work_charge(sview_len(name), work) or not proof_report_source_work_charge(sview_len(wanted_name), work)
+                        name_count <- name_count + 1 if name == wanted_name
+                        line_count <- line_count + 1 if position.line == wanted_line
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if not proof_report_source_work_charge(sview_len(module_name), work) or not proof_report_source_work_charge(sview_len(wanted_name), work)
+                        name_count <- name_count + 1 if module_name == wanted_name
+                        return false if not proof_report_call_requires_decl_find(nested, wanted_name, wanted_line, wanted_offset, parameters, body, exact_count, name_count, line_count, has_import, target_nested, work, depth + 1, true)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_report_call_requires_decl_find(nested, wanted_name, wanted_line, wanted_offset, parameters, body, exact_count, name_count, line_count, has_import, target_nested, work, depth + 1, true)
+                    Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _) | Ast::Decl.Alias(name, _, _) | Ast::Decl.Law(name, _, _) | Ast::Decl.Const(name, _, _, _, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), work) or not proof_report_source_work_charge(sview_len(wanted_name), work)
+                        name_count <- name_count + 1 if name == wanted_name
+                    Ast::Decl.Import(_, _):
+                        has_import <- true
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+            true
+
+        def proof_report_call_requires_find_owner(declarations: darray[Ast::Decl]&, wanted_name: sview, wanted_line: u32, wanted_offset: u32, parameters: mutable darray[Ast::ParamDecl]&, body: mutable darray[Ast::Stmt]&, count: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPORT_CALL_REQUIRES_RESOLUTION_DEPTH_LIMIT
+            for declaration in declarations |declaration, wanted_name, wanted_line, wanted_offset, parameters, body, count, work, depth|:
+                return false if not proof_report_source_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Func(name, function_parameters, _, function_body, _, _, position):
+                        return false if not proof_report_source_work_charge(sview_len(name), work) or not proof_report_source_work_charge(sview_len(wanted_name), work)
+                        if name == wanted_name and position.line == wanted_line and position.offset == wanted_offset:
+                            count <- count + 1
+                            parameters <- function_parameters
+                            body <- function_body
+                    Ast::Decl.Extern(_, _, _, _, _, _, _, _):
+                        pass
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_report_call_requires_find_owner(nested, wanted_name, wanted_line, wanted_offset, parameters, body, count, work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+            true
+
+        # Dependency collection deliberately includes logical contracts and assert_by goals.
+        # They are not executable call sites and do not emit ordinary call-requires events.
+        # Use this narrower walk when authenticating producer tags.
+        def proof_report_call_requires_collect_runtime_expression(expression: Ast::Expr, names: mutable darray[sview]&, qualifiers: mutable darray[sview]&, sources: mutable darray[Ast::Expr]&, expressions: mutable darray[Ast::Expr]&, positions: mutable darray[Ast::Pos]&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPORT_CALL_REQUIRES_RESOLUTION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                Ast::Expr.Call(callee, arguments, _, _):
+                    called: sview = proof_callable_name(callee)
+                    source: Ast::Expr = callee if called != "" else expression
+                    proof_push_call_source(names, qualifiers, sources, expressions, positions, called, proof_call_qualifier(callee), source, Ast::expr_pos(expression), expression)
+                    return false if not proof_report_call_requires_collect_runtime_expression(callee, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    for argument in arguments |argument, names, qualifiers, sources, expressions, positions, work, depth|:
+                        return false if not proof_report_call_requires_collect_runtime_expression(argument, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
+                    if lowered.known:
+                        return false if not proof_report_call_requires_collect_runtime_expression(lowered.call, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    else:
+                        proof_push_call_source(names, qualifiers, sources, expressions, positions, "__opaque_call__", "", Ast::Expr.Invalid, Ast::expr_pos(expression), Ast::Expr.Invalid)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(inner, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(left, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    return false if not proof_report_call_requires_collect_runtime_expression(right, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(object, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(object, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    return false if not proof_report_call_requires_collect_runtime_expression(low, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    return false if not proof_report_call_requires_collect_runtime_expression(high, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(object, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    for argument in arguments |argument, names, qualifiers, sources, expressions, positions, work, depth|:
+                        return false if not proof_report_call_requires_collect_runtime_expression(argument, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |element, names, qualifiers, sources, expressions, positions, work, depth|:
+                        return false if not proof_report_call_requires_collect_runtime_expression(element, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |entry, names, qualifiers, sources, expressions, positions, work, depth|:
+                        return false if not proof_report_call_requires_collect_runtime_expression(entry.key, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        return false if not proof_report_call_requires_collect_runtime_expression(entry.value, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(type_expression, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    for field in fields |field, names, qualifiers, sources, expressions, positions, work, depth|:
+                        return false if not proof_report_call_requires_collect_runtime_expression(field.value, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(base, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    for field in fields |field, names, qualifiers, sources, expressions, positions, work, depth|:
+                        return false if not proof_report_call_requires_collect_runtime_expression(field.value, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(condition, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    return false if not proof_report_call_requires_collect_runtime_expression(then_expression, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    return false if not proof_report_call_requires_collect_runtime_expression(else_expression, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(iterable, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    return false if not proof_report_call_requires_collect_runtime_expression(condition, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    return false if not proof_report_call_requires_collect_runtime_expression(body, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.Catch(guarded, arms, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(guarded, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    for arm in arms |arm, names, qualifiers, sources, expressions, positions, work, depth|:
+                        return false if not proof_report_source_work_charge(1, work)
+                        return false if not proof_report_call_requires_collect_runtime_expression(arm.guard, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        return false if not proof_report_call_requires_collect_runtime_calls(arm.body, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    nested_names: mutable darray[sview] = []
+                    nested_qualifiers: mutable darray[sview] = []
+                    nested_sources: mutable darray[Ast::Expr] = []
+                    nested_expressions: mutable darray[Ast::Expr] = []
+                    nested_positions: mutable darray[Ast::Pos] = []
+                    return false if not proof_report_call_requires_collect_runtime_expression(guarded, &nested_names, &nested_qualifiers, &nested_sources, &nested_expressions, &nested_positions, work, depth + 1)
+                    return false if not proof_report_call_requires_collect_runtime_calls(recovery, &nested_names, &nested_qualifiers, &nested_sources, &nested_expressions, &nested_positions, work, depth + 1)
+                    return false if nested_names.count != nested_qualifiers.count or nested_names.count != nested_sources.count or nested_names.count != nested_expressions.count or nested_names.count != nested_positions.count
+                    if nested_names.count > 0:
+                        proof_push_call_source(names, qualifiers, sources, expressions, positions, "__opaque_call__", "", Ast::Expr.Invalid, Ast::expr_pos(expression), Ast::Expr.Invalid)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(base, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    return false if not proof_report_call_requires_collect_runtime_expression(predicate, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(scrutinee, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    for arm in arms |arm, names, qualifiers, sources, expressions, positions, work, depth|:
+                        return false if not proof_report_source_work_charge(1, work)
+                        return false if not proof_report_call_requires_collect_runtime_expression(arm.guard, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        return false if not proof_report_call_requires_collect_runtime_calls(arm.body, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                # The generic producer frame-call walker does not descend into expression
+                # blocks. Return blocks are handled by the return-specific helper above;
+                # refuse a block seen in an ordinary expression position.
+                Ast::Expr.Block(_, _, _, _):
+                    return false
+                Ast::Expr.Lambda(_, _, _):
+                    proof_push_call_source(names, qualifiers, sources, expressions, positions, "__opaque_call__", "", Ast::Expr.Invalid, Ast::expr_pos(expression), Ast::Expr.Invalid)
+                _:
+                    proof_push_call_source(names, qualifiers, sources, expressions, positions, "__opaque_call__", "", Ast::Expr.Invalid, Ast::expr_pos(expression), Ast::Expr.Invalid)
+            true
+
+        # Returns have producer paths beyond the generic expression walker: value blocks are
+        # flattened, value matches are checked arm by arm, and GetElse checks its guarded call
+        # and recovery statements separately.
+        def proof_report_call_requires_collect_runtime_return(expression: Ast::Expr, names: mutable darray[sview]&, qualifiers: mutable darray[sview]&, sources: mutable darray[Ast::Expr]&, expressions: mutable darray[Ast::Expr]&, positions: mutable darray[Ast::Pos]&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPORT_CALL_REQUIRES_RESOLUTION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Block(statements, value, _, _):
+                    match value:
+                        Ast::Expr.Absent | Ast::Expr.Invalid:
+                            return false
+                        _:
+                            return false if not proof_report_call_requires_collect_runtime_calls(statements, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                            return proof_report_call_requires_collect_runtime_return(value, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return false if not proof_report_call_requires_collect_runtime_expression(scrutinee, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    for arm in arms |arm, names, qualifiers, sources, expressions, positions, work, depth|:
+                        return false if not proof_report_source_work_charge(1, work)
+                        return false if not proof_report_call_requires_collect_runtime_expression(arm.guard, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        if arm.body.count == 1:
+                            match arm.body[0]:
+                                Ast::Stmt.Expr(value, _):
+                                    return false if not proof_report_call_requires_collect_runtime_return(value, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                                _:
+                                    proof_push_call_source(names, qualifiers, sources, expressions, positions, "__opaque_call__", "", Ast::Expr.Invalid, Ast::expr_pos(expression), Ast::Expr.Invalid)
+                        else:
+                            proof_push_call_source(names, qualifiers, sources, expressions, positions, "__opaque_call__", "", Ast::Expr.Invalid, Ast::expr_pos(expression), Ast::Expr.Invalid)
+                Ast::Expr.Catch(guarded, arms, _):
+                    match guarded:
+                        Ast::Expr.Call(_, _, _, _):
+                            return false if not proof_report_call_requires_collect_runtime_expression(guarded, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        _:
+                            proof_push_call_source(names, qualifiers, sources, expressions, positions, "__opaque_call__", "", Ast::Expr.Invalid, Ast::expr_pos(expression), Ast::Expr.Invalid)
+                    for arm in arms |arm, names, qualifiers, sources, expressions, positions, work, depth|:
+                        return false if not proof_report_source_work_charge(1, work)
+                        return false if not proof_report_call_requires_collect_runtime_expression(arm.guard, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        if arm.body.count == 1:
+                            match arm.body[0]:
+                                Ast::Stmt.Expr(value, _):
+                                    return false if not proof_report_call_requires_collect_runtime_expression(value, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                                _:
+                                    proof_push_call_source(names, qualifiers, sources, expressions, positions, "__opaque_call__", "", Ast::Expr.Invalid, Ast::expr_pos(expression), Ast::Expr.Invalid)
+                        else:
+                            proof_push_call_source(names, qualifiers, sources, expressions, positions, "__opaque_call__", "", Ast::Expr.Invalid, Ast::expr_pos(expression), Ast::Expr.Invalid)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return false if not proof_report_call_requires_collect_runtime_calls(recovery, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    match guarded:
+                        Ast::Expr.Call(_, _, _, _):
+                            return proof_report_call_requires_collect_runtime_expression(guarded, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        _:
+                            return false
+                _:
+                    return proof_report_call_requires_collect_runtime_expression(expression, names, qualifiers, sources, expressions, positions, work, depth + 1)
+            true
+
+        # Match the loop checker’s finite-decreases dispatch. A loop body is checked a
+        # second time only when it has at least one finite decreases component and no
+        # decreases* clause. Keep this source walk metered because tuple flattening can
+        # otherwise hide arbitrarily large trees from the census budget.
+        def proof_report_call_requires_count_decreases_components(expression: Ast::Expr, count: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPORT_CALL_REQUIRES_RESOLUTION_DEPTH_LIMIT or not proof_report_source_work_charge(1, work)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_report_call_requires_count_decreases_components(inner, count, work, depth + 1)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |element, count, work, depth|:
+                        return false if not proof_report_call_requires_count_decreases_components(element, count, work, depth + 1)
+                _:
+                    count <- count + 1
+            true
+
+        def proof_report_call_requires_loop_body_rechecked(body: darray[Ast::Stmt]&, work: mutable usize&, depth: usize) -> (complete: bool, rechecked: bool):
+            return (false, false) if depth >= PROOF_REPORT_CALL_REQUIRES_RESOLUTION_DEPTH_LIMIT
+            decreases_count: mutable usize = 0
+            component_count: mutable usize = 0
+            has_unbounded_decreases: mutable bool = false
+            for statement in body |decreases_count, component_count, has_unbounded_decreases, work, depth|:
+                return (false, false) if not proof_report_source_work_charge(1, work)
+                match statement:
+                    Ast::Stmt.Contract(kind, expression, _):
+                        return (false, false) if not proof_report_source_work_charge(sview_len(kind), work)
+                        if kind == "decreases":
+                            decreases_count <- decreases_count + 1
+                            return (false, false) if not proof_report_call_requires_count_decreases_components(expression, &component_count, work, depth + 1)
+                        elif kind == "decreases*":
+                            has_unbounded_decreases <- true
+                    _:
+                        pass
+            (true, decreases_count > 0 and component_count > 0 and not has_unbounded_decreases)
+
+        def proof_report_call_requires_collect_runtime_calls(body: darray[Ast::Stmt]&, names: mutable darray[sview]&, qualifiers: mutable darray[sview]&, sources: mutable darray[Ast::Expr]&, expressions: mutable darray[Ast::Expr]&, positions: mutable darray[Ast::Pos]&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPORT_CALL_REQUIRES_RESOLUTION_DEPTH_LIMIT
+            for statement in body |statement, names, qualifiers, sources, expressions, positions, work, depth|:
+                return false if not proof_report_source_work_charge(1, work)
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        if value is returned:
+                            return false if not proof_report_call_requires_collect_runtime_return(returned, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.VarDecl(_, _, expression, _):
+                        return false if not proof_report_call_requires_collect_runtime_expression(expression, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    Ast::Stmt.Contract(kind, expression, _):
+                        return false if not proof_report_source_work_charge(sview_len(kind), work)
+                        if kind == "assert":
+                            return false if not proof_report_call_requires_collect_runtime_expression(expression, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        elif kind != "requires" and not proof_is_ensure_kind(kind) and kind not in {"invariant", "decreases", "decreases*", "changes", "preserves"}:
+                            return false
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        return false if not proof_report_call_requires_collect_runtime_expression(target, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        return false if not proof_report_call_requires_collect_runtime_expression(initializer, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return false if not proof_report_call_requires_collect_runtime_expression(condition, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        return false if not proof_report_call_requires_collect_runtime_calls(then_body, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        return false if not proof_report_call_requires_collect_runtime_calls(else_body, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    Ast::Stmt.While(condition, loop_body, _):
+                        return false if not proof_report_call_requires_collect_runtime_expression(condition, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        return false if not proof_report_call_requires_collect_runtime_calls(loop_body, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        repeated_body: (complete: bool, rechecked: bool) = proof_report_call_requires_loop_body_rechecked(loop_body, work, depth + 1)
+                        return false if not repeated_body.complete
+                        return false if repeated_body.rechecked and not proof_report_call_requires_collect_runtime_calls(loop_body, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    Ast::Stmt.For(_, _, iterable, loop_body, _):
+                        return false if not proof_report_call_requires_collect_runtime_expression(iterable, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        return false if not proof_report_call_requires_collect_runtime_calls(loop_body, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return false if not proof_report_call_requires_collect_runtime_expression(scrutinee, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        for arm in arms |arm, names, qualifiers, sources, expressions, positions, work, depth|:
+                            return false if not proof_report_source_work_charge(1, work)
+                            return false if not proof_report_call_requires_collect_runtime_expression(arm.guard, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                            return false if not proof_report_call_requires_collect_runtime_calls(arm.body, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                    Ast::Stmt.Block(block_kind, _, _, nested, _):
+                        if block_kind != "assert_by":
+                            return false if not proof_report_call_requires_collect_runtime_calls(nested, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                        else:
+                            # The replay boundary requires the first assert_by statement to
+                            # be its declared assertion. Reject malformed or empty blocks so
+                            # omitted proof-body calls cannot be mistaken for a complete walk.
+                            return false if nested.count == 0
+                            match nested[0]:
+                                Ast::Stmt.Contract("assert", goal, _):
+                                    return false if not proof_report_call_requires_collect_runtime_expression(goal, names, qualifiers, sources, expressions, positions, work, depth + 1)
+                                _:
+                                    return false
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    Ast::Stmt.Invalid:
+                        return false
+                    _:
+                        return false
+            true
+
+        def proof_report_call_requires_has_shadow(body: darray[Ast::Stmt]&, name: sview, work: mutable usize&, depth: usize) -> (complete: bool, found: bool):
+            return (false, false) if depth >= PROOF_REPORT_CALL_REQUIRES_RESOLUTION_DEPTH_LIMIT or not proof_report_source_work_charge(1, work)
+            # Reuse the source-call shadow audit: it covers loop binders, assignments,
+            # expression-scoped binders, match arms, and unsupported dynamic call shapes.
+            # Its conservative true result means either a shadow or an incomplete scan.
+            found: bool = proof_replay_resource_call_shadow_name_in_statements(body, name, work, depth)
+            (true, found)
+
+        def proof_report_call_requires_same_site(candidate: ProofGoalAttempt, attempt: ProofGoalAttempt, work: mutable usize&) -> (complete: bool, same: bool):
+            return (false, false) if not proof_report_source_work_charge(sview_len(candidate.name), work) or not proof_report_source_work_charge(sview_len(attempt.name), work)
+            return (true, false) if candidate.name != attempt.name or candidate.owner_function_line != attempt.owner_function_line or candidate.owner_function_offset != attempt.owner_function_offset
+            return (false, false) if not proof_report_source_work_charge(sview_len(candidate.source_call_callee_name), work) or not proof_report_source_work_charge(sview_len(attempt.source_call_callee_name), work)
+            return (true, false) if candidate.source_call_callee_name != attempt.source_call_callee_name
+            return (false, false) if not proof_report_source_work_charge(sview_len(candidate.source_call_callee_module), work) or not proof_report_source_work_charge(sview_len(attempt.source_call_callee_module), work)
+            return (true, false) if candidate.source_call_callee_module != attempt.source_call_callee_module
+            return (true, false) if candidate.source_call_callee_line != attempt.source_call_callee_line or candidate.source_call_callee_offset != attempt.source_call_callee_offset
+            return (true, proof_report_call_requires_position_equal(candidate.source_call_position, attempt.source_call_position))
+
+        def proof_report_obligation_event_for_goal(report: ProofReport&, goal_id: usize, source_work: mutable usize&) -> (found: bool, entry: ProofObligationEntry):
+            low: mutable usize = 0
+            high: mutable usize = report.results.obligation_inventory.count
+            empty: ProofObligationEntry = ProofObligationEntry{identity: 0, attempts_start: 0, attempts_count: 0, proven: false, source_line: 0, source_name: "", source_kind: "", source_function_offset: 0, source_obligation_index: 0, owner_function_line: 0, owner_function_offset: 0, source_call_position: Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}, source_call_callee_name: "", source_call_callee_module: "", source_call_callee_line: 0, source_call_callee_offset: 0, source_call_requires_index: 0}
+            while low < high |low, high, report, goal_id, source_work|:
+                return (false, empty) if not proof_report_source_work_charge(1, source_work)
+                middle: usize = low + (high - low) / 2
+                entry: ProofObligationEntry = report.results.obligation_inventory[middle]
+                if goal_id < entry.attempts_start:
+                    high <- middle
+                else:
+                    attempt_offset: usize = goal_id - entry.attempts_start
+                    if attempt_offset < entry.attempts_count:
+                        return (true, entry)
+                    low <- middle + 1
+            (false, empty)
+
+        def proof_report_call_requires_ledger_match(report: ProofReport&, attempt: ProofGoalAttempt, attempt_index: usize, work: mutable usize&) -> bool:
+            event: (found: bool, entry: ProofObligationEntry) = proof_report_obligation_event_for_goal(report, attempt_index, work)
+            return false if not event.found or event.entry.source_kind != "call-requires"
+            entry: ProofObligationEntry = event.entry
+            return false if not proof_report_source_work_charge(sview_len(entry.source_call_callee_name), work) or not proof_report_source_work_charge(sview_len(attempt.source_call_callee_name), work)
+            return false if not proof_report_source_work_charge(sview_len(entry.source_call_callee_module), work) or not proof_report_source_work_charge(sview_len(attempt.source_call_callee_module), work)
+            return false if:
+                entry.owner_function_line != attempt.owner_function_line or entry.owner_function_offset != attempt.owner_function_offset
+                entry.source_call_callee_name != attempt.source_call_callee_name or entry.source_call_callee_module != attempt.source_call_callee_module
+                entry.source_call_callee_line != attempt.source_call_callee_line or entry.source_call_callee_offset != attempt.source_call_callee_offset
+                entry.source_call_requires_index != attempt.source_call_requires_index
+                not proof_report_call_requires_position_equal(entry.source_call_position, attempt.source_call_position)
+                entry.attempts_start > report.results.goal_attempts.count or entry.attempts_count > report.results.goal_attempts.count - entry.attempts_start
+            event_end: usize = entry.attempts_start + entry.attempts_count
+            return false if attempt_index < entry.attempts_start or attempt_index >= event_end
+            selected_in_event: mutable usize = 0
+            contains_attempt: mutable bool = false
+            for goal_id in entry.attempts_start..<event_end |goal_id, entry, report, attempt, attempt_index, selected_in_event, contains_attempt, work|:
+                return false if not proof_report_source_work_charge(1, work)
+                candidate: ProofGoalAttempt = report.results.goal_attempts[goal_id]
+                if goal_id == attempt_index:
+                    return false if not candidate.source_call_requires or not candidate.source_call_obligation_selected
+                    return false if candidate.source_call_requires_index != attempt.source_call_requires_index or not proof_report_call_requires_position_equal(candidate.source_call_position, attempt.source_call_position)
+                    contains_attempt <- true
+                continue if not candidate.source_call_requires or not candidate.source_call_obligation_selected
+                return false if not proof_report_source_work_charge(sview_len(candidate.name), work) or not proof_report_source_work_charge(sview_len(attempt.name), work)
+                return false if not proof_report_source_work_charge(sview_len(candidate.source_call_callee_name), work) or not proof_report_source_work_charge(sview_len(attempt.source_call_callee_name), work)
+                return false if not proof_report_source_work_charge(sview_len(candidate.source_call_callee_module), work) or not proof_report_source_work_charge(sview_len(attempt.source_call_callee_module), work)
+                continue if candidate.owner_function_line != attempt.owner_function_line or candidate.owner_function_offset != attempt.owner_function_offset or candidate.name != attempt.name
+                continue if candidate.source_call_callee_name != attempt.source_call_callee_name or candidate.source_call_callee_module != attempt.source_call_callee_module
+                continue if candidate.source_call_callee_line != attempt.source_call_callee_line or candidate.source_call_callee_offset != attempt.source_call_callee_offset
+                continue if candidate.source_call_requires_index != attempt.source_call_requires_index
+                continue if not proof_report_call_requires_position_equal(candidate.source_call_position, attempt.source_call_position)
+                return false if candidate.producer_proven != entry.proven
+                selected_in_event <- selected_in_event + 1
+            contains_attempt and selected_in_event == 1
+
+        def proof_report_call_requires_selected_source_match(declarations: darray[Ast::Decl]&, report: ProofReport&, attempt: ProofGoalAttempt, attempt_index: usize, source_work: mutable usize&) -> bool:
+            return false if not proof_report_source_work_charge(sview_len(attempt.source_call_callee_module), source_work) or attempt.source_call_callee_module != ""
+            return false if not proof_report_call_requires_ledger_match(report, attempt, attempt_index, source_work)
+            caller_parameters: mutable darray[Ast::ParamDecl] = []
+            caller_body: mutable darray[Ast::Stmt] = []
+            caller_count: mutable usize = 0
+            return false if not proof_report_call_requires_find_owner(declarations, attempt.name, attempt.owner_function_line, attempt.owner_function_offset, &caller_parameters, &caller_body, &caller_count, source_work, 0)
+            return false if caller_count != 1
+            caller_body_cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost_body(caller_body, &caller_body_cost, source_work, 0)
+            return false if not proof_report_source_work_charge(caller_body_cost, source_work)
+            for parameter in caller_parameters |parameter, attempt, source_work|:
+                return false if not proof_report_source_work_charge(sview_len(parameter.name), source_work) or not proof_report_source_work_charge(sview_len(attempt.source_call_callee_name), source_work)
+                return false if parameter.name == attempt.source_call_callee_name
+            call_names: mutable darray[sview] = []
+            call_qualifiers: mutable darray[sview] = []
+            call_sources: mutable darray[Ast::Expr] = []
+            call_expressions: mutable darray[Ast::Expr] = []
+            call_positions: mutable darray[Ast::Pos] = []
+            return false if not proof_report_call_requires_collect_runtime_calls(caller_body, &call_names, &call_qualifiers, &call_sources, &call_expressions, &call_positions, source_work, 0)
+            call_contract_rows: mutable darray[usize] = []
+            for _ in 0..<call_positions.count |call_contract_rows, call_positions, report|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                call_contract_rows.push(report.source_contracts.source_signature_contract_lines.count)
+            return false if report.source_contracts.source_signature_contract_lines.count != report.source_contracts.source_signature_contract_kinds.count or report.source_contracts.source_signature_contract_lines.count != report.source_contracts.source_signature_contracts.count
+            same_line_declarations: mutable usize = 0
+            for declaration in declarations |declaration, attempt, source_work, same_line_declarations|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(_, _, _, _, _, _, position):
+                        same_line_declarations <- same_line_declarations + 1 if position.line == attempt.owner_function_line
+                    Ast::Decl.Extern(_, _, _, _, _, _, _, position):
+                        same_line_declarations <- same_line_declarations + 1 if position.line == attempt.owner_function_line
+                    Ast::Decl.Module(_, _, _) | Ast::Decl.Scoped(_, _):
+                        return false
+                    _:
+                        pass
+            for contract_index in 0..<report.source_contracts.source_signature_contract_lines.count |contract_index, report, attempt, source_work, call_names, call_qualifiers, call_sources, call_expressions, call_positions, call_contract_rows|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                continue if report.source_contracts.source_signature_contract_lines[contract_index] != attempt.owner_function_line
+                kind: sview = report.source_contracts.source_signature_contract_kinds[contract_index]
+                continue if kind not in {"requires", "ensures", "ensure"}
+                return false if same_line_declarations != 1
+                expression_cost: mutable usize = 0
+                expression: Ast::Expr = report.source_contracts.source_signature_contracts[contract_index]
+                return false if not proof_replay_summary_expr_cost(expression, &expression_cost, source_work, 0)
+                return false if not proof_report_source_work_charge(expression_cost, source_work)
+                before: usize = call_positions.count
+                return false if not proof_report_call_requires_collect_runtime_expression(expression, &call_names, &call_qualifiers, &call_sources, &call_expressions, &call_positions, source_work, 0)
+                return false if before > call_positions.count
+                for _ in before..<call_positions.count |call_contract_rows, contract_index, source_work|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    call_contract_rows.push(contract_index)
+            return false if call_positions.count != call_expressions.count or call_positions.count != call_names.count or call_positions.count != call_sources.count or call_positions.count != call_qualifiers.count
+            return false if call_positions.count != call_contract_rows.count
+            matched: mutable usize = call_positions.count
+            selected_contract_row: mutable usize = call_contract_rows.count
+            for row in 0..<call_positions.count |row, call_positions, call_expressions, call_contract_rows, attempt, matched, selected_contract_row, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                if proof_report_call_requires_position_equal(call_positions[row], attempt.source_call_position):
+                    return false if matched != call_positions.count
+                    matched <- row
+                    selected_contract_row <- call_contract_rows[row]
+            return false if matched >= call_positions.count
+            return false if selected_contract_row > report.source_contracts.source_signature_contract_lines.count
+            return false if selected_contract_row < report.source_contracts.source_signature_contract_lines.count and report.source_contracts.source_signature_contract_lines[selected_contract_row] != attempt.owner_function_line
+            match call_expressions[matched]:
+                Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), arguments, argument_names, call_position):
+                    return false if not proof_report_source_work_charge(sview_len(callee_name), source_work) or not proof_report_source_work_charge(sview_len(attempt.source_call_callee_name), source_work) or callee_name != attempt.source_call_callee_name or argument_names.count != 0
+                    return false if not proof_report_call_requires_position_equal(call_position, attempt.source_call_position)
+                    caller_shadow: (complete: bool, found: bool) = proof_report_call_requires_has_shadow(caller_body, callee_name, source_work, 0)
+                    return false if not caller_shadow.complete or caller_shadow.found
+                    source_parameters: mutable darray[Ast::ParamDecl] = []
+                    source_body: mutable darray[Ast::Stmt] = []
+                    exact_count: mutable usize = 0
+                    name_count: mutable usize = 0
+                    line_count: mutable usize = 0
+                    has_import: mutable bool = false
+                    target_nested: mutable bool = false
+                    return false if not proof_report_call_requires_decl_find(declarations, attempt.source_call_callee_name, attempt.source_call_callee_line, attempt.source_call_callee_offset, &source_parameters, &source_body, &exact_count, &name_count, &line_count, &has_import, &target_nested, source_work, 0, false)
+                    return false if exact_count != 1 or name_count != 1 or has_import or target_nested or arguments.count != source_parameters.count
+                    callee_body_cost: mutable usize = 0
+                    return false if not proof_replay_summary_expr_cost_body(source_body, &callee_body_cost, source_work, 0)
+                    return false if not proof_report_source_work_charge(callee_body_cost, source_work)
+                    for parameter in source_parameters |parameter, source_work|:
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        return false if parameter.has_default
+                    requirements: mutable darray[Ast::Expr] = []
+                    for statement in source_body |statement, requirements, source_work|:
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        match statement:
+                            Ast::Stmt.Contract(kind, expression, _):
+                                return false if not proof_report_source_work_charge(sview_len(kind), source_work)
+                                requirements.push(expression) if kind == "requires"
+                            _:
+                                pass
+                    return false if report.source_contracts.source_signature_contract_lines.count != report.source_contracts.source_signature_contract_kinds.count or report.source_contracts.source_signature_contract_lines.count != report.source_contracts.source_signature_contracts.count
+                    for row in 0..<report.source_contracts.source_signature_contract_lines.count |row, report, call_position, requirements, source_work|:
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        continue if report.source_contracts.source_signature_contract_lines[row] != attempt.source_call_callee_line
+                        return false if line_count != 1
+                        return false if not proof_report_source_work_charge(sview_len(report.source_contracts.source_signature_contract_kinds[row]), source_work)
+                        requirements.push(report.source_contracts.source_signature_contracts[row]) if report.source_contracts.source_signature_contract_kinds[row] == "requires"
+                    # One source call may be checked more than once (for example, in both
+                    # the ordinary and termination passes for a loop body). Require each
+                    # recorded visit to contain one selected attempt for every source
+                    # requires clause, while allowing those repeated complete groups.
+                    return false if requirements.count == 0
+                    tagged_for_call: mutable usize = 0
+                    clause_counts: mutable darray[usize] = []
+                    for _ in 0..<requirements.count |clause_counts, source_work|:
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        clause_counts.push(0)
+                    for candidate in report.results.goal_attempts |candidate, attempt, tagged_for_call, clause_counts, requirements, source_work|:
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        continue if not candidate.source_call_requires
+                        same_site: (complete: bool, same: bool) = proof_report_call_requires_same_site(candidate, attempt, source_work)
+                        return false if not same_site.complete
+                        continue if not same_site.same
+                        return false if not candidate.source_call_obligation_selected
+                        return false if candidate.source_call_requires_index >= requirements.count
+                        tagged_for_call <- tagged_for_call + 1
+                        clause_counts[candidate.source_call_requires_index] <- clause_counts[candidate.source_call_requires_index] + 1
+                    return false if tagged_for_call == 0 or tagged_for_call % requirements.count != 0
+                    visits: usize = tagged_for_call / requirements.count
+                    for requires_index in 0..<requirements.count |requires_index, clause_counts, visits, source_work|:
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        return false if clause_counts[requires_index] != visits
+                    return false if attempt.source_call_requires_index >= requirements.count
+                    return false if arguments.count != source_parameters.count
+                    return false if not proof_replay_summary_expr_repeat_charge_with_work(requirements[attempt.source_call_requires_index], source_parameters.count + 1, source_work)
+                    parameter_names: mutable darray[sview] = []
+                    actuals: mutable darray[Ast::Expr] = []
+                    for argument in arguments |actuals, source_work|:
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        actuals.push(argument)
+                    for parameter in source_parameters |parameter_names, source_work|:
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        return false if not proof_report_source_work_charge(sview_len(parameter.name), source_work)
+                        parameter_names.push(parameter.name)
+                    expected: Ast::Expr = proof_substitute_with_work_limit(requirements[attempt.source_call_requires_index], parameter_names, actuals, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    expected_cost: mutable usize = 0
+                    return false if not proof_replay_summary_expr_cost(expected, &expected_cost, source_work, 0)
+                    return false if not proof_report_source_work_charge(expected_cost, source_work)
+                    proof_replay_summary_expr_equal_with_limit(expected, attempt.goal, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                _:
+                    return false

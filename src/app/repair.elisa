@@ -165,7 +165,10 @@ def proof_push_json_repair_finding_with_work[@view](buffer: mutable darray[u8]&,
     return false if finding_index >= report.results.findings.count or goal_id >= report.results.goal_attempts.count
     finding: ProofFinding = report.results.findings[finding_index]
     return false if not proof_output_reserve_status_snapshot_work(work_used, 2)
-    status_source_admitted: bool = finding.has_goal and finding.goal_id == goal_id and proof_checked_view_goal_source_admissible(checked_view, goal_id) and proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)
+    return false if not proof_output_reserve_finding_status_comparison_work_with_work(work_used, finding.status)
+    status: (complete: bool, replayed: bool, goal_source_admitted: bool, facts_source_admitted: bool, source_admitted: bool, proven: bool, producer_claim: bool) = proof_checked_view_attempt_status_snapshot_with_work(checked_view, goal_id, work_used)
+    return false if not status.complete
+    status_source_admitted: bool = finding.has_goal and finding.goal_id == goal_id and status.source_admitted
     finding_status: sview = proof_output_finding_source_status(finding, status_source_admitted)
     counterexample_trusted: bool = finding.counterexample_found and finding_status == "disproved"
     if counterexample_trusted:
@@ -210,7 +213,7 @@ def proof_repair_strip_outer_parens(expression: Ast::Expr) -> (complete: bool, v
                 return (true, current)
     return (false, current)
 
-def proof_repair_check_candidate[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize, repair_state: darray[u8]&, script_text: darray[u8]&, context_prevalidated: bool) -> (usable: bool, admitted: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global{Read,Write}]:
+def proof_repair_check_candidate[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize, repair_state: darray[u8]&, script_text: darray[u8]&, context_prevalidated: bool, source_work: mutable usize&) -> (usable: bool, admitted: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global{Read,Write}]:
     report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     candidate_arena: mutable Arena = zeroed
     usable: mutable bool = false
@@ -241,7 +244,9 @@ def proof_repair_check_candidate[@view](checked_view: ProofCheckedView[view]& @v
                 candidate_scratch: mutable darray[ProofTacticJsonBranchScratch] @candidate_arena = []
                 candidate_tree: mutable ProofTacticJsonTree& @candidate_arena = proof_tactic_tree_in_arena(&candidate_arena)
                 candidate_annotations: mutable darray[Ast::EnumAnnotation] @candidate_arena = []
-                candidate_result: ProofTacticJsonResult = (proof_tactic_json_run_source(ElisaProofJson::from_result(parsed_candidate), ElisaProofJson::from_result(parsed_state), &candidate_annotations, candidate_state, candidate_tree, &candidate_scratch, checked_view, goal_id) can Global{Read,Write})
+                candidate_run: (result: ProofTacticJsonResult, source_admitted: bool) = (proof_tactic_json_run_source_with_target_work(ElisaProofJson::from_result(parsed_candidate), ElisaProofJson::from_result(parsed_state), &candidate_annotations, candidate_state, candidate_tree, &candidate_scratch, checked_view, goal_id, source_work) can Global{Read,Write})
+                usable <- candidate_run.source_admitted
+                candidate_result: ProofTacticJsonResult = candidate_run.result
                 admitted <- candidate_result.valid and candidate_result.solved and candidate_result.trace_replayed and candidate_result.kernel_trace_replayed and candidate_result.kernel_replayed and candidate_result.certificate_replayed
     (arena_free(&candidate_arena) can Global{Read,Write})
     return (usable, admitted)
@@ -320,8 +325,9 @@ def proof_repair_push_script_text(buffer: mutable darray[u8]&, report: ProofRepo
 # One goal's bounded search, shared by the single-goal and whole-file repair modes. It reports only
 # what was tried and which candidate the *checked engine* accepted; it never reaches a verdict of
 # its own. Rewrites are generated only from explicit equalities in this goal's own fact list.
-def proof_repair_search[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize) -> (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool, has_apply: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global{Read,Write}]:
-    return (false, 0, 0, false, "", 0, false, false, false) if not proof_checked_view_goal_source_admissible(checked_view, goal_id) or not proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)
+def proof_repair_search[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize, source_work: mutable usize&) -> (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool, has_apply: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global{Read,Write}]:
+    source_status: (complete: bool, replayed: bool, goal_source_admitted: bool, facts_source_admitted: bool, source_admitted: bool, proven: bool, producer_claim: bool) = proof_checked_view_attempt_status_snapshot_with_work(checked_view, goal_id, source_work)
+    return (false, 0, 0, false, "", 0, false, false, false) if not source_status.complete or not source_status.source_admitted
     report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     repair_state: mutable darray[u8] = []
     repair_goal: mutable Ast::Expr = Ast::Expr.Invalid
@@ -374,12 +380,12 @@ def proof_repair_search[@view](checked_view: ProofCheckedView[view]& @view, goal
         repair_store: Ast::Node.Store[Local] = Ast::Node.Store(repair_region)
         in repair_store:
             if repair_state.count > 0:
-                for candidate_index in 0..<base_candidates.count |candidate_index, base_candidates, repair_state, report, checked_view, repaired, searched, winning, goal_id, candidate_context_usable, candidate_context_prevalidated|:
+                for candidate_index in 0..<base_candidates.count |candidate_index, base_candidates, repair_state, report, checked_view, repaired, searched, winning, goal_id, candidate_context_usable, candidate_context_prevalidated, source_work|:
                     break if repaired or not candidate_context_usable
                     candidate: sview = base_candidates[candidate_index]
                     script_text: mutable darray[u8] = []
                     proof_repair_push_script_json(&script_text, goal_id, candidate)
-                    candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated) can Global{Read,Write})
+                    candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated, source_work) can Global{Read,Write})
                     if not candidate_check.usable:
                         exhaustive <- false
                         candidate_context_usable <- false
@@ -415,12 +421,12 @@ def proof_repair_search[@view](checked_view: ProofCheckedView[view]& @view, goal
                                     break
                                 relevant_apply_facts <- relevant_apply_facts + 1
                                 candidate_count <- candidate_count + apply_closers.count
-                                for closer_index in 0..<apply_closers.count |closer_index, fact_index, apply_closers, repair_state, report, checked_view, goal_id, repaired, searched, winning, winning_fact_index, has_apply, candidate_context_usable, candidate_context_prevalidated|:
+                                for closer_index in 0..<apply_closers.count |closer_index, fact_index, apply_closers, repair_state, report, checked_view, goal_id, repaired, searched, winning, winning_fact_index, has_apply, candidate_context_usable, candidate_context_prevalidated, source_work|:
                                     break if repaired or not candidate_context_usable
                                     closer: sview = apply_closers[closer_index]
                                     script_text: mutable darray[u8] = []
                                     proof_repair_push_indexed_apply_script_json(&script_text, goal_id, fact_index, closer)
-                                    candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated) can Global{Read,Write})
+                                    candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated, source_work) can Global{Read,Write})
                                     if not candidate_check.usable:
                                         exhaustive <- false
                                         candidate_context_usable <- false
@@ -461,12 +467,12 @@ def proof_repair_search[@view](checked_view: ProofCheckedView[view]& @view, goal
                                     reverse: bool = direction == 1
                                     continue if reverse and not right_to_left.changed
                                     continue if not reverse and not left_to_right.changed
-                                    for closer_index in 0..<rewrite_closers.count |closer_index, direction, reverse, fact_index, rewrite_closers, repair_state, report, checked_view, goal_id, repaired, searched, winning, winning_fact_index, winning_reverse, has_rewrite, exhaustive, candidate_context_usable, candidate_context_prevalidated|:
+                                    for closer_index in 0..<rewrite_closers.count |closer_index, direction, reverse, fact_index, rewrite_closers, repair_state, report, checked_view, goal_id, repaired, searched, winning, winning_fact_index, winning_reverse, has_rewrite, exhaustive, candidate_context_usable, candidate_context_prevalidated, source_work|:
                                         break if repaired or not candidate_context_usable
                                         closer: sview = rewrite_closers[closer_index]
                                         script_text: mutable darray[u8] = []
                                         proof_repair_push_indexed_script_json(&script_text, goal_id, fact_index, reverse, closer)
-                                        candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated) can Global{Read,Write})
+                                        candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated, source_work) can Global{Read,Write})
                                         if not candidate_check.usable:
                                             exhaustive <- false
                                             candidate_context_usable <- false

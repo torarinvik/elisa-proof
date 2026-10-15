@@ -1,0 +1,148 @@
+# Source admission snapshots derived from the parser-owned checked-view inputs.
+extend ElisaProof:
+    private:
+        def proof_source_analysis_report_admission_snapshot[@r](source: ProofSourceAnalysis[r]& @r, report: ProofReport&, import_failed: bool, semantic_errors: u32, replay_complete: bool, goal_finding_clear: mutable darray[bool]&, goal_finding_snapshot_ready: mutable bool&, source_work: mutable usize&) -> (complete: bool, failure: sview, source_checks_complete: bool, source_complete: bool, source_admissible: bool) can[Memory.Allocate]:
+            source_work_limit: usize = proof_replay_summary_source_work_limit()
+            return (true, "focused-source-identity", false, false, false) if report.context.focused_function != "" and not report.context.focused_function_identity_valid
+            return (false, "source-admission-work-limit", false, false, false) if:
+                not source.issued or source_work > source_work_limit
+                source.literal_ensure_inventory_work_limited
+            return (false, "source-admission-work-limit", false, false, false) if not source.source_struct_invariant_scan_complete
+            return (true, "unsupported-source-struct-invariant", false, false, false) if source.source_has_struct_invariants
+            return (true, "source-literal-ensure-inventory-incomplete", false, false, false) if not source.literal_ensure_inventory_complete
+            return (false, "source-admission-work-limit", false, false, false) if source.assert_by_inventory_work_limited
+            return (true, "source-assert-by-inventory-incomplete", false, false, false) if not source.assert_by_inventory_complete
+            # The API issues this snapshot only after
+            # `proof_source_analysis_report_structure_bound_failure` has completed the
+            # source loop-invariant and transfer censuses under this shared work counter.
+            # Do not repeat those full AST/report scans here.
+            if not proof_source_signature_contract_snapshot_matches(source, report, source_work):
+                return (false, "source-admission-work-limit", false, false, false) if source_work > source_work_limit
+                return (true, "signature-contract-source", false, false, false)
+            if not proof_source_local_region_annotations_snapshot_matches(source, report, source_work):
+                return (false, "source-admission-work-limit", false, false, false) if source_work > source_work_limit
+                return (true, "local-region-annotation-source", false, false, false)
+            if not proof_report_source_postcondition_inventory_consistent_with_work(report, source_work):
+                return (false, "source-admission-work-limit", false, false, false) if source_work > source_work_limit
+                return (true, "postcondition-inventory", false, false, false)
+
+            literal_inventory: mutable darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = []
+            assert_by_inventory: mutable darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = []
+            if report.context.focused_function != "":
+                for expected in source.literal_ensure_inventory |source, report, literal_inventory, source_work|:
+                    return (false, "source-admission-work-limit", false, false, false) if:
+                        not proof_source_analysis_charge_work(1, source_work)
+                        not proof_source_analysis_charge_work(sview_len(expected.name), source_work)
+                        not proof_source_analysis_charge_work(sview_len(report.context.focused_function), source_work)
+                    literal_inventory.push(expected) if expected.function_offset == report.context.focused_function_offset
+                for expected in source.assert_by_inventory |source, report, assert_by_inventory, source_work|:
+                    return (false, "source-admission-work-limit", false, false, false) if:
+                        not proof_source_analysis_charge_work(1, source_work)
+                        not proof_source_analysis_charge_work(sview_len(expected.name), source_work)
+                        not proof_source_analysis_charge_work(sview_len(report.context.focused_function), source_work)
+                    assert_by_inventory.push(expected) if expected.function_offset == report.context.focused_function_offset
+            else:
+                literal_inventory <- source.literal_ensure_inventory
+                assert_by_inventory <- source.assert_by_inventory
+
+            if not proof_source_literal_ensure_inventory_coverage_with_work(literal_inventory, report, true, source_work):
+                return (false, "source-admission-work-limit", false, false, false) if source_work > source_work_limit
+                failure: sview = "focused-source-obligations" if report.context.focused_function != "" else "source-literal-ensure-coverage"
+                return (true, failure, false, false, false)
+            if not proof_source_assert_by_coverage_inner(assert_by_inventory, report, true, source_work):
+                return (false, "source-admission-work-limit", false, false, false) if source_work > source_work_limit
+                failure: sview = "focused-source-obligations" if report.context.focused_function != "" else "source-assert-by-coverage"
+                return (true, failure, false, false, false)
+
+            semantic_admissible: mutable bool = not import_failed and semantic_errors == 0
+            if semantic_admissible:
+                # The same bounded scan computes report-level semantic admissibility and
+                # records the exact refutations used to build per-goal blocker status.
+                refutations: mutable darray[ProofGoalRefutation] = []
+                for finding_index in 0..<report.results.findings.count |finding_index, report, source_work, semantic_admissible, refutations|:
+                    return (false, "source-admission-work-limit", false, false, false) if not proof_source_analysis_charge_work(1, source_work)
+                    finding: ProofFinding = report.results.findings[finding_index]
+                    return (true, "source-goal-finding-link", false, false, false) if finding.has_goal and finding.goal_id >= report.results.goal_attempts.count
+                    refuting: bool = proof_report_goal_finding_is_refuting(finding.kind, source_work)
+                    return (false, "source-admission-work-limit", false, false, false) if source_work > source_work_limit
+                    if refuting:
+                        semantic_admissible <- false
+                        return (false, "source-admission-work-limit", false, false, false) if not proof_source_analysis_charge_work(1, source_work)
+                        refutations.push(ProofGoalRefutation{finding_index: finding_index})
+                finding_snapshot: (goal_finding_clear: darray[bool], complete: bool) = proof_report_source_goal_finding_snapshot_from_refutations(report, refutations, source_work, true)
+                return (false, "source-admission-work-limit", false, false, false) if not finding_snapshot.complete
+                goal_finding_clear <- finding_snapshot.goal_finding_clear
+                goal_finding_snapshot_ready <- true
+
+            source_checks_complete: mutable bool = semantic_admissible and report.results.failed == 0 and report.results.producer_proven_count == report.results.obligations
+            for attempt in report.results.goal_attempts |source_work, source_checks_complete|:
+                return (false, "source-admission-work-limit", false, false, false) if not proof_source_analysis_charge_work(1, source_work)
+                source_checks_complete <- false if not attempt.producer_proven
+            source_admissible: bool = semantic_admissible and replay_complete
+            (true, "", source_checks_complete, source_checks_complete and replay_complete, source_admissible)
+        def proof_source_analysis_goal_admission_snapshot[@r](source: ProofSourceAnalysis[r]& @r, report: ProofReport&, import_failed: bool, semantic_errors: u32, goal_finding_clear: mutable darray[bool]&, goal_finding_snapshot_ready: bool, source_work: mutable usize&) -> (statuses: darray[bool], complete: bool, claims_admissible: bool) can[Memory.Allocate]:
+            statuses: mutable darray[bool] = []
+            claims_admissible: mutable bool = true
+            complete: mutable bool = true
+            return (statuses, false, false) if report.context.focused_function != "" and not report.context.focused_function_identity_valid
+            return (statuses, false, false) if:
+                not source.issued or source_work > proof_replay_summary_source_work_limit() or source.literal_ensure_inventory_work_limited or source.assert_by_inventory_work_limited
+                not source.literal_ensure_inventory_complete or not source.assert_by_inventory_complete
+                not source.source_struct_invariant_scan_complete or source.source_has_struct_invariants
+            check_source_goals: bool = not import_failed and semantic_errors == 0
+            # If frontend admission already failed, every goal is rejected below. Finding and
+            # filtering source evidence cannot change that verdict, so keep this fail-closed path
+            # linear in the attempt count instead of rescanning the source inventories/findings.
+            if check_source_goals and not goal_finding_snapshot_ready:
+                goal_finding_snapshot: (goal_finding_clear: darray[bool], complete: bool) = proof_report_source_goal_finding_snapshot(report, source_work)
+                return (statuses, false, false) if not goal_finding_snapshot.complete
+                goal_finding_clear <- goal_finding_snapshot.goal_finding_clear
+            return (statuses, true, true) if report.results.goal_attempts.count == 0
+            return (statuses, false, false) if check_source_goals and goal_finding_clear.count != report.results.goal_attempts.count
+            literal_inventory: mutable darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = []
+            assert_by_inventory: mutable darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = []
+            postcondition_ast_inventory: mutable darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)] = []
+            if check_source_goals and report.context.focused_function != "":
+                for expected in source.literal_ensure_inventory |source, report, literal_inventory, source_work|:
+                    return (statuses, false, false) if not proof_source_analysis_charge_work(1, source_work)
+                    literal_inventory.push(expected) if expected.function_offset == report.context.focused_function_offset
+                for expected in source.assert_by_inventory |source, report, assert_by_inventory, source_work|:
+                    return (statuses, false, false) if not proof_source_analysis_charge_work(1, source_work)
+                    assert_by_inventory.push(expected) if expected.function_offset == report.context.focused_function_offset
+                for expected in source.postcondition_ast_inventory |source, report, postcondition_ast_inventory, source_work|:
+                    return (statuses, false, false) if not proof_source_analysis_charge_work(1, source_work)
+                    postcondition_ast_inventory.push(expected) if expected.function_offset == report.context.focused_function_offset
+            elif check_source_goals:
+                literal_inventory <- source.literal_ensure_inventory
+                assert_by_inventory <- source.assert_by_inventory
+                postcondition_ast_inventory <- source.postcondition_ast_inventory
+            needs_postcondition_index: mutable bool = false
+            if check_source_goals:
+                for obligation in report.results.obligation_inventory |needs_postcondition_index, source_work|:
+                    if not proof_source_analysis_charge_work(1, source_work):
+                        return (statuses, false, false)
+                    needs_postcondition_index <- true if obligation.source_kind == "postcondition" and obligation.attempts_count > 0
+            literal_index: mutable ProofSourceLiteralEnsureAdmissionIndex = ProofSourceLiteralEnsureAdmissionIndex{valid: true}
+            if needs_postcondition_index:
+                literal_index <- proof_source_literal_ensure_admission_index(literal_inventory, source_work)
+                return (statuses, false, false) if not literal_index.valid
+            postcondition_ast_index: mutable ProofSourcePostconditionAstIndex = ProofSourcePostconditionAstIndex{valid: true}
+            if needs_postcondition_index:
+                return (statuses, false, false) if source.postcondition_ast_inventory_work_limited or not source.postcondition_ast_inventory_complete
+                postcondition_ast_index <- proof_source_postcondition_ast_index_create(postcondition_ast_inventory, source_work)
+                return (statuses, false, false) if not postcondition_ast_index.valid
+            for goal_id in 0..<report.results.goal_attempts.count |goal_id, statuses, complete, claims_admissible, source_work, check_source_goals, source, report, literal_index, postcondition_ast_index, goal_finding_clear|:
+                if not proof_source_analysis_charge_work(1, source_work):
+                    complete <- false
+                    claims_admissible <- false
+                    break
+                admitted: bool = check_source_goals and source.postcondition_return_inventory_complete and proof_report_goal_source_admissible_after_structure_with_snapshots(report, source.postcondition_return_inventory, goal_id, literal_inventory, literal_index, postcondition_ast_index, assert_by_inventory, goal_finding_clear, source_work)
+                statuses.push(admitted)
+                claims_admissible <- false if report.results.goal_attempts[goal_id].producer_proven and not admitted
+                source_work_limit: usize = proof_replay_summary_source_work_limit()
+                if source_work > source_work_limit or source_work == source_work_limit and goal_id + 1 < report.results.goal_attempts.count:
+                    complete <- false
+                    claims_admissible <- false
+                    break
+            (statuses, complete, claims_admissible)
+

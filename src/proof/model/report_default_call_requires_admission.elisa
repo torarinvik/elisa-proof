@@ -1,0 +1,182 @@
+# Default expressions execute as part of an outer call, but the ordinary call checker
+# does not currently emit a source_call_requires event for calls nested in them. Until
+# those events have stable invocation/visit identities, admit only defaults whose calls
+# are uniquely resolved to local functions with no preconditions.
+extend ElisaProof:
+    private:
+        const PROOF_REPORT_DEFAULT_CALL_REQUIRES_DEPTH_LIMIT: usize = 64
+
+        # The shared call collector flattens some lexical scopes. Until it carries each
+        # scope's binders into resolution, defaults that combine calls with these forms
+        # cannot safely use declaration-name resolution. Unknown variants fail closed too.
+        def proof_report_default_call_requires_has_scoped_binders(expression: Ast::Expr, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPORT_DEFAULT_CALL_REQUIRES_DEPTH_LIMIT
+            return true if not proof_report_source_work_charge(1, work)
+            match expression:
+                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_report_default_call_requires_has_scoped_binders(callee, work, depth + 1)
+                    for argument in arguments |argument, work, depth|:
+                        return true if proof_report_default_call_requires_has_scoped_binders(argument, work, depth + 1)
+                    return false
+                Ast::Expr.StaticEffectCall(callee, _, _, arguments, _, _):
+                    return true if proof_report_default_call_requires_has_scoped_binders(callee, work, depth + 1)
+                    for argument in arguments |argument, work, depth|:
+                        return true if proof_report_default_call_requires_has_scoped_binders(argument, work, depth + 1)
+                    return false
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    return proof_report_default_call_requires_has_scoped_binders(inner, work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return true if proof_report_default_call_requires_has_scoped_binders(left, work, depth + 1)
+                    return proof_report_default_call_requires_has_scoped_binders(right, work, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    return proof_report_default_call_requires_has_scoped_binders(object, work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return true if proof_report_default_call_requires_has_scoped_binders(object, work, depth + 1)
+                    return true if proof_report_default_call_requires_has_scoped_binders(low, work, depth + 1)
+                    return proof_report_default_call_requires_has_scoped_binders(high, work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_report_default_call_requires_has_scoped_binders(object, work, depth + 1)
+                    for argument in arguments |argument, work, depth|:
+                        return true if proof_report_default_call_requires_has_scoped_binders(argument, work, depth + 1)
+                    return false
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |element, work, depth|:
+                        return true if proof_report_default_call_requires_has_scoped_binders(element, work, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |entry, work, depth|:
+                        return true if proof_report_default_call_requires_has_scoped_binders(entry.key, work, depth + 1)
+                        return true if proof_report_default_call_requires_has_scoped_binders(entry.value, work, depth + 1)
+                    return false
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return true if proof_report_default_call_requires_has_scoped_binders(type_expression, work, depth + 1)
+                    for field in fields |field, work, depth|:
+                        return true if proof_report_default_call_requires_has_scoped_binders(field.value, work, depth + 1)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_report_default_call_requires_has_scoped_binders(base, work, depth + 1)
+                    for field in fields |field, work, depth|:
+                        return true if proof_report_default_call_requires_has_scoped_binders(field.value, work, depth + 1)
+                    return false
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return true if proof_report_default_call_requires_has_scoped_binders(condition, work, depth + 1)
+                    return true if proof_report_default_call_requires_has_scoped_binders(then_expression, work, depth + 1)
+                    return proof_report_default_call_requires_has_scoped_binders(else_expression, work, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return true if proof_report_default_call_requires_has_scoped_binders(base, work, depth + 1)
+                    return proof_report_default_call_requires_has_scoped_binders(predicate, work, depth + 1)
+                Ast::Expr.Comprehension(_, _, _, _, _) | Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.Block(_, _, _, _) | Ast::Expr.Lambda(_, _, _):
+                    return true
+                _:
+                    return true
+
+        def proof_report_default_call_requires_safe(declarations: darray[Ast::Decl]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_exprs: darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            return false if signature_lines.count != signature_kinds.count or signature_lines.count != signature_exprs.count
+            return proof_report_default_call_requires_declarations(declarations, signature_lines, signature_kinds, signature_exprs, work, 0)
+
+        def proof_report_default_call_requires_declarations(declarations: darray[Ast::Decl]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_exprs: darray[Ast::Expr]&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPORT_DEFAULT_CALL_REQUIRES_DEPTH_LIMIT
+            for declaration in declarations |declaration, signature_lines, signature_kinds, signature_exprs, work, depth|:
+                return false if not proof_report_source_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Func(_, parameters, _, _, _, _, _):
+                        for parameter_index in 0..<parameters.count |parameter_index, parameters, declarations, signature_lines, signature_kinds, signature_exprs, work, depth|:
+                            parameter: Ast::ParamDecl = parameters[parameter_index]
+                            return false if not proof_report_source_work_charge(1, work)
+                            if parameter.has_default:
+                                cost: mutable usize = 0
+                                return false if not proof_replay_summary_expr_cost(parameter.default_value, &cost, work, 0)
+                                return false if not proof_report_source_work_charge(cost, work)
+                                names: mutable darray[sview] = []
+                                qualifiers: mutable darray[sview] = []
+                                sources: mutable darray[Ast::Expr] = []
+                                expressions: mutable darray[Ast::Expr] = []
+                                positions: mutable darray[Ast::Pos] = []
+                                return false if not proof_report_call_requires_collect_runtime_expression(parameter.default_value, &names, &qualifiers, &sources, &expressions, &positions, work, 0)
+                                return false if names.count != qualifiers.count or names.count != sources.count or names.count != expressions.count or names.count != positions.count
+                                if names.count > 0:
+                                    return false if proof_report_default_call_requires_has_scoped_binders(parameter.default_value, work, 0)
+                                for row in 0..<names.count |row, names, qualifiers, sources, expressions, positions, declarations, signature_lines, signature_kinds, signature_exprs, parameters, parameter_index, parameter, work|:
+                                    return false if not proof_report_source_work_charge(1, work)
+                                    # This slice deliberately supports direct positional local
+                                    # calls only. Other forms need the ordinary resolver's
+                                    # shadow/module/overload semantics before they can be safe.
+                                    match expressions[row]:
+                                        Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), arguments, argument_names, _):
+                                            return false if argument_names.count != 0 or names[row] != callee_name or qualifiers[row] != ""
+                                            # Defaults may refer to earlier formals. If one
+                                            # shadows the apparent callee, substitution turns
+                                            # this into an indirect call, so the global name
+                                            # lookup below cannot establish its contract.
+                                            for earlier_index in 0..<parameter_index |earlier_index, parameters, callee_name, work|:
+                                                earlier_name: sview = parameters[earlier_index].name
+                                                return false if not proof_report_source_work_charge(sview_len(earlier_name) + sview_len(callee_name) + 1, work)
+                                                return false if earlier_name == callee_name
+                                            # Nested expression scopes can add binders too.
+                                            # The shadow walk treats incomplete scopes as
+                                            # shadowed and is bounded by the same source meter.
+                                            return false if proof_replay_resource_call_shadow_name_in_expr(parameter.default_value, callee_name, work, 0)
+                                            return false if not proof_report_default_call_requires_target_safe(declarations, signature_lines, signature_kinds, signature_exprs, callee_name, arguments.count, work, 0)
+                                        _:
+                                            return false
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_report_default_call_requires_declarations(nested, signature_lines, signature_kinds, signature_exprs, work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+            true
+
+        def proof_report_default_call_requires_target_safe(declarations: darray[Ast::Decl]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_exprs: darray[Ast::Expr]&, wanted_name: sview, argument_count: usize, work: mutable usize&, depth: usize) -> bool:
+            parameters: mutable darray[Ast::ParamDecl] = []
+            body: mutable darray[Ast::Stmt] = []
+            exact_count: mutable usize = 0
+            name_count: mutable usize = 0
+            line_count: mutable usize = 0
+            has_import: mutable bool = false
+            target_nested: mutable bool = false
+            # A zero location selects by name, while the counters require one exact
+            # top-level source declaration and fail closed for same-name/module targets.
+            return false if not proof_report_call_requires_decl_find(declarations, wanted_name, 0, 0, &parameters, &body, &exact_count, &name_count, &line_count, &has_import, &target_nested, work, depth, false)
+            return false if exact_count != 0 or name_count != 1 or has_import or target_nested
+            # The existing resolver requires line and offset to identify the declaration.
+            # Resolve the unique row in a second source walk, retaining duplicate detection.
+            return proof_report_default_call_requires_unique_target(declarations, signature_lines, signature_kinds, signature_exprs, wanted_name, argument_count, work, 0, false)
+
+        def proof_report_default_call_requires_unique_target(declarations: darray[Ast::Decl]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_exprs: darray[Ast::Expr]&, wanted_name: sview, argument_count: usize, work: mutable usize&, depth: usize, nested_scope: bool) -> bool:
+            return false if depth >= PROOF_REPORT_DEFAULT_CALL_REQUIRES_DEPTH_LIMIT
+            matched: mutable usize = 0
+            safe: mutable bool = false
+            for declaration in declarations |declaration, signature_lines, signature_kinds, signature_exprs, wanted_name, argument_count, work, depth, matched, safe|:
+                return false if not proof_report_source_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, body, _, _, position):
+                        return false if not proof_report_source_work_charge(sview_len(name), work) or not proof_report_source_work_charge(sview_len(wanted_name), work)
+                        if name == wanted_name:
+                            matched <- matched + 1
+                            safe <- parameters.count == argument_count and not nested_scope
+                            for parameter in parameters |parameter, safe, work|:
+                                return false if not proof_report_source_work_charge(1, work)
+                                safe <- false if parameter.has_default
+                            for statement in body |statement, safe, work|:
+                                return false if not proof_report_source_work_charge(1, work)
+                                match statement:
+                                    Ast::Stmt.Contract(kind, _, _):
+                                        return false if not proof_report_source_work_charge(sview_len(kind), work)
+                                        safe <- false if kind == "requires"
+                                    _:
+                                        pass
+                            for row in 0..<signature_lines.count |row, signature_lines, signature_kinds, safe, position, work|:
+                                return false if not proof_report_source_work_charge(1, work)
+                                continue if signature_lines[row] != position.line
+                                return false if not proof_report_source_work_charge(sview_len(signature_kinds[row]), work)
+                                safe <- false if signature_kinds[row] == "requires"
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_report_default_call_requires_unique_target(nested, signature_lines, signature_kinds, signature_exprs, wanted_name, argument_count, work, depth + 1, true)
+                    Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _):
+                        return false if not proof_report_source_work_charge(1, work)
+                    _:
+                        pass
+            matched == 1 and safe

@@ -4,7 +4,7 @@ extend ElisaProofTheoremOutput:
             requires depth <= PROOF_THEOREM_OUTPUT_DEPTH_LIMIT
             decreases PROOF_THEOREM_OUTPUT_DEPTH_LIMIT - depth
             if depth >= PROOF_THEOREM_OUTPUT_DEPTH_LIMIT:
-                replay_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                replay_work <- ElisaProof::proof_replay_summary_source_work_limit() + 1
                 return false
             return false if not proof_suggestion_work_charge(replay_work, 1)
             match pattern:
@@ -15,7 +15,7 @@ extend ElisaProofTheoremOutput:
                     if parameter_index < theorem.parameters_count:
                         return false if parameter_index >= bound.count or parameter_index >= values.count
                         if bound[parameter_index]:
-                            return proof_replay_summary_expr_proof_equal_with_limit(values[parameter_index], target, &replay_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                            return proof_replay_summary_expr_proof_equal_with_limit(values[parameter_index], target, &replay_work, ElisaProof::proof_replay_summary_source_work_limit())
                         bound[parameter_index] <- true
                         values[parameter_index] <- target
                         return true
@@ -121,7 +121,7 @@ extend ElisaProofTheoremOutput:
                         _:
                             return false
                 _:
-                    return proof_replay_summary_expr_proof_equal_with_limit(pattern, target, &replay_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return proof_replay_summary_expr_proof_equal_with_limit(pattern, target, &replay_work, ElisaProof::proof_replay_summary_source_work_limit())
     public:
         def proof_push_json_suggestions_with_replayed[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, goal_id: usize, replay_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic, Global{Read,Write}]:
             report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
@@ -133,17 +133,16 @@ extend ElisaProofTheoremOutput:
             suggestions_complete: mutable bool = true
             theorem_admissions_complete: bool = proof_checked_view_theorem_source_admissions_complete(checked_view)
             suggestions_complete <- false if not theorem_admissions_complete
-            snapshot: (complete: bool, replayed_goals: darray[bool], source_admitted_goals: darray[bool]) = proof_output_checked_view_goal_statuses_with_work(checked_view, replay_work)
-            replayed_goals: darray[bool] = snapshot.replayed_goals
-            source_admitted_goals: darray[bool] = snapshot.source_admitted_goals
+            snapshot: (complete: bool, replayed_goals: darray[bool], source_admitted_goals: darray[bool], proven_goals: darray[bool]) = proof_output_checked_view_goal_statuses_with_work(checked_view, replay_work)
+            proven_goals: darray[bool] = snapshot.proven_goals
             goal_status_parts_complete: mutable bool = true
+            goal_status_parts: mutable (complete: bool, replayed: bool, goal_source_admitted: bool, facts_source_admitted: bool, source_admitted: bool, proven: bool, producer_claim: bool) = (true, false, false, false, false, false, false)
             if goal_id < report.results.goal_attempts.count:
-                # The snapshot stores only the combined status. Read each component separately
-                # here so the JSON fields preserve their distinct meanings.
-                goal_status_parts_complete <- proof_suggestion_work_charge(replay_work, 2)
+                goal_status_parts <- proof_checked_view_attempt_status_snapshot_with_work(checked_view, goal_id, replay_work)
+                goal_status_parts_complete <- goal_status_parts.complete
                 suggestions_complete <- false if not goal_status_parts_complete
-            goal_source_admissible: bool = goal_status_parts_complete and goal_id < report.results.goal_attempts.count and proof_checked_view_goal_source_admissible(checked_view, goal_id)
-            goal_facts_source_admissible: bool = goal_status_parts_complete and goal_id < report.results.goal_attempts.count and proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)
+            goal_source_admissible: bool = goal_status_parts_complete and goal_id < report.results.goal_attempts.count and goal_status_parts.goal_source_admitted
+            goal_facts_source_admissible: bool = goal_status_parts_complete and goal_id < report.results.goal_attempts.count and goal_status_parts.facts_source_admitted
             proof_push(buffer, "{\"format\":\"elisa-proof-suggestions-v1\",\"status\":")
             proof_push_json_string(buffer, "incomplete" if not snapshot.complete else ("ok" if goal_id < report.results.goal_attempts.count else "not_found"))
             proof_push(buffer, ",\"goal_status_snapshot_complete\":")
@@ -164,8 +163,8 @@ extend ElisaProofTheoremOutput:
             proof_push(buffer, "true" if goal_facts_source_admissible else "false")
             proof_push(buffer, ",\"goal_fingerprint\":")
             if snapshot.complete and goal_id < report.results.goal_attempts.count:
-                fingerprint: (valid: bool, value: u32) = proof_goal_fingerprint_with_limit(report, report.results.goal_attempts[goal_id], replay_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
-                suggestions_complete <- false if replay_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                fingerprint: (valid: bool, value: u32) = proof_goal_fingerprint_with_limit(report, report.results.goal_attempts[goal_id], replay_work, ElisaProof::proof_replay_summary_source_work_limit())
+                suggestions_complete <- false if replay_work > ElisaProof::proof_replay_summary_source_work_limit()
                 if fingerprint.valid:
                     proof_push(buffer, "{\"algorithm\":\"fnv1a32-kernel-goal-v2\",\"value\":")
                     proof_push_number(buffer, fingerprint.value)
@@ -187,7 +186,7 @@ extend ElisaProofTheoremOutput:
             if goal_id < report.results.goal_attempts.count and goal_source_admissible and goal_facts_source_admissible:
                 attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
                 valid_facts: bool = attempt.facts_start <= report.analysis_1.certificate_facts.count and attempt.facts_count <= report.analysis_1.certificate_facts.count - attempt.facts_start
-                for theorem_index in 0..<report.analysis_1.theorems.summaries.count |__suggestion_theorem_loop_unit = false, theorem_index, report, annotations, attempt, valid_facts, buffer, emitted, replayed_goals, source_admitted_goals, replay_work, fingerprint_source_work, fingerprint_identity_work, target_cost_cached, target_expression_cost, suggestions_complete| -> __suggestion_theorem_loop_unit:
+                for theorem_index in 0..<report.analysis_1.theorems.summaries.count |__suggestion_theorem_loop_unit = false, theorem_index, report, checked_view, annotations, attempt, valid_facts, buffer, emitted, proven_goals, replay_work, fingerprint_source_work, fingerprint_identity_work, target_cost_cached, target_expression_cost, suggestions_complete| -> __suggestion_theorem_loop_unit:
                     theorem: ProofTheoremSummary = report.analysis_1.theorems.summaries[theorem_index]
                     if not proof_suggestion_work_charge(replay_work, 1):
                         suggestions_complete <- false
@@ -195,8 +194,8 @@ extend ElisaProofTheoremOutput:
                     valid_parameters: bool = theorem.parameters_start <= report.analysis_1.theorems.parameters.count and theorem.parameters_count <= report.analysis_1.theorems.parameters.count - theorem.parameters_start and theorem.parameters_start <= report.analysis_1.theorems.parameter_types.count and theorem.parameters_count <= report.analysis_1.theorems.parameter_types.count - theorem.parameters_start and theorem.parameters_start <= report.analysis_1.theorems.parameter_has_defaults.count and theorem.parameters_count <= report.analysis_1.theorems.parameter_has_defaults.count - theorem.parameters_start and theorem.parameters_start <= report.analysis_1.theorems.parameter_defaults.count and theorem.parameters_count <= report.analysis_1.theorems.parameter_defaults.count - theorem.parameters_start
                     valid_requires: bool = theorem.requires_start <= report.analysis_1.theorems.requires.count and theorem.requires_count <= report.analysis_1.theorems.requires.count - theorem.requires_start
                     valid_ensures: bool = theorem.ensures_start <= report.analysis_1.theorems.ensures.count and theorem.ensures_count <= report.analysis_1.theorems.ensures.count - theorem.ensures_start
-                    theorem_source_status: (source_admissible: bool, declaration_identity_unambiguous: bool) = proof_checked_view_theorem_source_admission(checked_view, theorem_index)
-                    if theorem.verified and theorem_source_status.source_admissible and theorem_source_status.declaration_identity_unambiguous and not proof_theorem_has_replay_gap(checked_view, report, theorem, replayed_goals, source_admitted_goals, replay_work) and valid_parameters and valid_requires and valid_ensures and valid_facts and theorem.ensures_count > 0:
+                    theorem_source_status: (source_admissible: bool, declaration_identity_unambiguous: bool) = proof_checked_view_theorem_source_admission_with_work(checked_view, theorem_index, &replay_work)
+                    if theorem.verified and theorem_source_status.source_admissible and theorem_source_status.declaration_identity_unambiguous and not proof_theorem_has_replay_gap(checked_view, report, theorem, proven_goals, replay_work) and valid_parameters and valid_requires and valid_ensures and valid_facts and theorem.ensures_count > 0:
                         if not target_cost_cached:
                             target_cost_result: (complete: bool, cost: usize) = proof_suggestion_expr_cost_charge(attempt.goal, replay_work)
                             if not target_cost_result.complete:
@@ -224,7 +223,7 @@ extend ElisaProofTheoremOutput:
                                 suggestions_complete <- false
                                 break
                             matched: bool = proof_suggestion_match(conclusion, attempt.goal, report, theorem, &bound, &values, replay_work, 0)
-                            if replay_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                            if replay_work >= ElisaProof::proof_replay_summary_source_work_limit():
                                 suggestions_complete <- false
                                 break
                             all_bound: mutable bool = matched
@@ -234,13 +233,13 @@ extend ElisaProofTheoremOutput:
                                     default_expression: Ast::Expr = report.analysis_1.theorems.parameter_defaults[theorem.parameters_start + parameter_index]
                                     parameter_name_bytes: mutable usize = 0
                                     for formal_name in names |__suggestion_name_loop_unit = false, formal_name, parameter_name_bytes, replay_work, suggestions_complete| -> __suggestion_name_loop_unit:
-                                        if sview_len(formal_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - parameter_name_bytes:
+                                        if sview_len(formal_name) > ElisaProof::proof_replay_summary_source_work_limit() - parameter_name_bytes:
                                             suggestions_complete <- false
-                                            replay_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                            replay_work <- ElisaProof::proof_replay_summary_source_work_limit()
                                             break
                                         parameter_name_bytes <- parameter_name_bytes + sview_len(formal_name)
                                     default_safe: mutable bool = suggestions_complete and proof_suggestion_default_work_reserve(default_expression, target_expression_cost, theorem.parameters_count, parameter_name_bytes, replay_work)
-                                    if replay_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                    if replay_work >= ElisaProof::proof_replay_summary_source_work_limit():
                                         suggestions_complete <- false
                                         break
                                     default_safe <- not proof_expr_has_call(default_expression) and not proof_expr_has_old(default_expression) if default_safe
@@ -350,7 +349,7 @@ extend ElisaProofTheoremOutput:
                                 proof_push(buffer, ",\"applicable\":")
                                 proof_push(buffer, "true" if applicable and source_admissible and goal_source_admissible else "false")
                                 proof_push(buffer, "}")
-            suggestions_complete <- false if replay_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or solver_work >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or solver_preflight_work >= PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+            suggestions_complete <- false if replay_work >= ElisaProof::proof_replay_summary_source_work_limit() or solver_work >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or solver_preflight_work >= PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
             proof_push(buffer, "],\"suggestions_complete\":")
             proof_push(buffer, "true" if suggestions_complete else "false")
             proof_push(buffer, "}\n")

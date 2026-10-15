@@ -148,12 +148,12 @@ assert "text_status_snapshot_complete: bool =" in cli_source and "semantic_visib
 assert "proof_semantic_diagnostic_visible(" not in output_helpers and "proof_semantic_diagnostic_visible(" not in cli_source
 suggestion_body = theorem_suggestions.split("def proof_push_json_suggestions_with_replayed[", 1)[1]
 outer_theorem_loop = suggestion_body.split("for theorem_index in 0..<report.analysis_1.theorems.summaries.count", 1)[1].split("valid_parameters:", 1)[0]
-assert "proof_suggestion_work_charge(&replay_work, 1)" in outer_theorem_loop
-assert "proof_checked_view_theorem_source_admission(checked_view, theorem_index)" in suggestion_body
+assert "proof_suggestion_work_charge(replay_work, 1)" in outer_theorem_loop
+assert "proof_checked_view_theorem_source_admission_with_work(checked_view, theorem_index, &replay_work)" in suggestion_body
 assert "theorem_source_status.source_admissible and theorem_source_status.declaration_identity_unambiguous" in suggestion_body
 assert "proof_declaration_name_is_unique" not in suggestion_body
 assert "proof_checked_view_theorem_source_admissions_complete(checked_view)" in suggestion_body
-assert "goal_facts_source_admissible: bool = goal_status_parts_complete and goal_id < report.results.goal_attempts.count and proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)" in suggestion_body
+assert "goal_facts_source_admissible: bool = goal_status_parts_complete and goal_id < report.results.goal_attempts.count and goal_status_parts.facts_source_admitted" in suggestion_body
 assert 'proof_push(buffer, "true" if goal_facts_source_admissible else "false")' in suggestion_body
 assert "and goal_source_admissible and goal_facts_source_admissible:" in suggestion_body
 assert "if goal_id < report.results.goal_attempts.count and goal_source_admissible and goal_facts_source_admissible:" in suggestion_body
@@ -179,13 +179,13 @@ gap_index_find = (ROOT / "src/app/theorem_output.elisa").read_text(encoding="utf
 assert "for goal_id in 0..<attempt_count" in gap_index_build
 assert "attempt_count > limit or theorem_count > limit - attempt_count or declaration_count > limit - attempt_count - theorem_count" in gap_index_build
 assert "not proof_output_reserve_status_snapshot_work(work, 4 + sview_len(attempt.name))" in gap_index_build
-assert "replay_gap: bool = not proof_checked_view_attempt_had_producer_claim(checked_view, goal_id) or not replayed" in gap_index_build
+assert "replay_gap: bool = not status.producer_claim or not status.replayed" in gap_index_build
 assert "theorem_count: usize = report.analysis_1.theorems.summaries.count" in gap_index_build
 assert "declaration_count: usize = report.analysis_1.declaration_details.count" in gap_index_build
 assert "indexed_rows: usize = attempt_count + theorem_count + declaration_count" in gap_index_build
 assert "target_capacity: usize = indexed_rows * 2" in gap_index_build
-assert "proof_checked_view_attempt_status(checked_view, goal_id)" in gap_index_build
-assert "proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)" in gap_index_build
+assert "proof_checked_view_attempt_status_snapshot_with_work(checked_view, goal_id, work)" in gap_index_build
+assert "source_gap: bool = not status.source_admitted" in gap_index_build
 assert "index.replay_gaps[current] <- index.replay_gaps[current] or replay_gap" in gap_index_record
 assert "index.source_gaps[current] <- index.source_gaps[current] or source_gap" in gap_index_record
 assert "proof_output_text_equal_with_work(index.names[current], name, work)" in gap_index_record
@@ -589,7 +589,7 @@ assert "proof_goal_tactic_preflight_charge_scaled(&preflight_work, float_square_
 assert "proof_goal_tactic_preflight_charge_scaled(&preflight_work, shape_cost, 16)" in shared_float
 assert "proof_float_goal_with_work(facts, goal, operator_mask, &float_work, &float_exhausted)" in shared_float
 assert "proof_float_goal(facts, goal)" not in shared_float
-assert "proof_float_propositional_goal_with_shared_work(facts, goal, operator_mask, &preflight_work, PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT)" in shared_float
+assert "proof_float_propositional_goal_with_shared_work(facts, goal, operator_mask, preflight_work, PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT)" in shared_float
 goal_replay = kernel_resource_model.split("def proof_kernel_replay_goal_depth_remaining_with_work(", 1)[1]
 goal_root_gate = goal_replay.index("if not (proof_kernel_replay_unsigned_safe_closing_with_goal_work(nodes, children, goal_root")
 binary_solver = goal_replay.index("proof_kernel_replay_goal_binary_with_work(nodes, children, facts")

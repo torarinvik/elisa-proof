@@ -1,0 +1,363 @@
+# Source census and exact transfer binding for loop-control invariant goals.
+extend ElisaProof:
+    private:
+        const PROOF_SOURCE_LOOP_TRANSFER_DEPTH_LIMIT: usize = 64
+
+        struct ProofSourceLoopTransferExpectation:
+            owner_name: sview
+            owner_line: u32
+            owner_offset: u32
+            position: Ast::Pos
+            invariant: Ast::Expr
+            phase: u32 = 0
+
+        struct ProofSourceLoopTransferGroup:
+            key: ProofSourceLoopTransferExpectation
+            expected_clause_count: mutable usize
+            matched_attempt_count: mutable usize
+
+        struct ProofSourceLoopTransferIndex:
+            slot_heads: mutable darray[usize] = []
+            slot_hashes: mutable darray[u32] = []
+            next_groups: mutable darray[usize] = []
+            empty: usize = 0
+            valid: bool = false
+
+        def proof_source_loop_transfer_position_equal(left: Ast::Pos, right: Ast::Pos) -> bool:
+            left.line == right.line and left.column == right.column and left.offset == right.offset and left.end_line == right.end_line and left.end_column == right.end_column and left.end_offset == right.end_offset
+
+        def proof_source_loop_transfer_work(work: mutable usize&) -> bool:
+            proof_report_source_work_charge(1, work)
+
+        def proof_source_loop_transfer_key_equal(left: ProofSourceLoopTransferExpectation, right: ProofSourceLoopTransferExpectation, source_work: mutable usize&) -> bool:
+            return false if left.owner_line != right.owner_line or left.owner_offset != right.owner_offset
+            return false if not proof_source_loop_transfer_position_equal(left.position, right.position)
+            return false if left.phase != right.phase
+            return false if not proof_report_source_work_charge(sview_len(left.owner_name), source_work)
+            return false if not proof_report_source_work_charge(sview_len(right.owner_name), source_work)
+            return false if left.owner_name != right.owner_name
+            equal: bool = proof_replay_summary_expr_equal_with_limit(left.invariant, right.invariant, source_work, proof_replay_summary_source_work_limit())
+            return false if not equal and source_work >= proof_replay_summary_source_work_limit()
+            equal
+
+        # The expression shape only filters candidates. Full owner/span/expression equality below
+        # remains authoritative, so hash collisions cannot admit a source obligation.
+        def proof_source_loop_transfer_key_hash(key: ProofSourceLoopTransferExpectation, source_work: mutable usize&) -> (complete: bool, hash: u32):
+            return (false, 0) if not proof_report_source_work_charge(sview_len(key.owner_name), source_work)
+            return (false, 0) if not proof_report_source_work_charge(10, source_work)
+            hash: mutable u32 = proof_expr_shape_mix(ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS.u32(), proof_name_hash(key.owner_name).i64())
+            hash <- proof_expr_shape_mix(hash, key.owner_line.i64())
+            hash <- proof_expr_shape_mix(hash, key.owner_offset.i64())
+            hash <- proof_expr_shape_mix(hash, key.position.line.i64())
+            hash <- proof_expr_shape_mix(hash, key.position.column.i64())
+            hash <- proof_expr_shape_mix(hash, key.position.offset.i64())
+            hash <- proof_expr_shape_mix(hash, key.position.end_line.i64())
+            hash <- proof_expr_shape_mix(hash, key.position.end_column.i64())
+            hash <- proof_expr_shape_mix(hash, key.position.end_offset.i64())
+            hash <- proof_expr_shape_mix(hash, key.phase.i64())
+            invariant_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(key.invariant, &invariant_cost, source_work, proof_replay_summary_source_work_limit()):
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, 0)
+            remaining: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            if invariant_cost > remaining / 2:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, 0)
+            source_work <- source_work + invariant_cost * 2
+            hash <- proof_expr_shape_mix(hash, proof_expr_shape_hash(key.invariant, 0).i64())
+            (true, hash)
+
+        def proof_source_loop_transfer_index_create(expected_count: usize, source_work: mutable usize&) -> ProofSourceLoopTransferIndex can[Memory.Allocate]:
+            empty_index: mutable ProofSourceLoopTransferIndex = ProofSourceLoopTransferIndex{valid: true, empty: expected_count}
+            return empty_index if expected_count == 0
+            if expected_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return ProofSourceLoopTransferIndex{}
+            capacity: mutable usize = 1
+            target_capacity: usize = expected_count * 2
+            while capacity < target_capacity |capacity, target_capacity, source_work|:
+                return ProofSourceLoopTransferIndex{} if not proof_source_loop_transfer_work(source_work)
+                capacity <- capacity * 2
+            if capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return ProofSourceLoopTransferIndex{}
+            return ProofSourceLoopTransferIndex{} if:
+                not proof_report_source_work_charge(capacity, source_work)
+                not proof_report_source_work_charge(capacity, source_work)
+                not proof_report_source_work_charge(expected_count, source_work)
+            index: mutable ProofSourceLoopTransferIndex = ProofSourceLoopTransferIndex{valid: true, empty: expected_count}
+            index.slot_heads.resize(capacity)
+            index.slot_hashes.resize(capacity)
+            index.next_groups.resize(expected_count)
+            for slot in 0..<capacity |slot, index, capacity, source_work|:
+                return ProofSourceLoopTransferIndex{} if not proof_source_loop_transfer_work(source_work)
+                index.slot_heads[slot] <- expected_count
+            for group_id in 0..<expected_count |group_id, index, expected_count, source_work|:
+                return ProofSourceLoopTransferIndex{} if not proof_source_loop_transfer_work(source_work)
+                index.next_groups[group_id] <- expected_count
+            index
+
+        def proof_source_loop_transfer_index_insert(index: mutable ProofSourceLoopTransferIndex&, groups: mutable darray[ProofSourceLoopTransferGroup]&, key: ProofSourceLoopTransferExpectation, source_work: mutable usize&) -> bool:
+            capacity: usize = index.slot_heads.count
+            return false if not index.valid or index.slot_hashes.count != capacity or index.empty != index.next_groups.count
+            return false if capacity == 0 or groups.count >= index.empty
+            hashed: (complete: bool, hash: u32) = proof_source_loop_transfer_key_hash(key, source_work)
+            return false if not hashed.complete
+            slot: mutable usize = (hashed.hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hashed, index, groups, key, capacity, source_work|:
+                return false if not proof_source_loop_transfer_work(source_work)
+                head: usize = index.slot_heads[slot]
+                if head == index.empty:
+                    group_id: usize = groups.count
+                    return false if group_id >= index.next_groups.count
+                    groups.push(ProofSourceLoopTransferGroup{key: key, expected_clause_count: 1, matched_attempt_count: 0})
+                    index.next_groups[group_id] <- index.empty
+                    index.slot_heads[slot] <- group_id
+                    index.slot_hashes[slot] <- hashed.hash
+                    return true
+                return false if head >= groups.count
+                if index.slot_hashes[slot] == hashed.hash:
+                    group_id: mutable usize = head
+                    chain_length: mutable usize = 0
+                    while group_id != index.empty and chain_length <= PROOF_NAME_INDEX_MAX_CLUSTER |group_id, chain_length, index, groups, key, source_work|:
+                        return false if group_id >= groups.count or group_id >= index.next_groups.count
+                        return false if not proof_source_loop_transfer_work(source_work)
+                        equal: bool = proof_source_loop_transfer_key_equal(key, groups[group_id].key, source_work)
+                        return false if not equal and source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        if equal:
+                            return false if groups[group_id].expected_clause_count >= index.empty
+                            groups[group_id].expected_clause_count <- groups[group_id].expected_clause_count + 1
+                            return true
+                        group_id <- index.next_groups[group_id]
+                        chain_length <- chain_length + 1
+                    return false if chain_length >= PROOF_NAME_INDEX_MAX_CLUSTER
+                    new_group: usize = groups.count
+                    return false if new_group >= index.next_groups.count
+                    groups.push(ProofSourceLoopTransferGroup{key: key, expected_clause_count: 1, matched_attempt_count: 0})
+                    index.next_groups[new_group] <- head
+                    index.slot_heads[slot] <- new_group
+                    return true
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return false
+
+        def proof_source_loop_transfer_index_find(index: ProofSourceLoopTransferIndex, groups: darray[ProofSourceLoopTransferGroup]&, key: ProofSourceLoopTransferExpectation, source_work: mutable usize&) -> (complete: bool, found: bool, group_id: usize):
+            return (false, false, index.empty) if not index.valid or index.slot_heads.count != index.slot_hashes.count or index.empty != index.next_groups.count
+            return (true, false, index.empty) if index.slot_heads.count == 0
+            hashed: (complete: bool, hash: u32) = proof_source_loop_transfer_key_hash(key, source_work)
+            return (false, false, index.empty) if not hashed.complete
+            capacity: usize = index.slot_heads.count
+            slot: mutable usize = (hashed.hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hashed, index, groups, key, capacity, source_work|:
+                return (false, false, index.empty) if not proof_source_loop_transfer_work(source_work)
+                head: usize = index.slot_heads[slot]
+                return (true, false, index.empty) if head == index.empty
+                return (false, false, index.empty) if head >= groups.count
+                if index.slot_hashes[slot] == hashed.hash:
+                    group_id: mutable usize = head
+                    chain_length: mutable usize = 0
+                    found_group: mutable usize = index.empty
+                    while group_id != index.empty and chain_length <= PROOF_NAME_INDEX_MAX_CLUSTER |group_id, chain_length, index, groups, key, found_group, source_work|:
+                        return (false, false, index.empty) if group_id >= groups.count or group_id >= index.next_groups.count
+                        return (false, false, index.empty) if not proof_source_loop_transfer_work(source_work)
+                        equal: bool = proof_source_loop_transfer_key_equal(key, groups[group_id].key, source_work)
+                        return (false, false, index.empty) if not equal and source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        if equal:
+                            return (false, false, index.empty) if found_group != index.empty
+                            found_group <- group_id
+                        group_id <- index.next_groups[group_id]
+                        chain_length <- chain_length + 1
+                    return (false, false, index.empty) if chain_length > PROOF_NAME_INDEX_MAX_CLUSTER
+                    return (true, true, found_group) if found_group != index.empty
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false, index.empty)
+
+        def proof_source_loop_transfer_collect_loop_body(body: darray[Ast::Stmt]&, owner_name: sview, owner_position: Ast::Pos, report: ProofReport&, active_loop_body: darray[Ast::Stmt]&, expected: mutable darray[ProofSourceLoopTransferExpectation]&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_LOOP_TRANSFER_DEPTH_LIMIT
+            for statement in body |statement, body, owner_name, owner_position, report, active_loop_body, expected, work, depth|:
+                return false if not proof_source_loop_transfer_work(work)
+                match statement:
+                    Ast::Stmt.While(condition, nested, position) | Ast::Stmt.For(_, _, condition, nested, position):
+                        return false if not proof_source_loop_transfer_collect_expression(condition, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                        return false if not proof_source_loop_transfer_collect_loop_body(nested, owner_name, owner_position, report, nested, expected, work, depth + 1)
+                    Ast::Stmt.Block(kind, _, _, nested, _):
+                        return false if kind != "assert_by" and not proof_source_loop_transfer_collect_loop_body(nested, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return false if not proof_source_loop_transfer_collect_expression(condition, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                        return false if not proof_source_loop_transfer_collect_loop_body(then_body, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                        return false if not proof_source_loop_transfer_collect_loop_body(else_body, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return false if not proof_source_loop_transfer_collect_expression(scrutinee, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                        for arm in arms |arm, owner_name, owner_position, report, active_loop_body, expected, work, depth|:
+                            return false if not proof_source_loop_transfer_work(work)
+                            return false if not proof_source_loop_transfer_collect_expression(arm.guard, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                            return false if not proof_source_loop_transfer_collect_loop_body(arm.body, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    Ast::Stmt.Break(label, position):
+                        return false if label != ""
+                        return false if not proof_source_loop_transfer_collect_site(position, owner_name, owner_position, active_loop_body, expected, work)
+                    Ast::Stmt.Continue(label, position):
+                        return false if label != ""
+                        return false if not proof_source_loop_transfer_collect_site(position, owner_name, owner_position, active_loop_body, expected, work)
+                    Ast::Stmt.Return(expression, _) | Ast::Stmt.Expr(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                        return false if not proof_source_loop_transfer_collect_expression(expression, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    Ast::Stmt.VarDecl(_, type_expression, initializer, _):
+                        return false if not proof_source_loop_transfer_collect_expression(type_expression, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                        return false if not proof_source_loop_transfer_collect_expression(initializer, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        return false if not proof_source_loop_transfer_collect_expression(target, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                        return false if not proof_source_loop_transfer_collect_expression(initializer, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    Ast::Stmt.Invalid:
+                        return false
+                    _:
+                        return false
+                flow: (complete: bool, may_fallthrough: bool) = proof_source_loop_statement_flow(statement, report.source.source_annotations, work, depth + 1)
+                return false if not flow.complete
+                break if not flow.may_fallthrough
+            return true
+
+        def proof_source_loop_transfer_collect_site(position: Ast::Pos, owner_name: sview, owner_position: Ast::Pos, active_loop_body: darray[Ast::Stmt]&, expected: mutable darray[ProofSourceLoopTransferExpectation]&, work: mutable usize&) -> bool:
+            return true if active_loop_body.count == 0
+            for clause in active_loop_body |clause, position, owner_name, owner_position, expected, work|:
+                return false if not proof_source_loop_transfer_work(work)
+                match clause:
+                    Ast::Stmt.Contract(kind, invariant, _):
+                        if kind == "invariant":
+                            return false if:
+                                expected.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                not proof_report_source_work_charge(sview_len(kind), work)
+                                not proof_report_source_work_charge(sview_len(owner_name), work)
+                                not proof_source_loop_transfer_work(work)
+                            expected.push(ProofSourceLoopTransferExpectation{owner_name: owner_name, owner_line: owner_position.line, owner_offset: owner_position.offset, position: position, invariant: invariant})
+                    _:
+                        pass
+            return true
+
+        def proof_source_loop_transfer_collect_expression(expression: Ast::Expr, owner_name: sview, owner_position: Ast::Pos, report: ProofReport&, active_loop_body: darray[Ast::Stmt]&, expected: mutable darray[ProofSourceLoopTransferExpectation]&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_LOOP_TRANSFER_DEPTH_LIMIT or not proof_source_loop_transfer_work(work)
+            match expression:
+                Ast::Expr.Block(statements, value, _, _):
+                    return false if not proof_source_loop_transfer_collect_loop_body(statements, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    return false if not proof_source_loop_transfer_collect_expression(value, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _) | Ast::Expr.Unary(_, inner, _):
+                    return false if not proof_source_loop_transfer_collect_expression(inner, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_source_loop_transfer_collect_expression(callee, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    for argument in arguments |argument, owner_name, owner_position, report, active_loop_body, expected, work, depth|:
+                        return false if not proof_source_loop_transfer_collect_expression(argument, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.Index(object, index, _) | Ast::Expr.Binary(object, _, index, _):
+                    return false if not proof_source_loop_transfer_collect_expression(object, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    return false if not proof_source_loop_transfer_collect_expression(index, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_source_loop_transfer_collect_expression(object, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    return false if not proof_source_loop_transfer_collect_expression(low, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    return false if not proof_source_loop_transfer_collect_expression(high, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_source_loop_transfer_collect_expression(object, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    for argument in arguments |argument, owner_name, owner_position, report, active_loop_body, expected, work, depth|:
+                        return false if not proof_source_loop_transfer_collect_expression(argument, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |element, owner_name, owner_position, report, active_loop_body, expected, work, depth|:
+                        return false if not proof_source_loop_transfer_collect_expression(element, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |entry, owner_name, owner_position, report, active_loop_body, expected, work, depth|:
+                        return false if not proof_source_loop_transfer_collect_expression(entry.key, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                        return false if not proof_source_loop_transfer_collect_expression(entry.value, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.Construct(type_expression, fields, _) | Ast::Expr.RecordUpdate(type_expression, fields, _):
+                    return false if not proof_source_loop_transfer_collect_expression(type_expression, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    for field in fields |field, owner_name, owner_position, report, active_loop_body, expected, work, depth|:
+                        return false if not proof_source_loop_transfer_collect_expression(field.value, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return false if not proof_source_loop_transfer_collect_expression(condition, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    return false if not proof_source_loop_transfer_collect_expression(then_value, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    return false if not proof_source_loop_transfer_collect_expression(else_value, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                    return false if not proof_source_loop_transfer_collect_expression(scrutinee, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    for arm in arms |arm, owner_name, owner_position, report, active_loop_body, expected, work, depth|:
+                        return false if not proof_source_loop_transfer_collect_expression(arm.guard, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                        return false if not proof_source_loop_transfer_collect_loop_body(arm.body, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return false if not proof_source_loop_transfer_collect_expression(iterable, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    return false if not proof_source_loop_transfer_collect_expression(condition, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    return false if not proof_source_loop_transfer_collect_expression(body, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_source_loop_transfer_collect_expression(base, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    return false if not proof_source_loop_transfer_collect_expression(predicate, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.GetElse(base, recovery, _):
+                    return false if not proof_source_loop_transfer_collect_expression(base, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    return false if not proof_source_loop_transfer_collect_loop_body(recovery, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.Lambda(_, body, _):
+                    no_loop: darray[Ast::Stmt] = []
+                    return false if not proof_source_loop_transfer_collect_loop_body(body, owner_name, owner_position, report, no_loop, expected, work, depth + 1)
+                Ast::Expr.StaticEffectCall(effect_type, _, candidates, arguments, _, _):
+                    return false if not proof_source_loop_transfer_collect_expression(effect_type, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    for candidate in candidates |candidate, owner_name, owner_position, report, active_loop_body, expected, work, depth|:
+                        return false if not proof_source_loop_transfer_work(work)
+                        return false if not proof_source_loop_transfer_collect_expression(candidate.effect_type, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                        for capture in candidate.captures |capture, owner_name, owner_position, report, active_loop_body, expected, work, depth|:
+                            return false if not proof_source_loop_transfer_work(work)
+                            return false if not proof_source_loop_transfer_collect_expression(capture, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                    for argument in arguments |argument, owner_name, owner_position, report, active_loop_body, expected, work, depth|:
+                        return false if not proof_source_loop_transfer_collect_expression(argument, owner_name, owner_position, report, active_loop_body, expected, work, depth + 1)
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                _:
+                    return false
+            return true
+
+        def proof_source_loop_transfer_collect_declarations(declarations: darray[Ast::Decl]&, report: ProofReport&, expected: mutable darray[ProofSourceLoopTransferExpectation]&, work: mutable usize&, depth: usize, focused: bool, focused_offset: u32) -> bool:
+            return false if depth >= PROOF_SOURCE_LOOP_TRANSFER_DEPTH_LIMIT
+            for declaration in declarations |declaration, report, expected, work, depth|:
+                return false if not proof_source_loop_transfer_work(work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        return false if not proof_report_source_work_charge(sview_len(name), work)
+                        no_loop: darray[Ast::Stmt] = []
+                        continue if focused and position.offset != focused_offset
+                        return false if not proof_source_loop_transfer_collect_loop_body(body, name, position, report, no_loop, expected, work, depth + 1)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_loop_transfer_collect_declarations(nested, report, expected, work, depth + 1, focused, focused_offset)
+                    Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Import(_, _):
+                        pass
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
+            return true
+
+        def proof_source_loop_transfer_attempt_admitted(report: ProofReport&, goal_id: usize, source_work: mutable usize&) -> bool:
+            return false if goal_id >= report.results.goal_attempts.count
+            attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
+            # Whole-report source snapshots run `proof_source_loop_transfer_source_coverage`
+            # before per-attempt admission. Keep this local predicate constant-time; repeating
+            # the full AST census once for every transfer would turn a linear census into O(T*A).
+            transfer: Ast::Pos = attempt.loop_transfer_position
+            return false if attempt.source_phase != "loop-invariant-transfer" or attempt.rule != "goal"
+            transfer.line == attempt.line and transfer.offset > 0 and transfer.end_offset > transfer.offset and transfer.end_line == transfer.line
+
+        def proof_source_loop_transfer_source_coverage(report: ProofReport&, source_work: mutable usize&) -> bool:
+            expected: mutable darray[ProofSourceLoopTransferExpectation] = []
+            return false if not proof_source_loop_transfer_collect_declarations(report.source.source_declarations, report, &expected, source_work, 0, report.context.focused_function != "", report.context.focused_function_offset)
+            index: mutable ProofSourceLoopTransferIndex = proof_source_loop_transfer_index_create(expected.count, source_work)
+            return false if not index.valid
+            groups: mutable darray[ProofSourceLoopTransferGroup] = []
+            for expected_row in expected |expected_row, index, groups, source_work|:
+                return false if not proof_source_loop_transfer_index_insert(&index, &groups, expected_row, source_work)
+            for attempt_id in 0..<report.results.goal_attempts.count |attempt_id, report, index, groups, source_work|:
+                return false if not proof_source_loop_transfer_work(source_work)
+                attempt: ProofGoalAttempt = report.results.goal_attempts[attempt_id]
+                continue if attempt.source_phase != "loop-invariant-transfer"
+                return false if attempt.rule != "goal"
+                attempt_key: ProofSourceLoopTransferExpectation = ProofSourceLoopTransferExpectation{owner_name: attempt.name, owner_line: attempt.owner_function_line, owner_offset: attempt.owner_function_offset, position: attempt.loop_transfer_position, invariant: attempt.goal}
+                match_result: (complete: bool, found: bool, group_id: usize) = proof_source_loop_transfer_index_find(index, groups, attempt_key, source_work)
+                return false if not match_result.complete or not match_result.found or match_result.group_id >= groups.count
+                return false if groups[match_result.group_id].matched_attempt_count >= groups[match_result.group_id].expected_clause_count
+                groups[match_result.group_id].matched_attempt_count <- groups[match_result.group_id].matched_attempt_count + 1
+            for group in groups |group, source_work|:
+                return false if not proof_source_loop_transfer_work(source_work)
+                return false if group.matched_attempt_count != group.expected_clause_count
+            return true

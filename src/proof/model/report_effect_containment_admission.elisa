@@ -1,0 +1,193 @@
+# Independently enumerate function declarations with explicit effect rows (including `can[]`) and
+# reconcile them against the producer's effect-containment attempts.
+extend ElisaProof:
+    private:
+        const PROOF_SOURCE_EFFECT_CONTAINMENT_DEPTH_LIMIT: usize = 64
+
+        def proof_source_effect_containment_expected(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, effect_row_markers: ProofFunctionEffectRowMarkerIndex, expected: mutable darray[(name: sview, line: u32, offset: u32)]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= PROOF_SOURCE_EFFECT_CONTAINMENT_DEPTH_LIMIT
+            for declaration in declarations |declaration, expected, source_work, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, effects, _, position):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        explicit_empty: bool = false
+                        if effects.count == 0:
+                            marker: (complete: bool, present: bool) = proof_function_effect_row_marker_index_lookup(effect_row_markers, annotations, name, position.line, position.offset, source_work)
+                            return false if not marker.complete
+                            explicit_empty <- marker.present
+                        continue if effects.count == 0 and not explicit_empty
+                        # Source offsets are zero-based, so a first declaration may start at 0.
+                        return false if position.line == 0
+                        expected.push((name, position.line, position.offset))
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_effect_containment_expected(nested, annotations, effect_row_markers, expected, source_work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+            true
+
+        def proof_source_effect_containment_text_equal(left: sview, right: sview, source_work: mutable usize&) -> bool:
+            return false if not proof_report_source_work_charge(sview_len(left), source_work)
+            return false if not proof_report_source_work_charge(sview_len(right), source_work)
+            left == right
+
+        def proof_source_effect_containment_key_hash(name: sview, line: u32, offset: u32) -> u32:
+            proof_expr_shape_mix(proof_expr_shape_mix(proof_name_hash(name), line.i64()), offset.i64())
+
+        def proof_source_effect_containment_expected_index_build(expected: darray[(name: sview, line: u32, offset: u32)]&, hashes: mutable darray[u32]&, values: mutable darray[usize]&, counts: mutable darray[usize]&, source_work: mutable usize&) -> bool:
+            count: usize = expected.count
+            capacity: usize = proof_name_index_capacity(count)
+            return false if count > 0 and capacity == 0
+            return false if capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3
+            return false if not proof_report_source_work_charge(capacity * 3, source_work)
+            hashes.resize(capacity)
+            values.resize(capacity)
+            counts.resize(capacity)
+            for slot in 0..<capacity |slot, values, counts, count|:
+                values[slot] <- count
+                counts[slot] <- 0
+            for row_index in 0..<count |row_index, expected, hashes, values, counts, source_work, count, capacity|:
+                row: (name: sview, line: u32, offset: u32) = expected[row_index]
+                return false if not proof_report_source_work_charge(sview_len(row.name), source_work)
+                hash: u32 = proof_source_effect_containment_key_hash(row.name, row.line, row.offset)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, row_index, expected, hashes, values, counts, source_work, count, capacity, placed|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    current: usize = values[slot]
+                    if current == count:
+                        hashes[slot] <- hash
+                        values[slot] <- row_index
+                        counts[slot] <- 1
+                        placed <- true
+                        break
+                    return false if current > count
+                    if hashes[slot] == hash:
+                        prior: (name: sview, line: u32, offset: u32) = expected[current]
+                        return false if not proof_report_source_work_charge(sview_len(prior.name), source_work) or not proof_report_source_work_charge(sview_len(row.name), source_work)
+                        if prior.name == row.name and prior.line == row.line and prior.offset == row.offset:
+                            counts[slot] <- counts[slot] + 1
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            true
+
+        def proof_source_effect_containment_expected_lookup(name: sview, line: u32, offset: u32, expected: darray[(name: sview, line: u32, offset: u32)]&, hashes: darray[u32]&, values: darray[usize]&, counts: darray[usize]&, source_work: mutable usize&) -> (complete: bool, count: usize, row: usize):
+            capacity: usize = hashes.count
+            return (false, 0, expected.count) if capacity != values.count or capacity != counts.count
+            return (true, 0, expected.count) if capacity == 0 and expected.count == 0
+            return (false, 0, expected.count) if capacity != proof_name_index_capacity(expected.count)
+            return (false, 0, expected.count) if not proof_report_source_work_charge(sview_len(name), source_work)
+            hash: u32 = proof_source_effect_containment_key_hash(name, line, offset)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, name, line, offset, expected, hashes, values, counts, source_work, capacity|:
+                return (false, 0, expected.count) if not proof_report_source_work_charge(1, source_work)
+                row_index: usize = values[slot]
+                return (true, 0, expected.count) if row_index == expected.count
+                return (false, 0, expected.count) if row_index > expected.count or counts[slot] == 0
+                if hashes[slot] == hash:
+                    row: (name: sview, line: u32, offset: u32) = expected[row_index]
+                    return (false, 0, expected.count) if not proof_report_source_work_charge(sview_len(row.name), source_work)
+                    if row.name == name and row.line == line and row.offset == offset:
+                        return (true, counts[slot], row_index)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, 0, expected.count)
+
+        def proof_source_effect_containment_coverage(declarations: darray[Ast::Decl]&, report: ProofReport&, source_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            expected: mutable darray[(name: sview, line: u32, offset: u32)] = []
+            effect_row_markers: ProofFunctionEffectRowMarkerIndex = proof_function_effect_row_marker_index_build(report.source.source_annotations, source_work)
+            return false if not effect_row_markers.valid or not proof_source_effect_containment_expected(declarations, report.source.source_annotations, effect_row_markers, &expected, source_work, 0)
+            expected_hashes: mutable darray[u32] = []
+            expected_values: mutable darray[usize] = []
+            expected_counts: mutable darray[usize] = []
+            return false if not proof_source_effect_containment_expected_index_build(expected, &expected_hashes, &expected_values, &expected_counts, source_work)
+            matched: mutable darray[bool] = []
+            for _ in 0..<expected.count |matched, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                matched.push(false)
+            for attempt in report.results.goal_attempts |attempt, expected, expected_hashes, expected_values, expected_counts, matched, report, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                return false if not proof_report_source_work_charge(sview_len(attempt.rule), source_work)
+                continue if attempt.rule != "effect-containment"
+                lookup: (complete: bool, count: usize, row: usize) = proof_source_effect_containment_expected_lookup(attempt.name, attempt.owner_function_line, attempt.owner_function_offset, expected, expected_hashes, expected_values, expected_counts, source_work)
+                return false if not lookup.complete or lookup.count != 1 or lookup.row >= expected.count or matched[lookup.row]
+                row: (name: sview, line: u32, offset: u32) = expected[lookup.row]
+                return false if attempt.line != row.line
+                return false if not attempt.producer_proven or not attempt.has_certificate or attempt.certificate_index >= report.analysis_1.certificates.count
+                certificate: ProofGoalCertificate = report.analysis_1.certificates[attempt.certificate_index]
+                return false if not proof_report_source_work_charge(sview_len(certificate.rule), source_work)
+                return false if certificate.rule != "effect-containment" or not certificate.replayed or certificate.kernel_goal != attempt.kernel_goal
+                return false if not proof_source_effect_containment_text_equal(certificate.name, row.name, source_work)
+                return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or certificate.line != row.line
+                return false if not proof_replay_summary_expr_equal_with_limit(attempt.goal, certificate.goal, source_work, proof_replay_summary_source_work_limit())
+                matched[lookup.row] <- true
+            for index in 0..<matched.count |index, matched, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work) or not matched[index]
+            source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+
+        def proof_source_resource_safety_expected(file: Ast::File&, declarations: darray[Ast::Decl]&, lemma_index: ProofLemmaAnnotationIndex, expected: mutable darray[(name: sview, line: u32, offset: u32)]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= PROOF_SOURCE_EFFECT_CONTAINMENT_DEPTH_LIMIT
+            for declaration in declarations |declaration, file, lemma_index, expected, source_work, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, position):
+                        lemma: (complete: bool, is_lemma: bool) = proof_function_is_lemma_with_work(lemma_index, name, source_work)
+                        return false if not lemma.complete
+                        continue if lemma.is_lemma
+                        return false if position.line == 0 or not proof_report_source_work_charge(sview_len(name), source_work)
+                        expected.push((name, position.line, position.offset))
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_resource_safety_expected(file, nested, lemma_index, expected, source_work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+            true
+
+        def proof_source_resource_safety_coverage(file: Ast::File&, report: ProofReport&, source_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            lemma_result: (index: ProofLemmaAnnotationIndex, complete: bool, reason: sview, observed: usize, limit: usize) = proof_lemma_annotation_index(file, source_work)
+            return false if not lemma_result.complete
+            expected: mutable darray[(name: sview, line: u32, offset: u32)] = []
+            return false if not proof_source_resource_safety_expected(file, file.top_decls, lemma_result.index, &expected, source_work, 0)
+            attempts: ProofDeclarationAttemptIndex = proof_declaration_attempt_index_build(report, source_work)
+            return false if not attempts.valid
+            resource_attempt_count: mutable usize = 0
+            for attempt in report.results.goal_attempts |attempt, resource_attempt_count, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(attempt.rule), source_work)
+                resource_attempt_count <- resource_attempt_count + 1 if attempt.rule == "resource-safety"
+            return false if resource_attempt_count != expected.count
+            for expected_index in 0..<expected.count |expected_index, expected, attempts, report, source_work|:
+                row: (name: sview, line: u32, offset: u32) = expected[expected_index]
+                attempt_count: mutable usize = 0
+                indexed_row: (complete: bool, row: usize) = proof_declaration_attempt_index_find(attempts, row.name, row.line, row.offset, source_work)
+                return false if not indexed_row.complete or indexed_row.row >= attempts.heads.count or indexed_row.row >= attempts.tails.count
+                attempt_id: mutable usize = attempts.heads[indexed_row.row]
+                expected_tail: usize = attempts.tails[indexed_row.row]
+                visits: mutable usize = 0
+                while attempt_id < report.results.goal_attempts.count and visits < report.results.goal_attempts.count |attempt_id, expected_tail, visits, attempts, report, row, attempt_count, source_work|:
+                    return false if not proof_report_source_work_charge(1, source_work) or attempt_id >= attempts.next.count
+                    attempt: ProofGoalAttempt = report.results.goal_attempts[attempt_id]
+                    return false if not proof_report_source_work_charge(sview_len(attempt.rule), source_work)
+                    if attempt.rule == "resource-safety":
+                        attempt_count <- attempt_count + 1
+                        return false if attempt_count > 1 or attempt.name != row.name or attempt.owner_function_line != row.line or attempt.owner_function_offset != row.offset
+                        return false if not attempt.producer_proven or not attempt.has_certificate or attempt.certificate_index >= report.analysis_1.certificates.count
+                        certificate: ProofGoalCertificate = report.analysis_1.certificates[attempt.certificate_index]
+                        return false if not proof_report_source_work_charge(sview_len(certificate.rule), source_work) or not proof_report_source_work_charge(sview_len(certificate.name), source_work)
+                        return false if certificate.rule != "resource-safety" or certificate.name != row.name or certificate.line != row.line or certificate.kernel_goal != attempt.kernel_goal or not certificate.replayed
+                        return false if attempt.kernel_goal >= report.analysis_1.kernel.nodes.count
+                        root: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[attempt.kernel_goal]
+                        return false if not proof_report_source_work_charge(sview_len(root.kind), source_work) or not proof_report_source_work_charge(sview_len(root.operator), source_work) or not proof_report_source_work_charge(sview_len(root.name), source_work)
+                        return false if root.kind != "resource-safety" or root.operator != "resource-v2" or root.name != row.name or root.right != row.line.usize() or root.value != row.offset.i64()
+                    break if attempt_id == expected_tail
+                    attempt_id <- attempts.next[attempt_id]
+                    visits <- visits + 1
+                return false if attempt_count != 1
+            source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT

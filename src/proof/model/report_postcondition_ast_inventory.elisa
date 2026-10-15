@@ -221,27 +221,58 @@ extend ElisaProof:
                 return ProofSourcePostconditionAstIndex{} if probes >= capacity or probes > PROOF_NAME_INDEX_MAX_CLUSTER
             return index
 
-        def proof_source_postcondition_ast_index_find(index: ProofSourcePostconditionAstIndex, name: sview, function_offset: u32, line: u32, source_index: usize, source_work: mutable usize&) -> (complete: bool, found: bool, count: usize, contract_line: u32, expression: Ast::Expr):
+        def proof_source_postcondition_ast_index_find(index: ProofSourcePostconditionAstIndex, name: sview, function_offset: u32, line: u32, source_index: usize, source_work: mutable usize&) -> (complete: bool, found: bool, row: usize, count: usize, contract_line: u32, expression: Ast::Expr):
             empty: Ast::Expr = Ast::Expr.Invalid
+            empty_row: usize = index.names.count
             capacity: usize = index.slot_values.count
-            return (false, false, 0, 0, empty) if:
+            return (false, false, empty_row, 0, 0, empty) if:
                 not index.valid
                 index.hashes.count != capacity
-            return (true, false, 0, 0, empty) if capacity == 0
+            return (true, false, empty_row, 0, 0, empty) if capacity == 0
             key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: name, function_offset: function_offset, line: line, source_index: source_index}
             hashed: (complete: bool, hash: u32) = proof_report_source_postcondition_hash(key, source_work)
-            return (false, false, 0, 0, empty) if not hashed.complete
+            return (false, false, empty_row, 0, 0, empty) if not hashed.complete
             slot: mutable usize = (hashed.hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
             while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hashed, name, function_offset, line, source_index, index, capacity, source_work|:
-                return (false, false, 0, 0, empty) if not proof_report_source_postcondition_work_charge(1, source_work)
+                return (false, false, empty_row, 0, 0, empty) if not proof_report_source_postcondition_work_charge(1, source_work)
                 current: usize = index.slot_values[slot]
-                return (true, false, 0, 0, empty) if current == capacity
-                return (false, false, 0, 0, empty) if current >= index.names.count or current >= index.function_offsets.count or current >= index.lines.count or current >= index.source_indices.count or current >= index.contract_lines.count or current >= index.counts.count or current >= index.expressions.count
+                return (true, false, empty_row, 0, 0, empty) if current == capacity
+                return (false, false, empty_row, 0, 0, empty) if current >= index.names.count or current >= index.function_offsets.count or current >= index.lines.count or current >= index.source_indices.count or current >= index.contract_lines.count or current >= index.counts.count or current >= index.expressions.count
                 if index.hashes[slot] == hashed.hash:
-                    return (false, false, 0, 0, empty) if not proof_report_source_postcondition_work_charge(sview_len(name), source_work)
+                    return (false, false, empty_row, 0, 0, empty) if not proof_report_source_postcondition_work_charge(sview_len(name), source_work)
                     if index.names[current] == name and index.function_offsets[current] == function_offset and index.lines[current] == line and index.source_indices[current] == source_index:
-                        return (true, true, index.counts[current], index.contract_lines[current], index.expressions[current])
+                        return (true, true, current, index.counts[current], index.contract_lines[current], index.expressions[current])
                 slot <- (slot + 1) % capacity
                 probes <- probes + 1
-            return (false, false, 0, 0, empty)
+            return (false, false, empty_row, 0, 0, empty)
+
+        # Reconcile the complete parser-origin ensure inventory with the accounting ledger.
+        # Per-goal source binding cannot detect a source contract for which the producer emitted
+        # no obligation at all, so checked-view admission requires each AST row to be represented
+        # by at least one exact ledger row. Multiple return paths may legitimately record the
+        # same source postcondition more than once.
+        def proof_source_postcondition_obligations_covered[@r](source: ProofSourceAnalysis[r]& @r, report: ProofReport&, source_work: mutable usize&) -> bool:
+            return false if not source.postcondition_ast_inventory_complete or source.postcondition_ast_inventory_work_limited
+            index: ProofSourcePostconditionAstIndex = proof_source_postcondition_ast_index_create(source.postcondition_ast_inventory, source_work)
+            return false if not index.valid
+            matched: mutable darray[bool] = []
+            for _ in 0..<index.names.count |matched, source_work|:
+                return false if not proof_report_source_postcondition_work_charge(1, source_work)
+                matched.push(false)
+            for expected in source.postcondition_ast_inventory |expected, index, source_work|:
+                return false if not proof_report_source_postcondition_work_charge(1, source_work)
+                identity: (complete: bool, found: bool, row: usize, count: usize, contract_line: u32, expression: Ast::Expr) = proof_source_postcondition_ast_index_find(index, expected.name, expected.function_offset, expected.line, expected.source_index, source_work)
+                return false if not identity.complete or not identity.found or identity.row >= matched.count or identity.count != 1
+            observed: mutable usize = 0
+            for obligation in report.results.obligation_inventory |obligation, source, index, matched, observed, source_work|:
+                return false if not proof_report_source_postcondition_work_charge(1, source_work)
+                continue if obligation.source_kind != "postcondition"
+                observed <- observed + 1
+                lookup: (complete: bool, found: bool, row: usize, count: usize, contract_line: u32, expression: Ast::Expr) = proof_source_postcondition_ast_index_find(index, obligation.source_name, obligation.source_function_offset, obligation.source_line, obligation.source_obligation_index, source_work)
+                return false if not lookup.complete or not lookup.found or lookup.row >= matched.count or lookup.count != 1
+                matched[lookup.row] <- true
+            return false if observed < source.postcondition_ast_inventory.count
+            for found in matched |found, source_work|:
+                return false if not proof_report_source_postcondition_work_charge(1, source_work) or not found
+            source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT

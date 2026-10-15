@@ -2,6 +2,70 @@
 # require source-context replay; this does not grant a kernel proof.
 extend ElisaProof:
     private:
+        # Parser-origin inventory for the direct body frame clauses checked by
+        # `proof_check_frame_specs`. This gate receives the retained immutable source AST;
+        # dynamic writes/calls remain separate `frame` rows.
+        def proof_report_frame_clause_keys_collect(declarations: darray[Ast::Decl]&, keys: mutable darray[ProofSourcePostconditionKey]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate]:
+            return false if depth >= 64
+            for declaration in declarations |keys, source_work, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        frame_clause_index: mutable usize = 0
+                        for statement in body |keys, source_work, name, position, frame_clause_index|:
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            match statement:
+                                Ast::Stmt.Contract(kind, _, contract_position):
+                                    if kind in {"changes", "preserves"}:
+                                        return false if:
+                                            keys.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+                                            not proof_report_source_work_charge(sview_len(name), source_work)
+                                        keys.push(ProofSourcePostconditionKey{name: name, function_offset: position.offset, line: contract_position.line, source_index: frame_clause_index})
+                                        frame_clause_index <- frame_clause_index + 1
+                                _:
+                                    pass
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_report_frame_clause_keys_collect(nested, keys, source_work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_report_frame_clause_inventory_consistent(report: ProofReport&, declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
+            expected_keys: mutable darray[ProofSourcePostconditionKey] = []
+            return false if not proof_report_frame_clause_keys_collect(declarations, &expected_keys, source_work, 0)
+            index: mutable ProofSourcePostconditionCountIndex = proof_report_source_postcondition_index_create(expected_keys.count, source_work)
+            return false if not index.valid
+            policy_owner_index: mutable ProofSourcePostconditionCountIndex = proof_report_source_postcondition_index_create(report.results.obligation_inventory.count, source_work)
+            return false if not policy_owner_index.valid
+            for key in expected_keys |index, source_work|:
+                return false if not proof_report_source_postcondition_index_add(&index, key, 0, false, source_work)
+            for entry in report.results.obligation_inventory |report, index, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                if entry.source_kind in {"changes", "preserves", "allow", "preserve"}:
+                    owner_key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: entry.source_name, function_offset: entry.owner_function_offset, line: 0, source_index: 0}
+                    return false if not proof_report_source_postcondition_index_add(&policy_owner_index, owner_key, 1, false, source_work)
+                continue if entry.source_kind != "frame-clause"
+                return false if:
+                    entry.source_name == "" or entry.source_line == 0 or entry.source_function_offset != entry.owner_function_offset
+                    entry.attempts_count != 0
+                    not proof_report_source_work_charge(sview_len(entry.source_name), source_work)
+                key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: entry.source_name, function_offset: entry.source_function_offset, line: entry.source_line, source_index: entry.source_obligation_index}
+                found: (complete: bool, found: bool, count: usize) = proof_report_source_postcondition_index_find(index, key, source_work)
+                return false if not found.complete or not found.found
+                return false if not proof_report_source_postcondition_index_add(&index, key, 1, false, source_work)
+            for key in expected_keys |index, source_work|:
+                found: (complete: bool, found: bool, count: usize) = proof_report_source_postcondition_index_find(index, key, source_work)
+                return false if not found.complete or not found.found or found.count > 1
+                if found.count == 0:
+                    owner_key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: key.name, function_offset: key.function_offset, line: 0, source_index: 0}
+                    # The prepared source-frame replay route records exact frame-policy event
+                    # rows instead of the checker fallback's `frame-clause` rows. Presence of
+                    # such rows is accepted here; their source event identities are reconciled
+                    # by frame-report replay admission.
+                    policy_owner_found: (complete: bool, found: bool, count: usize) = proof_report_source_postcondition_index_find(policy_owner_index, owner_key, source_work)
+                    return false if not policy_owner_found.complete or not policy_owner_found.found
+            return true
+
         def proof_report_frame_owner_keys_collect(declarations: darray[Ast::Decl]&, keys: mutable darray[ProofSourcePostconditionKey]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate]:
             return false if depth >= 64
             for declaration in declarations |keys, source_work, depth|:

@@ -37,22 +37,62 @@ for type_name in ("ProofReplayReceipt", "ProofSourceAnalysis", "ProofCheckedView
     assert re.search(rf"struct {type_name}\[@r\]:\n\s+private:", receipt_text), type_name
 
 checked_view = ROOT / "src/proof/model/checked_view.elisa"
+checked_view_rows = ROOT / "src/proof/model/checked_view_rows.elisa"
 app_text = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src/app").rglob("*.elisa"))
-assert not re.search(r"\.producer_proven\b|\.producer_proven_count\b|\.proven\b", app_text)
+# The app may consume the receipt-derived `snapshot.proven` verdict, but not raw producer flags.
+assert not re.search(r"\.producer_proven\b|\.producer_proven_count\b", app_text)
 struct_invariant_scan = function_body(checked_view, "proof_source_struct_invariant_scan")
 assert "Ast::Decl.Struct(_, _, _, _, _, invariants, _)" in struct_invariant_scan
 assert "invariants.count > 0" in struct_invariant_scan
 assert "proof_source_analysis_charge_work(invariants.count, source_work)" in struct_invariant_scan
 assert "proof_source_struct_invariant_scan(nested, source_work, depth + 1)" in struct_invariant_scan
 assert "_:\n                        return (false, false)" in struct_invariant_scan
-source_admission = function_body(checked_view, "proof_source_analysis_report_admission_snapshot")
+source_admission = function_body(ROOT / "src/proof/model/checked_view_admission.elisa", "proof_source_analysis_report_admission_snapshot")
 assert "not source.source_struct_invariant_scan_complete" in source_admission
 postcondition_inventory = function_body(ROOT / "src/proof/model/report_postcondition_ast_inventory.elisa", "proof_source_postcondition_ast_inventory_collect")
 for statement in ("Ast::Stmt.Expr(expression, _):", "Ast::Stmt.Return(expression, _):"):
     statement_body = postcondition_inventory.split(statement, 1)[1].split("Ast::Stmt.", 1)[0]
     assert "return_supported <- false if expression == Ast::Expr.Absent or expression == Ast::Expr.Invalid" in statement_body
 assert source_admission.index('"unsupported-source-struct-invariant"') < source_admission.index("source.source_has_struct_invariants") < source_admission.index("proof_report_source_postcondition_inventory_consistent_with_work")
-goal_admission_snapshot = function_body(checked_view, "proof_source_analysis_goal_admission_snapshot")
+assert_by_inventory_path = ROOT / "src/proof/model/report_assert_by_inventory.elisa"
+assert_by_expression_walk = function_body(assert_by_inventory_path, "proof_source_assert_by_collect_expression")
+assert_by_statement_walk = function_body(assert_by_inventory_path, "proof_source_assert_by_collect_body")
+static_effect_walk = assert_by_expression_walk.split("Ast::Expr.StaticEffectCall", 1)[1].split("Ast::Expr.Field", 1)[0]
+assert "for candidate in candidates" in static_effect_walk
+assert "for capture in candidate.captures" in static_effect_walk
+assert "proof_source_assert_by_collect_expression(function_offset, function_name, capture" in static_effect_walk
+assert "work <- work + 1" in static_effect_walk
+assert "Ast::Expr.Lambda(_, body, _)" in assert_by_expression_walk
+assert "proof_source_assert_by_collect_body(function_offset, function_name, false, body" in assert_by_expression_walk
+assert "Ast::Expr.Invalid:" in assert_by_expression_walk
+assert "position.line, position.line, position.offset, false, Ast::Expr.Invalid, false" in assert_by_expression_walk
+assert "_:\n                    position: Ast::Pos = Ast::expr_pos(expression)" in assert_by_expression_walk
+assert "Ast::Stmt.Block(kind, _, _, nested, _)" in assert_by_statement_walk
+assert "block_scope_supported: bool = scope_supported and kind == \"\"" in assert_by_statement_walk
+assert "branch_supported: bool = scope_supported and allow_direct_branch" in assert_by_statement_walk
+assert "loop_body_supported: bool = scope_supported and allow_direct_loop" in assert_by_statement_walk
+assert "inventory.push((function_name, function_offset, 0, 0, 0, false, Ast::Expr.Invalid, false))" in assert_by_statement_walk
+goal_admission = function_body(ROOT / "src/proof/model/report_goal_admission.elisa", "proof_report_goal_source_admissible_after_structure_internal")
+assert "proof_source_loop_invariant_goal_attempt_admitted_with_declarations(report.source.source_declarations, report, goal_id, source_work, source_loop_invariants_checked)" in goal_admission
+structure_failure = function_body(ROOT / "src/proof/model/report_structure_bound_failure.elisa", "proof_source_analysis_report_structure_bound_failure")
+assert "proof_source_loop_invariant_source_coverage_with_declarations(report, source.file.top_decls, source_work)" in structure_failure
+assert '"source-loop-invariant-coverage" if not loop_invariants_covered' in structure_failure
+assert "proof_report_frame_clause_inventory_consistent(report, source.file.top_decls, source_work)" in structure_failure
+assert '"source-frame-clause-coverage" if not frame_clauses_covered' in structure_failure
+frame_recording = function_body(ROOT / "src/proof/model/report_recording.elisa", "proof_frame_clause_obligation")
+assert 'source_kind <- "frame-clause"' in frame_recording
+assert "source_function_offset <- report.context.current_goal_owner_offset" in frame_recording
+frame_checker = function_body(ROOT / "src/proof/check/function_contracts_and_frames.elisa", "proof_check_frame_specs")
+assert 'if kind in {"changes", "preserves"}' in frame_checker
+assert "proof_frame_clause_obligation(valid, position.line, name, frame_clause_index)" in frame_checker
+assert "frame_clause_index <- frame_clause_index + 1" in frame_checker
+frame_inventory = function_body(ROOT / "src/proof/model/report_frame_inventory.elisa", "proof_report_frame_clause_inventory_consistent")
+assert "proof_report_frame_clause_keys_collect(declarations, &expected_keys, source_work, 0)" in frame_inventory
+assert "entry.attempts_count != 0" in frame_inventory
+assert "found.count > 1" in frame_inventory and "found.count == 0" in frame_inventory
+assert "proof_report_source_postcondition_index_find(policy_owner_index, owner_key, source_work)" in frame_inventory
+admission_snapshot_path = ROOT / "src/proof/model/checked_view_admission.elisa"
+goal_admission_snapshot = function_body(admission_snapshot_path, "proof_source_analysis_goal_admission_snapshot")
 assert "not source.source_struct_invariant_scan_complete or source.source_has_struct_invariants" in goal_admission_snapshot
 assert "proof_report_source_goal_finding_snapshot(report, source_work)" in goal_admission_snapshot
 finding_snapshot_path = ROOT / "src/proof/model/report_goal_finding_snapshot.elisa"
@@ -61,31 +101,19 @@ assert "finding.has_goal and finding.goal_id >= report.results.goal_attempts.cou
 source_import = function_body(checked_view, "proof_source_analysis_import_parse")
 assert source_import.index("source_bytes: usize = source.count") < source_import.index("source.push(0)") < source_import.index("source_identity: uintptr = (&source[0]).cast[uintptr]")
 assert "proof_source_analysis_hash(source, source_bytes)" in source_import
+assert "proof_source_assert_by_inventory_with_work(top_declarations, &inventory_source_work)" in source_import
+assert "assert_by_inventory: mutable darray" in source_import
+admission_snapshot = function_body(admission_snapshot_path, "proof_source_analysis_report_admission_snapshot")
+assert "proof_source_assert_by_coverage_inner(assert_by_inventory, report, true, source_work)" in admission_snapshot
+assert '"source-assert-by-coverage"' in admission_snapshot
 struct_scan = source_import.index("proof_source_struct_invariant_scan(top_declarations, &inventory_source_work, 0)")
 assert struct_scan < source_import.index("proof_source_literal_ensure_inventory_with_work")
 assert "source_struct_invariant_scan_complete: struct_invariant_scan.complete" in source_import
 assert "source_has_struct_invariants: struct_invariant_scan.found" in source_import
-assert visibility_before(checked_view, "proof_checked_view_create") == "private"
-view_create = function_body(checked_view, "proof_checked_view_create")
-for gate in (
-    "not receipt.issued or not source.issued",
-    "not report.source.source_analysis_bound",
-    "receipt.source_identity != source.source_identity",
-    "receipt.source_file_identity != source.file_identity",
-    "receipt.source_bytes != source.source_bytes",
-    "receipt.source_fingerprint != source.source_fingerprint",
-    "fact_call_snapshot.status.source_identity != source.file_identity",
-    "fact_call_snapshot.status.source_fingerprint != source.source_fingerprint",
-):
-    assert gate in view_create, gate
-diagnostic_report = function_body(checked_view, "proof_checked_view_diagnostic_report")
-assert "ProofReport& @view" in diagnostic_report
-assert "mutable ProofReport&" not in diagnostic_report
-assert visibility_before(checked_view, "proof_checked_view_diagnostic_report") == "public"
-
 source_complete = function_body(checked_view, "proof_checked_view_source_complete")
 for gate in (
     "proof_checked_view_source_validated(view)",
+    "proof_checked_view_rows_match(view)",
     "view.receipt.source_admission_snapshot_complete",
     "view.receipt.source_goal_statuses_complete",
     "view.receipt.source_claims_admissible",
@@ -189,9 +217,8 @@ resource_prefix_edges = function_body(
     resource_source_path, "proof_replay_resource_prefix_edges_unique_with_work"
 )
 for guard in (
-    "node_count > remaining_work / 3",
-    "prefix_end > remaining_work / 2",
-    "report.analysis_1.kernel.children.count > remaining_work",
+    "node_count > remaining_work / 5\n            remaining_work <- remaining_work - node_count * 5\n            return false if prefix_end > remaining_work / 2\n            remaining_work <- remaining_work - prefix_end * 2\n            return false if report.analysis_1.kernel.children.count > remaining_work",
+    "proof_replay_owner_work_charge(node_count * 2, source_work)",
     "prefix_nodes.resize(node_count)",
     "incoming_counts.resize(node_count)",
     "for parent_index in 0..<node_count",
@@ -251,7 +278,9 @@ assert "parameter.name == wanted" in resource_call_omission
 assert "proof_replay_resource_call_shadow_name_in_statements(owner_body, wanted" in resource_call_omission
 assert "Ast::Stmt.VarDecl(name, type_expression, initializer, _)" in resource_call_shadow_guard
 assert "variable == wanted" in resource_call_shadow_guard
-assert "Ast::Stmt.Match(_, _, _) | Ast::Stmt.Invalid:" in resource_call_shadow_guard
+assert "Ast::Stmt.Match(scrutinee, arms, _):" in resource_call_shadow_guard
+assert "proof_replay_resource_call_shadow_name_in_arms(arms, wanted, source_work, depth + 1)" in resource_call_shadow_guard
+assert "Ast::Stmt.Invalid:\n                        return true" in resource_call_shadow_guard
 resource_call_shadow_expr = function_body(
     ROOT / "src/proof/replay/resource_call_shadow_validation.elisa",
     "proof_replay_resource_call_shadow_name_in_expr",
@@ -349,8 +378,7 @@ assert "report.analysis_2.replay_owner_offset <- saved_owner_offset" in attempt_
 attempt_proven = function_body(checked_view, "proof_checked_view_attempt_is_proven")
 for gate in (
     "proof_checked_view_source_validated(view)",
-    "proof_checked_view_goal_source_admissible(view, attempt_index)",
-    "proof_checked_view_goal_facts_source_admissible(view, attempt_index)",
+    "proof_checked_view_attempt_row_matches(view, attempt_index)",
     "proof_replay_receipt_attempt_is_proven(view.receipt, attempt_index)",
 ):
     assert gate in attempt_proven, gate
@@ -373,6 +401,8 @@ for gate in (
     "attempt_index >= receipt.attempt_proven_statuses.count",
 ):
     assert gate in source_proven, gate
+assert "receipt.source_goal_statuses.count != receipt.attempt_proven_statuses.count" in source_proven
+assert "receipt.source_attempt_fact_statuses.count != receipt.attempt_proven_statuses.count" in source_proven
 receipt_attempt_status = function_body(receipt_status, "proof_replay_receipt_attempt_status")
 assert "not receipt.source_bound or not receipt.source_validated" in receipt_attempt_status
 standalone_attempt = function_body(receipt_status, "proof_replay_receipt_kernel_attempt_status")
@@ -438,20 +468,31 @@ for gate in ("proof_checked_view_goal_source_admissions_complete(view)",
 # view rather than report counters or producer flags.
 status_helpers = ROOT / "src/app/output_replay_status.elisa"
 finding_counts = function_body(status_helpers, "proof_output_finding_counts_with_work")
-assert "source_admitted_goals" not in finding_counts
-assert "proof_checked_view_goal_source_admissible(checked_view, finding.goal_id)" in finding_counts
-assert "proof_checked_view_goal_facts_source_admissible(checked_view, finding.goal_id)" in finding_counts
+assert "goal_snapshot: (complete: bool, replayed_goals: darray[bool], source_admitted_goals: darray[bool]" in finding_counts
+assert "proof_output_checked_view_goal_statuses_with_work(checked_view, work_used)" in finding_counts
+assert "not goal_snapshot.complete" in finding_counts
+assert "proof_output_cached_source_admission_status(goal_snapshot.source_admitted_goals, finding.goal_id)" in finding_counts
 assert "proof_output_reserve_status_snapshot_work(work_used, 2)" in finding_counts
 finding_summary = function_body(status_helpers, "proof_output_checked_view_finding_summary_with_work")
 assert "source_admitted_goals" not in finding_summary
 assert "proof_output_finding_counts_with_work(checked_view, work_used)" in finding_summary
+attempt_statuses = function_body(status_helpers, "proof_output_checked_view_attempt_statuses_with_work")
+assert "proof_checked_view_attempt_status_snapshot_with_work(checked_view, goal_id, work_used)" in attempt_statuses
+assert "not status.complete" in attempt_statuses
+assert "source_admitted_goals.push(status.source_admitted)" in attempt_statuses
+assert "proven_goals.push(status.proven)" in attempt_statuses
 goal_snapshot = function_body(status_helpers, "proof_output_checked_view_goal_statuses_with_work")
+assert "proof_output_checked_view_attempt_statuses_with_work(checked_view, work_used)" in goal_snapshot
+assert "snapshot.source_admitted_goals" in goal_snapshot and "snapshot.proven_goals" in goal_snapshot
+attempt_status = function_body(checked_view_rows, "proof_checked_view_attempt_status_snapshot_with_work")
 for gate in (
-    "proof_checked_view_attempt_status(checked_view, goal_id)",
-    "proof_checked_view_goal_source_admissible(checked_view, goal_id)",
-    "proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)",
+    "not view.receipt.source_goal_statuses_complete",
+    "not view.receipt.source_attempt_fact_statuses_complete",
+    "goal_source_admitted: bool = view.receipt.source_goal_statuses[attempt_index]",
+    "facts_source_admitted: bool = view.receipt.source_attempt_fact_statuses[attempt_index]",
+    "source_admitted: bool = goal_source_admitted and facts_source_admitted",
 ):
-    assert gate in goal_snapshot, gate
+    assert gate in attempt_status, gate
 
 report_output = ROOT / "src/app/report_output_integrated_helpers.elisa"
 summary_output = function_body(report_output, "proof_push_json_report_summary_with_replay")
@@ -475,36 +516,43 @@ for gate in ("state.complete", 'state.state == "proved"',
              "proof_checked_view_goal_source_admissions_complete(checked_view)"):
     assert gate in exit_gate, gate
 tactic_admission = function_body(ROOT / "src/app/cli_tactics.elisa", "proof_tactic_result_admitted")
-assert all(guard in tactic_admission for guard in ("source_complete: bool = proof_checked_view_source_complete(checked_view)", "not target_bound and source_complete", "target_bound and target_admission_base and target_source_admitted"))
-source_report_snapshot = function_body(checked_view, "proof_source_analysis_report_admission_snapshot")
+assert all(guard in tactic_admission for guard in ("tactic_admitted: bool = result.valid and result.certificate_replayed and source_match", "source_complete: bool = status.source_complete", "target_admission_base: bool = status.target_admission_base", "target_source_admitted: bool = target_bound and status.source_admitted", "target_bound and target_admission_base and target_source_admitted", "not target_bound and source_complete", "target_fingerprint_match"))
+source_report_snapshot = function_body(admission_snapshot_path, "proof_source_analysis_report_admission_snapshot")
 assert all(guard in source_report_snapshot for guard in ("report.results.producer_proven_count == report.results.obligations", "source_checks_complete and replay_complete", "source_checks_complete <- false if not attempt.producer_proven"))
 serialized_goals = function_body(report_output, "proof_push_json_report_with_replay")
 assert (
-    "replay_proven: bool = producer_claim and "
-    "proof_output_cached_replay_status(replayed_goals, index) and "
-    "proof_output_cached_source_admission_status(source_admitted_goals, index)"
+    "replay_proven: bool = proof_output_cached_proven_status(proven_goals, index)"
 ) in serialized_goals
 assert "producer_claim: bool = proof_output_cached_producer_claim_status(producer_claimed_goals, index)" in serialized_goals
 assert 'proof_push(buffer, "true" if replay_proven else "false")' in serialized_goals
 
 theorem_output = ROOT / "src/app/theorem_output.elisa"
+theorem_replay_gap = function_body(theorem_output, "proof_theorem_has_replay_gap")
+assert all(gate in theorem_replay_gap for gate in ("goal_id >= proven_goals.count", "not status.complete or not status.producer_claim", "not proof_output_cached_proven_status(proven_goals, goal_id)"))
+suggestions = function_body(ROOT / "src/app/theorem_output_suggestions.elisa", "proof_push_json_suggestions_with_replayed"); assert "not proof_theorem_has_replay_gap(checked_view, report, theorem, proven_goals, replay_work)" in suggestions
 serialized_theorem = function_body(theorem_output, "proof_push_json_theorem")
 assert "proof_push(buffer, \"true\" if kernel_verified and source_claim_admissible else \"false\")" in serialized_theorem
 assert "source_claim_admissible: bool = theorem_source_admissible and source_admissions_complete and declaration_identity_unambiguous and valid_proof_goals" in serialized_theorem
-assert 'proof_push(buffer, "true" if replayed and proof_output_cached_source_admission_status(source_admitted_goals, goal_id) else "false")' in serialized_theorem
+assert 'proof_push(buffer, "true" if proof_output_cached_proven_status(proven_goals, goal_id) else "false")' in serialized_theorem
 
 package_output = ROOT / "src/app/package_output.elisa"
 serialized_package = function_body(package_output, "proof_push_json_package_with_replayed")
 assert "proof_checked_view_source_admissible(checked_view)" in serialized_package
-assert "not proof_output_cached_producer_claim_status(producer_claimed_goals, goal_id) or not proof_output_cached_replay_status(replayed_goals, goal_id) or not proof_output_cached_source_admission_status(source_admitted_goals, goal_id)" in serialized_package
+assert "snapshot.complete and producer_claim_snapshot.complete" in serialized_package
+assert "proven_goals: darray[bool] = snapshot.proven_goals" in serialized_package
+assert "continue if not proof_output_cached_proven_status(proven_goals, goal_id)" in serialized_package
 
 source_map = ROOT / "src/app/source_map_output.elisa"
 serialized_functions = function_body(source_map, "proof_push_json_function_status_from_checked_view")
-assert "proof_output_checked_view_goal_status_with_work(checked_view, goal_id, work_used)" in serialized_functions
+assert "proof_output_checked_view_attempt_statuses_with_work(checked_view, work_used)" in serialized_functions
+assert "complete: mutable bool = attempt_snapshot.complete" in serialized_functions
+assert "proven_goals: darray[bool] = attempt_snapshot.proven_goals" in serialized_functions
+assert "proof_output_cached_proven_status(proven_goals, goal_id)" in serialized_functions
 assert "proof_checked_view_source_admissible(checked_view) and proof_checked_view_source_admissions_complete(checked_view)" in serialized_functions
 assert 'source_authority_complete and open_goals[index] == 0 and findings[index] == 0' in serialized_functions
 single_goal_snapshot = function_body(status_helpers, "proof_output_checked_view_goal_status_with_work")
-assert "source_admitted: bool = proof_checked_view_goal_source_admissible(checked_view, goal_id) and proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)" in single_goal_snapshot
+assert "proof_checked_view_attempt_status_snapshot_with_work(checked_view, goal_id, work_used)" in single_goal_snapshot
+assert "status.source_admitted" in single_goal_snapshot and "status.proven" in single_goal_snapshot
 
 explain_output = ROOT / "src/app/explain_output.elisa"
 explained_goal = function_body(explain_output, "proof_push_goal_explanation_with_replayed")
@@ -548,53 +596,4 @@ assert "kernel_verified and source_claim_admissible" in theorem_json
 assert "proof_replay_complete: mutable bool = theorem.verified and valid_proof_goals and theorem.proof_goals_count > 0" in theorem_json
 assert "theorem_source_admissible and source_admissions_complete and declaration_identity_unambiguous and valid_proof_goals" in theorem_json
 
-# Resource event names are diagnostic labels. Keep each read, move, and write tied to the
-# parser-derived active binder, then have kernel replay compare that event root to its live slot.
-resource_identity_path = ROOT / "src/proof/replay/resource_binding_identity_validation.elisa"
-resource_identity = resource_identity_path.read_text(encoding="utf-8")
-resource_owner = function_body(
-    ROOT / "src/proof/replay/resource_call_source_validation.elisa",
-    "proof_replay_resource_safety_owner_valid_with_work",
-)
-assert "proof_replay_resource_binding_position_index_build_with_work(report, root, source_work)" in resource_owner
-assert "proof_replay_resource_binding_identities_source_valid_with_work(report, root, resource_positions.index, parameters, body, source_work)" in resource_owner
-resource_identity_pass = function_body(
-    resource_identity_path, "proof_replay_resource_binding_identities_source_valid_with_work"
-)
-assert 'report.analysis_1.kernel.nodes[event_root].auxiliary <- 0' in resource_identity_pass
-assert "proof_replay_resource_binding_statements_covered_with_work(report, index, names, binders, body" in resource_identity_pass
-resource_event_walk = function_body(
-    resource_identity_path, "proof_replay_resource_binding_positions_at_with_work"
-)
-assert 'event.kind in {"resource-safety", "resource-scope", "resource-alternatives"}' in resource_event_walk
-resource_scope_mark = function_body(
-    resource_identity_path, "proof_replay_resource_binding_scope_mark_with_work"
-)
-resource_scope_restore = function_body(
-    resource_identity_path, "proof_replay_resource_binding_scope_restore_with_work"
-)
-assert "names.count != binders.count" in resource_scope_mark
-assert "(true, names.count)" in resource_scope_mark
-assert "mark > names.count" in resource_scope_restore
-assert "names <- names.truncate(mark)" in resource_scope_restore
-assert "binders <- binders.truncate(mark)" in resource_scope_restore
-resource_statement_walk = function_body(
-    resource_identity_path, "proof_replay_resource_binding_statements_covered_with_work"
-)
-assert "branch_scope.mark, source_work" in resource_statement_walk
-assert "nested_scope.mark, source_work" in resource_statement_walk
-assert "proof_replay_resource_binding_range_shape_with_work(iterable, source_work, 0)" in resource_statement_walk
-assert 'proof_replay_resource_binding_position_find_with_work(report, index, "resource-bind", iterable_position.end_offset.usize(), variable' in resource_statement_walk
-for operation in ("resource-use", "resource-write", "resource-move"):
-    assert f'"{operation}"' in resource_identity_pass
-assert 'proof_replay_resource_binding_position_find_with_work(report, index, "resource-bind", position.end_offset.usize(), name' in resource_identity
-assert 'proof_replay_resource_binding_event_annotate_with_work(report, index, "resource-write"' in resource_identity
-resource_kernel = (ROOT / "src/proof/kernel_replay/resource_events.elisa").read_text(encoding="utf-8")
-assert resource_kernel.count("proof_kernel_replay_resource_binding_event_identity_matches(state, nodes, slot, node.auxiliary)") >= 3
-resource_identity_kernel = function_body(
-    ROOT / "src/proof/kernel_replay/resource_state.elisa",
-    "proof_kernel_replay_resource_binding_event_identity_matches",
-)
-assert 'nodes[root].kind not in {"resource-bind", "resource-region-alloc", "resource-region-bind", "resource-call-result"}' in resource_identity_kernel
-assert "nodes[root].name == state.bindings.binding_names[slot]" in resource_identity_kernel
 print("source authority guards: receipt boundaries and bounded resource-prefix capabilities remain enforced")

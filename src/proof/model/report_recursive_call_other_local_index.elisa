@@ -1,0 +1,175 @@
+# Fast exact-name prefilter for the recursive census's conservative other-local-call guard.
+extend ElisaProof:
+    private:
+        def proof_source_recursive_call_pattern_shadows_name(pattern: Ast::Pattern, name: sview, source_work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT or not proof_report_source_work_charge(1, source_work)
+            match pattern:
+                Ast::Pattern.Binding(binding) | Ast::Pattern.Rest(binding) | Ast::Pattern.TypeBind(_, binding) | Ast::Pattern.As(binding, _):
+                    return true if not proof_report_source_work_charge(sview_len(binding), source_work) or not proof_report_source_work_charge(sview_len(name), source_work)
+                    return true if binding == name
+                    match pattern:
+                        Ast::Pattern.As(_, inner):
+                            for nested in inner |nested, name, source_work, depth|:
+                                return true if proof_source_recursive_call_pattern_shadows_name(nested, name, source_work, depth + 1)
+                        _:
+                            pass
+                    false
+                Ast::Pattern.Variant(_, fields) | Ast::Pattern.Struct(_, fields) | Ast::Pattern.Tuple(fields) | Ast::Pattern.Or(fields) | Ast::Pattern.Field(_, fields):
+                    for nested in fields |nested, name, source_work, depth|:
+                        return true if proof_source_recursive_call_pattern_shadows_name(nested, name, source_work, depth + 1)
+                    false
+                Ast::Pattern.Wildcard | Ast::Pattern.Literal(_) | Ast::Pattern.Pin(_) | Ast::Pattern.Range(_, _, _):
+                    false
+                Ast::Pattern.Other(_):
+                    true
+
+        def proof_source_recursive_call_other_local_candidate_indexed(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, owner_name: sview, declaration_names: ProofSourceRecursiveCallNameIndex&, source_work: mutable usize&) -> (complete: bool, candidate: bool):
+            # Reserve a complete metered walk before the legacy call collector allocates its
+            # aligned edge arrays. Only bodies made of direct self-calls with atomic arguments
+            # can take the fast path; other shapes retain the old name-sensitive scan.
+            metered: (complete: bool, candidate: bool) = proof_source_recursive_call_body_candidate(body, owner_name, source_work, 0)
+            return (false, false) if not metered.complete
+            has_local: (complete: bool, found: bool) = proof_source_recursive_call_body_has_local_declaration(body, source_work, 0)
+            return (false, false) if not has_local.complete
+            # This structural slice does not model local binding resolution. Reject
+            # declarations before scanning call names: a local function-valued binder
+            # may deliberately shadow owner_name, which the legacy other-function
+            # scan skips because it excludes the enclosing declaration itself.
+            return (true, true) if has_local.found
+            names: mutable darray[sview] = []
+            qualifiers: mutable darray[sview] = []
+            sources: mutable darray[Ast::Expr] = []
+            expressions: mutable darray[Ast::Expr] = []
+            positions: mutable darray[Ast::Pos] = []
+            proof_collect_body_call_edges(body, &names, &qualifiers, &sources, &expressions, &positions)
+            return (false, false) if names.count != qualifiers.count or names.count != sources.count or names.count != expressions.count or names.count != positions.count
+            fallback: mutable bool = false
+            for call_index in 0..<names.count |call_index, names, expressions, declaration_names, owner_name, fallback, source_work|:
+                return (false, false) if not proof_report_source_work_charge(1, source_work)
+                call: Ast::Expr = expressions[call_index]
+                match call:
+                    Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, _, _):
+                        if callee == owner_name:
+                            for argument in arguments |argument, declaration_names, owner_name, source_work, fallback|:
+                                match argument:
+                                    Ast::Expr.Ident(argument_name, _):
+                                        continue if argument_name == owner_name
+                                        local: (complete: bool, count: usize) = proof_source_recursive_call_name_index_lookup(declaration_names, argument_name, source_work)
+                                        return (false, false) if not local.complete
+                                        return (true, true) if local.count > 0
+                                    Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.StringLit(_, _):
+                                        pass
+                                    _:
+                                        fallback <- true
+                            continue
+                        local: (complete: bool, count: usize) = proof_source_recursive_call_name_index_lookup(declaration_names, callee, source_work)
+                        return (false, false) if not local.complete
+                        return (true, true) if local.count > 0
+                        fallback <- true
+                    _:
+                        # Preserve the old conservative walk for qualified, method, and
+                        # otherwise opaque call forms whose lexical target is not a bare name.
+                        fallback <- true
+            if fallback:
+                return proof_source_recursive_call_other_local_candidate_legacy(declarations, body, owner_name, source_work, 0)
+            (true, false)
+
+        def proof_source_recursive_call_body_has_local_declaration(body: darray[Ast::Stmt]&, source_work: mutable usize&, depth: usize) -> (complete: bool, found: bool):
+            return (false, false) if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT
+            for statement in body |statement, source_work, depth|:
+                return (false, false) if not proof_report_source_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.VarDecl(_, _, _, _):
+                        return (true, true)
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                        return (false, false) if not proof_report_source_work_charge(1, source_work)
+                        return (true, true) if proof_source_recursive_call_expr_has_value_block(expression, source_work, depth + 1)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        return (false, false) if not proof_report_source_work_charge(1, source_work)
+                        return (true, true) if proof_source_recursive_call_expr_has_value_block(target, source_work, depth + 1) or proof_source_recursive_call_expr_has_value_block(value, source_work, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        nested_has: (complete: bool, found: bool) = proof_source_recursive_call_body_has_local_declaration(nested, source_work, depth + 1)
+                        return nested_has if not nested_has.complete or nested_has.found
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return (false, false) if not proof_report_source_work_charge(1, source_work)
+                        return (true, true) if proof_source_recursive_call_expr_has_value_block(condition, source_work, depth + 1)
+                        then_has: (complete: bool, found: bool) = proof_source_recursive_call_body_has_local_declaration(then_body, source_work, depth + 1)
+                        return then_has if not then_has.complete or then_has.found
+                        else_has: (complete: bool, found: bool) = proof_source_recursive_call_body_has_local_declaration(else_body, source_work, depth + 1)
+                        return else_has if not else_has.complete or else_has.found
+                    Ast::Stmt.While(condition, nested, _) | Ast::Stmt.For(_, _, condition, nested, _):
+                        return (false, false) if not proof_report_source_work_charge(1, source_work)
+                        return (true, true) if proof_source_recursive_call_expr_has_value_block(condition, source_work, depth + 1)
+                        nested_has: (complete: bool, found: bool) = proof_source_recursive_call_body_has_local_declaration(nested, source_work, depth + 1)
+                        return nested_has if not nested_has.complete or nested_has.found
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return (false, false) if not proof_report_source_work_charge(1, source_work)
+                        return (true, true) if proof_source_recursive_call_expr_has_value_block(scrutinee, source_work, depth + 1)
+                        for arm in arms |arm, source_work, depth|:
+                            return (false, false) if not proof_report_source_work_charge(1, source_work)
+                            return (true, true) if proof_source_recursive_call_expr_has_value_block(arm.guard, source_work, depth + 1)
+                            nested_has: (complete: bool, found: bool) = proof_source_recursive_call_body_has_local_declaration(arm.body, source_work, depth + 1)
+                            return nested_has if not nested_has.complete or nested_has.found
+                    _:
+                        pass
+            (true, false)
+
+        # Value blocks may contain declarations whose type expressions the call-edge
+        # collector intentionally does not visit. Keep those bodies on the legacy path.
+        def proof_source_recursive_call_expr_has_value_block(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> bool:
+            # Charge this full prewalk twice: once for the walk itself and once for the
+            # subsequent call-edge collector, which traverses the same expression tree.
+            return true if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT or not proof_report_source_work_charge(2, source_work)
+            match expression:
+                Ast::Expr.Block(_, _, _, _) | Ast::Expr.Lambda(_, _, _):
+                    true
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    true
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_source_recursive_call_expr_has_value_block(callee, source_work, depth + 1)
+                    for argument in arguments |argument, source_work, depth|:
+                        return true if proof_source_recursive_call_expr_has_value_block(argument, source_work, depth + 1)
+                    false
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _):
+                    proof_source_recursive_call_expr_has_value_block(inner, source_work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    proof_source_recursive_call_expr_has_value_block(left, source_work, depth + 1) or proof_source_recursive_call_expr_has_value_block(right, source_work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_source_recursive_call_expr_has_value_block(object, source_work, depth + 1) or proof_source_recursive_call_expr_has_value_block(low, source_work, depth + 1) or proof_source_recursive_call_expr_has_value_block(high, source_work, depth + 1)
+                Ast::Expr.IndexN(object, elements, _):
+                    return true if proof_source_recursive_call_expr_has_value_block(object, source_work, depth + 1)
+                    for element in elements |element, source_work, depth|:
+                        return true if proof_source_recursive_call_expr_has_value_block(element, source_work, depth + 1)
+                    false
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |element, source_work, depth|:
+                        return true if proof_source_recursive_call_expr_has_value_block(element, source_work, depth + 1)
+                    false
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    proof_source_recursive_call_expr_has_value_block(condition, source_work, depth + 1) or proof_source_recursive_call_expr_has_value_block(then_value, source_work, depth + 1) or proof_source_recursive_call_expr_has_value_block(else_value, source_work, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    proof_source_recursive_call_expr_has_value_block(iterable, source_work, depth + 1) or proof_source_recursive_call_expr_has_value_block(condition, source_work, depth + 1) or proof_source_recursive_call_expr_has_value_block(body, source_work, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    proof_source_recursive_call_expr_has_value_block(base, source_work, depth + 1) or proof_source_recursive_call_expr_has_value_block(predicate, source_work, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |entry, source_work, depth|:
+                        return true if proof_source_recursive_call_expr_has_value_block(entry.key, source_work, depth + 1) or proof_source_recursive_call_expr_has_value_block(entry.value, source_work, depth + 1)
+                    false
+                Ast::Expr.Construct(type_expression, fields, _) | Ast::Expr.RecordUpdate(type_expression, fields, _):
+                    return true if proof_source_recursive_call_expr_has_value_block(type_expression, source_work, depth + 1)
+                    for field in fields |field, source_work, depth|:
+                        return true if proof_source_recursive_call_expr_has_value_block(field.value, source_work, depth + 1)
+                    false
+                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                    return true if proof_source_recursive_call_expr_has_value_block(scrutinee, source_work, depth + 1)
+                    for arm in arms |arm, source_work, depth|:
+                        return true if proof_source_recursive_call_expr_has_value_block(arm.guard, source_work, depth + 1)
+                        nested: (complete: bool, found: bool) = proof_source_recursive_call_body_has_local_declaration(arm.body, source_work, depth + 1)
+                        return true if not nested.complete or nested.found
+                    false
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return true if proof_source_recursive_call_expr_has_value_block(guarded, source_work, depth + 1)
+                    nested: (complete: bool, found: bool) = proof_source_recursive_call_body_has_local_declaration(recovery, source_work, depth + 1)
+                    not nested.complete or nested.found
+                _:
+                    false

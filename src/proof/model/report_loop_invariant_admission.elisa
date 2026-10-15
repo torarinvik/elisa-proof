@@ -1,0 +1,496 @@
+# Exact source binding for loop invariant goals in report admission.
+extend ElisaProof:
+    private:
+        const PROOF_SOURCE_LOOP_INVARIANT_DEPTH_LIMIT: usize = 64
+
+        def proof_source_loop_invariant_scan_loop(header: Ast::Expr, nested: darray[Ast::Stmt]&, position: Ast::Pos, attempt: ProofGoalAttempt, report: ProofReport&, source_work: mutable usize&, depth: usize, loop_matches: mutable usize&, invariant_matches: mutable usize&) -> bool:
+            return false if not proof_source_loop_invariant_scan_expression(header, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+            if attempt.loop_source_position.line == 0 or attempt.loop_source_position.line != attempt.line:
+                return false
+            if proof_source_loop_transfer_position_equal(position, attempt.loop_source_position):
+                loop_matches <- loop_matches + 1
+                return false if loop_matches > 1
+                for invariant_statement in nested |attempt, report, source_work, invariant_matches|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    match invariant_statement:
+                        Ast::Stmt.Contract(kind, expression, _):
+                            return false if not proof_report_source_work_charge(sview_len(kind), source_work) or not proof_report_source_work_charge(sview_len("invariant"), source_work)
+                            continue if kind != "invariant"
+                            equal: bool = proof_replay_summary_expr_equal_with_limit(attempt.goal, expression, source_work, proof_replay_summary_source_work_limit())
+                            invariant_matches <- invariant_matches + 1 if equal
+                            return false if invariant_matches > 1
+                        _:
+                            pass
+            proof_source_loop_invariant_scan_body(nested, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+
+        def proof_source_loop_invariant_scan_body(body: darray[Ast::Stmt]&, attempt: ProofGoalAttempt, report: ProofReport&, source_work: mutable usize&, depth: usize, loop_matches: mutable usize&, invariant_matches: mutable usize&) -> bool:
+            return false if depth >= PROOF_SOURCE_LOOP_INVARIANT_DEPTH_LIMIT
+            for statement in body |attempt, report, source_work, depth, loop_matches, invariant_matches|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.While(condition, nested, position):
+                        return false if not proof_source_loop_invariant_scan_loop(condition, nested, position, attempt, report, source_work, depth, loop_matches, invariant_matches)
+                    Ast::Stmt.For(_, _, iterable, nested, position):
+                        return false if not proof_source_loop_invariant_scan_loop(iterable, nested, position, attempt, report, source_work, depth, loop_matches, invariant_matches)
+                    Ast::Stmt.Block(kind, _, _, nested, _):
+                        return false if kind != "assert_by" and not proof_source_loop_invariant_scan_body(nested, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return false if not proof_source_loop_invariant_scan_expression(condition, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                        return false if not proof_source_loop_invariant_scan_body(then_body, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                        return false if not proof_source_loop_invariant_scan_body(else_body, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return false if not proof_source_loop_invariant_scan_expression(scrutinee, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                        for arm in arms |attempt, report, source_work, depth, loop_matches, invariant_matches|:
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            return false if not proof_source_loop_invariant_scan_expression(arm.guard, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                            return false if not proof_source_loop_invariant_scan_body(arm.body, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _):
+                        return false if not proof_source_loop_invariant_scan_expression(expression, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    Ast::Stmt.VarDecl(_, type_expression, initializer, _):
+                        return false if not proof_source_loop_invariant_scan_expression(type_expression, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                        return false if not proof_source_loop_invariant_scan_expression(initializer, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        return false if not proof_source_loop_invariant_scan_expression(target, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                        return false if not proof_source_loop_invariant_scan_expression(initializer, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return false if not proof_source_loop_invariant_scan_expression(expression, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    Ast::Stmt.Invalid:
+                        return false
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return false
+                flow: (complete: bool, may_fallthrough: bool) = proof_source_loop_statement_flow(statement, report.source.source_annotations, source_work, depth + 1)
+                return false if not flow.complete
+                break if not flow.may_fallthrough
+            return true
+
+        def proof_source_loop_invariant_scan_expression(expression: Ast::Expr, attempt: ProofGoalAttempt, report: ProofReport&, source_work: mutable usize&, depth: usize, loop_matches: mutable usize&, invariant_matches: mutable usize&) -> bool:
+            return false if depth >= PROOF_SOURCE_LOOP_INVARIANT_DEPTH_LIMIT or not proof_report_source_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Block(statements, value, _, _):
+                    return false if not proof_source_loop_invariant_scan_body(statements, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    return false if not proof_source_loop_invariant_scan_expression(value, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _) | Ast::Expr.Unary(_, inner, _):
+                    return false if not proof_source_loop_invariant_scan_expression(inner, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_source_loop_invariant_scan_expression(callee, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    for argument in arguments |attempt, report, source_work, depth, loop_matches, invariant_matches|:
+                        return false if not proof_source_loop_invariant_scan_expression(argument, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.Index(object, index, _) | Ast::Expr.Binary(object, _, index, _):
+                    return false if not proof_source_loop_invariant_scan_expression(object, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    return false if not proof_source_loop_invariant_scan_expression(index, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_source_loop_invariant_scan_expression(object, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    return false if not proof_source_loop_invariant_scan_expression(low, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    return false if not proof_source_loop_invariant_scan_expression(high, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_source_loop_invariant_scan_expression(object, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    for argument in arguments |attempt, report, source_work, depth, loop_matches, invariant_matches|:
+                        return false if not proof_source_loop_invariant_scan_expression(argument, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |attempt, report, source_work, depth, loop_matches, invariant_matches|:
+                        return false if not proof_source_loop_invariant_scan_expression(element, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |attempt, report, source_work, depth, loop_matches, invariant_matches|:
+                        return false if not proof_source_loop_invariant_scan_expression(entry.key, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                        return false if not proof_source_loop_invariant_scan_expression(entry.value, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.Construct(type_expression, fields, _) | Ast::Expr.RecordUpdate(type_expression, fields, _):
+                    return false if not proof_source_loop_invariant_scan_expression(type_expression, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    for field in fields |attempt, report, source_work, depth, loop_matches, invariant_matches|:
+                        return false if not proof_source_loop_invariant_scan_expression(field.value, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return false if not proof_source_loop_invariant_scan_expression(condition, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    return false if not proof_source_loop_invariant_scan_expression(then_value, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    return false if not proof_source_loop_invariant_scan_expression(else_value, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                    return false if not proof_source_loop_invariant_scan_expression(scrutinee, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    for arm in arms |attempt, report, source_work, depth, loop_matches, invariant_matches|:
+                        return false if not proof_source_loop_invariant_scan_expression(arm.guard, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                        return false if not proof_source_loop_invariant_scan_body(arm.body, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return false if not proof_source_loop_invariant_scan_expression(iterable, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    return false if not proof_source_loop_invariant_scan_expression(condition, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    return false if not proof_source_loop_invariant_scan_expression(body, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_source_loop_invariant_scan_expression(base, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    return false if not proof_source_loop_invariant_scan_expression(predicate, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.GetElse(base, recovery, _):
+                    return false if not proof_source_loop_invariant_scan_expression(base, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    return false if not proof_source_loop_invariant_scan_body(recovery, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.Lambda(_, body, _):
+                    return false if not proof_source_loop_invariant_scan_body(body, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.StaticEffectCall(effect_type, _, candidates, arguments, _, _):
+                    return false if not proof_source_loop_invariant_scan_expression(effect_type, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    for candidate in candidates |attempt, report, source_work, depth, loop_matches, invariant_matches|:
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        return false if not proof_source_loop_invariant_scan_expression(candidate.effect_type, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                        for capture in candidate.captures |attempt, report, source_work, depth, loop_matches, invariant_matches|:
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            return false if not proof_source_loop_invariant_scan_expression(capture, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    for argument in arguments |attempt, report, source_work, depth, loop_matches, invariant_matches|:
+                        return false if not proof_source_loop_invariant_scan_expression(argument, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                _:
+                    return false
+            return true
+
+        # Loop invariant goals are recorded with a phase and the loop statement's source line.
+        # Admit the exact, untransformed subset where the reported goal is structurally equal to
+        # one parser-origin invariant clause. Substituted invariants need an independently
+        # source-derived substitution witness; do not infer that correspondence from line/phase.
+        def proof_source_loop_invariant_goal_matches_declarations(declarations: darray[Ast::Decl]&, attempt: ProofGoalAttempt, report: ProofReport&, source_work: mutable usize&, depth: usize, loop_matches: mutable usize&, invariant_matches: mutable usize&) -> bool:
+            return false if depth >= PROOF_SOURCE_LOOP_INVARIANT_DEPTH_LIMIT
+            for declaration in declarations |attempt, report, source_work, depth, loop_matches, invariant_matches|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, function_position):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work) or not proof_report_source_work_charge(sview_len(attempt.name), source_work)
+                        continue if name != attempt.name or function_position.offset != attempt.owner_function_offset or function_position.line != attempt.owner_function_line
+                        return false if not proof_source_loop_invariant_scan_body(body, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_loop_invariant_goal_matches_declarations(nested, attempt, report, source_work, depth + 1, loop_matches, invariant_matches)
+                    Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Import(_, _):
+                        pass
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
+            return true
+
+        def proof_source_loop_invariant_goal_attempt_admitted_with_declarations(declarations: darray[Ast::Decl]&, report: ProofReport&, goal_id: usize, source_work: mutable usize&, source_coverage_checked: bool = false) -> bool:
+            return false if goal_id >= report.results.goal_attempts.count
+            return false if not proof_report_source_work_charge(1, source_work)
+            attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
+            return false if not proof_report_source_work_charge(sview_len(attempt.source_phase), source_work)
+            return false if not proof_report_source_work_charge(sview_len("loop-invariant-entry"), source_work)
+            return false if not proof_report_source_work_charge(sview_len("loop-invariant-preservation"), source_work)
+            return false if attempt.source_phase != "loop-invariant-entry" and attempt.source_phase != "loop-invariant-preservation"
+            # Lexer token offsets are zero-based; an owner at the start of the file
+            # is still exact because the source scan matches both owner line and offset.
+            return false if attempt.rule != "goal" or attempt.line == 0 or attempt.owner_function_line == 0
+            return false if attempt.loop_source_position.line == 0 or attempt.loop_source_position.line != attempt.line
+            return false if attempt.has_certificate != attempt.producer_proven
+            if not source_coverage_checked:
+                loop_matches: mutable usize = 0
+                invariant_matches: mutable usize = 0
+                return false if not proof_source_loop_invariant_goal_matches_declarations(declarations, attempt, report, source_work, 0, &loop_matches, &invariant_matches)
+                return false if loop_matches != 1 or invariant_matches != 1
+            if attempt.producer_proven:
+                return false if not attempt.has_certificate or attempt.certificate_index >= report.analysis_1.certificates.count
+                certificate: ProofGoalCertificate = report.analysis_1.certificates[attempt.certificate_index]
+                return false if:
+                    not certificate.replayed
+                    not proof_report_source_work_charge(sview_len(certificate.name), source_work)
+                    not proof_report_source_work_charge(sview_len(attempt.name), source_work)
+                    not proof_report_source_work_charge(sview_len(certificate.rule), source_work)
+                    not proof_report_source_work_charge(sview_len(attempt.rule), source_work)
+                    not proof_report_source_work_charge(sview_len(certificate.source_phase), source_work)
+                    not proof_report_source_work_charge(sview_len(attempt.source_phase), source_work)
+                    certificate.name != attempt.name or certificate.line != attempt.line or certificate.rule != attempt.rule
+                    certificate.source_phase != attempt.source_phase
+                    not proof_source_loop_transfer_position_equal(certificate.loop_source_position, attempt.loop_source_position)
+                    not proof_replay_summary_expr_equal_with_limit(attempt.goal, certificate.goal, source_work, proof_replay_summary_source_work_limit())
+            true
+
+        def proof_source_loop_invariant_goal_attempt_admitted(report: ProofReport&, goal_id: usize, source_work: mutable usize&) -> bool:
+            proof_source_loop_invariant_goal_attempt_admitted_with_declarations(report.source.source_declarations, report, goal_id, source_work, false)
+
+        # Return and loop transfers have no normal successor. Structured branches have no
+        # normal successor only when every reachable arm exits; loops and unsupported control
+        # flow stay conservative. This lets source admission match the producer for nested
+        # all-exit paths without trusting an unmetered control-flow summary.
+        def proof_source_loop_match_catchall(pattern: Ast::Pattern, catch_match: bool, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_LOOP_INVARIANT_DEPTH_LIMIT
+            match pattern:
+                Ast::Pattern.Wildcard | Ast::Pattern.Binding(_):
+                    return true
+                Ast::Pattern.TypeBind(type_name, _):
+                    return catch_match and type_name == "error"
+                Ast::Pattern.As(_, inner):
+                    return false if inner.count != 1
+                    return proof_source_loop_match_catchall(inner[0], catch_match, depth + 1)
+                _:
+                    return false
+
+        def proof_source_loop_match_is_catch(position: Ast::Pos, annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&) -> (complete: bool, is_catch: bool):
+            for annotation in annotations |annotation, position, source_work|:
+                return (false, false) if not proof_report_source_work_charge(1, source_work)
+                continue if annotation.line != position.line or annotation.offset != position.offset
+                return (false, false) if not proof_report_source_work_charge(sview_len(annotation.owner), source_work) or not proof_report_source_work_charge(sview_len(annotation.name), source_work)
+                return (true, true) if annotation.owner == "__catch_match" and annotation.name == "__catch_match"
+            (true, false)
+
+        def proof_source_loop_match_fully_exits(arms: darray[Ast::MatchArm]&, position: Ast::Pos, annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&, depth: usize) -> (complete: bool, fully_exits: bool):
+            return (false, false) if depth >= PROOF_SOURCE_LOOP_INVARIANT_DEPTH_LIMIT or arms.count == 0
+            catch_state: (complete: bool, is_catch: bool) = proof_source_loop_match_is_catch(position, annotations, source_work)
+            return (false, false) if not catch_state.complete
+            for arm in arms |arm, annotations, source_work, depth|:
+                return (false, false) if not proof_report_source_work_charge(1, source_work)
+                match arm.guard:
+                    Ast::Expr.Absent:
+                        pass
+                    _:
+                        return (true, false)
+                arm_flow: (complete: bool, may_fallthrough: bool) = proof_source_loop_body_may_fallthrough(arm.body, annotations, source_work, depth + 1)
+                return (false, false) if not arm_flow.complete
+                return (true, false) if arm_flow.may_fallthrough
+            last_pattern: Ast::Pattern = arms[arms.count - 1].pattern
+            # `error value` is exhaustive only in a parser-tagged catch statement;
+            # ordinary TypeBind patterns remain category tests.
+            return (true, true) if proof_source_loop_match_catchall(last_pattern, catch_state.is_catch, 0)
+            (true, false)
+
+        def proof_source_loop_statement_flow(statement: Ast::Stmt, annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&, depth: usize) -> (complete: bool, may_fallthrough: bool):
+            return (false, true) if depth >= PROOF_SOURCE_LOOP_INVARIANT_DEPTH_LIMIT or not proof_report_source_work_charge(1, source_work)
+            match statement:
+                Ast::Stmt.Return(_, _) | Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                    return (true, false)
+                Ast::Stmt.If(_, then_body, else_body, _):
+                    then_flow: (complete: bool, may_fallthrough: bool) = proof_source_loop_body_may_fallthrough(then_body, annotations, source_work, depth + 1)
+                    else_flow: (complete: bool, may_fallthrough: bool) = proof_source_loop_body_may_fallthrough(else_body, annotations, source_work, depth + 1)
+                    return (false, true) if not then_flow.complete or not else_flow.complete
+                    return (true, then_flow.may_fallthrough or else_flow.may_fallthrough)
+                Ast::Stmt.Block(kind, _, _, nested, _):
+                    return (true, true) if kind == "assert_by"
+                    proof_source_loop_body_may_fallthrough(nested, annotations, source_work, depth + 1)
+                Ast::Stmt.Match(_, arms, position):
+                    match_flow: (complete: bool, fully_exits: bool) = proof_source_loop_match_fully_exits(arms, position, annotations, source_work, depth + 1)
+                    return (false, true) if not match_flow.complete
+                    (true, not match_flow.fully_exits)
+                # A loop may execute zero times, so it can always reach its successor.
+                Ast::Stmt.While(_, _, _) | Ast::Stmt.For(_, _, _, _, _):
+                    (true, true)
+                Ast::Stmt.Invalid:
+                    (false, true)
+                _:
+                    (true, true)
+
+        def proof_source_loop_body_may_fallthrough(body: darray[Ast::Stmt]&, annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&, depth: usize) -> (complete: bool, may_fallthrough: bool):
+            return (false, true) if depth >= PROOF_SOURCE_LOOP_INVARIANT_DEPTH_LIMIT
+            for statement in body |statement, body, annotations, source_work, depth|:
+                flow: (complete: bool, may_fallthrough: bool) = proof_source_loop_statement_flow(statement, annotations, source_work, depth + 1)
+                return (false, true) if not flow.complete
+                return (true, false) if not flow.may_fallthrough
+            (true, true)
+
+        def proof_source_loop_invariant_preservation_required(body: darray[Ast::Stmt]&, annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&) -> bool:
+            flow: (complete: bool, may_fallthrough: bool) = proof_source_loop_body_may_fallthrough(body, annotations, source_work, 0)
+            not flow.complete or flow.may_fallthrough
+
+        # Reuse the bounded shared loop-transfer index, while keeping the full loop source
+        # position and phase as separate key components. Callers compare the complete key
+        # after its hash filter.
+        def proof_source_loop_invariant_coverage_key(name: sview, function_position: Ast::Pos, loop_position: Ast::Pos, expression: Ast::Expr, phase: u32) -> ProofSourceLoopTransferExpectation:
+            ProofSourceLoopTransferExpectation{owner_name: name, owner_line: function_position.line, owner_offset: function_position.offset, position: loop_position, invariant: expression, phase: phase}
+
+        # Collect source expectations here; reconcile report attempts once after the AST walk.
+        def proof_source_loop_invariant_coverage_clause(name: sview, function_position: Ast::Pos, loop_position: Ast::Pos, expression: Ast::Expr, preservation_required: bool, expected: mutable darray[ProofSourceLoopTransferExpectation]&, source_work: mutable usize&) -> bool:
+            return false if not proof_report_source_work_charge(1, source_work)
+            expected.push(proof_source_loop_invariant_coverage_key(name, function_position, loop_position, expression, 0))
+            if preservation_required:
+                return false if not proof_report_source_work_charge(1, source_work)
+                expected.push(proof_source_loop_invariant_coverage_key(name, function_position, loop_position, expression, 1))
+            true
+
+        # Follow expression children so executable value blocks cannot hide source loops.
+        def proof_source_loop_invariant_coverage_expression(expression: Ast::Expr, name: sview, function_position: Ast::Pos, report: ProofReport&, source_work: mutable usize&, depth: usize, expected: mutable darray[ProofSourceLoopTransferExpectation]&) -> bool:
+            return false if depth >= PROOF_SOURCE_LOOP_INVARIANT_DEPTH_LIMIT
+            return false if not proof_report_source_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Block(statements, value, _, _):
+                    return false if not proof_source_loop_invariant_coverage_body(statements, name, function_position, report, source_work, depth + 1, expected)
+                    return false if not proof_source_loop_invariant_coverage_expression(value, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _) | Ast::Expr.Unary(_, inner, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(inner, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(callee, name, function_position, report, source_work, depth + 1, expected)
+                    for argument in arguments |name, function_position, report, source_work, depth, expected|:
+                        return false if not proof_source_loop_invariant_coverage_expression(argument, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.Index(object, index, _) | Ast::Expr.Binary(object, _, index, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(object, name, function_position, report, source_work, depth + 1, expected)
+                    return false if not proof_source_loop_invariant_coverage_expression(index, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(object, name, function_position, report, source_work, depth + 1, expected)
+                    return false if not proof_source_loop_invariant_coverage_expression(low, name, function_position, report, source_work, depth + 1, expected)
+                    return false if not proof_source_loop_invariant_coverage_expression(high, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(object, name, function_position, report, source_work, depth + 1, expected)
+                    for argument in arguments |name, function_position, report, source_work, depth, expected|:
+                        return false if not proof_source_loop_invariant_coverage_expression(argument, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |name, function_position, report, source_work, depth, expected|:
+                        return false if not proof_source_loop_invariant_coverage_expression(element, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |name, function_position, report, source_work, depth, expected|:
+                        return false if not proof_source_loop_invariant_coverage_expression(entry.key, name, function_position, report, source_work, depth + 1, expected)
+                        return false if not proof_source_loop_invariant_coverage_expression(entry.value, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(type_expression, name, function_position, report, source_work, depth + 1, expected)
+                    for field in fields |name, function_position, report, source_work, depth, expected|:
+                        return false if not proof_source_loop_invariant_coverage_expression(field.value, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(base, name, function_position, report, source_work, depth + 1, expected)
+                    for field in fields |name, function_position, report, source_work, depth, expected|:
+                        return false if not proof_source_loop_invariant_coverage_expression(field.value, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(condition, name, function_position, report, source_work, depth + 1, expected)
+                    return false if not proof_source_loop_invariant_coverage_expression(then_value, name, function_position, report, source_work, depth + 1, expected)
+                    return false if not proof_source_loop_invariant_coverage_expression(else_value, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(scrutinee, name, function_position, report, source_work, depth + 1, expected)
+                    for arm in arms |name, function_position, report, source_work, depth, expected|:
+                        return false if not proof_source_loop_invariant_coverage_expression(arm.guard, name, function_position, report, source_work, depth + 1, expected)
+                        return false if not proof_source_loop_invariant_coverage_body(arm.body, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(iterable, name, function_position, report, source_work, depth + 1, expected)
+                    return false if not proof_source_loop_invariant_coverage_expression(condition, name, function_position, report, source_work, depth + 1, expected)
+                    return false if not proof_source_loop_invariant_coverage_expression(body, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(base, name, function_position, report, source_work, depth + 1, expected)
+                    return false if not proof_source_loop_invariant_coverage_expression(predicate, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.GetElse(base, recovery, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(base, name, function_position, report, source_work, depth + 1, expected)
+                    return false if not proof_source_loop_invariant_coverage_body(recovery, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.Lambda(_, body, _):
+                    return false if not proof_source_loop_invariant_coverage_body(body, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.StaticEffectCall(effect_type, _, candidates, arguments, _, _):
+                    return false if not proof_source_loop_invariant_coverage_expression(effect_type, name, function_position, report, source_work, depth + 1, expected)
+                    for candidate in candidates |name, function_position, report, source_work, depth, expected|:
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        return false if not proof_source_loop_invariant_coverage_expression(candidate.effect_type, name, function_position, report, source_work, depth + 1, expected)
+                        for capture in candidate.captures |name, function_position, report, source_work, depth, expected|:
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            return false if not proof_source_loop_invariant_coverage_expression(capture, name, function_position, report, source_work, depth + 1, expected)
+                    for argument in arguments |name, function_position, report, source_work, depth, expected|:
+                        return false if not proof_source_loop_invariant_coverage_expression(argument, name, function_position, report, source_work, depth + 1, expected)
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                _:
+                    return false
+            return true
+
+        # Recurse through every bounded statement subtree, including nested loops, so an
+        # omitted entry obligation cannot hide below a direct function-body statement.
+        def proof_source_loop_invariant_coverage_loop(header: Ast::Expr, nested: darray[Ast::Stmt]&, position: Ast::Pos, name: sview, function_position: Ast::Pos, report: ProofReport&, source_work: mutable usize&, depth: usize, expected: mutable darray[ProofSourceLoopTransferExpectation]&) -> bool:
+            return false if not proof_source_loop_invariant_coverage_expression(header, name, function_position, report, source_work, depth + 1, expected)
+            loop_line: u32 = position.line
+            return false if not proof_report_source_work_charge(1, source_work)
+            expected.push(proof_source_loop_invariant_coverage_key(name, function_position, position, Ast::Expr.BoolLit(true, position), 2))
+            preservation_required: bool = proof_source_loop_invariant_preservation_required(nested, report.source.source_annotations, source_work)
+            for invariant_statement in nested |name, function_position, loop_line, position, report, source_work, expected|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match invariant_statement:
+                    Ast::Stmt.Contract(kind, expression, _):
+                        return false if not proof_report_source_work_charge(sview_len(kind), source_work)
+                        continue if kind != "invariant"
+                        return false if not proof_source_loop_invariant_coverage_clause(name, function_position, position, expression, preservation_required, expected, source_work)
+                    _:
+                        pass
+            # Rewalk the body after matching direct clauses so each invariant expression is
+            # also checked for nested blocks, lambdas, and loops under the same meter.
+            return proof_source_loop_invariant_coverage_body(nested, name, function_position, report, source_work, depth + 1, expected)
+
+        def proof_source_loop_invariant_coverage_body(body: darray[Ast::Stmt]&, name: sview, function_position: Ast::Pos, report: ProofReport&, source_work: mutable usize&, depth: usize, expected: mutable darray[ProofSourceLoopTransferExpectation]&) -> bool:
+            return false if depth >= PROOF_SOURCE_LOOP_INVARIANT_DEPTH_LIMIT
+            for statement in body |name, function_position, report, source_work, depth, expected|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.While(condition, nested, position):
+                        return false if not proof_source_loop_invariant_coverage_loop(condition, nested, position, name, function_position, report, source_work, depth, expected)
+                    Ast::Stmt.For(_, _, iterable, nested, position):
+                        return false if not proof_source_loop_invariant_coverage_loop(iterable, nested, position, name, function_position, report, source_work, depth, expected)
+                    Ast::Stmt.Block(kind, _, _, nested, _):
+                        return false if kind != "assert_by" and not proof_source_loop_invariant_coverage_body(nested, name, function_position, report, source_work, depth + 1, expected)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return false if not proof_source_loop_invariant_coverage_expression(condition, name, function_position, report, source_work, depth + 1, expected)
+                        return false if not proof_source_loop_invariant_coverage_body(then_body, name, function_position, report, source_work, depth + 1, expected)
+                        return false if not proof_source_loop_invariant_coverage_body(else_body, name, function_position, report, source_work, depth + 1, expected)
+                    Ast::Stmt.Return(expression, _) | Ast::Stmt.Expr(expression, _):
+                        return false if not proof_source_loop_invariant_coverage_expression(expression, name, function_position, report, source_work, depth + 1, expected)
+                    Ast::Stmt.VarDecl(_, type_expression, initializer, _):
+                        return false if not proof_source_loop_invariant_coverage_expression(type_expression, name, function_position, report, source_work, depth + 1, expected)
+                        return false if not proof_source_loop_invariant_coverage_expression(initializer, name, function_position, report, source_work, depth + 1, expected)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        return false if not proof_source_loop_invariant_coverage_expression(target, name, function_position, report, source_work, depth + 1, expected)
+                        return false if not proof_source_loop_invariant_coverage_expression(initializer, name, function_position, report, source_work, depth + 1, expected)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return false if not proof_source_loop_invariant_coverage_expression(scrutinee, name, function_position, report, source_work, depth + 1, expected)
+                        for arm in arms |name, function_position, report, source_work, depth, expected|:
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            return false if not proof_source_loop_invariant_coverage_expression(arm.guard, name, function_position, report, source_work, depth + 1, expected)
+                            return false if not proof_source_loop_invariant_coverage_body(arm.body, name, function_position, report, source_work, depth + 1, expected)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return false if not proof_source_loop_invariant_coverage_expression(expression, name, function_position, report, source_work, depth + 1, expected)
+                    Ast::Stmt.Invalid:
+                        return false
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return false
+                flow: (complete: bool, may_fallthrough: bool) = proof_source_loop_statement_flow(statement, report.source.source_annotations, source_work, depth + 1)
+                return false if not flow.complete
+                break if not flow.may_fallthrough
+            return true
+
+        def proof_source_loop_invariant_entry_coverage_declarations(declarations: darray[Ast::Decl]&, report: ProofReport&, source_work: mutable usize&, depth: usize, focused: bool, focused_offset: u32, expected: mutable darray[ProofSourceLoopTransferExpectation]&) -> bool:
+            return false if depth >= PROOF_SOURCE_LOOP_INVARIANT_DEPTH_LIMIT
+            for declaration in declarations |report, source_work, depth, focused, focused_offset, expected|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, function_position):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        continue if focused and function_position.offset != focused_offset
+                        return false if not proof_source_loop_invariant_coverage_body(body, name, function_position, report, source_work, depth + 1, expected)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_loop_invariant_entry_coverage_declarations(nested, report, source_work, depth + 1, focused, focused_offset, expected)
+                    # These declaration-owned expressions are outside the function-body
+                    # loop-checking pass. Do not count loops nested in their types/values as
+                    # expected obligations; phase-tagged attempts there fail the source match.
+                    Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Import(_, _):
+                        pass
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
+            return true
+
+        def proof_source_loop_invariant_source_coverage_with_declarations(report: ProofReport&, declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> bool:
+            expected: mutable darray[ProofSourceLoopTransferExpectation] = []
+            focused: bool = report.context.focused_function != ""
+            return false if not proof_source_loop_invariant_entry_coverage_declarations(declarations, report, source_work, 0, focused, report.context.focused_function_offset, &expected)
+            index: mutable ProofSourceLoopTransferIndex = proof_source_loop_transfer_index_create(expected.count, source_work)
+            return false if not index.valid
+            groups: mutable darray[ProofSourceLoopTransferGroup] = []
+            for expected_row in expected |expected_row, index, groups, source_work|:
+                return false if not proof_source_loop_transfer_index_insert(&index, &groups, expected_row, source_work)
+            for group in groups |group, source_work|:
+                if group.key.phase == 2:
+                    return false if group.expected_clause_count != 1 or not proof_report_source_work_charge(1, source_work)
+                    group.matched_attempt_count <- 1
+            for goal_id in 0..<report.results.goal_attempts.count |goal_id, report, source_work, focused, index, groups|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
+                return false if not proof_report_source_work_charge(sview_len(attempt.source_phase), source_work)
+                if attempt.source_phase == "loop-invariant-entry" or attempt.source_phase == "loop-invariant-preservation":
+                    return false if focused and attempt.owner_function_offset != report.context.focused_function_offset
+                    return false if not proof_report_source_work_charge(sview_len(attempt.rule), source_work) or attempt.rule != "goal"
+                    preservation: bool = attempt.source_phase == "loop-invariant-preservation"
+                    return false if attempt.loop_source_position.line == 0 or attempt.loop_source_position.line != attempt.line
+                    key: ProofSourceLoopTransferExpectation = proof_source_loop_invariant_coverage_key(attempt.name, Ast::Pos{line: attempt.owner_function_line, column: 0, offset: attempt.owner_function_offset, end_line: 0, end_column: 0, end_offset: 0}, attempt.loop_source_position, attempt.goal, 1 if preservation else 0)
+                    matched: (complete: bool, found: bool, group_id: usize) = proof_source_loop_transfer_index_find(index, groups, key, source_work)
+                    return false if not matched.complete or not matched.found or matched.group_id >= groups.count
+                    return false if groups[matched.group_id].matched_attempt_count >= groups[matched.group_id].expected_clause_count
+                    groups[matched.group_id].matched_attempt_count <- groups[matched.group_id].matched_attempt_count + 1
+            for group in groups |group, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                return false if group.matched_attempt_count != group.expected_clause_count
+            true
+
+        def proof_source_loop_invariant_source_coverage(report: ProofReport&, source_work: mutable usize&) -> bool:
+            proof_source_loop_invariant_source_coverage_with_declarations(report, report.source.source_declarations, source_work)

@@ -1,9 +1,13 @@
 # Derived invariants shared by report rendering, CLI admission, and adversarial tests.
 include "./report_assert_by_inventory.elisa"
+include "./report_loop_invariant_admission.elisa"
+include "./report_loop_transfer_admission.elisa"
 include "./report_postcondition_inventory.elisa"
 include "./report_frame_inventory.elisa"
 include "./report_goal_attempt_index.elisa"
 include "./report_theorem_line_index.elisa"
+include "./report_call_requires_resolution.elisa"
+include "./report_default_call_requires_admission.elisa"
 extend ElisaProof:
     private:
         const PROOF_SOURCE_ASSERT_BY_AST_DEPTH_LIMIT: usize = 64
@@ -143,7 +147,13 @@ extend ElisaProof:
         # obligation inventory independently binds the aggregate source count and proven count.
         def proof_report_goal_attempts_bounded_by_obligations(report: ProofReport&, source_work: mutable usize&, track_open_goals: bool, has_open_goal: mutable bool&) -> bool:
             frame_obligations: (complete: bool, count: usize) = proof_report_proven_frame_obligations(report, source_work)
-            return false if not frame_obligations.complete or report.results.producer_proven_count.usize() > report.results.obligations.usize() or report.results.goal_attempts.count + frame_obligations.count < report.results.producer_proven_count.usize()
+            return false if not frame_obligations.complete or report.results.producer_proven_count.usize() > report.results.obligations.usize()
+            uncovered_proven: usize = report.results.producer_proven_count.usize()
+            if report.results.goal_attempts.count >= uncovered_proven:
+                uncovered_proven <- 0
+            else:
+                uncovered_proven <- uncovered_proven - report.results.goal_attempts.count
+            return false if frame_obligations.count < uncovered_proven
             cursor: mutable usize = 0
             for event in report.results.obligation_inventory |event, report, cursor, source_work, track_open_goals, has_open_goal|:
                 return false if:
@@ -163,18 +173,185 @@ extend ElisaProof:
         def proof_report_proven_frame_obligations(report: ProofReport&, source_work: mutable usize&) -> (complete: bool, count: usize):
             count: mutable usize = 0
             for obligation in report.results.obligation_inventory |count, source_work|:
-                return (false, count) if not proof_report_source_work_charge(1, source_work)
-                count <- count + 1 if obligation.proven and obligation.source_kind == "frame"
+                return (false, count) if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(obligation.source_kind), source_work)
+                count <- count + 1 if obligation.proven and obligation.source_kind in {"frame", "frame-clause"}
             return (true, count)
+
+        struct ProofReportCallRequiresSourceIndex:
+            positions: mutable darray[Ast::Pos] = []
+            owner_lines: mutable darray[u32] = []
+            owner_offsets: mutable darray[u32] = []
+            owner_names: mutable darray[sview] = []
+            callee_names: mutable darray[sview] = []
+            hashes: mutable darray[u32] = []
+            slots: mutable darray[usize] = []
+            empty: usize = 0
+            valid: bool = false
+
+        def proof_report_call_requires_key_hash(owner_name: sview, owner_line: u32, owner_offset: u32, position: Ast::Pos) -> u32:
+            hash: u32 = proof_expr_shape_mix(proof_name_hash(owner_name), owner_line.i64())
+            hash <- proof_expr_shape_mix(hash, owner_offset.i64())
+            proof_expr_shape_mix(hash, position.offset.i64())
+
+        def proof_report_call_requires_position_equal(left: Ast::Pos, right: Ast::Pos) -> bool:
+            left.line == right.line and left.column == right.column and left.offset == right.offset and left.end_line == right.end_line and left.end_column == right.end_column and left.end_offset == right.end_offset
+
+        def proof_report_call_requires_source_rows(declarations: darray[Ast::Decl]&, index: mutable ProofReportCallRequiresSourceIndex&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96 or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return false if declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + declarations.count
+            for declaration in declarations |declaration, index, source_work, depth|:
+                match declaration:
+                    Ast::Decl.Func(owner_name, parameters, _, body, _, _, owner_position):
+                        return false if not proof_report_source_work_charge(sview_len(owner_name), source_work)
+                        body_cost: mutable usize = 0
+                        return false if not proof_replay_summary_expr_cost_body(body, &body_cost, source_work, 0)
+                        return false if not proof_report_source_work_charge(body_cost, source_work)
+                        names: mutable darray[sview] = []
+                        qualifiers: mutable darray[sview] = []
+                        sources: mutable darray[Ast::Expr] = []
+                        expressions: mutable darray[Ast::Expr] = []
+                        positions: mutable darray[Ast::Pos] = []
+                        proof_collect_body_call_edges(body, &names, &qualifiers, &sources, &expressions, &positions)
+                        for parameter in parameters |parameter, names, qualifiers, sources, expressions, positions, source_work|:
+                            if parameter.has_default:
+                                expression_cost: mutable usize = 0
+                                return false if not proof_replay_summary_expr_cost(parameter.default_value, &expression_cost, source_work, 0)
+                                return false if not proof_report_source_work_charge(expression_cost, source_work)
+                                proof_collect_call_edges(parameter.default_value, &names, &qualifiers, &sources, &expressions, &positions)
+                        return false if names.count != positions.count or names.count != expressions.count or names.count != sources.count or names.count != qualifiers.count
+                        return false if not proof_report_source_work_charge(names.count, source_work)
+                        for row in 0..<names.count |row, names, expressions, positions, owner_name, owner_position, index, source_work|:
+                            match expressions[row]:
+                                Ast::Expr.Call(callee, _, _, call_position):
+                                    return false if not proof_report_call_requires_position_equal(call_position, positions[row])
+                                    callee_name: sview = proof_callable_name(callee)
+                                    return false if not proof_report_source_work_charge(sview_len(owner_name), source_work) or not proof_report_source_work_charge(sview_len(callee_name), source_work)
+                                    return false if index.positions.count == PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                    index.positions.push(call_position)
+                                    index.owner_lines.push(owner_position.line)
+                                    index.owner_offsets.push(owner_position.offset)
+                                    index.owner_names.push(owner_name)
+                                    index.callee_names.push(callee_name)
+                                _:
+                                    pass
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_report_call_requires_source_rows(nested, index, source_work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+            true
+
+        def proof_report_call_requires_source_index_build(declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> ProofReportCallRequiresSourceIndex can[Memory.Allocate, Abort.Panic]:
+            index: mutable ProofReportCallRequiresSourceIndex = ProofReportCallRequiresSourceIndex{}
+            return index if not proof_report_call_requires_source_rows(declarations, &index, source_work, 0)
+            rows: usize = index.positions.count
+            return index if rows != index.owner_lines.count or rows != index.owner_offsets.count or rows != index.owner_names.count or rows != index.callee_names.count
+            index.empty <- rows
+            return ProofReportCallRequiresSourceIndex{empty: 0, valid: true} if rows == 0
+            capacity: usize = proof_name_index_capacity(rows)
+            return ProofReportCallRequiresSourceIndex{} if capacity == 0
+            return ProofReportCallRequiresSourceIndex{} if not proof_report_source_work_charge(capacity * 2, source_work)
+            index.hashes.resize(capacity)
+            index.slots.resize(capacity)
+            for slot in 0..<capacity |slot, index, rows|:
+                index.slots[slot] <- rows
+            for row in 0..<rows |row, index, rows, capacity, source_work|:
+                position: Ast::Pos = index.positions[row]
+                hash: u32 = proof_report_call_requires_key_hash(index.owner_names[row], index.owner_lines[row], index.owner_offsets[row], position)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, row, hash, index, rows, capacity, source_work, placed|:
+                    return ProofReportCallRequiresSourceIndex{} if not proof_report_source_work_charge(1, source_work)
+                    current: usize = index.slots[slot]
+                    if current == rows:
+                        index.hashes[slot] <- hash
+                        index.slots[slot] <- row
+                        placed <- true
+                        break
+                    return ProofReportCallRequiresSourceIndex{} if current >= rows
+                    if index.hashes[slot] == hash:
+                        return ProofReportCallRequiresSourceIndex{} if not proof_report_source_work_charge(sview_len(index.owner_names[current]), source_work) or not proof_report_source_work_charge(sview_len(index.owner_names[row]), source_work)
+                        if index.owner_lines[current] == index.owner_lines[row] and index.owner_offsets[current] == index.owner_offsets[row] and index.owner_names[current] == index.owner_names[row] and index.positions[current].offset == index.positions[row].offset:
+                            return ProofReportCallRequiresSourceIndex{}
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return ProofReportCallRequiresSourceIndex{} if not placed
+            index.valid <- true
+            index
+
+        def proof_report_call_requires_source_index_contains(index: ProofReportCallRequiresSourceIndex&, attempt: ProofGoalAttempt, source_work: mutable usize&) -> (complete: bool, found: bool):
+            rows: usize = index.positions.count
+            capacity: usize = index.slots.count
+            return (false, false) if not index.valid or rows != index.owner_lines.count or rows != index.owner_offsets.count or rows != index.owner_names.count or rows != index.callee_names.count
+            return (true, false) if rows == 0 and capacity == 0
+            return (false, false) if capacity == 0 or index.hashes.count != capacity
+            hash: u32 = proof_report_call_requires_key_hash(attempt.name, attempt.owner_function_line, attempt.owner_function_offset, attempt.source_call_position)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, index, attempt, rows, capacity, source_work|:
+                return (false, false) if not proof_report_source_work_charge(1, source_work)
+                current: usize = index.slots[slot]
+                return (true, false) if current == rows
+                return (false, false) if current > rows
+                if index.hashes[slot] == hash and index.owner_lines[current] == attempt.owner_function_line and index.owner_offsets[current] == attempt.owner_function_offset:
+                    return (false, false) if not proof_report_source_work_charge(sview_len(index.owner_names[current]), source_work) or not proof_report_source_work_charge(sview_len(attempt.name), source_work)
+                    if index.owner_names[current] == attempt.name and proof_report_call_requires_position_equal(index.positions[current], attempt.source_call_position):
+                        return (false, false) if not proof_report_source_work_charge(sview_len(index.callee_names[current]), source_work) or not proof_report_source_work_charge(sview_len(attempt.source_call_callee_name), source_work)
+                        return (true, index.callee_names[current] == attempt.source_call_callee_name)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            (false, false)
 
         # Every successful accounting increment must have a corresponding proof attempt. This
         # prevents a report from keeping its `proven` counter while losing the checked root that
         # justifies that result; replay separately verifies each proven attempt's certificate.
         def proof_report_proven_attempts_consistent(report: ProofReport&, source_work: mutable usize&) -> bool:
+            proof_report_proven_attempts_consistent_with_declarations(report, report.source.source_declarations, source_work)
+
+        # Source-authorized admission supplies parser-owned declarations separately from the
+        # report's mutable mirror. Keep the report-only wrapper for legacy diagnostics, but bind
+        # selected call-precondition attempts against the supplied source of authority.
+        def proof_report_proven_attempts_consistent_with_declarations(report: ProofReport&, declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> bool:
+            return false if report.context.call_attribution_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            has_call_requires_tag: mutable bool = false
+            for candidate in report.results.goal_attempts |candidate, source_work, has_call_requires_tag|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                has_call_requires_tag <- true if candidate.source_call_requires
+            call_requires_index: ProofReportCallRequiresSourceIndex = proof_report_call_requires_source_index_build(declarations, source_work) if has_call_requires_tag else ProofReportCallRequiresSourceIndex{valid: true}
+            return false if has_call_requires_tag and not call_requires_index.valid
             proven_attempts: mutable usize = 0
             expected_certificate: mutable usize = 0
-            for attempt in report.results.goal_attempts |proven_attempts, expected_certificate, report, source_work|:
-                return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(attempt.name), source_work) or not proof_report_source_work_charge(sview_len(attempt.rule), source_work)
+            for attempt_index in 0..<report.results.goal_attempts.count |attempt_index, proven_attempts, expected_certificate, report, source_work, call_requires_index|:
+                attempt: ProofGoalAttempt = report.results.goal_attempts[attempt_index]
+                return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(attempt.name), source_work) or not proof_report_source_work_charge(sview_len(attempt.rule), source_work) or not proof_report_source_work_charge(sview_len(attempt.source_phase), source_work)
+                if attempt.source_call_requires:
+                    return false if:
+                        not attempt.source_call_obligation_selected
+                        attempt.owner_function_line == 0
+                        attempt.source_call_position.line == 0 or attempt.source_call_position.offset == 0 or attempt.source_call_position.end_offset <= attempt.source_call_position.offset
+                        attempt.source_call_callee_name == "" or attempt.source_call_callee_line == 0
+                        not proof_report_source_work_charge(sview_len(attempt.source_call_callee_name), source_work)
+                        not proof_report_source_work_charge(sview_len(attempt.source_call_callee_module), source_work)
+                        not proof_report_goal_owner_is_source_declaration(report, attempt.name, attempt.owner_function_line, attempt.owner_function_offset, source_work)
+                        not proof_report_goal_owner_is_source_declaration(report, attempt.source_call_callee_name, attempt.source_call_callee_line, attempt.source_call_callee_offset, source_work)
+                    source_site: (complete: bool, found: bool) = proof_report_call_requires_source_index_contains(call_requires_index, attempt, source_work)
+                    return false if not source_site.complete or not source_site.found
+                    return false if not proof_report_call_requires_selected_source_match(declarations, report, attempt, attempt_index, source_work)
+                else:
+                    return false if attempt.source_call_requires_index != 0 or attempt.source_call_callee_name != "" or attempt.source_call_callee_module != "" or attempt.source_call_callee_line != 0 or attempt.source_call_callee_offset != 0
+                if attempt.source_call_obligation_selected:
+                    return false if attempt.source_call_position.line == 0 or attempt.source_call_position.end_offset <= attempt.source_call_position.offset
+                if attempt.source_phase == "loop-invariant-transfer":
+                    transfer: Ast::Pos = attempt.loop_transfer_position
+                    return false if:
+                        transfer.line == 0 or transfer.line != attempt.line or transfer.offset == 0
+                        transfer.end_offset <= transfer.offset or transfer.end_line != transfer.line
+                if attempt.source_phase == "loop-invariant-entry" or attempt.source_phase == "loop-invariant-preservation":
+                    loop_position: Ast::Pos = attempt.loop_source_position
+                    return false if loop_position.line == 0 or loop_position.line != attempt.line or loop_position.end_offset <= loop_position.offset
                 if attempt.producer_proven:
                     return false if:
                         not attempt.has_certificate or attempt.certificate_index != expected_certificate
@@ -184,8 +361,16 @@ extend ElisaProof:
                         not proof_report_source_work_charge(1, source_work)
                         not proof_report_source_work_charge(sview_len(certificate.name), source_work)
                         not proof_report_source_work_charge(sview_len(certificate.rule), source_work)
+                        not proof_report_source_work_charge(sview_len(certificate.source_call_callee_name), source_work)
+                        not proof_report_source_work_charge(sview_len(certificate.source_call_callee_module), source_work)
                         certificate.kernel_goal != attempt.kernel_goal or certificate.kernel_facts_start != attempt.kernel_facts_start or certificate.kernel_facts_count != attempt.kernel_facts_count
                         certificate.line != attempt.line or certificate.name != attempt.name or certificate.rule != attempt.rule
+                        certificate.source_call_obligation_selected != attempt.source_call_obligation_selected
+                        certificate.source_call_requires != attempt.source_call_requires or certificate.source_call_requires_index != attempt.source_call_requires_index
+                        certificate.source_call_callee_name != attempt.source_call_callee_name or certificate.source_call_callee_module != attempt.source_call_callee_module
+                        certificate.source_call_callee_line != attempt.source_call_callee_line or certificate.source_call_callee_offset != attempt.source_call_callee_offset
+                        attempt.source_phase == "loop-invariant-transfer" and (certificate.loop_transfer_position.line != attempt.loop_transfer_position.line or certificate.loop_transfer_position.column != attempt.loop_transfer_position.column or certificate.loop_transfer_position.offset != attempt.loop_transfer_position.offset or certificate.loop_transfer_position.end_line != attempt.loop_transfer_position.end_line or certificate.loop_transfer_position.end_column != attempt.loop_transfer_position.end_column or certificate.loop_transfer_position.end_offset != attempt.loop_transfer_position.end_offset)
+                        (attempt.source_phase == "loop-invariant-entry" or attempt.source_phase == "loop-invariant-preservation") and not proof_report_call_requires_position_equal(certificate.loop_source_position, attempt.loop_source_position)
                     expected_certificate <- expected_certificate + 1
                     proven_attempts <- proven_attempts + 1
                 else:
@@ -197,10 +382,9 @@ extend ElisaProof:
             return false if not frame_obligations.complete or proven_attempts + frame_obligations.count < report.results.producer_proven_count.usize()
             return expected_certificate == report.analysis_1.certificates.count
 
-        # Bounded Q0.8 coverage: body-level ensures are recounted from the retained AST and
-        # each distinct source index must have at least one accounting event. Multiple return
-        # paths may legitimately emit multiple events for the same index. Signature-only
-        # contracts and other obligation families are deliberately outside this invariant.
+        # Bounded Q0.8 coverage recounts body ensures from the retained AST and requires each
+        # distinct source index to have an accounting event. Multiple return paths may emit
+        # multiple events; signature-only contracts and other families are outside this check.
         def proof_report_source_postcondition_inventory_consistent(report: ProofReport&) -> bool:
             source_work: mutable usize = 0
             proof_report_source_postcondition_inventory_consistent_with_work(report, &source_work)
@@ -211,6 +395,9 @@ extend ElisaProof:
             for obligation_index in 0..<report.results.obligation_inventory.count |obligation_index, report, event_keys, frame_entry_indices, source_work|:
                 return false if not proof_report_source_postcondition_work_charge(1, source_work)
                 obligation: ProofObligationEntry = report.results.obligation_inventory[obligation_index]
+                return false if not proof_report_source_postcondition_work_charge(sview_len(obligation.source_kind), source_work)
+                if obligation.source_kind != "call-requires":
+                    return false if obligation.source_call_position.line != 0 or obligation.source_call_position.column != 0 or obligation.source_call_position.offset != 0 or obligation.source_call_position.end_line != 0 or obligation.source_call_position.end_column != 0 or obligation.source_call_position.end_offset != 0 or obligation.source_call_callee_name != "" or obligation.source_call_callee_module != "" or obligation.source_call_callee_line != 0 or obligation.source_call_callee_offset != 0 or obligation.source_call_requires_index != 0
                 if obligation.source_kind == "postcondition":
                     return false if:
                         event_keys.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
@@ -218,10 +405,37 @@ extend ElisaProof:
                     event_keys.push(ProofSourcePostconditionKey{name: obligation.source_name, function_offset: obligation.source_function_offset, line: obligation.source_line, source_index: obligation.source_obligation_index})
                 elif obligation.source_kind in {"changes", "preserves", "allow", "preserve"}:
                     frame_entry_indices.push(obligation_index)
+                elif obligation.source_kind == "frame-clause":
+                    return false if obligation.source_name == "" or obligation.source_line == 0 or obligation.source_function_offset != obligation.owner_function_offset
+                elif obligation.source_kind == "call-requires":
+                    return false if obligation.source_line != 0 or obligation.source_name != "" or obligation.source_function_offset != 0 or obligation.source_obligation_index != 0
+                    return false if obligation.owner_function_line == 0 or obligation.source_call_position.line == 0 or obligation.source_call_position.end_offset <= obligation.source_call_position.offset
+                    return false if obligation.source_call_callee_name == "" or obligation.source_call_callee_line == 0
+                    return false if obligation.attempts_start > report.results.goal_attempts.count or obligation.attempts_count > report.results.goal_attempts.count - obligation.attempts_start
+                    selected_call_attempts: mutable usize = 0
+                    event_end: usize = obligation.attempts_start + obligation.attempts_count
+                    for goal_id in obligation.attempts_start..<event_end |goal_id, report, obligation, selected_call_attempts, source_work|:
+                        return false if not proof_report_source_postcondition_work_charge(1, source_work)
+                        attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
+                        continue if not attempt.source_call_requires or not attempt.source_call_obligation_selected
+                        continue if attempt.owner_function_line != obligation.owner_function_line or attempt.owner_function_offset != obligation.owner_function_offset
+                        return false if not proof_report_source_postcondition_work_charge(sview_len(attempt.source_call_callee_name), source_work) or not proof_report_source_postcondition_work_charge(sview_len(obligation.source_call_callee_name), source_work)
+                        return false if not proof_report_source_postcondition_work_charge(sview_len(attempt.source_call_callee_module), source_work) or not proof_report_source_postcondition_work_charge(sview_len(obligation.source_call_callee_module), source_work)
+                        continue if attempt.source_call_callee_name != obligation.source_call_callee_name or attempt.source_call_callee_module != obligation.source_call_callee_module
+                        continue if attempt.source_call_callee_line != obligation.source_call_callee_line or attempt.source_call_callee_offset != obligation.source_call_callee_offset
+                        continue if attempt.source_call_requires_index != obligation.source_call_requires_index
+                        continue if not proof_report_call_requires_position_equal(attempt.source_call_position, obligation.source_call_position)
+                        return false if attempt.producer_proven != obligation.proven
+                        selected_call_attempts <- selected_call_attempts + 1
+                    if selected_call_attempts == 0:
+                        return false if obligation.proven or obligation.attempts_count != 0
+                    else:
+                        return false if selected_call_attempts != 1
                 else:
                     return false if:
                         obligation.source_kind != "" and obligation.source_kind != "frame"
                         obligation.source_line != 0 or obligation.source_name != "" or obligation.source_function_offset != 0 or obligation.source_obligation_index != 0
+                        obligation.source_call_position.line != 0 or obligation.source_call_position.column != 0 or obligation.source_call_position.offset != 0 or obligation.source_call_position.end_line != 0 or obligation.source_call_position.end_column != 0 or obligation.source_call_position.end_offset != 0 or obligation.source_call_callee_name != "" or obligation.source_call_callee_module != "" or obligation.source_call_callee_line != 0 or obligation.source_call_callee_offset != 0 or obligation.source_call_requires_index != 0
 
             if frame_entry_indices.count > 0:
                 frame_owner_keys: mutable darray[ProofSourcePostconditionKey] = []
@@ -237,7 +451,6 @@ extend ElisaProof:
                     owner: (complete: bool, found: bool, count: usize) = proof_report_source_postcondition_index_find(frame_owner_index, owner_key, source_work)
                     return false if not owner.complete or not owner.found or owner.count != 1
                     return false if not proof_report_frame_obligation_associated(report, frame_entry, source_work)
-
             return false if not proof_structural_signature_contract_table_valid(report.source_contracts.source_signature_contract_lines, report.source_contracts.source_signature_contract_kinds, report.source_contracts.source_signature_contracts, source_work)
             owner_keys: mutable darray[ProofSourcePostconditionKey] = []
             return false if not proof_report_source_postcondition_keys_collect(report.source.source_declarations, &owner_keys, source_work, 0)
@@ -246,7 +459,6 @@ extend ElisaProof:
             return false if not owner_index.valid
             for key in owner_keys |owner_index, source_work|:
                 return false if not proof_report_source_postcondition_index_add(&owner_index, key, 1, false, source_work)
-
             event_index: mutable ProofSourcePostconditionCountIndex = proof_report_source_postcondition_index_create(event_keys.count, source_work)
             return false if not event_index.valid
             for key in event_keys |event_index, source_work|:
@@ -254,9 +466,7 @@ extend ElisaProof:
             for key in event_keys |owner_index, source_work|:
                 owner: (complete: bool, found: bool, count: usize) = proof_report_source_postcondition_index_find(owner_index, key, source_work)
                 return false if not owner.complete or not owner.found or owner.count != 1
-
             proof_report_source_postconditions_have_events_with_work(report.source.source_declarations, report, event_index, source_work, 0)
-
         # Focused source queries may return one checked goal while another declaration was
         # absent from the report. Their admission still depends on a structurally complete
         # source inventory and a consistent finding ledger, even when other goals remain open.
@@ -284,6 +494,12 @@ extend ElisaProof:
                 focused_covered: bool = proof_report_focused_source_obligations_covered_with_work(report, &source_work)
                 return "source-admission-work-limit" if source_work > proof_replay_summary_source_work_limit()
                 return "focused-source-obligations" if not focused_covered
+                loop_transfers_covered: bool = proof_source_loop_transfer_source_coverage(report, &source_work)
+                return "source-admission-work-limit" if source_work > proof_replay_summary_source_work_limit()
+                return "source-loop-transfer-coverage" if not loop_transfers_covered
+                loop_invariants_covered: bool = proof_source_loop_invariant_source_coverage(report, &source_work)
+                return "source-admission-work-limit" if source_work > proof_replay_summary_source_work_limit()
+                return "source-loop-invariant-coverage" if not loop_invariants_covered
             else:
                 literal_status: (inventory: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)], complete: bool, work_limited: bool) = proof_source_literal_ensure_inventory_with_work(report.source.source_declarations, &source_work)
                 return "source-admission-work-limit" if literal_status.work_limited or not literal_status.complete
@@ -297,11 +513,16 @@ extend ElisaProof:
                 assert_by_covered: bool = proof_source_assert_by_coverage_inner(assert_by_status.inventory, report, true, &source_work)
                 return "source-admission-work-limit" if source_work > proof_replay_summary_source_work_limit()
                 return "source-assert-by-coverage" if not assert_by_covered
+                loop_invariants_covered: bool = proof_source_loop_invariant_source_coverage(report, &source_work)
+                return "source-admission-work-limit" if source_work > proof_replay_summary_source_work_limit()
+                return "source-loop-invariant-coverage" if not loop_invariants_covered
+                loop_transfers_covered: bool = proof_source_loop_transfer_source_coverage(report, &source_work)
+                return "source-admission-work-limit" if source_work > proof_replay_summary_source_work_limit()
+                return "source-loop-transfer-coverage" if not loop_transfers_covered
             proven_consistent: bool = proof_report_proven_attempts_consistent(report, &source_work)
             return "source-admission-work-limit" if source_work > proof_replay_summary_source_work_limit()
             return "proven-attempt-certificates" if not proven_consistent
             return ""
-
     private:
         # Global accounting and declaration structure protect every local query. Whole-source
         # coverage is intentionally kept out of this predicate so an unrelated open claim does
@@ -315,7 +536,6 @@ extend ElisaProof:
                 not proof_report_obligation_inventory_consistent(report, source_work)
                 not proof_report_goal_attempts_bounded_by_obligations(report, source_work, false, &has_open_goal)
             return proof_report_proven_attempts_consistent(report, source_work)
-
         def proof_report_source_literal_ensure_goal_attempt_admitted(expected: (name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool), report: ProofReport&, goal_id: usize, source_work: mutable usize&) -> bool:
             return false if goal_id >= report.results.goal_attempts.count or expected.name == "" or expected.contract_line == 0
             attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
@@ -333,24 +553,6 @@ extend ElisaProof:
                     not proof_report_source_work_charge(sview_len(certificate.rule), source_work)
                 return certificate.name == expected.name and certificate.line == attempt.line and certificate.rule == attempt.rule and proof_source_literal_ensure_goal_matches(certificate.goal, expected, source_work)
             return true
-
-        def proof_report_obligation_event_for_goal(report: ProofReport&, goal_id: usize, source_work: mutable usize&) -> (found: bool, entry: ProofObligationEntry):
-            low: mutable usize = 0
-            high: mutable usize = report.results.obligation_inventory.count
-            empty: ProofObligationEntry = ProofObligationEntry{identity: 0, attempts_start: 0, attempts_count: 0, proven: false, source_line: 0, source_name: "", source_kind: "", source_function_offset: 0, source_obligation_index: 0, owner_function_line: 0, owner_function_offset: 0}
-            while low < high |low, high, report, goal_id, source_work|:
-                return (false, empty) if not proof_report_source_work_charge(1, source_work)
-                middle: usize = low + (high - low) / 2
-                entry: ProofObligationEntry = report.results.obligation_inventory[middle]
-                if goal_id < entry.attempts_start:
-                    high <- middle
-                else:
-                    attempt_offset: usize = goal_id - entry.attempts_start
-                    if attempt_offset < entry.attempts_count:
-                        return (true, entry)
-                    low <- middle + 1
-            (false, empty)
-
     public:
         def proof_source_parameter_name_count_with_work(parameters: darray[Ast::ParamDecl]&, name: sview, source_work: mutable usize&) -> (complete: bool, count: usize):
             return (false, 0) if not proof_report_source_work_charge(sview_len(name), source_work)
@@ -371,17 +573,13 @@ extend ElisaProof:
                 count <- count + 1 if parameter.name == name
             return count
 
-        # Independent source inventory slice (R-004): unique top-level functions with leading
-        # requires clauses, one ensure/ensures, and one integer literal or declared-parameter
-        # return. Store the substituted equality proposition even when it is false; dropping a
-        # mismatched return would hide an obligation instead of recording the source claim.
+        # Independent R-004 slice: unique top-level functions with leading requires, one
+        # ensure/ensures, and an integer literal or declared-parameter return. Preserve the
+        # substituted equality even when false; dropping a mismatch would hide a source claim.
         def proof_source_literal_ensure_candidate(declaration: Ast::Decl) -> (known: bool, name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool):
             source_work: mutable usize = 0
             complete: mutable bool = true
             proof_source_literal_ensure_candidate_with_work(declaration, &source_work, &complete)
-
-    private:
-    public:
         # Legacy report diagnostic: this checks aggregate report invariants and producer-marked
         # obligation closure only. It does not carry a replay receipt or parser-origin source
         # capability, so false is not a source-admission verdict. Source-positive status belongs

@@ -1,0 +1,519 @@
+# Require the exact source-derived visit count for every supported runtime call site and
+# requires clause in the API-bound scheduled owner closure. Revisited sites aggregate into
+# one key with an explicit multiplicity (for example, finite-decreases termination passes).
+extend ElisaProof:
+    private:
+        struct ProofSourceCallRequiresExpected:
+            owner_name: sview
+            owner_line: u32
+            owner_offset: u32
+            call_position: Ast::Pos
+            callee_name: sview
+            callee_line: u32
+            callee_offset: u32
+            requires_index: usize
+            contract_index: usize
+            visit_count: mutable usize
+
+        struct ProofSourceScheduledOwner:
+            name: sview
+            line: u32
+            offset: u32
+
+        struct ProofSourceCallRequiresExpectedIndex:
+            valid: mutable bool = false
+            hashes: mutable darray[u32] = []
+            slots: mutable darray[usize] = []
+            empty: mutable usize = 0
+
+        struct ProofSourceCallRequiresRowIndex:
+            valid: mutable bool = false
+            hashes: mutable darray[u32] = []
+            slots: mutable darray[usize] = []
+            empty: mutable usize = 0
+
+        def proof_report_call_requires_row_index_build(rows: darray[(name: sview, line: u32, offset: u32, parameters: darray[Ast::ParamDecl], body: darray[Ast::Stmt], signature_requires: darray[Ast::Expr], executable: bool, lemma: bool)]&, source_work: mutable usize&) -> ProofSourceCallRequiresRowIndex can[Memory.Allocate, Abort.Panic]:
+            empty: usize = rows.count
+            return ProofSourceCallRequiresRowIndex{valid: true, hashes: [], slots: [], empty: 0} if empty == 0
+            capacity: usize = proof_name_index_capacity(empty)
+            return ProofSourceCallRequiresRowIndex{valid: false} if capacity == 0 or not proof_report_source_work_charge(capacity * 2, source_work)
+            index: mutable ProofSourceCallRequiresRowIndex = ProofSourceCallRequiresRowIndex{valid: true, hashes: [], slots: [], empty: empty}
+            for _ in 0..<capacity |index, source_work|:
+                return ProofSourceCallRequiresRowIndex{valid: false} if not proof_report_source_work_charge(1, source_work)
+                index.hashes.push(0)
+                index.slots.push(empty)
+            for row in 0..<empty |row, rows, index, capacity, empty, source_work|:
+                name: sview = rows[row].name
+                return ProofSourceCallRequiresRowIndex{valid: false} if not proof_report_source_work_charge(sview_len(name), source_work)
+                hash: mutable u32 = proof_name_hash(name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, name, row, rows, index, capacity, empty, source_work, placed|:
+                    return ProofSourceCallRequiresRowIndex{valid: false} if not proof_report_source_work_charge(1, source_work)
+                    prior: usize = index.slots[slot]
+                    if prior == empty:
+                        index.hashes[slot] <- hash
+                        index.slots[slot] <- row
+                        placed <- true
+                        break
+                    return ProofSourceCallRequiresRowIndex{valid: false} if prior >= empty
+                    if index.hashes[slot] == hash:
+                        prior_name: sview = rows[prior].name
+                        return ProofSourceCallRequiresRowIndex{valid: false} if not proof_report_source_work_charge(sview_len(prior_name), source_work)
+                        return ProofSourceCallRequiresRowIndex{valid: false} if prior_name == name
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return ProofSourceCallRequiresRowIndex{valid: false} if not placed
+            index
+
+        def proof_report_call_requires_row_index_find(rows: darray[(name: sview, line: u32, offset: u32, parameters: darray[Ast::ParamDecl], body: darray[Ast::Stmt], signature_requires: darray[Ast::Expr], executable: bool, lemma: bool)]&, index: ProofSourceCallRequiresRowIndex&, name: sview, source_work: mutable usize&) -> (complete: bool, found: bool, row: usize):
+            count: usize = rows.count
+            capacity: usize = index.slots.count
+            return (false, false, count) if not index.valid or index.empty != count or index.hashes.count != capacity
+            return (true, false, count) if count == 0 and capacity == 0
+            return (false, false, count) if capacity == 0 or capacity != proof_name_index_capacity(count)
+            return (false, false, count) if not proof_report_source_work_charge(sview_len(name), source_work)
+            hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, name, rows, index, count, capacity, source_work|:
+                return (false, false, count) if not proof_report_source_work_charge(1, source_work)
+                current: usize = index.slots[slot]
+                return (true, false, count) if current == count
+                return (false, false, count) if current > count
+                if index.hashes[slot] == hash:
+                    return (false, false, count) if not proof_report_source_work_charge(sview_len(rows[current].name), source_work)
+                    return (true, true, current) if rows[current].name == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            (false, false, count)
+
+        def proof_report_call_requires_expected_hash(row: ProofSourceCallRequiresExpected) -> u32:
+            hash: mutable u32 = proof_expr_shape_mix(proof_name_hash(row.callee_name), row.owner_line.i64())
+            hash <- proof_expr_shape_mix(hash, row.owner_offset.i64())
+            hash <- proof_expr_shape_mix(hash, row.call_position.line.i64())
+            hash <- proof_expr_shape_mix(hash, row.call_position.column.i64())
+            hash <- proof_expr_shape_mix(hash, row.call_position.offset.i64())
+            hash <- proof_expr_shape_mix(hash, row.call_position.end_line.i64())
+            hash <- proof_expr_shape_mix(hash, row.call_position.end_column.i64())
+            hash <- proof_expr_shape_mix(hash, row.call_position.end_offset.i64())
+            hash <- proof_expr_shape_mix(hash, row.callee_line.i64())
+            hash <- proof_expr_shape_mix(hash, row.callee_offset.i64())
+            proof_expr_shape_mix(hash, row.requires_index.i64())
+
+        def proof_report_call_requires_expected_key_equal(left: ProofSourceCallRequiresExpected, right: ProofSourceCallRequiresExpected) -> bool:
+            left.owner_line == right.owner_line and left.owner_offset == right.owner_offset and proof_report_call_requires_position_equal(left.call_position, right.call_position) and left.callee_name == right.callee_name and left.callee_line == right.callee_line and left.callee_offset == right.callee_offset and left.requires_index == right.requires_index
+
+        def proof_report_call_requires_expected_index_build(expected: mutable darray[ProofSourceCallRequiresExpected]&, source_work: mutable usize&) -> ProofSourceCallRequiresExpectedIndex can[Memory.Allocate, Abort.Panic]:
+            empty: usize = expected.count
+            return ProofSourceCallRequiresExpectedIndex{valid: true, hashes: [], slots: [], empty: 0} if expected.count == 0
+            capacity: usize = proof_name_index_capacity(expected.count)
+            return ProofSourceCallRequiresExpectedIndex{valid: false} if capacity == 0 or not proof_report_source_work_charge(capacity * 2, source_work)
+            hashes: mutable darray[u32] = []
+            slots: mutable darray[usize] = []
+            for slot in 0..<capacity |hashes, slots, expected, source_work, empty|:
+                return ProofSourceCallRequiresExpectedIndex{valid: false} if not proof_report_source_work_charge(1, source_work)
+                hashes.push(0)
+                slots.push(empty)
+            for row in 0..<expected.count |row, expected, hashes, slots, capacity, source_work|:
+                item: ProofSourceCallRequiresExpected = expected[row]
+                return ProofSourceCallRequiresExpectedIndex{valid: false} if not proof_report_source_work_charge(sview_len(item.callee_name), source_work)
+                hash: mutable u32 = proof_report_call_requires_expected_hash(item)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, row, expected, hashes, slots, capacity, source_work, placed, item|:
+                    return ProofSourceCallRequiresExpectedIndex{valid: false} if not proof_report_source_work_charge(1, source_work)
+                    current: usize = slots[slot]
+                    if current == empty:
+                        hashes[slot] <- hash
+                        slots[slot] <- row
+                        placed <- true
+                        break
+                    return ProofSourceCallRequiresExpectedIndex{valid: false} if current >= expected.count
+                    if hashes[slot] == hash:
+                        prior: ProofSourceCallRequiresExpected = expected[current]
+                        return ProofSourceCallRequiresExpectedIndex{valid: false} if not proof_report_source_work_charge(sview_len(prior.callee_name), source_work)
+                        if proof_report_call_requires_expected_key_equal(prior, item):
+                            # Report rows retain the source site but not the parser
+                            # contract-row identity. Keep the indexed source key unique.
+                            return ProofSourceCallRequiresExpectedIndex{valid: false} if prior.contract_index != item.contract_index
+                            return ProofSourceCallRequiresExpectedIndex{valid: false} if prior.visit_count == 0 or item.visit_count == 0
+                            # Keep the raw bounded array stable for this pass; the first
+                            # indexed row owns the count and duplicate rows become inactive.
+                            expected[current].visit_count <- expected[current].visit_count + item.visit_count
+                            expected[row].visit_count <- 0
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return ProofSourceCallRequiresExpectedIndex{valid: false} if not placed
+            ProofSourceCallRequiresExpectedIndex{valid: true, hashes: hashes, slots: slots, empty: empty}
+
+        def proof_report_call_requires_expected_index_find(index: ProofSourceCallRequiresExpectedIndex&, expected: darray[ProofSourceCallRequiresExpected]&, key: ProofSourceCallRequiresExpected, source_work: mutable usize&) -> (complete: bool, found: bool, row: usize):
+            count: usize = expected.count
+            capacity: usize = index.slots.count
+            return (false, false, count) if not index.valid or index.empty != count or index.hashes.count != capacity
+            return (true, false, count) if count == 0 and capacity == 0
+            return (false, false, count) if capacity == 0 or capacity != proof_name_index_capacity(count)
+            return (false, false, count) if not proof_report_source_work_charge(sview_len(key.callee_name), source_work)
+            hash: u32 = proof_report_call_requires_expected_hash(key)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, index, expected, key, count, capacity, source_work|:
+                return (false, false, count) if not proof_report_source_work_charge(1, source_work)
+                current: usize = index.slots[slot]
+                return (true, false, count) if current == count
+                return (false, false, count) if current > count
+                if index.hashes[slot] == hash:
+                    return (false, false, count) if not proof_report_source_work_charge(sview_len(expected[current].callee_name), source_work)
+                    if proof_report_call_requires_expected_key_equal(expected[current], key):
+                        return (true, true, current)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false, count)
+
+        def proof_report_call_requires_expected_rows(rows: darray[(name: sview, line: u32, offset: u32, parameters: darray[Ast::ParamDecl], body: darray[Ast::Stmt], signature_requires: darray[Ast::Expr], executable: bool, lemma: bool)]&, row_index: ProofSourceCallRequiresRowIndex&, owner: usize, contract_index: usize, names: darray[sview]&, qualifiers: darray[sview]&, expressions: darray[Ast::Expr]&, positions: darray[Ast::Pos]&, expected: mutable darray[ProofSourceCallRequiresExpected]&, source_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if names.count != qualifiers.count or names.count != expressions.count or names.count != positions.count
+            for call_row in 0..<names.count |call_row, names, qualifiers, expressions, positions, rows, owner, contract_index, expected, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match expressions[call_row]:
+                    Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), arguments, argument_names, call_position):
+                        return false if argument_names.count != 0 or qualifiers[call_row] != "" or names[call_row] != callee_name
+                        resolved_target: (complete: bool, found: bool, row: usize) = proof_report_call_requires_row_index_find(rows, row_index, callee_name, source_work)
+                        return false if not resolved_target.complete
+                        target: usize = resolved_target.row
+                        continue if target >= rows.count or not rows[target].executable
+                        continue if rows[target].signature_requires.count == 0
+                        shadow: (complete: bool, found: bool) = proof_report_call_requires_has_shadow(rows[owner].body, callee_name, source_work, 0)
+                        return false if not shadow.complete or shadow.found
+                        for parameter in rows[owner].parameters |parameter, source_work|:
+                            return false if not proof_report_source_work_charge(sview_len(parameter.name), source_work)
+                            return false if parameter.name == callee_name
+                        return false if arguments.count != rows[target].parameters.count
+                        for parameter in rows[target].parameters |parameter, source_work|:
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            return false if parameter.has_default
+                        for requires_index in 0..<rows[target].signature_requires.count |requires_index, rows, owner, target, call_position, contract_index, expected, source_work|:
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            expected.push(ProofSourceCallRequiresExpected{owner_name: rows[owner].name, owner_line: rows[owner].line, owner_offset: rows[owner].offset, call_position: call_position, callee_name: rows[target].name, callee_line: rows[target].line, callee_offset: rows[target].offset, requires_index: requires_index, contract_index: contract_index, visit_count: 1})
+                    _:
+                        return false
+            true
+
+        def proof_report_call_requires_census[@r](source: ProofSourceAnalysis[r]& @r, report: ProofReport&, focus_function: sview, scheduled_owners: mutable darray[ProofSourceScheduledOwner]&, source_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if not source.issued or source.file_identity != report.source.source_file_identity
+            return false if not proof_report_source_work_charge(sview_len(focus_function), source_work)
+            return false if not proof_report_source_work_charge(sview_len(report.context.focused_function), source_work)
+            return false if focus_function != report.context.focused_function
+            return false if source.file.signature_contract_lines.count != source.file.signature_contract_kinds.count or source.file.signature_contract_lines.count != source.file.signature_contract_exprs.count
+            # This first source census supports only the declaration/call resolver slice
+            # that the selected-attempt validator can independently replay.
+            rows: mutable darray[(name: sview, line: u32, offset: u32, parameters: darray[Ast::ParamDecl], body: darray[Ast::Stmt], signature_requires: darray[Ast::Expr], executable: bool, lemma: bool)] = []
+            for declaration in source.file.top_decls |rows, report, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, body, _, _, position):
+                        requires_expressions: mutable darray[Ast::Expr] = []
+                        for statement in body |requires_expressions, source_work|:
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            match statement:
+                                Ast::Stmt.Contract(kind, expression, _):
+                                    return false if not proof_report_source_work_charge(sview_len(kind), source_work)
+                                    if kind == "requires":
+                                        requires_expressions.push(expression)
+                                _:
+                                    pass
+                        signature_count: mutable usize = 0
+                        for contract_row in 0..<source.file.signature_contract_lines.count |contract_row, source, position, requires_expressions, signature_count, source_work|:
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            continue if source.file.signature_contract_lines[contract_row] != position.line
+                            return false if contract_row >= source.file.signature_contract_kinds.count or contract_row >= source.file.signature_contract_exprs.count
+                            return false if not proof_report_source_work_charge(sview_len(source.file.signature_contract_kinds[contract_row]), source_work)
+                            if source.file.signature_contract_kinds[contract_row] == "requires":
+                                requires_expressions.push(source.file.signature_contract_exprs[contract_row])
+                                signature_count <- signature_count + 1
+                        executable: mutable bool = false
+                        lemma: mutable bool = false
+                        matching_summaries: mutable usize = 0
+                        for summary in report.analysis_1.declaration_details |summary, name, position, executable, lemma, matching_summaries, source_work|:
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            continue if summary.source_offset != position.offset or summary.line != position.line or summary.name != name
+                            matching_summaries <- matching_summaries + 1
+                            executable <- summary.kind == "function"
+                            lemma <- summary.kind == "lemma"
+                        return false if matching_summaries != 1
+                        return false if not executable and not lemma
+                        rows.push((name, position.line, position.offset, parameters, body, requires_expressions, executable, lemma))
+                    # Imports and extern declarations are metadata at this boundary; local
+                    # executable summaries are collected from the function declarations below.
+                    # A qualified call edge is still rejected during closure construction.
+                    Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _):
+                        pass
+                    Ast::Decl.Const(_, type_expression, initializer, _, _):
+                        type_has_call: bool = proof_expr_has_call_with_work(type_expression, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                        return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or type_has_call
+                        initializer_has_call: bool = proof_expr_has_call_with_work(initializer, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                        return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or initializer_has_call
+                    Ast::Decl.Module(_, _, _) | Ast::Decl.Scoped(_, _) | Ast::Decl.Invalid:
+                        return false
+                    Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    _:
+                        return false
+            # Build one source-owned index for duplicate detection and all later local
+            # callee resolution. Repeated edges no longer rescan every declaration row.
+            row_index: ProofSourceCallRequiresRowIndex = proof_report_call_requires_row_index_build(rows, source_work)
+            return false if not row_index.valid
+            # Lemma bodies can be skipped by the checker after a contract-type finding,
+            # and this census has no trusted record of which lemma bodies actually ran.
+            # Accept a lemma call only when the source slice proves it cannot emit a
+            # call-requires event; otherwise fail closed instead of inferring scheduling.
+            for owner in 0..<rows.count |owner, rows, source, source_work|:
+                continue if not rows[owner].lemma
+                names: mutable darray[sview] = []
+                qualifiers: mutable darray[sview] = []
+                sources: mutable darray[Ast::Expr] = []
+                expressions: mutable darray[Ast::Expr] = []
+                positions: mutable darray[Ast::Pos] = []
+                return false if not proof_report_call_requires_collect_runtime_calls(rows[owner].body, &names, &qualifiers, &sources, &expressions, &positions, source_work, 0)
+                return false if names.count != qualifiers.count or names.count != sources.count or names.count != expressions.count or names.count != positions.count
+                for call_row in 0..<names.count |call_row, names, qualifiers, expressions, positions, rows, owner, source, source_work|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    match expressions[call_row]:
+                        Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), _, argument_names, _):
+                            return false if qualifiers[call_row] != "" or names[call_row] != callee_name or argument_names.count != 0
+                            shadow: (complete: bool, found: bool) = proof_report_call_requires_has_shadow(rows[owner].body, callee_name, source_work, 0)
+                            return false if not shadow.complete or shadow.found
+                            for parameter in rows[owner].parameters |parameter, source_work|:
+                                return false if not proof_report_source_work_charge(sview_len(parameter.name), source_work)
+                                return false if parameter.name == callee_name
+                            resolved_target: (complete: bool, found: bool, row: usize) = proof_report_call_requires_row_index_find(rows, row_index, callee_name, source_work)
+                            return false if not resolved_target.complete
+                            target: usize = resolved_target.row
+                            if target < rows.count:
+                                if rows[target].lemma:
+                                    # A source-identified lemma uses proof_apply_lemma, whose
+                                    # goals are not ordinary call-requires events. Keep this
+                                    # exception only when no import or same-name declaration can
+                                    # redirect the unqualified call to an executable function.
+                                    for declaration in source.file.top_decls |declaration, callee_name, rows, target, source_work|:
+                                        return false if not proof_report_source_work_charge(1, source_work)
+                                        match declaration:
+                                            Ast::Decl.Func(other_name, _, _, _, _, _, position):
+                                                return false if not proof_report_source_work_charge(sview_len(other_name), source_work)
+                                                return false if other_name == callee_name and (position.line != rows[target].line or position.offset != rows[target].offset)
+                                            Ast::Decl.Extern(other_name, _, _, _, _, _, _, _):
+                                                return false if not proof_report_source_work_charge(sview_len(other_name), source_work)
+                                                return false if other_name == callee_name
+                                            Ast::Decl.Import(_, _):
+                                                return false
+                                            Ast::Decl.Struct(other_name, _, _, _, _, _, _) | Ast::Decl.Enum(other_name, _, _, _, _) | Ast::Decl.Alias(other_name, _, _) | Ast::Decl.Law(other_name, _, _) | Ast::Decl.Const(other_name, _, _, _, _):
+                                                return false if not proof_report_source_work_charge(sview_len(other_name), source_work)
+                                                return false if other_name == callee_name
+                                            _:
+                                                pass
+                                    continue
+                                return false if not rows[target].executable or rows[target].signature_requires.count > 0
+                                continue
+                            extern_matches: mutable usize = 0
+                            extern_line: mutable u32 = 0
+                            import_present: mutable bool = false
+                            for declaration in source.file.top_decls |declaration, callee_name, extern_matches, extern_line, import_present, source_work|:
+                                return false if not proof_report_source_work_charge(1, source_work)
+                                match declaration:
+                                    Ast::Decl.Extern(extern_name, _, _, _, _, _, _, position):
+                                        return false if not proof_report_source_work_charge(sview_len(extern_name), source_work)
+                                        if extern_name == callee_name:
+                                            extern_matches <- extern_matches + 1
+                                            extern_line <- position.line
+                                    Ast::Decl.Import(_, _):
+                                        import_present <- true
+                                    _:
+                                        pass
+                            if extern_matches == 1 and not import_present:
+                                for contract_row in 0..<source.file.signature_contract_lines.count |contract_row, source, extern_line, source_work|:
+                                    return false if not proof_report_source_work_charge(1, source_work)
+                                    continue if source.file.signature_contract_lines[contract_row] != extern_line
+                                    return false if contract_row >= source.file.signature_contract_kinds.count
+                                    return false if source.file.signature_contract_kinds[contract_row] == "requires"
+                                continue
+                            return false if extern_matches != 0 or import_present or not proof_builtin_scalar_type_name(callee_name)
+                        _:
+                            # Computed, qualified, imported, and opaque calls have no
+                            # independently verified no-requires status for lemma owners.
+                            return false
+            scheduled: mutable darray[bool] = []
+            for row in rows |scheduled, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                scheduled.push(focus_function == "")
+            pending: mutable darray[usize] = []
+            if focus_function != "":
+                focused_target: (complete: bool, found: bool, row: usize) = proof_report_call_requires_row_index_find(rows, row_index, focus_function, source_work)
+                return false if not focused_target.complete or not focused_target.found
+                return false if focused_target.row >= rows.count or not rows[focused_target.row].executable
+                target: usize = focused_target.row
+                scheduled[target] <- true
+                pending.push(target)
+            else:
+                for row in 0..<rows.count |row, rows, pending, source_work|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    pending.push(row) if rows[row].executable
+            pending_index: mutable usize = 0
+            while pending_index < pending.count |pending, pending_index, rows, scheduled, source, report, source_work|:
+                if not proof_report_source_work_charge(1, source_work):
+                    return false
+                caller: usize = pending[pending_index]
+                pending_index <- pending_index + 1
+                names: mutable darray[sview] = []
+                qualifiers: mutable darray[sview] = []
+                sources: mutable darray[Ast::Expr] = []
+                expressions: mutable darray[Ast::Expr] = []
+                positions: mutable darray[Ast::Pos] = []
+                return false if not proof_report_call_requires_census_dependency_edges(source.file, rows[caller].line, rows[caller].parameters, rows[caller].body, &names, &qualifiers, &sources, &expressions, &positions, source_work)
+                return false if names.count != qualifiers.count or names.count != sources.count or names.count != expressions.count or names.count != positions.count
+                for edge in 0..<names.count |edge, names, qualifiers, sources, expressions, positions, rows, scheduled, pending, source_work|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    match expressions[edge]:
+                        Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), _, argument_names, _):
+                            return false if qualifiers[edge] != "" or names[edge] != callee_name or argument_names.count != 0
+                            resolved_target: (complete: bool, found: bool, row: usize) = proof_report_call_requires_row_index_find(rows, row_index, callee_name, source_work)
+                            return false if not resolved_target.complete
+                            target: usize = resolved_target.row
+                            local_declarations: mutable usize = 0
+                            non_executable_local: mutable bool = false
+                            if resolved_target.found:
+                                local_declarations <- 1
+                                non_executable_local <- not rows[target].executable
+                            return false if local_declarations > 1 or non_executable_local
+                            if target < rows.count and not scheduled[target]:
+                                scheduled[target] <- true
+                                pending.push(target)
+                            elif target >= rows.count and local_declarations == 0:
+                                extern_matches: mutable usize = 0
+                                extern_line: mutable u32 = 0
+                                for declaration in source.file.top_decls |declaration, callee_name, extern_matches, extern_line, source_work|:
+                                    return false if not proof_report_source_work_charge(1, source_work)
+                                    match declaration:
+                                        Ast::Decl.Extern(extern_name, _, _, _, _, _, _, position):
+                                            return false if not proof_report_source_work_charge(sview_len(extern_name), source_work) or not proof_report_source_work_charge(sview_len(callee_name), source_work)
+                                            if extern_name == callee_name:
+                                                extern_matches <- extern_matches + 1
+                                                extern_line <- position.line
+                                        _:
+                                            pass
+                                if extern_matches == 1:
+                                    for contract_row in 0..<source.file.signature_contract_lines.count |contract_row, source, extern_line, source_work|:
+                                        return false if not proof_report_source_work_charge(1, source_work)
+                                        continue if source.file.signature_contract_lines[contract_row] != extern_line
+                                        return false if contract_row >= source.file.signature_contract_kinds.count
+                                        return false if source.file.signature_contract_kinds[contract_row] == "requires"
+                                    continue
+                                return false if extern_matches != 0 or not proof_builtin_scalar_type_name(callee_name)
+                        Ast::Expr.Call(_, _, _, _):
+                            # A computed or qualified callee has no authenticated local
+                            # declaration identity in this census.
+                            return false
+                        _:
+                            return false
+            for row in 0..<rows.count |row, rows, scheduled, scheduled_owners, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                continue if not scheduled[row] or not rows[row].executable
+                return false if not proof_report_source_work_charge(sview_len(rows[row].name), source_work)
+                scheduled_owners.push(ProofSourceScheduledOwner{name: rows[row].name, line: rows[row].line, offset: rows[row].offset})
+            expected: mutable darray[ProofSourceCallRequiresExpected] = []
+            for owner in 0..<rows.count |owner, rows, scheduled, source, report, expected, source_work|:
+                continue if not scheduled[owner] or not rows[owner].executable
+                names: mutable darray[sview] = []
+                qualifiers: mutable darray[sview] = []
+                sources: mutable darray[Ast::Expr] = []
+                expressions: mutable darray[Ast::Expr] = []
+                positions: mutable darray[Ast::Pos] = []
+                return false if not proof_report_call_requires_collect_runtime_calls(rows[owner].body, &names, &qualifiers, &sources, &expressions, &positions, source_work, 0)
+                return false if names.count != qualifiers.count or names.count != sources.count or names.count != expressions.count or names.count != positions.count
+                body_contract_index: usize = source.file.signature_contract_lines.count
+                return false if not proof_report_call_requires_expected_rows(rows, row_index, owner, body_contract_index, names, qualifiers, expressions, positions, &expected, source_work)
+                same_line_declarations: mutable usize = 0
+                for declaration in source.file.top_decls |declaration, rows, owner, source_work, same_line_declarations|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    match declaration:
+                        Ast::Decl.Func(_, _, _, _, _, _, position) | Ast::Decl.Extern(_, _, _, _, _, _, _, position):
+                            same_line_declarations <- same_line_declarations + 1 if position.line == rows[owner].line
+                        _:
+                            pass
+                for contract_index in 0..<source.file.signature_contract_lines.count |contract_index, source, rows, owner, same_line_declarations, row_index, expected, source_work|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    continue if source.file.signature_contract_lines[contract_index] != rows[owner].line
+                    return false if contract_index >= source.file.signature_contract_kinds.count or contract_index >= source.file.signature_contract_exprs.count
+                    kind: sview = source.file.signature_contract_kinds[contract_index]
+                    return false if not proof_report_source_work_charge(sview_len(kind), source_work)
+                    continue if kind not in {"requires", "ensures", "ensure"}
+                    return false if same_line_declarations != 1
+                    clause_names: mutable darray[sview] = []
+                    clause_qualifiers: mutable darray[sview] = []
+                    clause_sources: mutable darray[Ast::Expr] = []
+                    clause_expressions: mutable darray[Ast::Expr] = []
+                    clause_positions: mutable darray[Ast::Pos] = []
+                    expression_cost: mutable usize = 0
+                    return false if not proof_replay_summary_expr_cost(source.file.signature_contract_exprs[contract_index], &expression_cost, source_work, 0)
+                    return false if not proof_report_source_work_charge(expression_cost, source_work)
+                    return false if not proof_report_call_requires_collect_runtime_expression(source.file.signature_contract_exprs[contract_index], &clause_names, &clause_qualifiers, &clause_sources, &clause_expressions, &clause_positions, source_work, 0)
+                    return false if not proof_report_call_requires_expected_rows(rows, row_index, owner, contract_index, clause_names, clause_qualifiers, clause_expressions, clause_positions, &expected, source_work)
+            expected_index: ProofSourceCallRequiresExpectedIndex = proof_report_call_requires_expected_index_build(&expected, source_work)
+            return false if not expected_index.valid
+            event_counts: mutable darray[usize] = []
+            attempt_counts: mutable darray[usize] = []
+            for row in expected |event_counts, attempt_counts, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                event_counts.push(0)
+                attempt_counts.push(0)
+            for event in report.results.obligation_inventory |event, expected, expected_index, event_counts, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                continue if event.source_kind != "call-requires"
+                return false if event.source_call_callee_module != ""
+                key: ProofSourceCallRequiresExpected = ProofSourceCallRequiresExpected{owner_name: "", owner_line: event.owner_function_line, owner_offset: event.owner_function_offset, call_position: event.source_call_position, callee_name: event.source_call_callee_name, callee_line: event.source_call_callee_line, callee_offset: event.source_call_callee_offset, requires_index: event.source_call_requires_index, contract_index: 0, visit_count: 0}
+                matched: (complete: bool, found: bool, row: usize) = proof_report_call_requires_expected_index_find(expected_index, expected, key, source_work)
+                return false if not matched.complete or not matched.found
+                return false if event_counts[matched.row] >= expected[matched.row].visit_count
+                event_counts[matched.row] <- event_counts[matched.row] + 1
+            for attempt in report.results.goal_attempts |attempt, expected, expected_index, attempt_counts, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                continue if not attempt.source_call_requires
+                return false if not attempt.source_call_obligation_selected or attempt.source_call_callee_module != ""
+                return false if not proof_report_source_work_charge(sview_len(attempt.name), source_work)
+                key: ProofSourceCallRequiresExpected = ProofSourceCallRequiresExpected{owner_name: "", owner_line: attempt.owner_function_line, owner_offset: attempt.owner_function_offset, call_position: attempt.source_call_position, callee_name: attempt.source_call_callee_name, callee_line: attempt.source_call_callee_line, callee_offset: attempt.source_call_callee_offset, requires_index: attempt.source_call_requires_index, contract_index: 0, visit_count: 0}
+                matched: (complete: bool, found: bool, row: usize) = proof_report_call_requires_expected_index_find(expected_index, expected, key, source_work)
+                return false if not matched.complete or not matched.found
+                return false if not proof_report_source_work_charge(sview_len(expected[matched.row].owner_name), source_work)
+                return false if attempt.name != expected[matched.row].owner_name
+                return false if attempt_counts[matched.row] >= expected[matched.row].visit_count
+                attempt_counts[matched.row] <- attempt_counts[matched.row] + 1
+            for row in 0..<expected.count |row, expected, event_counts, attempt_counts, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                continue if expected[row].visit_count == 0
+                return false if event_counts[row] != expected[row].visit_count or attempt_counts[row] != expected[row].visit_count
+            true
+
+        def proof_report_call_requires_census_dependency_edges(file: Ast::File&, owner_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, names: mutable darray[sview]&, qualifiers: mutable darray[sview]&, sources: mutable darray[Ast::Expr]&, expressions: mutable darray[Ast::Expr]&, positions: mutable darray[Ast::Pos]&, source_work: mutable usize&) -> bool:
+            body_cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost_body(body, &body_cost, source_work, 0)
+            return false if not proof_report_source_work_charge(body_cost, source_work)
+            proof_collect_body_call_edges(body, names, qualifiers, sources, expressions, positions)
+            for parameter in parameters |names, qualifiers, sources, expressions, positions, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                if parameter.has_default:
+                    expression_cost: mutable usize = 0
+                    return false if not proof_replay_summary_expr_cost(parameter.default_value, &expression_cost, source_work, 0)
+                    return false if not proof_report_source_work_charge(expression_cost, source_work)
+                    proof_collect_call_edges(parameter.default_value, names, qualifiers, sources, expressions, positions)
+            for contract_row in 0..<file.signature_contract_lines.count |contract_row, file, body, names, qualifiers, sources, expressions, positions, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                continue if file.signature_contract_lines[contract_row] != owner_line
+                continue if contract_row >= file.signature_contract_kinds.count or contract_row >= file.signature_contract_exprs.count
+                continue if file.signature_contract_kinds[contract_row] not in {"requires", "ensures"}
+                expression_cost: mutable usize = 0
+                return false if not proof_replay_summary_expr_cost(file.signature_contract_exprs[contract_row], &expression_cost, source_work, 0)
+                return false if not proof_report_source_work_charge(expression_cost, source_work)
+                proof_collect_call_edges(file.signature_contract_exprs[contract_row], names, qualifiers, sources, expressions, positions) if file.signature_contract_lines[contract_row] > 0
+            true

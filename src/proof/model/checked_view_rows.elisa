@@ -1,0 +1,211 @@
+# Exact binding between mutable compatibility report rows and the immutable rows captured by
+# ProofCheckedView. A mismatch or exhausted comparison budget revokes source authority.
+extend ElisaProof:
+    public:
+        # One bounded trust snapshot for CLI tactic replay and its final result. It binds the
+        # compatibility report once, then carries the source and target verdicts computed from
+        # that same checked view through replay and serialization.
+        struct ProofCheckedViewTacticStatusSnapshot:
+            complete: bool
+            source_complete: bool
+            source_admissible: bool
+            target_admission_base: bool
+            goal_source_admitted: bool
+            facts_source_admitted: bool
+            source_admitted: bool
+            proven: bool
+
+    private:
+        # Issue the view only after binding report/source identities; capture authority rows
+        # before making the capability visible to callers.
+        def proof_checked_view_create[@r](report: ProofReport& @r, receipt: ProofReplayReceipt[r]& @r, source: ProofSourceAnalysis[r]) -> ProofCheckedView[r] can[Memory.Allocate]:
+            return ProofCheckedView{report: report, receipt: receipt, source_analysis: source} if not receipt.issued or not source.issued
+            attempt_count: usize = report.results.goal_attempts.count
+            theorem_count: usize = report.analysis_1.theorems.summaries.count
+            theorem_goal_id_count: usize = report.analysis_1.theorems.proof_goal_ids.count
+            snapshot_limit: usize = proof_replay_summary_source_work_limit()
+            return ProofCheckedView{report: report, receipt: receipt, source_analysis: source} if attempt_count > snapshot_limit
+            return ProofCheckedView{report: report, receipt: receipt, source_analysis: source} if theorem_count > snapshot_limit - attempt_count
+            return ProofCheckedView{report: report, receipt: receipt, source_analysis: source} if theorem_goal_id_count > snapshot_limit - attempt_count - theorem_count
+            attempt_rows: mutable darray[ProofGoalAttempt] = []
+            theorem_rows: mutable darray[ProofTheoremSummary] = []
+            theorem_proof_goal_ids: mutable darray[usize] = []
+            for attempt in report.results.goal_attempts |attempt_rows|:
+                attempt_rows.push(attempt)
+            for theorem in report.analysis_1.theorems.summaries |theorem_rows|:
+                theorem_rows.push(theorem)
+            for goal_id in report.analysis_1.theorems.proof_goal_ids |theorem_proof_goal_ids|:
+                theorem_proof_goal_ids.push(goal_id)
+            if receipt.source_bound:
+                return ProofCheckedView{report: report, receipt: receipt, source_analysis: source} if:
+                    not report.source.source_analysis_bound or report.source.source_file_identity != source.file_identity
+                    receipt.source_identity != source.source_identity or receipt.source_file_identity != source.file_identity
+                    receipt.source_bytes != source.source_bytes or receipt.source_fingerprint != source.source_fingerprint
+                fact_call_snapshot: ProofFactCallShapeSnapshot& = &report.analysis_2.fact_call_shapes
+                return ProofCheckedView{report: report, receipt: receipt, source_analysis: source} if fact_call_snapshot.status.source_identity != source.file_identity or fact_call_snapshot.status.source_fingerprint != source.source_fingerprint
+                if fact_call_snapshot.status.initialized:
+                    return ProofCheckedView{report: report, receipt: receipt, source_analysis: source} if not fact_call_snapshot.status.complete
+                if report.results.goal_attempts.count > 0 or report.analysis_1.certificates.count > 0:
+                    return ProofCheckedView{report: report, receipt: receipt, source_analysis: source} if not fact_call_snapshot.status.initialized or not fact_call_snapshot.status.complete
+            return ProofCheckedView{report: report, receipt: receipt, source_analysis: source, attempt_rows: attempt_rows, theorem_rows: theorem_rows, theorem_proof_goal_ids: theorem_proof_goal_ids, issued: true}
+
+        def proof_checked_view_row_charge(amount: usize, source_work: mutable usize&) -> bool:
+            limit: usize = proof_replay_summary_source_work_limit()
+            return false if source_work > limit
+            if amount > limit - source_work:
+                source_work <- limit + 1
+                return false
+            source_work <- source_work + amount
+            true
+
+        def proof_checked_view_position_equal(left: Ast::Pos, right: Ast::Pos) -> bool:
+            left.line == right.line and left.column == right.column and left.offset == right.offset and left.end_line == right.end_line and left.end_column == right.end_column and left.end_offset == right.end_offset
+
+        def proof_checked_view_attempt_row_matches_with_work(view: ProofCheckedView&, index: usize, source_work: mutable usize&) -> bool:
+            return false if index >= view.attempt_rows.count or index >= view.report.results.goal_attempts.count
+            return false if not proof_checked_view_row_charge(1, source_work)
+            actual: ProofGoalAttempt = view.report.results.goal_attempts[index]
+            expected: ProofGoalAttempt = view.attempt_rows[index]
+            return false if:
+                not proof_replay_summary_expr_equal_with_work(actual.goal, expected.goal, source_work)
+                actual.budget_exhausted != expected.budget_exhausted
+                actual.facts_start != expected.facts_start or actual.facts_count != expected.facts_count
+                actual.kernel_goal != expected.kernel_goal or actual.kernel_facts_start != expected.kernel_facts_start or actual.kernel_facts_count != expected.kernel_facts_count
+                actual.line != expected.line
+                not proof_checked_view_row_charge(sview_len(actual.name), source_work) or not proof_checked_view_row_charge(sview_len(expected.name), source_work)
+                not proof_checked_view_row_charge(sview_len(actual.rule), source_work) or not proof_checked_view_row_charge(sview_len(expected.rule), source_work)
+                not proof_checked_view_row_charge(sview_len(actual.source_phase), source_work) or not proof_checked_view_row_charge(sview_len(expected.source_phase), source_work)
+                actual.name != expected.name or actual.rule != expected.rule or actual.source_phase != expected.source_phase
+                actual.float_mode != expected.float_mode
+                not proof_checked_view_position_equal(actual.loop_source_position, expected.loop_source_position)
+                not proof_checked_view_position_equal(actual.source_call_position, expected.source_call_position)
+                actual.source_call_obligation_selected != expected.source_call_obligation_selected
+                actual.source_call_requires != expected.source_call_requires or actual.source_call_requires_index != expected.source_call_requires_index
+                not proof_checked_view_row_charge(sview_len(actual.source_call_callee_name), source_work) or not proof_checked_view_row_charge(sview_len(expected.source_call_callee_name), source_work)
+                not proof_checked_view_row_charge(sview_len(actual.source_call_callee_module), source_work) or not proof_checked_view_row_charge(sview_len(expected.source_call_callee_module), source_work)
+                actual.source_call_callee_name != expected.source_call_callee_name or actual.source_call_callee_module != expected.source_call_callee_module
+                actual.source_call_callee_line != expected.source_call_callee_line or actual.source_call_callee_offset != expected.source_call_callee_offset
+                not proof_checked_view_position_equal(actual.loop_transfer_position, expected.loop_transfer_position)
+                actual.producer_proven != expected.producer_proven or actual.has_certificate != expected.has_certificate or actual.certificate_index != expected.certificate_index
+                actual.owner_function_line != expected.owner_function_line or actual.owner_function_offset != expected.owner_function_offset
+            true
+
+        def proof_checked_view_attempt_row_matches(view: ProofCheckedView&, index: usize) -> bool:
+            source_work: mutable usize = 0
+            proof_checked_view_attempt_row_matches_with_work(view, index, &source_work)
+
+        def proof_checked_view_theorem_row_matches_with_work(view: ProofCheckedView&, index: usize, source_work: mutable usize&) -> bool:
+            return false if index >= view.theorem_rows.count or index >= view.report.analysis_1.theorems.summaries.count
+            return false if not proof_checked_view_row_charge(1, source_work)
+            actual: ProofTheoremSummary = view.report.analysis_1.theorems.summaries[index]
+            expected: ProofTheoremSummary = view.theorem_rows[index]
+            return false if not proof_checked_view_row_charge(sview_len(actual.name), source_work) or not proof_checked_view_row_charge(sview_len(expected.name), source_work) or not proof_checked_view_row_charge(sview_len(actual.verification_reason), source_work) or not proof_checked_view_row_charge(sview_len(expected.verification_reason), source_work)
+            return false if actual.name != expected.name or actual.line != expected.line or actual.parameters_start != expected.parameters_start or actual.parameters_count != expected.parameters_count or actual.requires_start != expected.requires_start or actual.requires_count != expected.requires_count or actual.ensures_start != expected.ensures_start or actual.ensures_count != expected.ensures_count or actual.decreases_start != expected.decreases_start or actual.decreases_count != expected.decreases_count or actual.proof_goals_start != expected.proof_goals_start or actual.proof_goals_count != expected.proof_goals_count or actual.recursive != expected.recursive or actual.verified != expected.verified or actual.verification_reason != expected.verification_reason or actual.source_offset != expected.source_offset
+            start: usize = actual.proof_goals_start
+            count: usize = actual.proof_goals_count
+            report_goal_ids: darray[usize]& = view.report.analysis_1.theorems.proof_goal_ids
+            return false if:
+                start > view.theorem_proof_goal_ids.count or count > view.theorem_proof_goal_ids.count - start
+                start > report_goal_ids.count or count > report_goal_ids.count - start
+            for offset in 0..<count |offset, start, view, report_goal_ids, source_work|:
+                return false if not proof_checked_view_row_charge(1, source_work)
+                return false if view.theorem_proof_goal_ids[start + offset] != report_goal_ids[start + offset]
+            true
+
+        def proof_checked_view_theorem_row_matches(view: ProofCheckedView&, index: usize) -> bool:
+            source_work: mutable usize = 0
+            proof_checked_view_theorem_row_matches_with_work(view, index, &source_work)
+
+        def proof_checked_view_rows_match(view: ProofCheckedView&) -> bool:
+            source_work: mutable usize = 0
+            proof_checked_view_rows_match_with_work(view, &source_work)
+
+        def proof_checked_view_rows_match_with_work(view: ProofCheckedView&, source_work: mutable usize&) -> bool:
+            return false if source_work > proof_replay_summary_source_work_limit()
+            return false if view.attempt_rows.count != view.report.results.goal_attempts.count or view.theorem_rows.count != view.report.analysis_1.theorems.summaries.count or view.theorem_proof_goal_ids.count != view.report.analysis_1.theorems.proof_goal_ids.count
+            for index in 0..<view.attempt_rows.count |index, view, source_work|:
+                return false if not proof_checked_view_attempt_row_matches_with_work(view, index, &source_work)
+            for index in 0..<view.theorem_rows.count |index, view, source_work|:
+                return false if not proof_checked_view_theorem_row_matches_with_work(view, index, &source_work)
+            true
+
+    public:
+        # Tactic candidate replay needs only its selected source goal and fact trace. This
+        # preserves the scalar admission boundary while sharing one row comparison and meter.
+        def proof_checked_view_goal_source_admissions_with_work[@view](view: ProofCheckedView[view]& @view, attempt_index: usize, source_work: mutable usize&) -> (complete: bool, goal_admitted: bool, facts_admitted: bool, source_admitted: bool):
+            return (false, false, false, false) if not proof_checked_view_source_validated(view) or source_work > proof_replay_summary_source_work_limit()
+            attempt_count: usize = view.report.results.goal_attempts.count
+            return (false, false, false, false) if attempt_index >= attempt_count
+            return (false, false, false, false) if not proof_checked_view_attempt_row_matches_with_work(view, attempt_index, source_work)
+            return (false, false, false, false) if:
+                not view.receipt.source_goal_statuses_complete or view.receipt.source_goal_statuses.count != attempt_count
+                not view.receipt.source_attempt_fact_statuses_complete or view.receipt.source_attempt_fact_statuses.count != attempt_count
+                not proof_checked_view_row_charge(2, source_work)
+            goal_admitted: bool = view.receipt.source_goal_statuses[attempt_index]
+            facts_admitted: bool = view.receipt.source_attempt_fact_statuses[attempt_index]
+            (true, goal_admitted, facts_admitted, goal_admitted and facts_admitted)
+
+        # Tactic output asks several questions about the same report and target. Bind every
+        # attempt and theorem row once under one work meter, then reuse those statuses instead
+        # of restarting the comparison budget in each scalar accessor.
+        def proof_checked_view_tactic_status_snapshot_with_work[@view](view: ProofCheckedView[view]& @view, attempt_index: usize, source_work: mutable usize&) -> ProofCheckedViewTacticStatusSnapshot:
+            empty: ProofCheckedViewTacticStatusSnapshot = ProofCheckedViewTacticStatusSnapshot{complete: false, source_complete: false, source_admissible: false, target_admission_base: false, goal_source_admitted: false, facts_source_admitted: false, source_admitted: false, proven: false}
+            return empty if not proof_checked_view_source_validated(view)
+            report: ProofReport& = view.report
+            attempt_count: usize = report.results.goal_attempts.count
+            theorem_count: usize = report.analysis_1.theorems.summaries.count
+            return empty if source_work > proof_replay_summary_source_work_limit()
+            return empty if not proof_checked_view_rows_match_with_work(view, source_work)
+
+            goal_source_admitted: mutable bool = false
+            facts_source_admitted: mutable bool = false
+            proven: mutable bool = false
+            if attempt_index < attempt_count:
+                return empty if not proof_checked_view_row_charge(10, source_work)
+                if view.receipt.source_goal_statuses_complete and view.receipt.source_goal_statuses.count == attempt_count:
+                    goal_source_admitted <- view.receipt.source_goal_statuses[attempt_index]
+                if view.receipt.source_attempt_fact_statuses_complete and view.receipt.source_attempt_fact_statuses.count == attempt_count:
+                    facts_source_admitted <- view.receipt.source_attempt_fact_statuses[attempt_index]
+                proven <- proof_replay_receipt_attempt_is_proven(view.receipt, attempt_index)
+
+            source_complete: bool =
+                view.receipt.source_admission_snapshot_complete and
+                view.receipt.source_goal_statuses_complete and view.receipt.source_goal_statuses.count == attempt_count and
+                view.receipt.source_claims_admissible and
+                view.receipt.source_attempt_fact_statuses_complete and view.receipt.source_attempt_fact_statuses.count == attempt_count and
+                view.receipt.theorem_source_admissions_complete and view.receipt.theorem_source_admissions.count == theorem_count and
+                view.receipt.source_report_admissible and view.receipt.source_report_complete
+            target_admission_base: bool =
+                view.receipt.source_admission_snapshot_complete and
+                view.receipt.source_goal_statuses_complete and view.receipt.source_goal_statuses.count == attempt_count and
+                view.receipt.source_attempt_fact_statuses_complete and view.receipt.source_attempt_fact_statuses.count == attempt_count and
+                view.receipt.theorem_source_admissions_complete and view.receipt.theorem_source_admissions.count == theorem_count and
+                view.receipt.source_claims_admissible and view.receipt.source_report_admissible
+            source_admitted: bool = goal_source_admitted and facts_source_admitted
+            ProofCheckedViewTacticStatusSnapshot{complete: true, source_complete: source_complete, source_admissible: source_complete and view.receipt.source_report_admissible, target_admission_base: target_admission_base, goal_source_admitted: goal_source_admitted, facts_source_admitted: facts_source_admitted, source_admitted: source_admitted, proven: proven}
+
+        # Looping renderers must share one meter across the row comparison and every status
+        # read. The legacy scalar accessors intentionally start their own bounded comparison;
+        # calling several of them for each goal can multiply the report's total work.
+        def proof_checked_view_attempt_status_snapshot_with_work[@view](view: ProofCheckedView[view]& @view, attempt_index: usize, source_work: mutable usize&) -> (complete: bool, replayed: bool, goal_source_admitted: bool, facts_source_admitted: bool, source_admitted: bool, proven: bool, producer_claim: bool):
+            return (false, false, false, false, false, false, false) if not proof_checked_view_source_validated(view)
+            report: ProofReport& = view.report
+            attempt_count: usize = report.results.goal_attempts.count
+            limit: usize = proof_replay_summary_source_work_limit()
+            return (false, false, false, false, false, false, false) if:
+                source_work > limit
+                view.attempt_rows.count != attempt_count
+                view.receipt.attempt_statuses.count != attempt_count
+                view.receipt.attempt_proven_statuses.count != attempt_count
+                not view.receipt.source_goal_statuses_complete or view.receipt.source_goal_statuses.count != attempt_count
+                not view.receipt.source_attempt_fact_statuses_complete or view.receipt.source_attempt_fact_statuses.count != attempt_count
+            return (true, false, false, false, false, false, false) if attempt_index >= attempt_count
+            return (false, false, false, false, false, false, false) if not proof_checked_view_attempt_row_matches_with_work(view, attempt_index, source_work)
+            return (false, false, false, false, false, false, false) if not proof_checked_view_row_charge(10, source_work)
+            replayed: bool = proof_replay_receipt_attempt_status(view.receipt, attempt_index)
+            goal_source_admitted: bool = view.receipt.source_goal_statuses[attempt_index]
+            facts_source_admitted: bool = view.receipt.source_attempt_fact_statuses[attempt_index]
+            source_admitted: bool = goal_source_admitted and facts_source_admitted
+            proven: bool = proof_replay_receipt_attempt_is_proven(view.receipt, attempt_index)
+            producer_claim: bool = view.attempt_rows[attempt_index].producer_proven
+            (true, replayed, goal_source_admitted, facts_source_admitted, source_admitted, proven, producer_claim)

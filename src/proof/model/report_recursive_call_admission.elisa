@@ -1,0 +1,595 @@
+# Bounded source census for direct recursive-call preconditions and atomic decreases measures.
+extend ElisaProof:
+    private:
+        const PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT: usize = 64
+
+        struct ProofSourceRecursiveCallNameIndex:
+            valid: bool
+            empty: usize
+            entries: usize
+            hashes: darray[u32]
+            slots: darray[usize]
+            names: darray[sview]
+            counts: darray[usize]
+
+        # Rebuild this lookup from the report rows consumed by source admission. The
+        # report's cached structural hash slots are producer data and are not replay
+        # authority, even when replay has built a separate index in a scratch report.
+        struct ProofSourceRecursiveCallStructuralOwnerIndex:
+            valid: bool
+            empty: usize
+            entries: usize
+            hashes: darray[u32]
+            slots: darray[usize]
+            names: darray[sview]
+            counts: darray[usize]
+            verified: darray[bool]
+
+        def proof_source_recursive_call_function_count(declarations: darray[Ast::Decl]&, total: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT
+            for declaration in declarations |total, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(_, _, _, _, _, _, _):
+                        return false if total >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+                        total <- total + 1
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_recursive_call_function_count(nested, total, source_work, depth + 1)
+                    _:
+                        pass
+            true
+
+        def proof_source_recursive_call_name_index_insert(name: sview, index: mutable ProofSourceRecursiveCallNameIndex&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
+            return false if not proof_report_source_work_charge(sview_len(name), source_work)
+            hash: u32 = proof_name_hash(name)
+            capacity: usize = index.slots.count
+            return false if capacity == 0 or not proof_report_source_work_charge(1, source_work)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, name, index, capacity, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                current: usize = index.slots[slot]
+                if current == index.empty:
+                    return false if not proof_report_source_work_charge(2, source_work)
+                    row: usize = index.names.count
+                    index.names.push(name)
+                    index.counts.push(1)
+                    index.hashes[slot] <- hash
+                    index.slots[slot] <- row
+                    index.entries <- index.entries + 1
+                    return true
+                return false if current >= index.names.count or current >= index.counts.count
+                if index.hashes[slot] == hash:
+                    return false if not proof_report_source_work_charge(sview_len(index.names[current]), source_work)
+                    if index.names[current] == name:
+                        index.counts[current] <- index.counts[current] + 1
+                        index.entries <- index.entries + 1
+                        return true
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            false
+
+        def proof_source_recursive_call_name_index_fill(declarations: darray[Ast::Decl]&, index: mutable ProofSourceRecursiveCallNameIndex&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate]:
+            return false if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT
+            for declaration in declarations |index, source_work, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, _):
+                        return false if not proof_source_recursive_call_name_index_insert(name, index, source_work)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_recursive_call_name_index_fill(nested, index, source_work, depth + 1)
+                    _:
+                        pass
+            true
+
+        def proof_source_recursive_call_name_index_build(declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> ProofSourceRecursiveCallNameIndex can[Memory.Allocate]:
+            total: mutable usize = 0
+            return ProofSourceRecursiveCallNameIndex{} if not proof_source_recursive_call_function_count(declarations, &total, source_work, 0)
+            index: mutable ProofSourceRecursiveCallNameIndex = ProofSourceRecursiveCallNameIndex{valid: true, empty: total}
+            return index if total == 0
+            capacity: usize = proof_name_index_capacity(total)
+            return ProofSourceRecursiveCallNameIndex{} if capacity == 0 or not proof_report_source_work_charge(capacity * 2, source_work)
+            for slot in 0..<capacity |index, source_work, total|:
+                return ProofSourceRecursiveCallNameIndex{} if not proof_report_source_work_charge(1, source_work)
+                index.hashes.push(0)
+                index.slots.push(total)
+            return ProofSourceRecursiveCallNameIndex{} if not proof_source_recursive_call_name_index_fill(declarations, &index, source_work, 0)
+            return ProofSourceRecursiveCallNameIndex{} if index.names.count > total or index.counts.count != index.names.count or index.entries != total
+            index
+
+        def proof_source_recursive_call_name_index_lookup(index: ProofSourceRecursiveCallNameIndex&, name: sview, source_work: mutable usize&) -> (complete: bool, count: usize):
+            return (false, 0) if not index.valid or index.names.count != index.counts.count or index.names.count > index.empty or index.entries != index.empty
+            return (true, 0) if index.empty == 0 and index.slots.count == 0
+            capacity: usize = index.slots.count
+            return (false, 0) if capacity == 0 or index.hashes.count != capacity or capacity != proof_name_index_capacity(index.empty)
+            return (false, 0) if not proof_report_source_work_charge(sview_len(name), source_work)
+            hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, name, index, capacity, source_work|:
+                return (false, 0) if not proof_report_source_work_charge(1, source_work)
+                current: usize = index.slots[slot]
+                return (true, 0) if current == index.empty
+                return (false, 0) if current >= index.names.count or current >= index.counts.count
+                if index.hashes[slot] == hash:
+                    return (false, 0) if not proof_report_source_work_charge(sview_len(index.names[current]), source_work)
+                    return (true, index.counts[current]) if index.names[current] == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            (false, 0)
+
+        def proof_source_recursive_call_lexicographic_goal(components: darray[Ast::Expr]&, next_components: darray[Ast::Expr]&, position: Ast::Pos, source_work: mutable usize&) -> Ast::Expr:
+            return Ast::Expr.Invalid if components.count == 0 or components.count != next_components.count
+            relation: mutable Ast::Expr = Ast::Expr.Invalid
+            cursor: mutable usize = components.count
+            while cursor > 0 |cursor, components, next_components, position, source_work, relation|:
+                cursor <- cursor - 1
+                return Ast::Expr.Invalid if not proof_report_source_work_charge(1, source_work)
+                smaller: Ast::Expr = Ast::Expr.Binary(next_components[cursor], TokenKind.Lt, components[cursor], position)
+                if proof_replay_expr_is_invalid(relation):
+                    relation <- smaller
+                else:
+                    equal: Ast::Expr = Ast::Expr.Binary(next_components[cursor], TokenKind.EqEq, components[cursor], position)
+                    suffix: Ast::Expr = Ast::Expr.Binary(equal, TokenKind.And, relation, position)
+                    relation <- Ast::Expr.Binary(smaller, TokenKind.Or, suffix, position)
+            relation
+
+        def proof_source_recursive_call_method_candidate(expression: Ast::Expr, name: sview, source_work: mutable usize&, depth: usize) -> bool:
+            return true if not proof_report_source_work_charge(1, source_work) or depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Call(Ast::Expr.Field(receiver, method, _), arguments, _, _):
+                    return true if not proof_report_source_work_charge(sview_len(method), source_work) or not proof_report_source_work_charge(sview_len(name), source_work)
+                    return true if method == name
+                    return true if proof_source_recursive_call_method_candidate(receiver, name, source_work, depth + 1)
+                    for argument in arguments |argument, name, source_work, depth|:
+                        return true if proof_source_recursive_call_method_candidate(argument, name, source_work, depth + 1)
+                    return false
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_source_recursive_call_method_candidate(callee, name, source_work, depth + 1)
+                    for argument in arguments |argument, name, source_work, depth|:
+                        return true if proof_source_recursive_call_method_candidate(argument, name, source_work, depth + 1)
+                    return false
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    proof_source_recursive_call_method_candidate(inner, name, source_work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    proof_source_recursive_call_method_candidate(left, name, source_work, depth + 1) or proof_source_recursive_call_method_candidate(right, name, source_work, depth + 1)
+                Ast::Expr.Field(receiver, _, _) | Ast::Expr.Scope(receiver, _, _):
+                    proof_source_recursive_call_method_candidate(receiver, name, source_work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_source_recursive_call_method_candidate(object, name, source_work, depth + 1) or proof_source_recursive_call_method_candidate(low, name, source_work, depth + 1) or proof_source_recursive_call_method_candidate(high, name, source_work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_source_recursive_call_method_candidate(object, name, source_work, depth + 1)
+                    for argument in arguments |argument, name, source_work, depth|:
+                        return true if proof_source_recursive_call_method_candidate(argument, name, source_work, depth + 1)
+                    return false
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |element, name, source_work, depth|:
+                        return true if proof_source_recursive_call_method_candidate(element, name, source_work, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |entry, name, source_work, depth|:
+                        return true if proof_source_recursive_call_method_candidate(entry.key, name, source_work, depth + 1) or proof_source_recursive_call_method_candidate(entry.value, name, source_work, depth + 1)
+                    return false
+                Ast::Expr.Construct(type_expression, fields, _) | Ast::Expr.RecordUpdate(type_expression, fields, _):
+                    return true if proof_source_recursive_call_method_candidate(type_expression, name, source_work, depth + 1)
+                    for field in fields |field, name, source_work, depth|:
+                        return true if proof_source_recursive_call_method_candidate(field.value, name, source_work, depth + 1)
+                    return false
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    proof_source_recursive_call_method_candidate(condition, name, source_work, depth + 1) or proof_source_recursive_call_method_candidate(then_expression, name, source_work, depth + 1) or proof_source_recursive_call_method_candidate(else_expression, name, source_work, depth + 1)
+                _:
+                    # Unknown AST forms are scanned as call-shaped candidates. This may
+                    # reject a local-name collision, but cannot overlook a method dispatch.
+                    proof_expr_has_call(expression)
+
+        def proof_source_recursive_call_expr_candidate(expression: Ast::Expr, name: sview, source_work: mutable usize&) -> bool:
+            # The two legacy predicates below each walk the complete expression. Reserve
+            # for both traversals and the candidate name before invoking either one.
+            return false if not proof_report_source_work_charge(sview_len(name), source_work) or not proof_replay_summary_expr_repeat_charge_with_work(expression, 2, source_work)
+            return true if proof_source_recursive_call_method_candidate(expression, name, source_work, 0)
+            proof_expr_has_call(expression) and proof_expr_mentions_name(expression, name)
+
+        def proof_source_recursive_call_stmt_candidate(statement: Ast::Stmt, name: sview, source_work: mutable usize&, depth: usize) -> (complete: bool, candidate: bool):
+            return (false, false) if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT or not proof_report_source_work_charge(1, source_work)
+            match statement:
+                Ast::Stmt.Expr(expression, _):
+                    candidate: bool = proof_source_recursive_call_expr_candidate(expression, name, source_work)
+                    (source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, candidate)
+                Ast::Stmt.VarDecl(_, type_expression, value, _):
+                    first: bool = proof_source_recursive_call_expr_candidate(type_expression, name, source_work)
+                    second: bool = proof_source_recursive_call_expr_candidate(value, name, source_work)
+                    (source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, first or second)
+                Ast::Stmt.Assign(target, _, value, _):
+                    first: bool = proof_source_recursive_call_expr_candidate(target, name, source_work)
+                    second: bool = proof_source_recursive_call_expr_candidate(value, name, source_work)
+                    (source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, first or second)
+                Ast::Stmt.Return(value, _):
+                    candidate: bool = proof_source_recursive_call_expr_candidate(value, name, source_work)
+                    (source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, candidate)
+                Ast::Stmt.Contract(_, expression, _):
+                    candidate: bool = proof_source_recursive_call_expr_candidate(expression, name, source_work)
+                    (source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, candidate)
+                Ast::Stmt.Block(_, _, _, nested, _):
+                    proof_source_recursive_call_body_candidate(nested, name, source_work, depth + 1)
+                Ast::Stmt.If(condition, then_body, else_body, _):
+                    condition_candidate: bool = proof_source_recursive_call_expr_candidate(condition, name, source_work)
+                    then_candidate: (complete: bool, candidate: bool) = proof_source_recursive_call_body_candidate(then_body, name, source_work, depth + 1)
+                    else_candidate: (complete: bool, candidate: bool) = proof_source_recursive_call_body_candidate(else_body, name, source_work, depth + 1)
+                    (then_candidate.complete and else_candidate.complete and source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, condition_candidate or then_candidate.candidate or else_candidate.candidate)
+                Ast::Stmt.While(condition, nested, _) | Ast::Stmt.For(_, _, condition, nested, _):
+                    condition_candidate: bool = proof_source_recursive_call_expr_candidate(condition, name, source_work)
+                    nested_candidate: (complete: bool, candidate: bool) = proof_source_recursive_call_body_candidate(nested, name, source_work, depth + 1)
+                    (nested_candidate.complete and source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, condition_candidate or nested_candidate.candidate)
+                Ast::Stmt.Match(scrutinee, arms, _):
+                    candidate: mutable bool = proof_source_recursive_call_expr_candidate(scrutinee, name, source_work)
+                    for arm in arms |arm, name, source_work, depth, candidate|:
+                        guard_candidate: bool = proof_source_recursive_call_expr_candidate(arm.guard, name, source_work)
+                        body_candidate: (complete: bool, candidate: bool) = proof_source_recursive_call_body_candidate(arm.body, name, source_work, depth + 1)
+                        return (false, candidate) if not body_candidate.complete
+                        candidate <- candidate or guard_candidate or body_candidate.candidate
+                    (source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, candidate)
+                Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                    (true, false)
+                _:
+                    (false, false)
+
+        def proof_source_recursive_call_collect_return(expression: Ast::Expr, name: sview, parameters: darray[Ast::ParamDecl]&, calls: mutable darray[(position: Ast::Pos, arguments: darray[Ast::Expr])]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT or not proof_report_source_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_recursive_call_collect_return(inner, name, parameters, calls, source_work, depth + 1)
+                Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, argument_names, position):
+                    return false if not proof_report_source_work_charge(sview_len(callee), source_work) or not proof_report_source_work_charge(sview_len(name), source_work)
+                    return false if callee != name or argument_names.count != 0 or arguments.count != parameters.count
+                    for argument in arguments |argument, source_work|:
+                        return false if not proof_replay_summary_expr_repeat_charge_with_work(argument, 1, source_work)
+                        match argument:
+                            Ast::Expr.Ident(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.StringLit(_, _):
+                                pass
+                            _:
+                                return false
+                    calls.push((position, arguments))
+                    return true
+                _:
+                    return false if not proof_replay_summary_expr_repeat_charge_with_work(expression, 1, source_work)
+                    return not proof_expr_has_call(expression)
+
+        # Admit the common structural-recursion shape where calls occur in return
+        # expressions under match arms. Every other stateful statement remains closed.
+        def proof_source_recursive_call_collect_structural_statements(body: darray[Ast::Stmt]&, name: sview, parameters: darray[Ast::ParamDecl]&, calls: mutable darray[(position: Ast::Pos, arguments: darray[Ast::Expr])]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT
+            for statement in body |name, parameters, calls, source_work, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        return false if not proof_source_recursive_call_collect_structural_statements(nested, name, parameters, calls, source_work, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return false if not proof_replay_summary_expr_repeat_charge_with_work(scrutinee, 1, source_work)
+                        return false if proof_expr_has_call(scrutinee)
+                        for arm in arms |arm, name, parameters, calls, source_work, depth|:
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            # A pattern binder with the function's spelling shadows the
+                            # declaration in this arm, so its call-shaped syntax is not a
+                            # recursive edge.
+                            return false if proof_source_recursive_call_pattern_shadows_name(arm.pattern, name, source_work, depth + 1)
+                            return false if not proof_replay_summary_expr_repeat_charge_with_work(arm.guard, 1, source_work)
+                            return false if proof_expr_has_call(arm.guard)
+                            return false if not proof_source_recursive_call_collect_structural_statements(arm.body, name, parameters, calls, source_work, depth + 1)
+                    Ast::Stmt.Return(value, _):
+                        return false if not proof_source_recursive_call_collect_return(value, name, parameters, calls, source_work, depth + 1)
+                    Ast::Stmt.Expr(Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, argument_names, position), _):
+                        return false if not proof_report_source_work_charge(sview_len(callee), source_work) or not proof_report_source_work_charge(sview_len(name), source_work)
+                        return false if callee != name or argument_names.count != 0 or arguments.count != parameters.count
+                        for argument in arguments |argument, source_work|:
+                            return false if not proof_replay_summary_expr_repeat_charge_with_work(argument, 1, source_work)
+                            match argument:
+                                Ast::Expr.Ident(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.StringLit(_, _):
+                                    pass
+                                _:
+                                    return false
+                        calls.push((position, arguments))
+                    _:
+                        return false
+            true
+
+        def proof_source_recursive_call_body_candidate(body: darray[Ast::Stmt]&, name: sview, source_work: mutable usize&, depth: usize) -> (complete: bool, candidate: bool):
+            return (false, false) if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT
+            candidate: mutable bool = false
+            for statement in body |statement, name, source_work, depth, candidate|:
+                row: (complete: bool, candidate: bool) = proof_source_recursive_call_stmt_candidate(statement, name, source_work, depth + 1)
+                return (false, candidate) if not row.complete
+                candidate <- candidate or row.candidate
+            (true, candidate)
+
+        # Until the source resolver reconstructs recursive components, any call-shaped
+        # expression mentioning another local function name is outside this slice. This
+        # deliberately over-approximates callees (a name may occur in an argument) so a
+        # mutually recursive edge cannot silently escape merely because it is not a
+        # direct self-call.
+        def proof_source_recursive_call_other_local_candidate_legacy(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, owner_name: sview, source_work: mutable usize&, depth: usize) -> (complete: bool, candidate: bool):
+            return (false, false) if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT
+            for declaration in declarations |declaration, body, owner_name, source_work, depth|:
+                return (false, false) if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(candidate_name, _, _, _, _, _, _):
+                        return (false, false) if not proof_report_source_work_charge(sview_len(candidate_name), source_work) or not proof_report_source_work_charge(sview_len(owner_name), source_work)
+                        continue if candidate_name == owner_name
+                        row: (complete: bool, candidate: bool) = proof_source_recursive_call_body_candidate(body, candidate_name, source_work, 0)
+                        return (false, false) if not row.complete
+                        return (true, true) if row.candidate
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        row: (complete: bool, candidate: bool) = proof_source_recursive_call_other_local_candidate_legacy(nested, body, owner_name, source_work, depth + 1)
+                        return (false, false) if not row.complete
+                        return (true, true) if row.candidate
+                    _:
+                        pass
+            (true, false)
+        def proof_source_recursive_call_structural_owner_index_build(report: ProofReport&, source_certificates_checked: bool, source_work: mutable usize&) -> ProofSourceRecursiveCallStructuralOwnerIndex can[Memory.Allocate]:
+            index: mutable ProofSourceRecursiveCallStructuralOwnerIndex = ProofSourceRecursiveCallStructuralOwnerIndex{valid: true, empty: 0}
+            return index if not source_certificates_checked
+            names: darray[sview]& = report.analysis_1.structural.names
+            verified: darray[bool]& = report.analysis_1.structural.verified_members
+            total: usize = names.count
+            return ProofSourceRecursiveCallStructuralOwnerIndex{} if total != verified.count or total > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+            index.empty <- total
+            return index if total == 0
+            capacity: usize = proof_name_index_capacity(total)
+            return ProofSourceRecursiveCallStructuralOwnerIndex{} if capacity == 0 or capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3
+            return ProofSourceRecursiveCallStructuralOwnerIndex{} if not proof_report_source_work_charge(capacity * 3, source_work)
+            index.hashes.resize(capacity)
+            index.slots.resize(capacity)
+            for slot in 0..<capacity |slot, index, total, source_work|:
+                return ProofSourceRecursiveCallStructuralOwnerIndex{} if not proof_report_source_work_charge(1, source_work)
+                index.slots[slot] <- total
+            for row in 0..<total |row, index, names, verified, total, capacity, source_work|:
+                name: sview = names[row]
+                return ProofSourceRecursiveCallStructuralOwnerIndex{} if not proof_report_source_work_charge(sview_len(name), source_work)
+                hash: u32 = proof_name_hash(name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, row, index, names, verified, total, capacity, source_work, placed|:
+                    return ProofSourceRecursiveCallStructuralOwnerIndex{} if not proof_report_source_work_charge(1, source_work)
+                    current: usize = index.slots[slot]
+                    if current == total:
+                        unique_row: usize = index.names.count
+                        index.hashes[slot] <- hash
+                        index.slots[slot] <- unique_row
+                        index.names.push(name)
+                        index.counts.push(1)
+                        index.verified.push(verified[row])
+                        index.entries <- index.entries + 1
+                        placed <- true
+                        break
+                    return ProofSourceRecursiveCallStructuralOwnerIndex{} if current >= index.names.count or current >= index.counts.count or current >= index.verified.count
+                    if index.hashes[slot] == hash:
+                        return ProofSourceRecursiveCallStructuralOwnerIndex{} if not proof_report_source_work_charge(sview_len(index.names[current]), source_work) or not proof_report_source_work_charge(sview_len(name), source_work)
+                        if index.names[current] == name:
+                            index.counts[current] <- index.counts[current] + 1
+                            index.entries <- index.entries + 1
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return ProofSourceRecursiveCallStructuralOwnerIndex{} if not placed
+            return ProofSourceRecursiveCallStructuralOwnerIndex{} if index.entries != total or index.names.count != index.counts.count or index.names.count != index.verified.count
+            index
+
+        def proof_source_recursive_call_structural_owner_verified(index: ProofSourceRecursiveCallStructuralOwnerIndex&, name: sview, source_certificates_checked: bool, source_work: mutable usize&) -> (complete: bool, verified: bool):
+            return (true, false) if not source_certificates_checked
+            name_count: usize = index.names.count
+            capacity: usize = index.slots.count
+            return (false, false) if:
+                not index.valid or index.entries != index.empty or name_count != index.counts.count or name_count != index.verified.count
+                name_count > index.empty or capacity != index.hashes.count
+            return (true, false) if index.empty == 0 and capacity == 0
+            expected_capacity: usize = proof_name_index_capacity(index.empty)
+            return (false, false) if expected_capacity == 0 or capacity != expected_capacity
+            return (false, false) if not proof_report_source_work_charge(sview_len(name), source_work)
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, index, name_count, capacity, source_work|:
+                return (false, false) if not proof_report_source_work_charge(1, source_work)
+                row: usize = index.slots[slot]
+                return (true, false) if row == index.empty
+                return (false, false) if row >= name_count
+                if index.hashes[slot] == wanted_hash:
+                    return (false, false) if not proof_report_source_work_charge(sview_len(index.names[row]), source_work)
+                    if index.names[row] == name:
+                        return (false, false) if index.counts[row] != 1
+                        return (true, index.verified[row])
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false)
+
+        def proof_source_recursive_call_owner_scheduled(name: sview, position: Ast::Pos, scheduled_owners: darray[ProofSourceScheduledOwner]&, scheduled_cursor: mutable usize&, source_work: mutable usize&) -> (complete: bool, scheduled: bool):
+            while scheduled_cursor < scheduled_owners.count |name, position, scheduled_owners, scheduled_cursor, source_work|:
+                owner: ProofSourceScheduledOwner = scheduled_owners[scheduled_cursor]
+                return (false, false) if not proof_report_source_work_charge(1, source_work)
+                return (false, false) if owner.offset < position.offset
+                return (true, false) if owner.offset > position.offset
+                return (false, false) if not proof_report_source_work_charge(sview_len(owner.name), source_work) or not proof_report_source_work_charge(sview_len(name), source_work)
+                return (false, false) if owner.name != name or owner.line != position.line
+                scheduled_cursor <- scheduled_cursor + 1
+                return (true, true)
+            (true, false)
+
+        def proof_source_recursive_call_collect(report: ProofReport&, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, declaration_names: ProofSourceRecursiveCallNameIndex&, structural_owners: ProofSourceRecursiveCallStructuralOwnerIndex&, scheduled_owners: darray[ProofSourceScheduledOwner]&, scheduled_cursor: mutable usize&, source_certificates_checked: bool, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT
+            for declaration in declarations |report, source_certificates_checked, source_work, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_recursive_call_collect(report, nested, all_declarations, declaration_names, structural_owners, scheduled_owners, scheduled_cursor, source_certificates_checked, source_work, depth + 1)
+                    Ast::Decl.Func(name, parameters, _, body, _, _, owner_position):
+                        scheduled: (complete: bool, value: bool) = proof_source_recursive_call_owner_scheduled(name, owner_position, scheduled_owners, scheduled_cursor, source_work)
+                        return false if not scheduled.complete
+                        continue if not scheduled.value
+                        requires: mutable darray[Ast::Expr] = []
+                        decreases: mutable darray[Ast::Expr] = []
+                        calls: mutable darray[(position: Ast::Pos, arguments: darray[Ast::Expr])] = []
+                        unsupported_shape: mutable bool = false
+                        unsupported_call_context: mutable bool = false
+                        has_decreases: mutable bool = false
+                        has_unbounded_decreases: mutable bool = false
+                        recursive_scan: (complete: bool, candidate: bool) = proof_source_recursive_call_body_candidate(body, name, source_work, 0)
+                        return false if not recursive_scan.complete
+                        other_local_candidate: (complete: bool, candidate: bool) = proof_source_recursive_call_other_local_candidate_indexed(all_declarations, body, name, declaration_names, source_work)
+                        return false if not other_local_candidate.complete or other_local_candidate.candidate
+                        for statement in body |requires, calls, unsupported_shape, name, source_work|:
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            match statement:
+                                Ast::Stmt.Contract(kind, expression, _):
+                                    if kind == "requires":
+                                        requires.push(expression)
+                                    elif kind == "decreases":
+                                        has_decreases <- true
+                                        decreases.push(expression)
+                                    elif kind == "decreases*":
+                                        has_unbounded_decreases <- true
+                                    if proof_source_recursive_call_expr_candidate(expression, name, source_work):
+                                        unsupported_shape <- true
+                                Ast::Stmt.Expr(Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, argument_names, position), _):
+                                    return false if not proof_report_source_work_charge(sview_len(callee), source_work) or not proof_report_source_work_charge(sview_len(name), source_work)
+                                    if callee == name:
+                                        return false if argument_names.count != 0 or arguments.count != parameters.count
+                                        for argument in arguments |argument, source_work|:
+                                            return false if not proof_replay_summary_expr_repeat_charge_with_work(argument, 1, source_work)
+                                            match argument:
+                                                Ast::Expr.Ident(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.StringLit(_, _):
+                                                    pass
+                                                _:
+                                                    return false
+                                        calls.push((position, arguments))
+                                    else:
+                                        row: (complete: bool, candidate: bool) = proof_source_recursive_call_stmt_candidate(statement, name, source_work, 0)
+                                        return false if not row.complete
+                                        unsupported_shape <- true if row.candidate
+                                        unsupported_call_context <- true
+                                Ast::Stmt.Match(_, _, _) | Ast::Stmt.Block(_, _, _, _, _):
+                                    return false if not proof_source_recursive_call_collect_structural_statements([statement], name, parameters, calls, source_work, 0)
+                                Ast::Stmt.Return(value, _):
+                                    return false if not proof_source_recursive_call_collect_return(value, name, parameters, calls, source_work, 0)
+                                _:
+                                    row: (complete: bool, candidate: bool) = proof_source_recursive_call_stmt_candidate(statement, name, source_work, 0)
+                                    return false if not row.complete
+                                    unsupported_shape <- true if row.candidate
+                                    unsupported_call_context <- true
+                        signature_lines: darray[u32] = report.source_contracts.source_signature_contract_lines
+                        signature_kinds: darray[sview] = report.source_contracts.source_signature_contract_kinds
+                        signature_exprs: darray[Ast::Expr] = report.source_contracts.source_signature_contracts
+                        return false if signature_lines.count != signature_kinds.count or signature_lines.count != signature_exprs.count
+                        signature_range: (complete: bool, start: usize, count: usize) = proof_structural_signature_contract_range_for_line(signature_lines, signature_kinds, signature_exprs, owner_position.line, source_work)
+                        return false if not signature_range.complete or signature_range.start > signature_lines.count or signature_range.count > signature_lines.count - signature_range.start
+                        for signature_offset in 0..<signature_range.count |signature_offset, signature_range, signature_lines, signature_kinds, signature_exprs, owner_position, requires, unsupported_shape, name, source_work|:
+                            row: usize = signature_range.start + signature_offset
+                            return false if not proof_report_source_work_charge(1, source_work)
+                            return false if signature_lines[row] != owner_position.line
+                            unsupported_shape <- true if proof_source_recursive_call_expr_candidate(signature_exprs[row], name, source_work)
+                            if signature_kinds[row] == "requires":
+                                requires.push(signature_exprs[row])
+                            elif signature_kinds[row] == "decreases":
+                                # The producer's function table derives decreases
+                                # measures from body Contract statements only. Treat a
+                                # signature-only measure as unsupported here instead of
+                                # inventing obligations the producer never emitted.
+                                unsupported_shape <- true
+                        return false if recursive_scan.candidate and calls.count == 0
+                        continue if calls.count == 0
+                        continue if not recursive_scan.candidate
+                        return false if unsupported_shape or name == "" or owner_position.line == 0 or owner_position.offset == 0
+                        # The call checker gives caller-bound parameters precedence over
+                        # declarations. Do not classify `f(...)` as recursion when a formal
+                        # parameter named `f` shadows that declaration.
+                        for parameter in parameters |parameter, name, source_work|:
+                            return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(parameter.name), source_work) or not proof_report_source_work_charge(sview_len(name), source_work)
+                            return false if parameter.name == name
+                        # The expected precondition and current measure use the active
+                        # parameter values directly. Until this census models assignments,
+                        # locals, and intervening calls, admit only contract clauses plus the
+                        # enumerated self-calls.
+                        return false if unsupported_call_context
+                        return false if has_unbounded_decreases
+                        # The first slice accepts only unique leaf names. Module-qualified and
+                        # overloaded recursive resolution needs a separate source resolver.
+                        name_matches: (complete: bool, count: usize) = proof_source_recursive_call_name_index_lookup(declaration_names, name, source_work)
+                        return false if not name_matches.complete or name_matches.count != 1
+                        structural_owner: (complete: bool, verified: bool) = proof_source_recursive_call_structural_owner_verified(structural_owners, name, source_certificates_checked, source_work)
+                        return false if not structural_owner.complete
+                        # A report bit may fail to claim an inferred structural proof. In
+                        # that case do not silently admit recursion without a ranking
+                        # obligation; only explicit source decreases may use the fallback.
+                        return false if not structural_owner.verified and not has_decreases
+                        return false if has_decreases and decreases.count == 0
+                        recursive_attempt_index: mutable ProofSourceRecursiveCallAttemptIndex = proof_source_recursive_call_attempt_index_create(calls, source_work)
+                        return false if not recursive_attempt_index.valid
+                        return false if not proof_source_recursive_call_attempt_index_fill(recursive_attempt_index, report, calls, owner_position, name, source_work)
+                        if structural_owner.verified:
+                            return false if not proof_source_recursive_call_structural_index_fill(recursive_attempt_index, report, name, owner_position, source_work)
+                        for call_index in 0..<calls.count |call_index, calls, requires, decreases, parameters, report, name, owner_position, source_work, recursive_attempt_index|:
+                            call: (position: Ast::Pos, arguments: darray[Ast::Expr]) = calls[call_index]
+                            structural_call_verified: bool = structural_owner.verified and recursive_attempt_index.structural_certificate_counts[call_index] == 1
+                            return false if structural_owner.verified and not structural_call_verified
+                            structural_summary: bool = has_decreases and structural_call_verified
+                            if has_decreases and not structural_summary:
+                                return false if calls.count != 1
+                                for component in decreases |source_work|:
+                                    return false if not proof_report_source_work_charge(1, source_work) or not proof_replay_summary_expr_repeat_charge_with_work(component, 1, source_work)
+                                    return false if not proof_source_recursive_call_measure_atom(component)
+                            if call.arguments.count > parameters.count:
+                                return false
+                            expected_goals: mutable darray[Ast::Expr] = []
+                            expected_capacity: usize = requires.count
+                            if has_decreases and not structural_summary:
+                                return false if decreases.count > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - 1) / 2
+                                termination_capacity: usize = decreases.count * 2 + 1
+                                return false if expected_capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - termination_capacity
+                                expected_capacity <- expected_capacity + termination_capacity
+                            return false if not proof_report_source_work_charge(expected_capacity, source_work)
+                            expected_goals.reserve(expected_capacity)
+                            for requirement_index in 0..<requires.count |requirement_index, call, requires, parameters, report, name, owner_position, source_work, expected_goals|:
+                                return false if not proof_report_source_work_charge(1, source_work)
+                                return false if not proof_replay_summary_expr_repeat_charge_with_work(requires[requirement_index], parameters.count + 1, source_work)
+                                parameter_names: mutable darray[sview] = []
+                                for parameter in parameters |parameter_names, source_work|:
+                                    return false if not proof_report_source_work_charge(sview_len(parameter.name), source_work)
+                                    parameter_names.push(parameter.name)
+                                expected: Ast::Expr = proof_substitute_with_work_limit(requires[requirement_index], parameter_names, call.arguments, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                                return false if proof_replay_expr_is_invalid(expected) or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                return false if not proof_report_source_work_charge(1, source_work)
+                                expected_goals.push(expected)
+                            if has_decreases and not structural_summary:
+                                next_components: mutable darray[Ast::Expr] = []
+                                for component in decreases |component, parameters, call, next_components, source_work, expected_goals|:
+                                    parameter_names: mutable darray[sview] = []
+                                    for parameter in parameters |parameter_names, source_work|:
+                                        return false if not proof_report_source_work_charge(sview_len(parameter.name), source_work)
+                                        parameter_names.push(parameter.name)
+                                    next_component: Ast::Expr = proof_substitute_with_work_limit(component, parameter_names, call.arguments, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                                    return false if proof_replay_expr_is_invalid(next_component) or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                    return false if not proof_source_recursive_call_measure_atom(next_component)
+                                    return false if not proof_report_source_work_charge(1, source_work)
+                                    next_components.push(next_component)
+                                for component in decreases |component, call, expected_goals, source_work|:
+                                    current_nonnegative: Ast::Expr = Ast::Expr.Binary(component, TokenKind.GtEq, Ast::Expr.IntLit(0, call.position), call.position)
+                                    return false if not proof_report_source_work_charge(1, source_work)
+                                    expected_goals.push(current_nonnegative)
+                                for component_index in 0..<decreases.count |component_index, decreases, next_components, call, expected_goals, source_work|:
+                                    next_nonnegative: Ast::Expr = Ast::Expr.Binary(next_components[component_index], TokenKind.GtEq, Ast::Expr.IntLit(0, call.position), call.position)
+                                    return false if not proof_report_source_work_charge(1, source_work)
+                                    expected_goals.push(next_nonnegative)
+                                lex_goal: Ast::Expr = proof_source_recursive_call_lexicographic_goal(decreases, next_components, call.position, source_work)
+                                return false if proof_replay_expr_is_invalid(lex_goal)
+                                return false if not proof_report_source_work_charge(1, source_work)
+                                expected_goals.push(lex_goal)
+                            return false if not proof_source_recursive_call_expected_goals_covered(recursive_attempt_index, expected_goals, call_index, source_work)
+            true
+        def proof_source_recursive_call_obligations_covered(report: ProofReport&, declarations: darray[Ast::Decl]&, scheduled_owners: darray[ProofSourceScheduledOwner]&, source_certificates_checked: bool, source_work: mutable usize&) -> bool:
+            scheduled_cursor: mutable usize = 0
+            declaration_names: ProofSourceRecursiveCallNameIndex = proof_source_recursive_call_name_index_build(declarations, source_work)
+            return false if not declaration_names.valid
+            structural_owners: ProofSourceRecursiveCallStructuralOwnerIndex = proof_source_recursive_call_structural_owner_index_build(report, source_certificates_checked, source_work)
+            return false if not structural_owners.valid
+            complete: bool = proof_source_recursive_call_collect(report, declarations, declarations, declaration_names, structural_owners, scheduled_owners, &scheduled_cursor, source_certificates_checked, source_work, 0)
+            complete and scheduled_cursor == scheduled_owners.count

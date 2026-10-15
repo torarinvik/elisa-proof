@@ -76,6 +76,45 @@ extend ElisaProof:
             return false if report.results.goal_attempts.count == 0
             return report.results.goal_attempts[report.results.goal_attempts.count - 1].budget_exhausted
 
+        # Preserve the exact parser-origin call site on every goal emitted while checking a
+        # callee contract or recursive measure. Independent source-obligation admission uses
+        # this identity to distinguish several calls on the same line and to notice a missing
+        # call-site obligation even when report counters still balance.
+        def proof_mark_call_obligations_since(report: mutable ProofReport&, attempt_start: usize, call_position: Ast::Pos) -> bool:
+            return false if attempt_start > report.results.goal_attempts.count
+            for attempt_index in attempt_start..<report.results.goal_attempts.count |attempt_index, report, call_position|:
+                return false if not proof_report_source_work_charge(1, &report.context.call_attribution_work)
+                attempt: ProofGoalAttempt = report.results.goal_attempts[attempt_index]
+                attempt_attributed: bool = attempt.source_call_position.line != 0 or attempt.source_call_position.offset != 0 or attempt.source_call_position.end_offset != 0
+                if attempt.has_certificate and attempt.certificate_index < report.analysis_1.certificates.count:
+                    return false if not proof_report_source_work_charge(1, &report.context.call_attribution_work)
+                    certificate: ProofGoalCertificate = report.analysis_1.certificates[attempt.certificate_index]
+                    certificate_attributed: bool = certificate.source_call_position.line != 0 or certificate.source_call_position.offset != 0 or certificate.source_call_position.end_offset != 0
+                    if attempt_attributed:
+                        report.analysis_1.certificates[attempt.certificate_index].source_call_position <- attempt.source_call_position if not certificate_attributed
+                    elif certificate_attributed:
+                        report.results.goal_attempts[attempt_index].source_call_position <- certificate.source_call_position
+                    else:
+                        report.results.goal_attempts[attempt_index].source_call_position <- call_position
+                        report.analysis_1.certificates[attempt.certificate_index].source_call_position <- call_position
+                else:
+                    report.results.goal_attempts[attempt_index].source_call_position <- call_position if not attempt_attributed
+            # The last emitted row is the requested obligation result; earlier rows
+            # can be speculative solver probes. Preserve that distinction explicitly
+            # for independent source admission.
+            if report.results.goal_attempts.count > attempt_start:
+                selected_index: usize = report.results.goal_attempts.count - 1
+                return false if not proof_report_source_work_charge(1, &report.context.call_attribution_work)
+                selected: ProofGoalAttempt = report.results.goal_attempts[selected_index]
+                selected_position_present: bool = selected.source_call_position.line != 0 or selected.source_call_position.offset != 0 or selected.source_call_position.end_offset != 0
+                selected_position_matches: bool = selected.source_call_position.line == call_position.line and selected.source_call_position.column == call_position.column and selected.source_call_position.offset == call_position.offset and selected.source_call_position.end_line == call_position.end_line and selected.source_call_position.end_column == call_position.end_column and selected.source_call_position.end_offset == call_position.end_offset
+                if not selected_position_present or selected_position_matches:
+                    report.results.goal_attempts[selected_index].source_call_obligation_selected <- true
+                    if selected.has_certificate:
+                        return false if selected.certificate_index >= report.analysis_1.certificates.count or not proof_report_source_work_charge(1, &report.context.call_attribution_work)
+                        report.analysis_1.certificates[selected.certificate_index].source_call_obligation_selected <- true
+            true
+
         def proof_finding_status(kind: sview) -> sview:
             return when kind:
                 "borrow-call-opaque" | "borrow-call-summary-unsupported" | "borrow-contract-unsupported" | "borrow-escape" | "borrow-source-opaque" | "call-old-opaque" | "call-result-unbound" | "captured-block-unsupported" | "catch-arm-unsupported" | "checked-get-unsupported" | "checked-index-unsupported" | "contract-call-unsupported" | "contract-expression-unsupported" | "contract-proposition-type" | "contract-resource-unsupported" | "control-flow-unsupported" | "control-flow-analysis-budget" | "declaration-unsupported" | "expression-unsupported" | "frame-call-opaque" | "frame-expression-opaque" | "frame-preserve-opaque" | "frame-spec-invalid" | "frame-spec-opaque" | "frame-write-opaque" | "function-summary-unverified" | "import-error" | "index-bounds-opaque" | "kernel-arena-budget" | "kernel-fact-admission-budget" | "kernel-certificate-invalid" | "lemma-impure" | "lemma-malformed" | "lemma-recursive-unsupported" | "lemma-result-unbound" | "lemma-return" | "loop-condition-opaque" | "loop-decreases-malformed" | "loop-invariant-scope" | "parallel-control-flow-unsupported" | "parallel-state-unsupported" | "parse-error" | "pattern-unsupported" | "proof-impure" | "proof-malformed" | "proof-internal-name" | "recursive-summary-unsupported" | "slice-bounds-opaque" | "statement-unsupported" | "region-alias-unsupported" | "region-allocation-unsupported" | "region-destroy-unsupported" | "region-expression-unsupported" | "region-return-escape" | "region-return-witness-unsupported" | "region-scope-unsupported" | "region-store-escape" | "effect-call-opaque" | "effect-row-abstract" | "frame-analysis-budget" | "resource-analysis-budget" | "resource-expression-depth" | "semantic-analysis-depth" -> "unsupported"
@@ -93,8 +132,11 @@ extend ElisaProof:
             return report.analysis_2.finding_offset if name == report.analysis_2.finding_function else 0
 
         def proof_add_finding(report: mutable ProofReport&, kind: sview, line: u32, name: sview, message: sview) -> void:
-            empty: mutable darray[Ast::Expr] = []
-            proof_add_finding_with_counterexample(report, kind, line, name, message, &empty, false)
+            # No temporary empty array is passed into the report-retaining helper: that made
+            # the compiler infer a short-lived region for a value stored in report.results.
+            finding_status: mutable sview = proof_finding_status(kind)
+            report.results.findings <- report.results.findings.push(ProofFinding{kind: kind, status: finding_status, line: line, name: name, owner: proof_finding_owner(report, name), owner_line: proof_finding_owner_line(report, name), owner_offset: proof_finding_owner_offset(report, name), message: message, budget_dimension: "", budget_observed: 0, budget_limit: 0, counterexample_start: report.results.counterexample_facts.count, counterexample_count: 0, counterexample_found: false, goal_id: 0, has_goal: false})
+            report.results.failed <- report.results.failed + 1
 
         def proof_add_budget_finding(report: mutable ProofReport&, kind: sview, line: u32, name: sview, message: sview, dimension: sview, observed: usize, limit: usize) -> void:
             proof_add_finding(report, kind, line, name, message)
@@ -127,9 +169,22 @@ extend ElisaProof:
         def proof_obligation(report: mutable ProofReport&, proven: bool) -> void:
             start: usize = 0 if report.results.obligation_inventory.count == 0 else report.results.obligation_inventory[report.results.obligation_inventory.count - 1].attempts_start + report.results.obligation_inventory[report.results.obligation_inventory.count - 1].attempts_count
             count: usize = report.results.goal_attempts.count - start if start <= report.results.goal_attempts.count else 0
-            report.results.obligation_inventory.push(ProofObligationEntry{identity: report.results.obligation_inventory.count, attempts_start: start, attempts_count: count, proven: proven, source_line: 0, source_name: "", source_kind: "", source_function_offset: 0, source_obligation_index: 0, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
+            report.results.obligation_inventory.push(ProofObligationEntry{identity: report.results.obligation_inventory.count, attempts_start: start, attempts_count: count, proven: proven, source_line: 0, source_name: "", source_kind: "", source_function_offset: 0, source_obligation_index: 0, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset, source_call_position: Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}, source_call_callee_name: "", source_call_callee_module: "", source_call_callee_line: 0, source_call_callee_offset: 0, source_call_requires_index: 0})
             report.results.obligations <- report.results.obligations + 1
             report.results.producer_proven_count <- report.results.producer_proven_count + 1 if proven
+
+        # Preserve the parser-resolvable identity of a call-precondition event in the
+        # obligation ledger, independently of attempt and certificate annotations.
+        def proof_call_requires_obligation(report: mutable ProofReport&, proven: bool, call_position: Ast::Pos, callee_name: sview, callee_module: sview, callee_line: u32, callee_offset: u32, requires_index: usize) -> void:
+            proof_obligation(report, proven)
+            last: usize = report.results.obligation_inventory.count - 1
+            report.results.obligation_inventory[last].source_kind <- "call-requires"
+            report.results.obligation_inventory[last].source_call_position <- call_position
+            report.results.obligation_inventory[last].source_call_callee_name <- callee_name
+            report.results.obligation_inventory[last].source_call_callee_module <- callee_module
+            report.results.obligation_inventory[last].source_call_callee_line <- callee_line
+            report.results.obligation_inventory[last].source_call_callee_offset <- callee_offset
+            report.results.obligation_inventory[last].source_call_requires_index <- requires_index
 
         # A frame check (a write or a callee's `changes` against the caller's `changes` and
         # `preserves` frames) is decided syntactically and has no goal attempt or certificate.
@@ -137,6 +192,17 @@ extend ElisaProof:
         def proof_frame_obligation(report: mutable ProofReport&, proven: bool) -> void:
             proof_obligation(report, proven)
             report.results.obligation_inventory[report.results.obligation_inventory.count - 1].source_kind <- "frame"
+
+        # Body frame clauses have parser-owned identities. Preserve that identity separately
+        # from the many dynamic frame checks, which intentionally remain ordinary `frame` rows.
+        def proof_frame_clause_obligation(report: mutable ProofReport&, proven: bool, line: u32, name: sview, source_index: usize) -> void:
+            proof_frame_obligation(report, proven)
+            last: usize = report.results.obligation_inventory.count - 1
+            report.results.obligation_inventory[last].source_line <- line
+            report.results.obligation_inventory[last].source_name <- name
+            report.results.obligation_inventory[last].source_kind <- "frame-clause"
+            report.results.obligation_inventory[last].source_function_offset <- report.context.current_goal_owner_offset
+            report.results.obligation_inventory[last].source_obligation_index <- source_index
 
         def proof_obligation_for_source(report: mutable ProofReport&, proven: bool, line: u32, name: sview, kind: sview, source_index: usize) -> void:
             proof_obligation(report, proven)
@@ -161,9 +227,9 @@ extend ElisaProof:
         def proof_certificate_fact_trace_index(report: ProofReport&, fact: Ast::Expr, owner: sview) -> usize:
             work: mutable usize = 0
             equality_work: mutable usize = 0
-            support: (complete: bool, supported: bool) = proof_kernel_expression_supported_with_work(fact, &work)
+            support: (complete: bool, supported: bool) = proof_kernel_expression_supported_with_work(fact, work)
             return report.analysis_1.traces.records.count if not support.complete or not support.supported
-            traced: (complete: bool, index: usize) = proof_certificate_fact_trace_index_after_support(report, fact, owner, &work, &equality_work)
+            traced: (complete: bool, index: usize) = proof_certificate_fact_trace_index_after_support(report, fact, owner, work, equality_work)
             return traced.index if traced.complete
             return report.analysis_1.traces.records.count
 
@@ -172,26 +238,26 @@ extend ElisaProof:
         # trace lookup separate so that path does not traverse the same fact AST twice.
         def proof_certificate_fact_trace_index_after_support(report: ProofReport&, fact: Ast::Expr, owner: sview, work: mutable usize&, equality_work: mutable usize&) -> (complete: bool, index: usize):
             owner_length: usize = sview_len(owner)
-            return (false, report.analysis_1.traces.records.count) if not proof_kernel_ast_support_charge_with_work(owner_length, &work)
-            fact_root_result: (complete: bool, root: Ast::Expr) = proof_trace_root_with_work(fact, 0, &work)
+            return (false, report.analysis_1.traces.records.count) if not proof_kernel_ast_support_charge_with_work(owner_length, work)
+            fact_root_result: (complete: bool, root: Ast::Expr) = proof_trace_root_with_work(fact, 0, work)
             return (false, report.analysis_1.traces.records.count) if not fact_root_result.complete
             fact_root: Ast::Expr = fact_root_result.root
             start: mutable usize = report.analysis_1.traces.active_start
             start <- 0 if start > report.analysis_1.traces.records.count
             for index in start..<report.analysis_1.traces.records.count |index, report, fact, fact_root, owner, work, equality_work|:
-                return (false, report.analysis_1.traces.records.count) if not proof_kernel_ast_support_charge_with_work(1, &work)
+                return (false, report.analysis_1.traces.records.count) if not proof_kernel_ast_support_charge_with_work(1, work)
                 trace: ProofFactTrace = report.analysis_1.traces.records[index]
                 trace_name_length: usize = sview_len(trace.name)
-                return (false, report.analysis_1.traces.records.count) if not proof_kernel_ast_support_charge_with_work(trace_name_length, &work)
+                return (false, report.analysis_1.traces.records.count) if not proof_kernel_ast_support_charge_with_work(trace_name_length, work)
                 continue if trace.name != owner
-                trace_root_result: (complete: bool, root: Ast::Expr) = proof_trace_root_with_work(trace.expression, 0, &work)
+                trace_root_result: (complete: bool, root: Ast::Expr) = proof_trace_root_with_work(trace.expression, 0, work)
                 return (false, report.analysis_1.traces.records.count) if not trace_root_result.complete
-                return (false, report.analysis_1.traces.records.count) if not proof_trace_root_names_charge(trace_root_result.root, fact_root, &work)
+                return (false, report.analysis_1.traces.records.count) if not proof_trace_root_names_charge(trace_root_result.root, fact_root, work)
                 continue if not proof_trace_root_may_equal(trace_root_result.root, fact_root)
-                trace_support: (complete: bool, supported: bool) = proof_kernel_expression_supported_with_work(trace.expression, &work)
+                trace_support: (complete: bool, supported: bool) = proof_kernel_expression_supported_with_work(trace.expression, work)
                 return (false, report.analysis_1.traces.records.count) if not trace_support.complete
                 continue if not trace_support.supported
-                equal: bool = proof_replay_summary_expr_proof_equal_with_limit(trace.expression, fact, &equality_work, proof_replay_summary_source_work_limit())
+                equal: bool = proof_replay_summary_expr_proof_equal_with_limit(trace.expression, fact, equality_work, proof_replay_summary_source_work_limit())
                 return (true, index) if equal
                 return (false, report.analysis_1.traces.records.count) if equality_work >= proof_replay_summary_source_work_limit()
             return (true, report.analysis_1.traces.records.count)
@@ -200,8 +266,8 @@ extend ElisaProof:
             return (true, Ast::Expr.Invalid) if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return (false, Ast::Expr.Invalid) if not proof_kernel_ast_support_charge_with_work(1, &work)
-                    return proof_trace_root_with_work(inner, depth + 1, &work)
+                    return (false, Ast::Expr.Invalid) if not proof_kernel_ast_support_charge_with_work(1, work)
+                    return proof_trace_root_with_work(inner, depth + 1, work)
                 _:
                     return (true, expression)
 
@@ -210,20 +276,20 @@ extend ElisaProof:
                 Ast::Expr.Binary(_, _, _, _):
                     match right:
                         Ast::Expr.Binary(_, _, _, _):
-                            return proof_kernel_ast_support_charge_with_work(1, &work)
+                            return proof_kernel_ast_support_charge_with_work(1, work)
                         _:
                             return true
                 Ast::Expr.Unary(_, _, _):
                     match right:
                         Ast::Expr.Unary(_, _, _):
-                            return proof_kernel_ast_support_charge_with_work(1, &work)
+                            return proof_kernel_ast_support_charge_with_work(1, work)
                         _:
                             return true
                 Ast::Expr.Ident(left_name, _):
                     match right:
                         Ast::Expr.Ident(right_name, _):
-                            return false if not proof_kernel_ast_support_charge_with_work(sview_len(left_name), &work)
-                            return proof_kernel_ast_support_charge_with_work(sview_len(right_name), &work)
+                            return false if not proof_kernel_ast_support_charge_with_work(sview_len(left_name), work)
+                            return proof_kernel_ast_support_charge_with_work(sview_len(right_name), work)
                         _:
                             return true
                 _:
@@ -346,7 +412,7 @@ extend ElisaProof:
             if facts.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET:
                 proof_kernel_budget_note(report, name)
             if report.analysis_1.kernel.budget_exhausted:
-                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: report.analysis_1.kernel.nodes.count, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, float_mode: report.context.current_float_mode, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
+                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: report.analysis_1.kernel.nodes.count, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, loop_source_position: report.context.current_loop_source_position, float_mode: report.context.current_float_mode, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
                 return
             captured_facts: mutable darray[Ast::Expr] = []
             captured_kernel_roots: mutable darray[usize] = []
@@ -365,7 +431,7 @@ extend ElisaProof:
                     break
                 supported_facts.push(fact)
             trace_count: usize = report.analysis_1.traces.records.count
-            trace_start: usize = report.analysis_1.traces.active_start
+            trace_start: mutable usize = report.analysis_1.traces.active_start
             trace_start <- 0 if trace_start > trace_count
             active_trace_count: usize = trace_count - trace_start
             use_fact_index: bool = not fact_admission_exhausted and supported_facts.count >= 8 and supported_facts.count <= 128 and support_work <= PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT / 8 and active_trace_count >= 256
@@ -383,7 +449,7 @@ extend ElisaProof:
                 fact_capacity: mutable usize = 0
                 can Memory.Allocate:
                     if proof_goal_fact_index_build(supported_facts, trace_count, &support_work, PROOF_KERNEL_AST_SUPPORT_WORK_LIMIT, &fact_capacity, &slot_hashes, &slot_heads, &next_facts, &matched_traces, &fact_roots, &root_tag_heads, &next_root_facts, &root_key_slot_hashes, &root_key_slot_heads, &next_root_key_facts):
-                        if not proof_goal_fact_index_scan(report, supported_facts, name, trace_start, fact_capacity, slot_hashes, slot_heads, next_facts, &matched_traces, fact_roots, root_tag_heads, next_root_facts, root_key_slot_hashes, root_key_slot_heads, next_root_key_facts, &support_work, &equality_work):
+                        if not proof_goal_fact_index_scan(report, supported_facts, name, trace_start, fact_capacity, slot_hashes, slot_heads, next_facts, &matched_traces, fact_roots, root_tag_heads, next_root_facts, root_key_slot_hashes, root_key_slot_heads, next_root_key_facts, &support_work, equality_work):
                             fact_admission_exhausted <- true
                         else:
                             for fact_index in 0..<supported_facts.count |fact_index, supported_facts, matched_traces, captured_facts, captured_kernel_roots, report, trace_count, fact_admission_exhausted|:
@@ -400,7 +466,7 @@ extend ElisaProof:
                         fact_admission_exhausted <- true
             else:
                 for fact in supported_facts |fact, captured_facts, captured_kernel_roots, report, name, support_work, equality_work, fact_admission_exhausted|:
-                    traced: (complete: bool, index: usize) = proof_certificate_fact_trace_index_after_support(report, fact, name, &support_work, &equality_work)
+                    traced: (complete: bool, index: usize) = proof_certificate_fact_trace_index_after_support(report, fact, name, &support_work, equality_work)
                     if not traced.complete:
                         fact_admission_exhausted <- true
                         break
@@ -412,13 +478,13 @@ extend ElisaProof:
             proof_kernel_fact_admission_budget_note(report, name) if fact_admission_exhausted
             encoded_goal: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(goal, report, name)
             if not encoded_goal.known:
-                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: report.analysis_1.kernel.nodes.count, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, float_mode: report.context.current_float_mode, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
+                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: report.analysis_1.kernel.nodes.count, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, loop_source_position: report.context.current_loop_source_position, float_mode: report.context.current_float_mode, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
                 return
             if not proof_kernel_report_append_allowed(report, report.analysis_1.certificate_facts.count, captured_facts.count, name):
-                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: encoded_goal.root, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, float_mode: report.context.current_float_mode, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
+                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: encoded_goal.root, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, loop_source_position: report.context.current_loop_source_position, float_mode: report.context.current_float_mode, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
                 return
             if not proof_kernel_report_append_allowed(report, report.analysis_1.kernel.certificate_facts.count, captured_kernel_roots.count, name):
-                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: encoded_goal.root, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
+                report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.analysis_1.certificate_facts.count, facts_count: 0, kernel_goal: encoded_goal.root, kernel_facts_start: report.analysis_1.kernel.certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, loop_source_position: report.context.current_loop_source_position, float_mode: report.context.current_float_mode, producer_proven: false, has_certificate: false, certificate_index: report.analysis_1.certificates.count, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
                 return
             facts_start: usize = report.analysis_1.certificate_facts.count
             report.analysis_1.certificate_facts.extend(captured_facts)
@@ -438,5 +504,5 @@ extend ElisaProof:
             certificate_index: usize = report.analysis_1.certificates.count
             if certificate_proven and not proof_kernel_report_append_allowed(report, report.analysis_1.certificates.count, 1, name):
                 certificate_proven <- false
-            report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: report.analysis_1.kernel.budget_exhausted, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, float_mode: report.context.current_float_mode, producer_proven: certificate_proven, has_certificate: certificate_proven, certificate_index: certificate_index, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
-            report.analysis_1.certificates <- report.analysis_1.certificates.push(ProofGoalCertificate{goal: goal, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, replayed: false}) if certificate_proven
+            report.results.goal_attempts <- report.results.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: report.analysis_1.kernel.budget_exhausted, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, loop_source_position: report.context.current_loop_source_position, float_mode: report.context.current_float_mode, producer_proven: certificate_proven, has_certificate: certificate_proven, certificate_index: certificate_index, owner_function_line: report.context.current_goal_owner_line, owner_function_offset: report.context.current_goal_owner_offset})
+            report.analysis_1.certificates <- report.analysis_1.certificates.push(ProofGoalCertificate{goal: goal, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, source_phase: report.context.current_loop_invariant_phase, loop_source_position: report.context.current_loop_source_position, replayed: false}) if certificate_proven
