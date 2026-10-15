@@ -10,7 +10,78 @@ extend ElisaProof:
                 _:
                     false
 
-        def proof_replay_resource_call_pure_expr(report: mutable ProofReport&, operator_source: mutable ProofReport&, index: ProofReplayDeterministicDeclarationIndex&, owner_entry: ProofReplayDeterministicDeclarationEntry, owner_line: u32, owner_offset: usize, expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, source_work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_resource_call_pure_scoped_row(index: ProofReplayDeterministicDeclarationIndex&, aliases: ProofModuleAliasIndex&, caller_module: sview, callee: Ast::Expr, source_work: mutable usize&) -> (complete: bool, matches: usize, row: usize):
+            name: sview = proof_callable_name(callee)
+            return (false, 0, 0) if name == ""
+            group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(index, name, source_work)
+            return (false, 0, 0) if not group.complete
+            selected_row: mutable usize = index.entries.count
+            matches: mutable usize = 0
+            row: mutable usize = group.head
+            for _ in 0..<group.count |group, index, name, aliases, caller_module, callee, selected_row, matches, row, source_work|:
+                return (false, 0, 0) if row >= index.entries.count
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
+                return (false, 0, 0) if not proof_replay_owner_work_charge(1, source_work)
+                if entry.is_function and not entry.is_lemma:
+                    names: mutable darray[sview] = []
+                    owners: mutable darray[sview] = []
+                    return (false, 0, 0) if not proof_replay_owner_work_charge(2, source_work)
+                    names.push(entry.name)
+                    owners.push(entry.owner)
+                    resolved: (complete: bool, row: usize) = proof_module_function_index_for_callee(names, owners, aliases, caller_module, callee, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return (false, 0, 0) if not resolved.complete
+                    if resolved.row == 0:
+                        matches <- matches + 1
+                        selected_row <- row
+                row <- entry.next_index
+                return (false, 0, 0) if row > index.entries.count
+            return (false, 0, 0) if row != index.entries.count or matches != 1
+            (true, matches, selected_row)
+
+        # A scoped path resolves through the module index only when its leading name is
+        # not a local parameter. The purity subset has no local declarations, so parameters
+        # are the complete set of local shadows in an admitted helper body.
+        def proof_replay_resource_call_pure_scope_root(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, name: sview):
+            return (false, "") if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return (false, "") if name == "" or not proof_replay_owner_work_charge(sview_len(name), source_work)
+                    return (true, name)
+                Ast::Expr.Scope(parent, _, _):
+                    return proof_replay_resource_call_pure_scope_root(parent, source_work, depth + 1)
+                _:
+                    (false, "")
+
+        def proof_replay_resource_call_pure_helper_row(report: ProofReport&, index: ProofReplayDeterministicDeclarationIndex&, aliases: ProofModuleAliasIndex&, owner_entry: ProofReplayDeterministicDeclarationEntry, owner_line: u32, owner_offset: usize, callee: Ast::Expr, position: Ast::Pos, source_work: mutable usize&) -> (complete: bool, row: usize):
+            return (false, 0) if owner_offset > 4294967295
+            frame_work: mutable usize = 0
+            selected: (known: bool, expression: Ast::Expr, callee: Ast::Expr) = ElisaProofFrameSource::source_call_expression_at_owner_with_work(report.source.source_declarations, report.source.source_annotations, owner_entry.name, owner_line, owner_offset.u32(), position, &frame_work)
+            return (false, 0) if not proof_replay_owner_work_charge(frame_work, source_work) or not selected.known
+            return (false, 0) if proof_replay_resource_call_group_has_nonfunction(index, proof_callable_name(callee), source_work)
+            match callee:
+                Ast::Expr.Ident(name, _):
+                    match selected.callee:
+                        Ast::Expr.Ident(selected_name, _):
+                            return (false, 0) if selected_name != name
+                            resolved_owner: (known: bool, line: u32, offset: u32, module_path: darray[sview]) = ElisaProofFrameSource::resolve_callee_owner_at_offset_with_work(report.source.source_declarations, report.source.source_annotations, owner_entry.name, owner_line, owner_offset.u32(), name, source_work)
+                            return (false, 0) if not resolved_owner.known
+                            resolved: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(index, selected_name, resolved_owner.line, resolved_owner.offset.usize(), source_work)
+                            return (false, 0) if not resolved.complete or resolved.matches != 1
+                            return (true, resolved.row)
+                        _:
+                            return (false, 0)
+                Ast::Expr.Scope(_, _, _):
+                    match selected.callee:
+                        Ast::Expr.Scope(_, _, _):
+                            resolved: (complete: bool, matches: usize, row: usize) = proof_replay_resource_call_pure_scoped_row(index, aliases, owner_entry.owner, selected.callee, source_work)
+                            return (false, 0) if not resolved.complete or resolved.matches != 1
+                            return (true, resolved.row)
+                        _:
+                            return (false, 0)
+                _:
+                    (false, 0)
+
+        def proof_replay_resource_call_pure_expr(report: mutable ProofReport&, operator_source: mutable ProofReport&, index: ProofReplayDeterministicDeclarationIndex&, aliases: ProofModuleAliasIndex&, owner_entry: ProofReplayDeterministicDeclarationEntry, owner_line: u32, owner_offset: usize, expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
             match expression:
                 Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _):
@@ -24,30 +95,35 @@ extend ElisaProof:
                         matches <- matches + 1 if parameter.name == name
                     return matches == 1
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_resource_call_pure_expr(report, operator_source, index, owner_entry, owner_line, owner_offset, inner, parameters, source_work, depth + 1)
+                    return proof_replay_resource_call_pure_expr(report, operator_source, index, aliases, owner_entry, owner_line, owner_offset, inner, parameters, source_work, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
                     return false if operator != TokenKind.Not and operator != TokenKind.Minus
-                    return proof_replay_resource_call_pure_expr(report, operator_source, index, owner_entry, owner_line, owner_offset, inner, parameters, source_work, depth + 1)
+                    return proof_replay_resource_call_pure_expr(report, operator_source, index, aliases, owner_entry, owner_line, owner_offset, inner, parameters, source_work, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent and operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq and operator != TokenKind.And and operator != TokenKind.Or
-                    return false if not proof_replay_resource_call_pure_expr(report, operator_source, index, owner_entry, owner_line, owner_offset, left, parameters, source_work, depth + 1)
-                    return proof_replay_resource_call_pure_expr(report, operator_source, index, owner_entry, owner_line, owner_offset, right, parameters, source_work, depth + 1)
-                Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, labels, position):
-                    return false if callee == "" or not proof_replay_owner_work_charge(sview_len(callee), source_work) or labels.count != 0 or depth + 1 >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT
-                    # A nested source helper is callable only when the same spelling cannot
-                    # resolve to an extern or another non-function declaration.
-                    return false if proof_replay_resource_call_group_has_nonfunction(index, callee, source_work)
-                    for parameter in parameters |callee, source_work|:
-                        return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(parameter.name), source_work) or not proof_replay_owner_work_charge(sview_len(callee), source_work)
-                        return false if parameter.name == callee
-                    call_position: Ast::Pos = position
-                    return false if owner_offset > 4294967295
-                    frame_work: mutable usize = 0
-                    selected: (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) = ElisaProofFrameSource::source_call_at_owner_with_work(report.source.source_declarations, report.source.source_annotations, owner_entry.name, owner_line, owner_offset.u32(), call_position, &frame_work)
-                    return false if not proof_replay_owner_work_charge(frame_work, source_work) or not selected.known or selected.callee != callee
-                    resolved: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(index, selected.callee, selected.callee_line, selected.callee_offset.usize(), source_work)
-                    return false if not resolved.complete or resolved.matches != 1 or resolved.row >= index.entries.count
-                    helper: ProofReplayDeterministicDeclarationEntry = index.entries[resolved.row]
+                    return false if not proof_replay_resource_call_pure_expr(report, operator_source, index, aliases, owner_entry, owner_line, owner_offset, left, parameters, source_work, depth + 1)
+                    return proof_replay_resource_call_pure_expr(report, operator_source, index, aliases, owner_entry, owner_line, owner_offset, right, parameters, source_work, depth + 1)
+                Ast::Expr.Call(callee_expression, arguments, labels, position):
+                    callee_name: sview = proof_callable_name(callee_expression)
+                    return false if callee_name == "" or not proof_replay_owner_work_charge(sview_len(callee_name), source_work) or labels.count != 0 or depth + 1 >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT
+                    bare_callee: bool = false
+                    match callee_expression:
+                        Ast::Expr.Ident(_, _):
+                            bare_callee <- true
+                        Ast::Expr.Scope(_, _, _):
+                            scope_root: (complete: bool, name: sview) = proof_replay_resource_call_pure_scope_root(callee_expression, source_work, 0)
+                            return false if not scope_root.complete
+                            for parameter in parameters |scope_root, source_work|:
+                                return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(parameter.name), source_work) or not proof_replay_owner_work_charge(sview_len(scope_root.name), source_work)
+                                return false if parameter.name == scope_root.name
+                        _:
+                            return false
+                    for parameter in parameters |callee_name, source_work|:
+                        return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(parameter.name), source_work) or not proof_replay_owner_work_charge(sview_len(callee_name), source_work)
+                        return false if bare_callee and parameter.name == callee_name
+                    helper_row: (complete: bool, row: usize) = proof_replay_resource_call_pure_helper_row(report, index, aliases, owner_entry, owner_line, owner_offset, callee_expression, position, source_work)
+                    return false if not helper_row.complete or helper_row.row >= index.entries.count
+                    helper: ProofReplayDeterministicDeclarationEntry = index.entries[helper_row.row]
                     helper_parameter_count: mutable usize = 0
                     match helper.declaration:
                         Ast::Decl.Func(_, helper_parameters, _, _, _, _, _):
@@ -55,14 +131,14 @@ extend ElisaProof:
                         _:
                             return false
                     return false if arguments.count != helper_parameter_count
-                    return false if not helper.is_function or helper.is_lemma or not proof_replay_resource_call_pure_function(report, operator_source, index, helper, source_work, depth + 1)
-                    for argument in arguments |report, operator_source, index, owner_entry, owner_line, owner_offset, parameters, source_work, depth|:
-                        return false if not proof_replay_resource_call_pure_expr(report, operator_source, index, owner_entry, owner_line, owner_offset, argument, parameters, source_work, depth + 1)
+                    return false if not helper.is_function or helper.is_lemma or not proof_replay_resource_call_pure_function(report, operator_source, index, aliases, helper, source_work, depth + 1)
+                    for argument in arguments |report, operator_source, index, aliases, owner_entry, owner_line, owner_offset, parameters, source_work, depth|:
+                        return false if not proof_replay_resource_call_pure_expr(report, operator_source, index, aliases, owner_entry, owner_line, owner_offset, argument, parameters, source_work, depth + 1)
                     return true
                 _:
                     false
 
-        def proof_replay_resource_call_pure_function(report: mutable ProofReport&, operator_source: mutable ProofReport&, index: ProofReplayDeterministicDeclarationIndex&, entry: ProofReplayDeterministicDeclarationEntry, source_work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_resource_call_pure_function(report: mutable ProofReport&, operator_source: mutable ProofReport&, index: ProofReplayDeterministicDeclarationIndex&, aliases: ProofModuleAliasIndex&, entry: ProofReplayDeterministicDeclarationEntry, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
             parameters: darray[Ast::ParamDecl] = []
             return_type: mutable Ast::Expr? = None
@@ -97,7 +173,7 @@ extend ElisaProof:
             match body[0]:
                 Ast::Stmt.Return(value, _):
                     if value is returned:
-                        return false if not proof_replay_resource_call_pure_expr(report, operator_source, index, entry, declaration_line, declaration_offset, returned, parameters, source_work, depth + 1)
+                        return false if not proof_replay_resource_call_pure_expr(report, operator_source, index, aliases, entry, declaration_line, declaration_offset, returned, parameters, source_work, depth + 1)
                     else:
                         return false
                 _:

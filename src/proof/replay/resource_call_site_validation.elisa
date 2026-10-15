@@ -1,0 +1,156 @@
+# Validate resource-call events against source call sites and complete owner inventories.
+extend ElisaProof:
+    private:
+        def proof_replay_resource_call_site_matches_owner_with_work(report: mutable ProofReport&, resource_root: usize, event: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if event.value < 0 or event.value > 4294967295 or owner == "" or owner_line == 0 or owner_offset > 4294967295 or event.name == ""
+            return false if event.kind != "resource-call" and event.kind != "resource-call-lend"
+            # This validator is reached only while recursively visiting resource_root. Its
+            # owner preflight already counts every call offset and rejects duplicates, so a
+            # second whole-root walk per event would add quadratic work without new evidence.
+            return false if resource_root >= report.analysis_1.kernel.nodes.count or report.analysis_1.kernel.nodes[resource_root].kind != "resource-safety"
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            caller_owner: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
+            return false if not caller_owner.complete or caller_owner.matches != 1 or caller_owner.row >= cache.deterministic_calls.declaration_index.entries.count
+            caller_entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[caller_owner.row]
+            return false if not proof_replay_owner_work_charge(sview_len(caller_entry.owner), source_work) or not proof_replay_owner_work_charge(sview_len(owner_module), source_work)
+            return false if caller_entry.owner != owner_module
+            parameters: darray[Ast::ParamDecl] = []
+            body: darray[Ast::Stmt] = []
+            match caller_entry.declaration:
+                Ast::Decl.Func(_, declared_parameters, _, declared_body, _, _, _):
+                    parameters <- declared_parameters
+                    body <- declared_body
+                _:
+                    return false
+            calls: mutable darray[sview] = []
+            call_position: Ast::Pos = Ast::Pos{line: 0, column: 0, offset: event.value.usize().u32(), end_line: 0, end_column: 0, end_offset: 0}
+            selected: mutable (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) = (false, Ast::Expr.Invalid, "", 0, 0)
+            scoped: (known: bool, expression: Ast::Expr, callee: Ast::Expr) = (false, Ast::Expr.Invalid, Ast::Expr.Invalid)
+            cached_selection: (complete: bool, ambiguous: bool, selected: (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32)) = proof_replay_resource_call_owner_snapshot_select(report, cache, caller_owner.row, owner, owner_line, owner_offset.u32(), event.value.usize(), source_work)
+            return false if not cached_selection.complete or cached_selection.ambiguous
+            selected <- cached_selection.selected if cached_selection.selected.known
+            if not selected.known:
+                return false if not proof_replay_source_calls_with_work(parameters, body, report.source.source_annotations, &calls, source_work, event.value.usize(), event.name, true)
+                frame_work: mutable usize = 0
+                selected <- ElisaProofFrameSource::source_call_at_owner_with_work(report.source.source_declarations, report.source.source_annotations, owner, owner_line, owner_offset.u32(), call_position, &frame_work)
+                if not selected.known:
+                    scoped <- ElisaProofFrameSource::source_call_expression_at_owner_with_work(report.source.source_declarations, report.source.source_annotations, owner, owner_line, owner_offset.u32(), call_position, &frame_work)
+                # Charge the attempted source lookup even when it fails to resolve. Otherwise a
+                # forged event can force repeated whole-owner scans without consuming the caller's
+                # source-work budget.
+                frame_work_charged: bool = proof_replay_owner_work_charge(frame_work, source_work)
+                return false if not frame_work_charged or not selected.known and not scoped.known
+            callee_name: sview = selected.callee if selected.known else proof_callable_name(scoped.callee)
+            source_expression: Ast::Expr = selected.expression if selected.known else scoped.expression
+            return false if not proof_replay_owner_work_charge(sview_len(callee_name), source_work) or not proof_replay_owner_work_charge(sview_len(event.name), source_work)
+            return false if callee_name != event.name
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            callee_owner: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, selected.callee, selected.callee_line, selected.callee_offset.usize(), source_work) if selected.known else proof_replay_resource_scoped_callee_row_with_work(report, owner_module, scoped.callee, source_work, &cache)
+            return false if not callee_owner.complete or callee_owner.matches != 1 or callee_owner.row >= cache.deterministic_calls.declaration_index.entries.count
+            callee_owner_module: sview = cache.deterministic_calls.declaration_index.entries[callee_owner.row].owner
+            return false if not proof_replay_owner_work_charge(sview_len(callee_owner_module), source_work) or not proof_replay_owner_work_charge(sview_len(event.secondary_name), source_work)
+            return false if callee_owner_module != event.secondary_name
+            # This emitted event is already bound to the exact source call and callee summary.
+            # The name-wide pure-call classifier is only needed to justify omitted events.
+            callee_entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[callee_owner.row]
+            match callee_entry.declaration:
+                Ast::Decl.Func(_, parameters, return_type, _, _, _, position):
+                    return false if not proof_replay_resource_region_line_owner_unambiguous(cache.deterministic_calls.declaration_index, report.source.source_local_region_annotations, position.line, source_work)
+                    if event.kind == "resource-call":
+                        # A name/module match is insufficient when overloads share a spelling:
+                        # the linked resource trace must be the exact declaration selected at
+                        # this source call site. Otherwise a valid but unrelated overload trace
+                        # could supply the caller's resource effects.
+                        return false if event.left >= report.analysis_1.kernel.nodes.count
+                        linked_summary: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[event.left]
+                        return false if:
+                            linked_summary.right != position.line.i64()
+                            linked_summary.value != position.offset.i64()
+                            not proof_replay_owner_work_charge(sview_len(linked_summary.kind), source_work)
+                            not proof_replay_owner_work_charge(sview_len(linked_summary.operator), source_work)
+                            not proof_replay_owner_work_charge(sview_len(linked_summary.name), source_work)
+                            not proof_replay_owner_work_charge(sview_len(callee_entry.name), source_work)
+                            not proof_replay_owner_work_charge(sview_len(linked_summary.secondary_name), source_work)
+                            not proof_replay_owner_work_charge(sview_len(callee_entry.owner), source_work)
+                            linked_summary.kind != "resource-safety"
+                            linked_summary.operator != "resource-v2"
+                            linked_summary.name != callee_entry.name
+                            linked_summary.secondary_name != callee_entry.owner
+                    return false if event.kind == "resource-call-lend" and not proof_replay_resource_lend_return_is_confined(report, return_type, position.line, position.offset, source_work)
+                    return false if event.kind == "resource-call" and not proof_replay_resource_call_return_view_is_confined_with_work(report, return_type, position.line, position.offset, source_work)
+                    return proof_replay_resource_call_arguments_match_with_work(report, event, source_expression, parameters, position.line, position.offset, source_work)
+                _:
+                    false
+
+        # Source call count must agree with resource-relevant call transitions. Same-name calls
+        # without events are accepted only when every declared candidate is definitely value-only
+        # and region-free. Per-event checking binds each emitted transition to a unique source
+        # position and a capability-bearing callee.
+        def proof_replay_resource_call_coverage_for_owner_with_work(report: mutable ProofReport&, root: usize, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if root >= report.analysis_1.kernel.nodes.count or owner == "" or owner_line == 0 or owner_offset > 4294967295
+            if not cache.initialized:
+                return false if not proof_replay_structural_validation_cache_build(report, source_work, &cache)
+            return false if not cache.complete
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            located: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
+            return false if not located.complete or located.matches != 1 or located.row >= cache.deterministic_calls.declaration_index.entries.count
+            entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[located.row]
+            return false if entry.owner != owner_module
+            parameters: darray[Ast::ParamDecl] = []
+            body: darray[Ast::Stmt] = []
+            match entry.declaration:
+                Ast::Decl.Func(_, declared_parameters, _, declared_body, _, _, _):
+                    parameters <- declared_parameters
+                    body <- declared_body
+                _:
+                    return false
+            # The source call inventory records explicit calls, but operators are lowered
+            # through protocol implementations and are not represented as call names there.
+            # Until resource traces carry those selected implementations, reject owners whose
+            # body or defaults dispatch through an overloaded operator. Debit the independent
+            # typed-operator scan to the same replay source-work budget.
+            # Use the replay-built source snapshot for overload resolution. The input report's
+            # operator index and protocol mask are producer claims and may be invalidated or
+            # cleared independently of the parser-owned declarations.
+            if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            if cache.scratch.source_types.source_effect_index.work.implicit_effect_work > source_work:
+                prior_operator_work: usize = cache.scratch.source_types.source_effect_index.work.implicit_effect_work - source_work
+                return false if not proof_replay_owner_work_charge(prior_operator_work, source_work)
+            else:
+                cache.scratch.source_types.source_effect_index.work.implicit_effect_work <- source_work
+            operator_work_before: usize = cache.scratch.source_types.source_effect_index.work.implicit_effect_work
+            overloaded_body: bool = proof_structural_typed_operator_statements_have_overload(body, parameters, owner_line, cache.scratch, 0, owner_module, true)
+            overloaded_defaults: bool = proof_structural_typed_operator_defaults_have_overload(parameters, owner_line, cache.scratch, owner_module, true)
+            operator_work_after: usize = cache.scratch.source_types.source_effect_index.work.implicit_effect_work
+            return false if operator_work_after < operator_work_before or operator_work_after > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            operator_work_used: usize = operator_work_after - operator_work_before
+            return false if not proof_replay_owner_work_charge(operator_work_used, source_work) or overloaded_body or overloaded_defaults
+            return false if not proof_replay_resource_call_owner_snapshots_ensure(cache, cache.deterministic_calls.declaration_index.entries.count, source_work)
+            snapshot_ready: bool = cache.resource_call_owner_snapshots[located.row].complete
+            if not snapshot_ready:
+                source_calls: mutable darray[sview] = []
+                # Fail closed on calls the walker cannot inventory, including omitted receiver calls.
+                # Include executable contract calls so body occurrences cannot balance them.
+                call_target: mutable ProofReplayCallSiteTarget = proof_replay_source_call_target_context(parameters, cache.scratch.source.source_annotations, &cache.scratch, entry.name, entry.owner, owner_line, owner_offset, source_work, true, true)
+                call_target.capture.capture_resource_call_expressions <- true
+                return false if not proof_replay_source_calls_with_target_work(parameters, body, cache.scratch.source.source_annotations, &source_calls, call_target, source_work)
+                return false if call_target.selection.unresolved_dispatch_found
+                return false if not proof_replay_resource_call_owner_snapshot_build(call_target, source_calls, cache, located.row, source_work)
+            event_names: mutable darray[sview] = []
+            event_offsets: mutable darray[usize] = []
+            return false if not proof_replay_resource_call_names_at_with_work(report, root, event_names, event_offsets, source_work, 0)
+            return false if event_names.count != event_offsets.count
+            return false if not proof_replay_resource_call_event_offsets_unique_with_work(event_offsets, source_work)
+            source_call_count: usize = cache.resource_call_owner_snapshots[located.row].source_calls.count
+            return false if source_call_count > report.analysis_1.kernel.nodes.count or event_names.count > source_call_count
+            return false if not proof_replay_deterministic_call_alias_imports_ensure(report, source_work, &cache.deterministic_calls)
+            return false if not proof_replay_deterministic_call_alias_index_ensure(report, source_work, &cache.deterministic_calls)
+            return false if not proof_replay_resource_call_name_counts_match(cache.resource_call_owner_snapshots[located.row].source_calls, event_names, report, cache.scratch, cache.deterministic_calls.declaration_index, cache.deterministic_calls.alias_index, parameters, body, source_work)
+            resource_root: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
+            ordinary: (complete: bool, count: usize) = proof_replay_resource_event_kind_count_in_root_with_work(report, resource_root, "resource-call", source_work)
+            return false if not ordinary.complete or ordinary.count > report.analysis_1.kernel.nodes.count
+            lends: (complete: bool, count: usize) = proof_replay_resource_event_kind_count_in_root_with_work(report, resource_root, "resource-call-lend", source_work)
+            return false if not lends.complete or lends.count > report.analysis_1.kernel.nodes.count - ordinary.count
+            event_names.count == ordinary.count + lends.count

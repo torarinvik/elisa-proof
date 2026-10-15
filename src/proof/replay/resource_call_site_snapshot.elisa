@@ -1,0 +1,123 @@
+# Metered parser-owned call-expression capture and exact-offset lookup for resource replay.
+extend ElisaProof:
+    private:
+        def proof_replay_resource_call_capture_expression(expression: Ast::Expr, position: Ast::Pos, target: mutable ProofReplayCallSiteTarget&, work: mutable usize&) -> bool:
+            return true if not target.capture.capture_resource_call_expressions
+            return false if not proof_replay_call_work_add(work, 4)
+            target.capture.resource_call_offsets.push(position.offset.usize())
+            target.capture.resource_call_expressions.push(expression)
+            true
+
+        def proof_replay_resource_call_site_hash(offset: usize) -> u32:
+            proof_expr_shape_mix(ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS.u32(), offset.i64())
+
+        def proof_replay_resource_call_owner_snapshots_ensure(cache: mutable ProofReplayStructuralValidationCache&, owner_count: usize, source_work: mutable usize&) -> bool:
+            return false if cache.resource_call_owner_snapshots.count != 0 and cache.resource_call_owner_snapshots.count != owner_count
+            return true if cache.resource_call_owner_snapshots.count == owner_count
+            return false if owner_count == 0 or owner_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+            return false if not proof_replay_owner_work_charge(owner_count * 2, source_work)
+            cache.resource_call_owner_snapshots.resize(owner_count)
+            for row in 0..<owner_count |row, cache, source_work|:
+                cache.resource_call_owner_snapshots[row] <- ProofReplayResourceCallOwnerSnapshot{}
+            true
+
+        def proof_replay_resource_call_owner_snapshot_build(target: ProofReplayCallSiteTarget&, source_calls: darray[sview]&, cache: mutable ProofReplayStructuralValidationCache&, owner_row: usize, source_work: mutable usize&) -> bool:
+            return false if owner_row >= cache.resource_call_owner_snapshots.count or target.capture.resource_call_offsets.count != target.capture.resource_call_expressions.count
+            snapshot: mutable ProofReplayResourceCallOwnerSnapshot& = cache.resource_call_owner_snapshots[owner_row]
+            return false if snapshot.attempted
+            snapshot.attempted <- true
+            return false if not proof_replay_owner_work_charge(source_calls.count, source_work)
+            for name in source_calls |snapshot, source_work|:
+                return false if not proof_replay_owner_work_charge(sview_len(name), source_work) or not proof_replay_owner_work_charge(2, source_work)
+                snapshot.source_calls.push(name)
+            call_count: usize = target.capture.resource_call_offsets.count
+            return false if call_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 6
+            for index in 0..<call_count |index, target, snapshot, source_work|:
+                return false if not proof_replay_owner_work_charge(6, source_work)
+                snapshot.call_offsets.push(target.capture.resource_call_offsets[index])
+                snapshot.call_expressions.push(target.capture.resource_call_expressions[index])
+                snapshot.call_counts.push(1)
+            if call_count > 0:
+                capacity: usize = proof_name_index_capacity(call_count)
+                return false if capacity == 0 or capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3
+                return false if not proof_replay_owner_work_charge(capacity * 3, source_work)
+                snapshot.call_hashes.resize(capacity)
+                snapshot.call_slots.resize(capacity)
+                for slot in 0..<capacity |slot, snapshot, source_work|:
+                    return false if not proof_replay_owner_work_charge(1, source_work)
+                    snapshot.call_hashes[slot] <- 0
+                    snapshot.call_slots[slot] <- 0
+                for index in 0..<call_count |index, snapshot, capacity, source_work|:
+                    return false if not proof_replay_owner_work_charge(1, source_work)
+                    hash: u32 = proof_replay_resource_call_site_hash(snapshot.call_offsets[index])
+                    slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                    probes: mutable usize = 0
+                    placed: mutable bool = false
+                    while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, index, snapshot, capacity, source_work, placed|:
+                        return false if not proof_replay_owner_work_charge(1, source_work)
+                        encoded: usize = snapshot.call_slots[slot]
+                        if encoded == 0:
+                            return false if not proof_replay_owner_work_charge(2, source_work)
+                            snapshot.call_slots[slot] <- index + 1
+                            snapshot.call_hashes[slot] <- hash
+                            placed <- true
+                            break
+                        existing: usize = encoded - 1
+                        return false if existing >= snapshot.call_offsets.count or existing >= snapshot.call_counts.count
+                        if snapshot.call_hashes[slot] == hash:
+                            return false if not proof_replay_owner_work_charge(1, source_work)
+                            if snapshot.call_offsets[existing] == snapshot.call_offsets[index]:
+                                return false if not proof_replay_owner_work_charge(1, source_work)
+                                snapshot.call_counts[existing] <- snapshot.call_counts[existing] + 1
+                                placed <- true
+                                break
+                        slot <- slot + 1 if slot + 1 < capacity else 0
+                        probes <- probes + 1
+                    return false if not placed
+            snapshot.complete <- true
+            true
+
+        def proof_replay_resource_call_owner_snapshot_lookup(cache: ProofReplayStructuralValidationCache&, owner_row: usize, offset: usize, source_work: mutable usize&) -> (complete: bool, found: bool, count: usize, expression: Ast::Expr):
+            return (false, false, 0, Ast::Expr.Invalid) if owner_row >= cache.resource_call_owner_snapshots.count
+            snapshot: ProofReplayResourceCallOwnerSnapshot& = cache.resource_call_owner_snapshots[owner_row]
+            return (false, false, 0, Ast::Expr.Invalid) if:
+                not snapshot.complete
+                snapshot.call_offsets.count != snapshot.call_expressions.count
+                snapshot.call_offsets.count != snapshot.call_counts.count
+                snapshot.call_hashes.count != snapshot.call_slots.count
+                snapshot.call_slots.count == 0 and snapshot.call_offsets.count != 0
+                snapshot.call_slots.count != 0 and snapshot.call_offsets.count == 0
+            return (true, false, 0, Ast::Expr.Invalid) if snapshot.call_slots.count == 0
+            hash: u32 = proof_replay_resource_call_site_hash(offset)
+            capacity: usize = snapshot.call_slots.count
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, offset, snapshot, capacity, source_work|:
+                return (false, false, 0, Ast::Expr.Invalid) if not proof_replay_owner_work_charge(1, source_work)
+                encoded: usize = snapshot.call_slots[slot]
+                return (true, false, 0, Ast::Expr.Invalid) if encoded == 0
+                row: usize = encoded - 1
+                return (false, false, 0, Ast::Expr.Invalid) if row >= snapshot.call_offsets.count or snapshot.call_counts[row] == 0
+                if snapshot.call_hashes[slot] == hash:
+                    return (false, false, 0, Ast::Expr.Invalid) if not proof_replay_owner_work_charge(1, source_work)
+                    return (true, true, snapshot.call_counts[row], snapshot.call_expressions[row]) if snapshot.call_offsets[row] == offset
+                slot <- slot + 1 if slot + 1 < capacity else 0
+                probes <- probes + 1
+            return (false, false, 0, Ast::Expr.Invalid)
+
+        def proof_replay_resource_call_owner_snapshot_select(report: ProofReport&, cache: ProofReplayStructuralValidationCache&, owner_row: usize, owner: sview, owner_line: u32, owner_offset: u32, call_offset: usize, source_work: mutable usize&) -> (complete: bool, ambiguous: bool, selected: (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32)):
+            empty: (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) = (false, Ast::Expr.Invalid, "", 0, 0)
+            cached: (complete: bool, found: bool, count: usize, expression: Ast::Expr) = proof_replay_resource_call_owner_snapshot_lookup(cache, owner_row, call_offset, source_work)
+            return (false, false, empty) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not cached.complete
+            return (true, false, empty) if not cached.found
+            return (true, true, empty) if cached.count != 1
+            match cached.expression:
+                Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), _, _, _):
+                    return (true, false, empty) if callee_name == "" or proof_builtin_scalar_type_name(callee_name)
+                    resolver_work: mutable usize = 0
+                    resolved: (known: bool, line: u32, offset: u32, module_path: darray[sview]) = ElisaProofFrameSource::resolve_callee_owner_at_offset_with_work(report.source.source_declarations, report.source.source_annotations, owner, owner_line, owner_offset, callee_name, &resolver_work)
+                    return (false, false, empty) if not proof_replay_owner_work_charge(resolver_work, source_work)
+                    return (true, false, empty) if not resolved.known
+                    (true, false, (true, cached.expression, callee_name, resolved.line, resolved.offset))
+                _:
+                    (true, false, empty)

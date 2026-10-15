@@ -78,9 +78,10 @@ expected_direct_nodes = {
 }
 assert direct_nodes == expected_direct_nodes, (direct_nodes, expected_direct_nodes)
 call_validation = (ROOT / "src/proof/replay/resource_call_source_validation.elisa").read_text(encoding="utf-8")
+call_site_validation = (ROOT / "src/proof/replay/resource_call_site_validation.elisa").read_text(encoding="utf-8")
 event_validation = (ROOT / "src/proof/replay/resource_event_source_validation.elisa").read_text(encoding="utf-8")
-assert "proof_replay_resource_call_site_matches_owner_with_work" in call_validation
-assert 'event.kind != "resource-call" and event.kind != "resource-call-lend"' in call_validation
+assert "proof_replay_resource_call_site_matches_owner_with_work" in call_site_validation
+assert 'event.kind != "resource-call" and event.kind != "resource-call-lend"' in call_site_validation
 argument_matcher = call_validation.split("def proof_replay_resource_call_arguments_match_with_work", 1)[1].split(
     "# Check prefix-node aliasing", 1
 )[0]
@@ -93,7 +94,7 @@ for required in (
     'linked_summary.kind != "resource-safety"',
     "linked_summary.value != position.offset.i64()",
 ):
-    assert required in argument_matcher + call_validation, required
+    assert required in argument_matcher + call_validation + call_site_validation, required
 for nested in {"resource-call-arg", "resource-call-formal", "resource-call-region"}:
     assert f'"{nested}"' in call_validation, nested
 for container in {"resource-safety", "resource-scope", "resource-alternatives"}:

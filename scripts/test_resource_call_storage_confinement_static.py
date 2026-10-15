@@ -46,11 +46,31 @@ assert "proof_structural_typed_operator_statements_have_overload(body, parameter
 assert "or overloaded_operator" in resource_purity_function
 resource_name_counts = function_body(ROOT / "src/proof/replay/resource_call_name_counts.elisa", "proof_replay_resource_call_name_counts_match")
 assert "proof_replay_resource_call_name_is_irrelevant_with_work(report, operator_source" in resource_name_counts
-resource_coverage = function_body(resource_source_path, "proof_replay_resource_call_coverage_for_owner_with_work")
-assert "proof_replay_resource_call_name_counts_match(source_calls, event_names, report, cache.scratch" in resource_coverage
+resource_coverage = function_body(ROOT / "src/proof/replay/resource_call_site_validation.elisa", "proof_replay_resource_call_coverage_for_owner_with_work")
+assert "proof_replay_resource_call_name_counts_match(cache.resource_call_owner_snapshots[located.row].source_calls, event_names, report, cache.scratch, cache.deterministic_calls.declaration_index, cache.deterministic_calls.alias_index, parameters, body, source_work)" in resource_coverage
 assert "proof_replay_source_call_target_context(parameters, cache.scratch.source.source_annotations, &cache.scratch, entry.name, entry.owner, owner_line, owner_offset, source_work, true, true)" in resource_coverage
 assert "proof_replay_source_calls_with_target_work(parameters, body, cache.scratch.source.source_annotations, &source_calls, call_target, source_work)" in resource_coverage
 assert "call_target.selection.unresolved_dispatch_found" in resource_coverage
+
+resource_snapshot_path = ROOT / "src/proof/replay/resource_call_site_snapshot.elisa"
+resource_snapshot_select = function_body(resource_snapshot_path, "proof_replay_resource_call_owner_snapshot_select")
+assert "cached.count != 1" in resource_snapshot_select
+assert "resolve_callee_owner_at_offset_with_work" in resource_snapshot_select
+resource_snapshot_lookup = function_body(resource_snapshot_path, "proof_replay_resource_call_owner_snapshot_lookup")
+assert "snapshot.call_offsets[row] == offset" in resource_snapshot_lookup
+assert "snapshot.call_counts[row] == 0" in resource_snapshot_lookup
+resource_snapshot_build = function_body(resource_snapshot_path, "proof_replay_resource_call_owner_snapshot_build")
+assert "snapshot.call_counts[existing] <- snapshot.call_counts[existing] + 1" in resource_snapshot_build
+
+resource_name_counts_path = ROOT / "src/proof/replay/resource_call_name_counts.elisa"
+event_offset_guard = function_body(resource_name_counts_path, "proof_replay_resource_call_event_offsets_unique_with_work")
+assert "return false if values[slot] == offset" in event_offset_guard
+assert "proof_replay_resource_call_event_offsets_unique_with_work(event_offsets, source_work)" in resource_coverage
+
+source_call_api = function_body(ROOT / "src/proof/replay/source_call_api.elisa", "proof_replay_source_calls_with_target_work")
+assert "capture_resource_call_expressions <- false" in source_call_api
+assert "body_expression_capture: bool = call_target.capture.capture_resource_call_expressions" in source_call_api
+assert "capture_resource_call_expressions <- body_expression_capture" in source_call_api
 
 source_call_target = function_body(ROOT / "src/proof/replay/source_call_target_context.elisa", "proof_replay_source_call_target_context")
 assert "include_nonassert_contract_calls: true" in source_call_target

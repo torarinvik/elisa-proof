@@ -24853,6 +24853,16 @@ complete metered fallback. Prefix validation and duplicate suppression keep thei
 while ordered branch/scope merges avoid repeated full-history scans. Static diff and source-length
 checks pass; no tests or builds were run.
 
+### 23.27.1831 Validate resource call-site snapshot dimensions (2026-10-15)
+
+The cached resource-call offset lookup validated the hash/slot pair and checked the selected row
+before dereference, but did not require the parallel offset, expression, and duplicate-count
+arrays to have equal lengths. Lookup now rejects inconsistent vector dimensions, impossible
+empty/nonempty table combinations, out-of-range encoded rows, and zero duplicate counts before
+using cached expressions. This hardens the internal replay cache against malformed state while
+preserving source-call admission behavior. `git diff --check` and the source-length gate pass;
+tests and compiler validation were not run.
+
 ### 23.27.1384 Rebuild threaded-summary source indexes during replay
 
 Threaded-summary certificate validation and mutable-local resymbolization now classify source types
@@ -29377,14 +29387,13 @@ It now requires a complete no-shadow lookup and a clear custom-cast/import snaps
 the builtin type rule, matching replay's conservative classification. `git diff --check` passes;
 tests and compiler qualification remain open under the validation hold.
 
-### 23.27.1821 Meter scalar witness traversal directly in linear safety (2026-10-15)
+### 23.27.1824 Meter scalar witness traversal directly in linear safety (2026-10-15)
 
 The linear-safety adapter previously estimated a subtree-square allowance with a fixed multiplier,
 then called the unmetered scalar-witness predicate. It now uses the existing work-aware witness
 mirror, which charges each marker scan, recursive term visit, and structural equality against the
 shared solver budget and fails closed on exhaustion. This removes the undocumented fixed-factor
-assumption from scalar witness checking; the retained marker scale is also checked against the
-global meter bound before traversal. Static diff and source-length gates pass; runtime
+assumption from scalar witness checking. Static diff and source-length gates pass; runtime
 qualification remains open under the compiler provenance hold.
 
 ### 23.27.1819 Pin unused resource-call region mapping refusal (2026-10-15)
@@ -29517,6 +29526,15 @@ The guard now requires source completeness, source admissibility, and complete s
 before exposing any conclusive report-level state. Static diff and source-length checks pass;
 tests and compiler qualification remain open under the validation hold.
 
+### 23.27.1821 Resolve scoped call-result aliases by exact declaration (2026-10-15)
+
+Call-result binding replay previously recognized only bare identifier callees in both the traced
+equality and the local initializer. It now accepts scoped callees only after matching the exact
+caller declaration, resolving the full callee path through the module-alias and declaration
+indexes, and validating the selected function's scalar signature. Bare calls retain their lexical
+shadow and unique-name checks. Diff and source-length gates pass; fixture execution and
+compiler/runtime qualification remain open under the validation hold.
+
 ### 23.27.1822 Separate node range checks from dereferences (2026-10-15)
 
 The hostile-index guard flagged a resource binding identity check that combined `root >= nodes.count`
@@ -29525,3 +29543,179 @@ reading the node, so the safety argument does not rely on short-circuit evaluati
 index reads, indexed-read work budgeting and operator parity, resource-call storage, tactic output
 authority, source authority, structural replay, resource-event boundary, active-port parity,
 source-length, and `git diff --check` guards pass. No compiler or runtime validation was run.
+
+### 23.27.1823 Treat mutable and lmut unary forms as local borrows (2026-10-15)
+
+The source-derived call-result alias scanner previously rejected `&local` but recursively passed
+through `mutable local` and `lmut local`. The neighboring local-write replay treats all three
+operators as lending forms. Alias provenance now rejects a mention of its tracked local under any
+of these operators, and a focused static guard pins the operator set and fail-closed AST behavior.
+The focused guard, resource-call and source-authority guards, source-length, and diff checks pass.
+Runtime qualification of the alias fixtures remains open.
+
+### 23.27.1824 Mix full-width identities in kernel indexes (2026-10-15)
+
+Kernel owner, type-declaration, and function-signature indexes previously converted `usize`
+identities to `i64` before hashing, allowing distinct identities with equal low 32 bits to
+concentrate in the same bounded probe clusters. Added a shared full-width identity mixer and
+updated each index consumer; exact identity equality remains authoritative after hashing. Owner
+path accessors also validate parallel owner/count arrays before indexing them. `git diff --check`
+and the source-length gate pass; tests and compiler validation were not run.
+
+### 23.27.1825 Meter call-result alias name scans (2026-10-15)
+
+The call-result alias validator reserved owner-body AST traversal cost, but its negative
+`proof_expr_mentions_name` checks and loop/pattern binder comparisons did not charge for repeated
+comparisons against the tracked local name. These checks now charge by expression width times
+candidate-name length or by both compared text lengths, and fail closed when the shared replay
+work limit is reached. `git diff --check` and the source-length gate pass; no test or compiler
+qualification was run.
+
+### 23.27.1826 Require pure callees for local call-result aliases (2026-10-15)
+
+Call-result binding replay now runs the bounded source-purity validator on the uniquely resolved
+bare or scoped callee, in addition to checking its scalar signature and exact source call. A
+signature cannot justify reusing a logical call term when repeated evaluations may have effects.
+The validation note records this requirement; `git diff --check` passes, while tests and compiler
+qualification remain open under the provenance hold.
+
+### 23.27.1827 Record source offsets on region-allocation rebind events (2026-10-15)
+
+`resource-region-rebind-alloc` carried its operand, target, and region but dropped the source
+assignment offset, so replay could not locate the transition that produced it. The producer now
+records the assignment offset, and the arena shape validates its range. Temporal event ordering
+uses the RHS end because operand-use events precede the rebind event. The source event walker can
+locate the exact assignment. The event remains explicitly rejected by source-bound fact validation
+until destination type and transition semantics are independently reconstructed. `git diff --check`
+and the source-length gate pass; no test or compiler qualification was run.
+
+### 23.27.1828 Preserve bounded reads in the active ElisaScript port (2026-10-15)
+
+The active `test_report_output_loop_layout.elisascript` candidate had switched from the shared
+bounded UTF-8 reader to `Path.read_text()`, checking file size only after the full read. A large
+or changing target could therefore consume unbounded memory before the check. Restored
+`EsBoundedText::read_utf8` with the same 16 MiB limit as the Python reference and updated the
+source parity guard to require that call and reject `read_text()`. Source-length and diff checks
+pass. No tests or builds were run; execution parity remains unqualified until a matching
+ElisaScript runner is available.
+
+### 23.27.1829 Align the port guard with the current script path API (2026-10-15)
+
+After restoring the bounded reader, source review found the static parity guard still expected the
+older `path(Script::source_path())` wrapper even though the current candidate uses
+`path_real(Script::source_path())`. Updated the guard to pin the candidate's current API form so
+it can check the actual source-relative resolution path. `git diff --check` and source-length
+checks pass; the guard itself was not run under the no-tests instruction.
+
+### 23.27.1830 Correct stale ElisaScript qualification claims (2026-10-15)
+
+The porting guide still described a KMP matcher and attached lowering evidence to an older
+candidate hash, although the active source now uses `contains` and had changed since that hash.
+Updated the guide to describe the current four-fragment behavior and bounded-reader source
+checks, and explicitly marked the old lowering evidence as historical and inapplicable to the
+current source. `git diff --check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1831 Reject local shadowing of scoped call heads in replay (2026-10-15)
+
+The compiler resolves the leading identifier in `module::function` as a module only when no
+local binding shadows it. Scoped call-result replay previously resolved that path through its
+module-alias index without checking the caller's active locals, so replay could select a different
+callee from source semantics. The targeted call gate now extracts the root identifier through
+nested scope paths and rejects a bound root; unsupported path shapes fail closed. A focused static
+guard pins the check and passes. `git diff --check` passes; runtime proof fixtures and compiler
+validation remain unqualified.
+
+### 23.27.1832 Validate resource call-site snapshot dimensions (2026-10-15)
+
+The cached resource-call offset lookup validated the hash/slot pair and checked the selected row
+before dereference, but did not require the parallel offset, expression, and duplicate-count
+arrays to have equal lengths. Lookup now rejects inconsistent vector dimensions, impossible
+empty/nonempty table combinations, out-of-range encoded rows, and zero duplicate counts before
+using cached expressions. This hardens the internal replay cache against malformed state while
+preserving source-call admission behavior. `git diff --check` and the source-length gate pass;
+tests and compiler validation were not run.
+
+### 23.27.1833 Resolve scoped nested helpers in resource omission proofs (2026-10-15)
+
+The resource-call omission purity walker previously accepted only bare identifier helper calls. A
+qualified helper inside an otherwise pure scalar function therefore caused a conservative refusal,
+even when source module aliases and declarations resolved it uniquely. The walker now maps each
+scoped helper through the source-derived module-alias index and rejects non-function name-group
+collisions before recursing into the helper body. This preserves bounded depth and shared source-work
+accounting while admitting uniquely resolved scoped calls. `git diff --check` and the source-length
+gate pass; tests and compiler qualification remain under the validation hold.
+
+### 23.27.1834 Fail closed on incomplete resource call-site lookup (2026-10-15)
+
+The resource call-site snapshot adapter treated a malformed or incomplete indexed lookup like a
+valid cache miss and continued through the slower source-search fallback. Lookup incompleteness
+can mean exhausted work or inconsistent cache vectors, so the adapter now rejects that state;
+only a complete lookup that finds no matching offset may use the fallback. This keeps resource
+event admission fail-closed under internal index corruption and avoids spending more work after a
+failed index check. `git diff --check` and the source-length gate pass; no tests or compiler
+validation were run.
+
+### 23.27.1835 Restore the active port's bounded file read (2026-10-15)
+
+Current-source inspection found the active ElisaScript candidate had regressed to
+`Path.read_text()` even though its parity guard and port guide required the shared bounded reader.
+That read could allocate from an oversized or changing source before checking its size. Restored the
+`EsBoundedText::read_utf8` call with the 16 MiB limit and its include. The Python reference remains
+authoritative until runtime parity is demonstrated. Diff and source-length checks pass; no test or
+compiler was run.
+
+### 23.27.1836 Meter untrusted resource event-kind dispatch (2026-10-15)
+
+Resource event scans compared attacker-controlled kernel `kind` strings against multiple event
+and container tags while charging at most one text comparison. The call census now accounts for
+its six possible comparisons; shared event counters reserve for the worst-case 28-tag dispatch;
+local-borrow and trace-order scans use conservative 28- and 32-comparison bounds. Root-kind
+checks also charge the compared text. Long malformed tags now consume the replay budget
+proportionally and fail closed on exhaustion. `git diff --check` and the source-length gate pass;
+tests and compiler validation were not run.
+
+### 23.27.1837 Meter repeated dispatch in resource trace counters (2026-10-15)
+
+Follow-up review found the comparison charge was also needed in sibling resource event counters,
+the local-borrow census, and temporal trace-order walk. Added a shared checked text-work
+reservation with per-walker worst-case comparison counts (28 for event whitelists, 4 for the
+narrow kind counter, 28 for local-borrow classification, and 32 for ordered transition
+classification). Root-kind equality checks charge their text too. This closes the same
+attacker-controlled long-tag work gap across resource replay scans. `git diff --check` and the
+source-length gate pass; tests and compiler validation were not run.
+
+### 23.27.1835 Make the full-width identity mixer portable to wasm32 (2026-10-15)
+
+The full-width replay identity mixer split `usize` identities by casting the 2^32 modulus to
+`usize`. On wasm32 and other 32-bit targets that cast truncates the modulus to zero, making the
+split invalid. It now widens the identity to explicit `u64` and splits it with a `u64` modulus;
+32-bit targets naturally produce a zero high limb while 64-bit targets retain both limbs. Static
+diff and source-length checks pass; no compiler or runtime validation was run.
+
+### 23.27.1838 Meter resource-fact and binding-position dispatch (2026-10-15)
+
+The recursive source validator for resource facts compared serialized event kinds against many
+branch tags without charging the string comparisons. Added a 28-comparison bound at each visited
+resource fact node. The source binding-position census now charges for its 32 possible kind
+comparisons and charges the root-kind check before comparing it. This extends the shared replay
+work budget to these high fan-out dispatch paths. `git diff --check` and the source-length gate
+pass; tests and compiler validation were not run.
+
+### 23.27.1839 Authenticate direct region-allocation rebinding (2026-10-15)
+
+Replay previously rejected every `resource-region-rebind-alloc` transition despite the producer
+recording its assignment offset and the owner-body walker being able to find that exact assignment.
+Added a bounded source bridge that resolves the exact owner, requires one event at the recorded
+offset, matches a direct `RegionNew` assignment's region and operand, and rejects unbridged or
+nested allocation cases. Kernel replay now also requires the destination to be a reference binding
+before changing its region ownership. Reverse source coverage requires exactly one event for each
+supported direct `RegionNew` assignment. Static diff and source-length checks pass; compiler and
+runtime qualification remain unrun.
+
+### 23.27.1840 Reassert bounded reads in the active ElisaScript port (2026-10-15)
+
+Revalidation found the active report-output layout candidate had regressed from the shared bounded
+reader to `Path.read_text()`, despite the parity guard and porting record requiring
+`EsBoundedText::read_utf8`. Restored the reader include and bounded call. The Python reference stays
+authoritative until a matching runner proves equal exit status and output. `git diff --check` passes;
+no tests or runner were executed.

@@ -1,25 +1,40 @@
 # Authenticate a local-result equality against one immutable scalar declaration and its exact call.
 extend ElisaProof:
     private:
+        # `proof_expr_mentions_name` compares the candidate against every visited identifier.
+        # Charge the full AST width times the candidate width before permitting a negative scan.
+        def proof_replay_call_result_binding_mentions_with_work(expression: Ast::Expr, name: sview, source_work: mutable usize&) -> (complete: bool, mentions: bool):
+            return (false, false) if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(expression, &cost, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return (false, false)
+            name_length: usize = sview_len(name)
+            return (false, false) if name_length >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            multiplier: usize = name_length + 1
+            remaining: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            if cost > remaining / multiplier:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return (false, false)
+            source_work <- source_work + cost * multiplier
+            return (true, proof_expr_mentions_name(expression, name))
+
         def proof_replay_call_result_binding_expr_borrows(expression: Ast::Expr, name: sview, source_work: mutable usize&, depth: usize) -> bool:
             return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Unary(operator, inner, _):
-                    if operator == TokenKind.Ampersand:
-                        return true if:
-                            not proof_replay_summary_expr_charge_with_work(inner, source_work)
-                            proof_expr_mentions_name(inner, name)
+                    if operator == TokenKind.Ampersand or operator == TokenKind.Mutable or operator == TokenKind.Lmut:
+                        mentioned: (complete: bool, mentions: bool) = proof_replay_call_result_binding_mentions_with_work(inner, name, source_work)
+                        return true if not mentioned.complete or mentioned.mentions
                     return proof_replay_call_result_binding_expr_borrows(inner, name, source_work, depth + 1)
                 Ast::Expr.Move(inner, _):
-                    return true if:
-                        not proof_replay_summary_expr_charge_with_work(inner, source_work)
-                        proof_expr_mentions_name(inner, name)
+                    mentioned: (complete: bool, mentions: bool) = proof_replay_call_result_binding_mentions_with_work(inner, name, source_work)
+                    return true if not mentioned.complete or mentioned.mentions
                 Ast::Expr.Call(callee, arguments, _, _):
                     match callee:
                         Ast::Expr.Field(receiver, _, _):
-                            return true if:
-                                not proof_replay_summary_expr_charge_with_work(receiver, source_work)
-                                proof_expr_mentions_name(receiver, name)
+                            mentioned: (complete: bool, mentions: bool) = proof_replay_call_result_binding_mentions_with_work(receiver, name, source_work)
+                            return true if not mentioned.complete or mentioned.mentions
                         _:
                             pass
                     return true if proof_replay_call_result_binding_expr_borrows(callee, name, source_work, depth + 1)
@@ -64,9 +79,8 @@ extend ElisaProof:
                 # borrow/write; in particular, comprehensions may contain calls in their
                 # iterable, filter, or body.
                 Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.Comprehension(_, _, _, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
-                    return true if:
-                        not proof_replay_summary_expr_charge_with_work(expression, source_work)
-                        proof_expr_mentions_name(expression, name)
+                    mentioned: (complete: bool, mentions: bool) = proof_replay_call_result_binding_mentions_with_work(expression, name, source_work)
+                    return true if not mentioned.complete or mentioned.mentions
                 Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.Absent | Ast::Expr.ShorthandMember(_, _):
                     pass
                 Ast::Expr.Invalid:
@@ -74,9 +88,8 @@ extend ElisaProof:
                 _:
                     # Keep the source gate fail-closed when the compiler adds an Expr
                     # variant before this validator learns how to inspect it.
-                    return true if:
-                        not proof_replay_summary_expr_charge_with_work(expression, source_work)
-                        proof_expr_mentions_name(expression, name)
+                    mentioned: (complete: bool, mentions: bool) = proof_replay_call_result_binding_mentions_with_work(expression, name, source_work)
+                    return true if not mentioned.complete or mentioned.mentions
             return false
 
         def proof_replay_call_result_binding_scan_statements(body: darray[Ast::Stmt]&, name: sview, binding_position: Ast::Pos, binding_count: mutable usize&, binding_end_offset: mutable u32&, source_type: mutable Ast::Expr&, source_initializer: mutable Ast::Expr&, invalid: mutable bool&, source_work: mutable usize&, lexical_depth: usize, depth: usize) -> bool:
@@ -84,6 +97,7 @@ extend ElisaProof:
             for statement in body |name, binding_position, binding_count, binding_end_offset, source_type, source_initializer, invalid, source_work, lexical_depth, depth|:
                 match statement:
                     Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
+                        return false if not proof_replay_mutable_local_text_compare_work_charge(local_name, name, source_work)
                         if local_name == name:
                             binding_count <- binding_count + 1
                             if lexical_depth == 0 and proof_replay_source_position_equal(position, binding_position):
@@ -96,8 +110,9 @@ extend ElisaProof:
                                 invalid <- true
                         invalid <- true if proof_replay_call_result_binding_expr_borrows(initializer, name, source_work, 0)
                     Ast::Stmt.Assign(target, _, value, _):
-                        return false if not proof_replay_summary_expr_charge_with_work(target, source_work)
-                        invalid <- true if proof_expr_mentions_name(target, name)
+                        target_mentions: (complete: bool, mentions: bool) = proof_replay_call_result_binding_mentions_with_work(target, name, source_work)
+                        return false if not target_mentions.complete
+                        invalid <- true if target_mentions.mentions
                         invalid <- true if proof_replay_call_result_binding_expr_borrows(target, name, source_work, 0) or proof_replay_call_result_binding_expr_borrows(value, name, source_work, 0)
                     Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):
                         invalid <- true if proof_replay_call_result_binding_expr_borrows(expression, name, source_work, 0)
@@ -110,7 +125,11 @@ extend ElisaProof:
                         invalid <- true if proof_replay_call_result_binding_expr_borrows(condition, name, source_work, 0)
                         return false if not proof_replay_call_result_binding_scan_statements(nested, name, binding_position, binding_count, binding_end_offset, source_type, source_initializer, invalid, source_work, lexical_depth + 1, depth + 1)
                     Ast::Stmt.For(bind, variables, iterable, nested, _):
-                        invalid <- true if bind == name or any variable in variables where variable == name
+                        return false if not proof_replay_mutable_local_text_compare_work_charge(bind, name, source_work)
+                        invalid <- true if bind == name
+                        for variable in variables |variable, name, invalid, source_work|:
+                            return false if not proof_replay_mutable_local_text_compare_work_charge(variable, name, source_work)
+                            invalid <- true if variable == name
                         invalid <- true if proof_replay_call_result_binding_expr_borrows(iterable, name, source_work, 0)
                         return false if not proof_replay_call_result_binding_scan_statements(nested, name, binding_position, binding_count, binding_end_offset, source_type, source_initializer, invalid, source_work, lexical_depth + 1, depth + 1)
                     Ast::Stmt.Match(scrutinee, arms, _):
@@ -118,7 +137,9 @@ extend ElisaProof:
                         for arm in arms |arm, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth, depth|:
                             pattern_names: mutable darray[sview] = []
                             return false if not proof_replay_call_pattern_bindings_with_work(arm.pattern, &pattern_names, source_work, depth + 1)
-                            invalid <- true if any pattern_name in pattern_names where pattern_name == name
+                            for pattern_name in pattern_names |pattern_name, name, invalid, source_work|:
+                                return false if not proof_replay_mutable_local_text_compare_work_charge(pattern_name, name, source_work)
+                                invalid <- true if pattern_name == name
                             invalid <- true if proof_replay_call_result_binding_expr_borrows(arm.guard, name, source_work, 0)
                             return false if not proof_replay_call_result_binding_scan_statements(arm.body, name, binding_position, binding_count, binding_end_offset, source_type, source_initializer, invalid, source_work, lexical_depth + 1, depth + 1)
                     Ast::Stmt.Block(_, _, _, nested, _):
@@ -132,8 +153,10 @@ extend ElisaProof:
         def proof_replay_call_result_binding_owner(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, local_name: sview, binding_position: Ast::Pos, binding_end_offset: mutable u32&, source_type: mutable Ast::Expr&, source_initializer: mutable Ast::Expr&, binding_count: mutable usize&, owner_count: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
             for declaration in declarations |owner, owner_line, local_name, binding_position, binding_end_offset, source_type, source_initializer, binding_count, owner_count, source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
                 match declaration:
                     Ast::Decl.Func(candidate, _, _, body, _, _, position):
+                        return false if not proof_replay_owner_work_charge(sview_len(candidate), source_work) or not proof_replay_owner_work_charge(sview_len(owner), source_work)
                         if candidate == owner and position.line == owner_line:
                             owner_count <- owner_count + 1
                             invalid: mutable bool = false
@@ -182,6 +205,40 @@ extend ElisaProof:
                         pass
             return true
 
+        # Qualified calls use the module-alias resolver and exact declaration index used by
+        # deterministic-call replay. A leaf-name census would either conflate sibling modules or
+        # reject a valid scoped result alias.
+        # Reusing an initializer's call term at a later consumer requires a pure callee;
+        # scalar signatures alone do not make repeated effectful calls interchangeable.
+        def proof_replay_call_result_binding_scoped_signature(report: ProofReport&, caller_name: sview, callee: Ast::Expr, name: sview, argument_count: usize, result_type: Ast::Expr, source_work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
+            return false if:
+                name == "" or not report.analysis_2.replay_owner_offset_valid
+                not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache)
+                not proof_replay_deterministic_call_alias_index_ensure(report, source_work, &cache)
+                not proof_replay_deterministic_call_alias_imports_ensure(report, source_work, &cache)
+            caller: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.declaration_index, caller_name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, source_work)
+            return false if not caller.complete or caller.matches != 1 or caller.row >= cache.declaration_index.entries.count
+            caller_module: sview = cache.declaration_index.entries[caller.row].owner
+            selected: mutable Ast::Decl = Ast::Decl.Invalid
+            selected_owner: mutable sview = ""
+            selected_row: mutable usize = cache.declaration_index.entries.count
+            matches: mutable usize = 0
+            return false if not proof_replay_deterministic_qualified_declaration(cache.declaration_index, name, callee, caller_module, cache.alias_index, selected, selected_owner, selected_row, matches, source_work) or matches != 1
+            match selected:
+                Ast::Decl.Func(_, parameters, return_type, _, _, _, _):
+                    return false if parameters.count != argument_count or not proof_replay_summary_expr_charge_with_work(return_type, source_work) or not proof_replay_summary_expr_equal_with_work(return_type, result_type, source_work)
+                    for parameter in parameters |parameter, cache, source_work|:
+                        return false if:
+                            not proof_replay_summary_expr_charge_with_work(parameter.type_expression, source_work)
+                            parameter.is_mutable or parameter.has_default or proof_replay_deterministic_parameter_type(parameter.type_expression, 0)
+                            not proof_replay_deterministic_scalar_type_indexed(parameter.type_expression, cache.declaration_index, source_work, 0)
+                    return false if selected_row >= cache.declaration_index.entries.count
+                    callee_entry: ProofReplayDeterministicDeclarationEntry = cache.declaration_index.entries[selected_row]
+                    return false if not callee_entry.is_function or callee_entry.is_lemma or not proof_replay_type_bound_scalar_call_source_pure(report, callee_entry, selected_row, source_work, cache)
+                    return true
+                _:
+                    return false
+
         def proof_replay_call_result_binding_valid(report: mutable ProofReport&, trace: ProofFactTrace) -> bool:
             source_work: mutable usize = 0
             owner_line: mutable u32 = report.analysis_2.replay_owner_line
@@ -205,7 +262,16 @@ extend ElisaProof:
                         local_name == "" or not proof_replay_source_position_equal(local_position, binding_position)
                         binding_position.line != trace.line or not proof_replay_is_call(source_call)
                     match source_call:
-                        Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), arguments, _, _):
+                        Ast::Expr.Call(callee_expression, arguments, _, _):
+                            callee_name: sview = proof_callable_name(callee_expression)
+                            scoped_callee: mutable bool = false
+                            match callee_expression:
+                                Ast::Expr.Ident(_, _):
+                                    pass
+                                Ast::Expr.Scope(_, _, _):
+                                    scoped_callee <- true
+                                _:
+                                    return false
                             return false if callee_name == "" or proof_name_is_reserved_internal(callee_name)
                             for argument in arguments |argument, source_work|:
                                 return false if:
@@ -227,7 +293,10 @@ extend ElisaProof:
                                 owner_count != 1 or binding_count != 1
                                 binding_end_offset == 0
                             owner_body: mutable darray[Ast::Stmt] = []
-                            parameter_shadowed: bool = proof_replay_local_binding_parameter_name_present_at_offset_with_work(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, true, callee_name, source_work, PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT, 0) if exact_owner else proof_replay_local_binding_parameter_name_present_with_default_limit(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, callee_name, source_work, 0)
+                            parameter_shadowed: mutable bool = false
+                            if not scoped_callee:
+                                parameter_shadowed <- proof_replay_local_binding_parameter_name_present_at_offset_with_work(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, true, callee_name, source_work, PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT, 0) if exact_owner
+                                parameter_shadowed <- proof_replay_local_binding_parameter_name_present_with_default_limit(report.source.source_declarations, trace.name, report.analysis_2.replay_owner_line, callee_name, source_work, 0) if not exact_owner
                             return false if:
                                 not proof_replay_source_owner_body_with_work(report, trace.name, report.analysis_2.replay_owner_line, &owner_body, source_work, PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT)
                                 parameter_shadowed
@@ -239,10 +308,11 @@ extend ElisaProof:
                                 not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, cache)
                                 not proof_replay_deterministic_scalar_type_indexed(source_type, cache.declaration_index, source_work, 0) or proof_replay_deterministic_parameter_type(source_type, 0)
                             match source_initializer:
-                                Ast::Expr.Call(Ast::Expr.Ident(source_callee, _), source_arguments, source_names, _):
+                                Ast::Expr.Call(source_callee_expression, source_arguments, source_names, _):
+                                    source_callee: sview = proof_callable_name(source_callee_expression)
                                     return false if:
                                         not proof_replay_mutable_local_text_compare_work_charge(source_callee, callee_name, source_work)
-                                        source_callee != callee_name or source_arguments.count != arguments.count
+                                        source_callee == "" or source_callee != callee_name or source_arguments.count != arguments.count
                                         source_names.count != 0 and source_names.count != source_arguments.count
                                     for argument_name in source_names |argument_name, source_work|:
                                         return false if:
@@ -253,10 +323,22 @@ extend ElisaProof:
                                         not proof_replay_deterministic_call_expression_equal_with_work(source_initializer, source_call, source_work, &complete, 0) or not complete
                                         not proof_replay_deterministic_call_source_site_with_cache(report, trace, source_initializer, source_work, cache)
                                         not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, cache)
-                                    same_module_count: mutable usize = 0
-                                    return false if not proof_replay_same_module_name_count_at_scope(report.source.source_declarations, callee_name, owner_scope, root_scope, &same_module_count, source_work, 0) or same_module_count != 1
-                                    signature_count: mutable usize = 0
-                                    return false if not proof_replay_call_result_binding_signature(report.source.source_declarations, cache.declaration_index, callee_name, owner_scope, root_scope, source_arguments.count, source_type, &signature_count, source_work, 0) or signature_count != 1
+                                    match source_callee_expression:
+                                        Ast::Expr.Ident(_, _):
+                                            same_module_count: mutable usize = 0
+                                            return false if not proof_replay_same_module_name_count_at_scope(report.source.source_declarations, callee_name, owner_scope, root_scope, &same_module_count, source_work, 0) or same_module_count != 1
+                                            signature_count: mutable usize = 0
+                                            return false if not proof_replay_call_result_binding_signature(report.source.source_declarations, cache.declaration_index, callee_name, owner_scope, root_scope, source_arguments.count, source_type, &signature_count, source_work, 0) or signature_count != 1
+                                            caller: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.declaration_index, trace.name, report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, source_work) if exact_owner else proof_replay_summary_owner_function_at_line(cache.declaration_index, trace.name, report.analysis_2.replay_owner_line, source_work)
+                                            return false if not caller.complete or caller.matches != 1 or caller.row >= cache.declaration_index.entries.count
+                                            selected_callee: (complete: bool, matches: usize, row: usize, declaration: Ast::Decl, owner: sview) = proof_replay_deterministic_bare_declaration(cache.declaration_index, callee_name, caller.row, source_work)
+                                            return false if not selected_callee.complete or selected_callee.matches != 1 or selected_callee.row >= cache.declaration_index.entries.count
+                                            callee_entry: ProofReplayDeterministicDeclarationEntry = cache.declaration_index.entries[selected_callee.row]
+                                            return false if not callee_entry.is_function or callee_entry.is_lemma or not proof_replay_type_bound_scalar_call_source_pure(report, callee_entry, selected_callee.row, source_work, cache)
+                                        Ast::Expr.Scope(_, _, _):
+                                            return false if not proof_replay_call_result_binding_scoped_signature(report, trace.name, source_callee_expression, callee_name, source_arguments.count, source_type, source_work, cache)
+                                        _:
+                                            return false
                                     return true
                                 _:
                                     return false
