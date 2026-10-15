@@ -38,7 +38,7 @@ using ElisaProof
 def test_source(text: sview, mode: i64) -> bool can[Memory.Allocate, Abort.Panic]:
     source: mutable darray[u8] = []
     for i in 0..<sview_len(text) |source|:
-        source.push(sview_at(text, i))
+        source.push(text[i])
     source.push(0)
     file: Ast::File = frontend_parse(&source[0])
     report: mutable ProofReport = proof_empty_report()

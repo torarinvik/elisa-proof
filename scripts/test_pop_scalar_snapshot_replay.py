@@ -66,7 +66,7 @@ extend ElisaProof:
 def can_test_replace_source(text: sview, bytes: mutable darray[u8]&, report: mutable ProofReport&) -> void can Memory.Allocate, Abort.Panic:
     bytes.clear()
     for index in 0..<sview_len(text) |index, text, bytes|:
-        bytes.push(sview_at(text, index))
+        bytes.push(text[index])
     bytes.push(0)
     file: Ast::File = frontend_parse(&bytes[0])
     report.source_declarations <- file.top_decls

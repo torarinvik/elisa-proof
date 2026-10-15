@@ -28265,10 +28265,11 @@ recognizes `resource-bind`, `resource-region-alloc`, and `resource-region-bind`,
 through `resource-scope` and `resource-alternatives` nodes across the complete owner trace with
 depth and source-work bounds. It also reads the lifetime marker for by-value `sview` formals,
 whose paired `resource-bind` does not carry the region. Ambiguous same-name bindings fail closed.
-The source-fact boundary still rejects local `resource-region-alloc` and `resource-region-bind`
-events: admitting them requires binding both their positioned declaration and type-derived
-reference, mutability, and lifetime metadata. Projected flows need a complete reverse census, so
-source-event omission remains open.
+At the time of this entry, the source-fact boundary rejected local `resource-region-alloc` and
+`resource-region-bind` events because their positioned declarations and type-derived metadata
+were not yet bound. The direct local `resource-region-alloc` initializer case was subsequently
+bridged in §23.27.1714; `resource-region-bind` and other allocation forms remain unsupported.
+Projected flows still need a complete reverse census, so source-event omission remains open.
 
 The source-level coverage remains statically reviewed only; no runtime test or compiler
 qualification was run for the new reverse walk or the `sview` marker lookup.
@@ -28473,3 +28474,100 @@ The discarded-region-allocation replay path performed recursive kernel-node kind
 compared source-derived region labels and owner module names without charging those text lengths.
 The source bridge and event census now debit those comparisons, including the declaration owner
 identity check. The whitespace diff check passes; runtime qualification remains open.
+
+### 23.27.1714 Bridge direct local region-allocation initializers (2026-10-15)
+
+The earlier source boundary rejected every local `resource-region-alloc`. Replay now admits the
+narrow form where a parser-owned local declaration has a direct `RegionNew` initializer and there
+is exactly one event at the declaration's byte offset and binding name. The bridge authenticates
+the source region and encoded operand, derives the declared type's reference/mutability flags, and
+rejects pointee types that can retain borrowed storage. A reverse owner scan requires that exact
+event for every direct allocation initializer, and nested allocation in the initializer operand
+is still rejected. Other local region-allocation forms and region bind/rebind events remain
+unsupported. Static source review and `git diff --check` pass; compiler/runtime qualification was
+not available.
+
+### 23.27.1715 Avoid repeated target scans in lent-call confinement replay (2026-10-15)
+
+Replay checked every writable formal against every reference formal for summary-free lending, even
+though each reference formal uses the same target-type premises. The old self-target exception
+could not apply: shared-reference targets are skipped first, while mutable-reference targets do
+not satisfy the exception. Replay now detects whether the callee has any reference formal, then
+checks each target type once, reducing this pass from quadratic parameter-pair work to linear
+parameter work plus the type traversals. Owner-path validation and the no-reference behavior are
+preserved. The source-length gate, resource-call storage static guard, and `git diff --check` pass;
+compiler/runtime qualification remains open.
+
+### 23.27.1716 Meter repeated text comparisons in kernel term equality (2026-10-15)
+
+The bounded arithmetic term-equality walk charged each node's labels before structural validation,
+but its literal leaf comparison then dispatched on the kind again and compared `typed-int` payload
+names and string/identifier labels a second time without corresponding text debits. Leaf equality
+now charges the tag dispatch and reserves both compared name lengths against the same hard work
+limit. It reports exhaustion as incomplete, which rejects the comparison instead of falling through
+to child expansion. `git diff --check` passes; compiler and runtime qualification remain open.
+
+### 23.27.1717 Scan summary-free lend storage once per call (2026-10-15)
+
+The producer repeated the same callee-formal type walk once for every lent reference argument.
+Because shared formal targets are already skipped and mutable targets must be checked, the
+`lent_slot` exception had no effect. The producer now performs this storage-confinement scan once
+when the first lent reference is encountered, matching replay's one-pass check. `git diff --check`
+and the source-length gate pass; compiler and runtime qualification were not run.
+
+### 23.27.1718 Avoid charging unreachable resource-tag dispatch branches (2026-10-15)
+
+The assignment-event label lookup, discard-allocation census, and region-binding lookup charged
+all candidate resource tags before dispatch, including tags after a match had already returned.
+They now charge each serialized tag immediately before the corresponding comparison, following
+the actual branch path while retaining bounded work for arbitrary tag text. This reduces budget
+consumption for common disjoint, call, and binding nodes without changing the accepted event set.
+Kernel inventory, source-authority, resource-call confinement, source-length, and whitespace checks
+pass; compiler/runtime qualification remains open.
+
+### 23.27.1719 Bind theorem summaries to parser-origin lemma markers (2026-10-15)
+
+Source admission previously accepted an empty theorem-summary table without checking whether the
+parsed source declared lemma markers, allowing an omitted producer summary to look complete. The
+source snapshot now re-enumerates `__lemma` annotations, matches each to the next theorem summary
+by name and line, and rejects missing, extra, or mismatched summaries before the empty-table fast
+path. The scan charges marker and compared-name lengths against the shared source-work budget.
+The source-authority static guard passes; compiler/runtime qualification remains open.
+
+### 23.27.1720 Refuse call-bearing typed index congruence edges (2026-10-15)
+
+The typed indexed-read rule used its caller-supplied type environment to infer call-result sorts,
+but that environment contains no effect or purity metadata. The rule now refuses call-bearing goal
+indices and skips call-bearing equality edges, using the existing bounded expression-call scan
+under the same goal-work meter. This keeps congruence from treating repeated effectful evaluations
+as equal; a future source adapter can admit pure calls only after authenticating purity. `git diff --check`
+and the source-length gate pass; compiler and runtime qualification were not run.
+
+### 23.27.1721 Scan summary-call storage confinement once (2026-10-15)
+
+The producer repeated the callee-formal storage-confinement scan for every resource-carrying
+argument to a summarized call. It now counts those arguments while mapping them and performs one
+shared scan. For a sole shared-reference actual, its own non-writable target remains exempt; with
+multiple resource-carrying actuals, all formal targets are checked. The self exemption is limited
+to shared references, so a by-value region allocation cannot skip its target-type check. Static
+source review and `git diff --check` pass; compiler/runtime qualification remains open.
+
+### 23.27.1722 Close the interval-index early-hit audit (2026-10-15)
+
+The older §23.27.1286 entry proposed a fallback for an early exact bound hit when optional index
+setup exhausts the shared work allowance. Rechecking the current lookup order shows that each
+ordered expression lookup and its loop-range fallback run before index construction; an early hit
+returns immediately, and only a miss can trigger optional setup. Setup is capped at half of the
+remaining goal-search allowance, leaving work for the caller's continuation. The proposed
+early-hit regression therefore does not describe the current implementation and is withdrawn;
+no code change was needed. Source inspection and `git diff --check` only; compiler/runtime
+qualification remains open.
+
+### 23.27.1723 Bind theorem summary offsets to parser-origin lemma markers (2026-10-15)
+
+The new parser-origin lemma inventory check compared summary names and lines but omitted the
+byte offset, even though replay binds theorem ownership using `source_offset` and the parser's
+lemma identity index uses name, line, and offset together. Admission now also requires each
+summary's `source_offset` to equal its marker's offset. The source-authority static guard checks
+this comparison; the guard, source-length gate, and `git diff --check` pass. Compiler/runtime
+qualification remains open.

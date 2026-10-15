@@ -393,6 +393,7 @@ assert "source_validated: bool" in receipt_issuer
 checked_transaction = function_body(replay_api, "proof_check_and_replay_with_source")
 assert "proof_replay_receipt_from_report(report, false)" in checked_transaction
 assert "receipt.source_theorem_count <- report.analysis_1.theorems.summaries.count" in checked_transaction
+assert "proof_report_theorem_source_status_snapshot(view_source, report," in checked_transaction
 binding = checked_transaction.split("if source_structure_failure == \"\":", 1)[1].split("goal_finding_clear:", 1)[0]
 for gate in (
     "receipt.source_identity <- source_identity",
@@ -403,6 +404,21 @@ for gate in (
     "receipt.source_validated <- true",
 ):
     assert gate in binding, gate
+
+theorem_admission = ROOT / "src/proof/model/report_theorem_source_admission.elisa"
+theorem_snapshot = function_body(theorem_admission, "proof_report_theorem_source_status_snapshot")
+assert theorem_snapshot.index("proof_report_source_lemma_inventory_matches_with_work") < theorem_snapshot.index("summaries.count == 0")
+lemma_inventory = function_body(theorem_admission, "proof_report_source_lemma_inventory_matches_with_work")
+for gate in (
+    "source.file.enum_annotations",
+    'annotation.owner != "__lemma"',
+    "annotation.name != theorem.name",
+    "annotation.line != theorem.line",
+    "annotation.offset != theorem.source_offset",
+    "summary_index == report.analysis_1.theorems.summaries.count",
+    "proof_report_source_work_charge",
+):
+    assert gate in lemma_inventory, gate
 
 invariants = ROOT / "src/proof/model/report_invariants.elisa"
 assert visibility_before(invariants, "proof_report_all_obligations_proven") == "private"

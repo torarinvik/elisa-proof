@@ -98,15 +98,15 @@ def main() -> i64:
     shadowed_text: sview = __SHADOWED__
     bytes: mutable darray[u8] = []
     for index in 0..<sview_len(text) |bytes|:
-        bytes.push(sview_at(text, index))
+        bytes.push(text[index])
     bytes.push(0)
     changed_bytes: mutable darray[u8] = []
     for index in 0..<sview_len(changed_text) |changed_bytes|:
-        changed_bytes.push(sview_at(changed_text, index))
+        changed_bytes.push(changed_text[index])
     changed_bytes.push(0)
     shadowed_bytes: mutable darray[u8] = []
     for index in 0..<sview_len(shadowed_text) |shadowed_bytes|:
-        shadowed_bytes.push(sview_at(shadowed_text, index))
+        shadowed_bytes.push(shadowed_text[index])
     shadowed_bytes.push(0)
     file: Ast::File = frontend_parse(&bytes[0])
     changed: Ast::File = frontend_parse(&changed_bytes[0])

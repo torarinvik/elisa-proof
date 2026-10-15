@@ -195,7 +195,7 @@ using ElisaProof
 def test_threaded_check(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&) -> void can Memory.Allocate, Abort.Panic, Global.Read, Global.Write:
     source.clear()
     for index in 0..<sview_len(text) |index, text, source|:
-        source.push(sview_at(text, index))
+        source.push(text[index])
     source.push(0)
     file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
     (proof_check(file, report) can Global{Read,Write})

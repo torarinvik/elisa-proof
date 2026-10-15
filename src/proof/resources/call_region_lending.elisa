@@ -180,7 +180,7 @@ extend ElisaProof:
         # metadata, imported the same way the resource header already imports the current
         # function's own parameter modes; it is recorded in the trace so replay checks the claim's
         # shape rather than having the call disappear from the certificate.
-        def proof_resource_call_lend_storage_is_confined(functions: ProofFunctionTable&, callee_index: usize, lent_slot: usize) -> bool:
+        def proof_resource_call_lend_storage_is_confined(functions: ProofFunctionTable&, callee_index: usize) -> bool:
             return false if:
                 callee_index >= functions.parameters.metadata.param_starts.count or callee_index >= functions.parameters.metadata.param_counts.count
                 callee_index >= functions.returns.return_reference_free.count or not functions.returns.return_reference_free[callee_index]
@@ -188,16 +188,13 @@ extend ElisaProof:
                 callee_index >= functions.returns.return_type_marker_complete.count or not functions.returns.return_type_marker_complete[callee_index]
             parameter_start: usize = functions.parameters.metadata.param_starts[callee_index]
             parameter_count: usize = functions.parameters.metadata.param_counts[callee_index]
-            for offset in 0..<parameter_count |offset, functions, parameter_start, lent_slot|:
+            for offset in 0..<parameter_count |offset, functions, parameter_start|:
                 slot: usize = parameter_start + offset
                 return false if slot >= functions.parameters.metadata.all_parameter_references.count or slot >= functions.parameters.metadata.all_parameter_mutable_references.count or slot >= functions.parameters.metadata.all_parameter_type_marker_complete.count or not functions.parameters.metadata.all_parameter_type_marker_complete[slot]
                 if functions.parameters.metadata.all_parameter_references[slot] and functions.parameters.metadata.all_parameter_mutable_references[slot]:
                     return false if slot >= functions.parameters.metadata.all_parameter_target_borrowed_view_free.count or not functions.parameters.metadata.all_parameter_target_borrowed_view_free[slot]
                 if functions.parameters.metadata.all_parameter_references[slot] and not functions.parameters.metadata.all_parameter_mutable_references[slot]:
                     continue
-                # Lending through this mutable formal still permits writes into its
-                # pointee, so check that target before exempting the lent argument.
-                continue if offset == lent_slot and not (functions.parameters.metadata.all_parameter_references[slot] and functions.parameters.metadata.all_parameter_mutable_references[slot])
                 return false if:
                     slot >= functions.parameters.metadata.all_parameter_target_reference_free.count
                     not functions.parameters.metadata.all_parameter_target_reference_free[slot]
@@ -220,13 +217,13 @@ extend ElisaProof:
                     return false if slot >= functions.parameters.metadata.all_parameter_target_borrowed_view_free.count or not functions.parameters.metadata.all_parameter_target_borrowed_view_free[slot]
             true
 
-        def proof_resource_call_summary_storage_is_confined(functions: ProofFunctionTable&, callee_index: usize, lent_slot: usize, callee_root: usize, report: ProofReport&) -> bool:
+        def proof_resource_call_summary_storage_is_confined(functions: ProofFunctionTable&, callee_index: usize, resource_slot: usize, multiple_resource_arguments: bool, callee_root: usize, report: ProofReport&) -> bool:
             return false if not proof_resource_call_summary_views_are_confined(functions, callee_index)
             return false if callee_index >= functions.parameters.metadata.param_starts.count or callee_index >= functions.parameters.metadata.param_counts.count
             parameter_start: usize = functions.parameters.metadata.param_starts[callee_index]
             parameter_count: usize = functions.parameters.metadata.param_counts[callee_index]
             return false if:
-                lent_slot >= parameter_count
+                resource_slot >= parameter_count
                 callee_index >= functions.returns.return_type_marker_complete.count or not functions.returns.return_type_marker_complete[callee_index]
             if callee_index >= functions.returns.return_reference_free.count or not functions.returns.return_reference_free[callee_index]:
                 # A returned reference is composable only when the callee's replayed summary pins
@@ -239,9 +236,10 @@ extend ElisaProof:
                 slot: usize = parameter_start + offset
                 return false if slot >= functions.parameters.metadata.all_parameter_type_marker_complete.count or not functions.parameters.metadata.all_parameter_type_marker_complete[slot]
                 return false if slot >= functions.parameters.metadata.all_parameter_references.count or slot >= functions.parameters.metadata.all_parameter_mutable_references.count
-                # The lent mutable reference is itself writable. Its pointee must not
-                # contain reference storage that could retain the borrowed capability.
-                continue if offset == lent_slot and not (functions.parameters.metadata.all_parameter_references[slot] and functions.parameters.metadata.all_parameter_mutable_references[slot])
+                # A shared-reference self target cannot store the borrowed capability. Check
+                # every other self target too: a value actual such as `new[r] ...` can still
+                # denote storage the callee writes through another alias.
+                continue if not multiple_resource_arguments and offset == resource_slot and functions.parameters.metadata.all_parameter_references[slot] and not functions.parameters.metadata.all_parameter_mutable_references[slot]
                 return false if:
                     slot >= functions.parameters.metadata.all_parameter_target_reference_free.count
                     not functions.parameters.metadata.all_parameter_target_reference_free[slot]
@@ -284,7 +282,8 @@ extend ElisaProof:
             lent_places: mutable darray[ProofResourcePlace] = []
             lent_known: mutable darray[bool] = []
             lent_exclusive: mutable darray[bool] = []
-            for parameter_index in 0..<mapped.count |parameter_index, mapped, functions, param_start, state, report, lent_places, lent_known, lent_exclusive|:
+            lend_storage_checked: mutable bool = false
+            for parameter_index in 0..<mapped.count |parameter_index, mapped, functions, param_start, state, report, lent_places, lent_known, lent_exclusive, lend_storage_checked|:
                 slot: usize = param_start + parameter_index
                 return false if slot >= functions.parameters.metadata.all_parameter_references.count or slot >= functions.parameters.metadata.all_parameter_mutable_references.count or slot >= functions.parameters.metadata.all_parameter_type_marker_complete.count or not functions.parameters.metadata.all_parameter_type_marker_complete[slot]
                 reference_formal: bool = functions.parameters.metadata.all_parameter_references[slot]
@@ -319,7 +318,9 @@ extend ElisaProof:
                 # still require explicit borrow/reference syntax.
                 if kind != "borrow" and kind != "reference":
                     return false if exclusive_formal or kind != "value" or not proof_resource_expr_carries_resource(argument, state, report)
-                return false if not proof_resource_call_lend_storage_is_confined(functions, callee_index, parameter_index)
+                if not lend_storage_checked:
+                    return false if not proof_resource_call_lend_storage_is_confined(functions, callee_index)
+                    lend_storage_checked <- true
                 actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool) = proof_resource_call_source_actual(argument, functions, state, report)
                 return false if not actual.known or actual.place.root == ""
                 lent_places[lent_places.count - 1] <- actual.place

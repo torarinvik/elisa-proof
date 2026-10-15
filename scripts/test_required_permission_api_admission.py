@@ -31,7 +31,7 @@ const REQUIRED_PERMISSION_KINDS: Semantic::DiagnosticKind[7] = [Semantic::Diagno
 def api_probe(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, route: usize) -> void can Memory.Allocate, Abort.Panic:
     source.clear()
     for index in 0..<sview_len(text) |index, text, source|:
-        source.push(sview_at(text, index))
+        source.push(text[index])
     source.push(0)
     file: mutable Ast::File = frontend_parse(&source[0])
     # Match the CLI's source-owned refinement preparation before calling the core API.

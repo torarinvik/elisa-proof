@@ -335,7 +335,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     text: sview = "SOURCE_TEXT_PLACEHOLDER"
     source: mutable darray[u8] = []
     for index in 0..<sview_len(text) |index, text, source|:
-        source.push(sview_at(text, index))
+        source.push(text[index])
     source.push(0)
     file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
     report: mutable ProofReport = proof_empty_report()

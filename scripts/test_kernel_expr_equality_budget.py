@@ -39,4 +39,11 @@ charge = body("proof_kernel_replay_expr_equality_node_work")
 for field in ("kind", "name", "secondary_name", "operator"):
     assert f"sview_len(node.{field})" in charge
 
+leaf = body("proof_kernel_replay_expr_leaf_equal")
+for field in ("kind", "left_name", "right_name"):
+    assert f"sview_len({field})" in leaf
+assert "(complete: bool, handled: bool, equal: bool)" in source
+expand = body("proof_kernel_replay_expr_pair_expand")
+assert expand.index("if not leaf.complete") < expand.index("if leaf.handled") < expand.index("proof_kernel_replay_expr_pair_enqueue_children")
+
 print("kernel expression equality: roots, node text, and pending work are bounded before use")

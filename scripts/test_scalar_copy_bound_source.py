@@ -30,7 +30,7 @@ extend ElisaProof:
 def parse_source(text: sview, bytes: mutable darray[u8]&, report: mutable ProofReport&) -> void can[Memory.Allocate, Global.Read, Global.Write]:
     bytes.clear()
     for index in 0..<sview_len(text) |bytes|:
-        bytes.push(sview_at(text, index))
+        bytes.push(text[index])
     bytes.push(0)
     file: Ast::File = (frontend_parse(&bytes[0]) can Global{Read,Write})
     (proof_check(file, report) can Global{Read,Write})

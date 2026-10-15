@@ -56,7 +56,7 @@ extend ElisaProof:
         def source_projection_summary(text: sview, add_reference_marker: bool) -> (known: bool, complete: usize, incomplete: usize, parameters: usize, second_by_reference: bool) can Memory.Allocate, Abort.Panic:
             source: mutable darray[u8] = []
             for index in 0..<sview_len(text) |index, text, source|:
-                source.push(sview_at(text, index))
+                source.push(text[index])
             source.push(0)
             file: mutable Ast::File = frontend_parse(&source[0])
             target_line: mutable u32 = 0
@@ -100,7 +100,7 @@ extend ElisaProof:
             text: sview = "def target(first: bool&, second: bool) -> bool:\n    return true\n"
             source: mutable darray[u8] = []
             for index in 0..<sview_len(text) |index, text, source|:
-                source.push(sview_at(text, index))
+                source.push(text[index])
             source.push(0)
             file: Ast::File = frontend_parse(&source[0])
             entries: mutable darray[ProofSourceKernelTypeEntry] = []
@@ -131,7 +131,7 @@ extend ElisaProof:
             text: sview = "def target(first: bool, second: bool) -> bool:\n    return true\n"
             source: mutable darray[u8] = []
             for index in 0..<sview_len(text) |index, text, source|:
-                source.push(sview_at(text, index))
+                source.push(text[index])
             source.push(0)
             file: mutable Ast::File = frontend_parse(&source[0])
             target_line: mutable u32 = 0
@@ -159,7 +159,7 @@ extend ElisaProof:
             text: sview = "module Left:\n    struct Node:\n        value: i64\n    type Ref = Node&\nmodule Right:\n    struct Node:\n        value: bool\n    type Ref = Node&\nmodule Caller:\n    struct Node:\n        value: u8\n    def target(first: Left::Ref, second: Right::Ref, third: Node) -> bool:\n        return true\n"
             source: mutable darray[u8] = []
             for index in 0..<sview_len(text) |index, text, source|:
-                source.push(sview_at(text, index))
+                source.push(text[index])
             source.push(0)
             file: Ast::File = frontend_parse(&source[0])
             entries: mutable darray[ProofSourceKernelTypeEntry] = []

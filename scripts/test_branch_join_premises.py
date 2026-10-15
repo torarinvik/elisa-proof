@@ -19,7 +19,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     text: sview = "def keep_or_replace(flag: bool, slot: usize, best: usize) -> usize:\n    requires best <= 8\n    requires slot < 8\n    ensure result <= 8\n    b: mutable usize = best\n    if flag:\n        b <- slot\n    b\n"
     bytes: mutable darray[u8] = []
     for index in 0..<sview_len(text) |bytes|:
-        bytes.push(sview_at(text, index))
+        bytes.push(text[index])
     bytes.push(0)
     file: Ast::File = (frontend_parse(&bytes[0]) can Global{Read,Write})
     report: mutable ProofReport = proof_empty_report()

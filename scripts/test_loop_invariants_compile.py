@@ -145,7 +145,7 @@ const UNRELATED_INVARIANT_SOURCE: sview = __UNRELATED_INVARIANT_SOURCE__
 def proof_test_parse_and_replay(source_text: sview, source: mutable darray[u8]&, report: mutable ProofReport&) -> void can Memory.Allocate, Abort.Panic:
     source.clear()
     for index in 0..<sview_len(source_text) |index, source_text, source|:
-        source.push(sview_at(source_text, index))
+        source.push(source_text[index])
     source.push(0)
     file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
     (proof_check(file, report) can Global{Read,Write})
@@ -154,7 +154,7 @@ def proof_test_parse_and_replay(source_text: sview, source: mutable darray[u8]&,
 def proof_test_parse_declarations(source_text: sview, source: mutable darray[u8]&, report: mutable ProofReport&) -> void can Memory.Allocate, Abort.Panic:
     source.clear()
     for index in 0..<sview_len(source_text) |index, source_text, source|:
-        source.push(sview_at(source_text, index))
+        source.push(source_text[index])
     source.push(0)
     file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
     (proof_check(file, report) can Global{Read,Write})

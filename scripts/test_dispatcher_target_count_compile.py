@@ -81,7 +81,7 @@ harness = prefix + r'''extend ElisaProof:
         def summary_gate(text: sview, positive: bool) -> i64:
             bytes: mutable darray[u8] = []
             for index in 0..<sview_len(text) |bytes|:
-                bytes.push(sview_at(text, index))
+                bytes.push(text[index])
             bytes.push(0)
             file: Ast::File = frontend_parse(&bytes[0])
             report: mutable ProofReport = proof_empty_report()
@@ -101,7 +101,7 @@ harness = prefix + r'''extend ElisaProof:
         def dispatcher_gate(text: sview, positive: bool) -> i64:
             bytes: mutable darray[u8] = []
             for index in 0..<sview_len(text) |bytes|:
-                bytes.push(sview_at(text, index))
+                bytes.push(text[index])
             bytes.push(0)
             file: Ast::File = frontend_parse(&bytes[0])
             report: mutable ProofReport = proof_empty_report()
