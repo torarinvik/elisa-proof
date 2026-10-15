@@ -47,53 +47,105 @@ extend ElisaProof:
         def proof_value_thread_reserve_expr_scan(expression: Ast::Expr, work: mutable usize&) -> bool:
             cost: mutable usize = 0
             return false if not proof_replay_summary_expr_cost_with_limit(expression, &cost, work, PROOF_VALUE_THREAD_WORK_LIMIT)
-            proof_value_thread_charge_cost(cost, 2, &work)
+            proof_value_thread_charge_cost(cost, 2, work)
 
         def proof_value_thread_name_in_with_work(name: sview, names: darray[sview]&, passes: usize, work: mutable usize&) -> (complete: bool, found: bool):
             index: mutable usize = names.count
             while index > 0 |index, names, name, work|:
                 index <- index - 1
                 candidate: sview = names[index]
-                return (false, false) if not proof_value_thread_charge_cost(1 + sview_len(candidate) + sview_len(name), passes, &work)
+                return (false, false) if not proof_value_thread_charge_cost(1 + sview_len(candidate) + sview_len(name), passes, work)
                 return (true, true) if candidate == name
             return (true, false)
 
         def proof_value_thread_local_with_work(argument: Ast::Expr, caller_names: darray[sview]&, caller_parameters: darray[sview]&, report: ProofReport&, work: mutable usize&) -> (complete: bool, name: sview):
-            return (false, "") if not proof_value_thread_reserve_expr_scan(argument, &work)
+            return (false, "") if not proof_value_thread_reserve_expr_scan(argument, work)
             lend: (known: bool, operand: Ast::Expr) = proof_explicit_lend_operand(argument)
             operand: Ast::Expr = proof_strip_parens(lend.operand if lend.known else argument)
             local_name: sview = proof_ident_name(operand)
-            return (false, "") if not proof_value_thread_charge(&work, sview_len(local_name))
+            return (false, "") if not proof_value_thread_charge(work, sview_len(local_name))
             return (true, "") if local_name == "" or proof_name_is_reserved_internal(local_name)
-            caller: (complete: bool, found: bool) = proof_value_thread_name_in_with_work(local_name, caller_names, 1, &work)
+            caller: (complete: bool, found: bool) = proof_value_thread_name_in_with_work(local_name, caller_names, 1, work)
             return (false, "") if not caller.complete
             return (true, "") if not caller.found
-            parameter: (complete: bool, found: bool) = proof_value_thread_name_in_with_work(local_name, caller_parameters, 1, &work)
+            parameter: (complete: bool, found: bool) = proof_value_thread_name_in_with_work(local_name, caller_parameters, 1, work)
             return (false, "") if not parameter.complete
             return (true, "") if parameter.found
-            binding: (complete: bool, found: bool) = proof_value_thread_name_in_with_work(local_name, report.aliases.value_binding_names, 1, &work)
+            binding: (complete: bool, found: bool) = proof_value_thread_name_in_with_work(local_name, report.aliases.value_binding_names, 1, work)
             return (false, "") if not binding.complete
             return (true, "") if not binding.found
-            reference: (complete: bool, found: bool) = proof_value_thread_name_in_with_work(local_name, report.aliases.reference_local_names, 1, &work)
+            reference: (complete: bool, found: bool) = proof_value_thread_name_in_with_work(local_name, report.aliases.reference_local_names, 1, work)
             return (false, "") if not reference.complete
             return (true, "") if reference.found
-            escaping: (complete: bool, found: bool) = proof_value_thread_name_in_with_work(local_name, report.aliases.escaping_names, 1, &work)
+            escaping: (complete: bool, found: bool) = proof_value_thread_name_in_with_work(local_name, report.aliases.escaping_names, 1, work)
             return (false, "") if not escaping.complete or escaping.found
             return (true, local_name)
 
-        def proof_value_thread_unsigned_width_with_work(facts: darray[Ast::Expr]&, name: sview, work: mutable usize&) -> (complete: bool, width: i64):
-            width: mutable i64 = 0
-            for fact in facts |fact, name, width, work|:
+        def proof_value_thread_unsigned_marker_snapshot_with_work(facts: darray[Ast::Expr]&, names: mutable darray[sview]&, widths: mutable darray[i64]&, hashes: mutable darray[u32]&, values: mutable darray[usize]&, work: mutable usize&) -> bool:
+            fact_count: usize = facts.count
+            capacity: usize = proof_name_index_capacity(fact_count)
+            return false if fact_count > 0 and capacity == 0
+            return false if capacity > PROOF_VALUE_THREAD_WORK_LIMIT / 2
+            return false if not proof_value_thread_charge_cost(capacity, 2, work)
+            hashes.resize(capacity)
+            values.resize(capacity)
+            for slot in 0..<capacity |slot, values, capacity|:
+                values[slot] <- capacity
+            for fact in facts |fact, names, widths, hashes, values, work, capacity|:
                 cost: mutable usize = 0
-                return (false, 0) if not proof_replay_summary_expr_cost_with_limit(fact, &cost, work, PROOF_VALUE_THREAD_WORK_LIMIT)
-                return (false, 0) if not proof_value_thread_charge_cost(cost, 2, &work)
-                return (false, 0) if not proof_value_thread_charge(&work, 1 + sview_len(name))
+                return false if not proof_replay_summary_expr_cost_with_limit(fact, &cost, work, PROOF_VALUE_THREAD_WORK_LIMIT)
+                return false if not proof_value_thread_charge_cost(cost, 2, work)
                 marker: (known: bool, name: sview, width: i64) = proof_unsigned_marker_info(fact)
                 continue if not marker.known
-                return (false, 0) if not proof_value_thread_charge(&work, sview_len(marker.name))
-                continue if marker.name != name
-                width <- marker.width if width == 0 or marker.width < width
-            return (true, width)
+                return false if not proof_value_thread_charge(work, sview_len(marker.name))
+                hash: u32 = proof_name_hash(marker.name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, marker, names, widths, hashes, values, work, capacity, placed|:
+                    return false if not proof_value_thread_charge(work, 1)
+                    row: usize = values[slot]
+                    if row == capacity:
+                        names.push(marker.name)
+                        widths.push(marker.width)
+                        hashes[slot] <- hash
+                        values[slot] <- names.count - 1
+                        placed <- true
+                        break
+                    return false if row >= names.count or row >= widths.count
+                    if hashes[slot] == hash:
+                        return false if not proof_value_thread_charge(work, sview_len(names[row]))
+                        if names[row] == marker.name:
+                            widths[row] <- marker.width if marker.width < widths[row]
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            true
+
+        def proof_value_thread_unsigned_snapshot_width_with_work(names: darray[sview]&, widths: darray[i64]&, hashes: darray[u32]&, values: darray[usize]&, name: sview, work: mutable usize&) -> (complete: bool, width: i64):
+            count: usize = names.count
+            capacity: usize = hashes.count
+            return (false, 0) if capacity != values.count or widths.count != count
+            return (true, 0) if capacity == 0 and count == 0
+            return (false, 0) if capacity == 0 or capacity < count
+            return (false, 0) if not proof_value_thread_charge(work, sview_len(name))
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, names, widths, hashes, values, work, count, capacity|:
+                return (false, 0) if not proof_value_thread_charge(work, 1)
+                row: usize = values[slot]
+                return (true, 0) if row == capacity
+                return (false, 0) if row >= count or row >= widths.count
+                if hashes[slot] == wanted_hash:
+                    return (false, 0) if not proof_value_thread_charge(work, sview_len(names[row]))
+                    if names[row] == name:
+                        return (true, widths[row])
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, 0)
 
         def proof_value_thread_effects_safe(functions: ProofFunctionTable&, index: usize, work: mutable usize&) -> bool:
             return false if index >= functions.summaries.effect_starts.count or index >= functions.summaries.effect_counts.count
@@ -101,7 +153,7 @@ extend ElisaProof:
             for offset in 0..<functions.summaries.effect_counts[index] |offset, functions, start, work|:
                 return false if start + offset >= functions.summaries.all_effects.count
                 effect: sview = functions.summaries.all_effects[start + offset]
-                return false if not proof_value_thread_charge(&work, 1 + sview_len(effect))
+                return false if not proof_value_thread_charge(work, 1 + sview_len(effect))
                 return false if sview_starts_with(effect, "Unsafe")
             return true
 
@@ -111,21 +163,21 @@ extend ElisaProof:
             seen: mutable darray[usize] = []
             while pending.count > 0 |pending, seen, functions, work|:
                 return false if seen.count >= PROOF_VALUE_THREAD_WALK_LIMIT
-                return false if not proof_value_thread_charge(&work, 1)
+                return false if not proof_value_thread_charge(work, 1)
                 current: usize = pending[pending.count - 1]
                 pending.pop()
                 visited: mutable bool = false
                 for candidate in seen |candidate, current, visited, work|:
-                    return false if not proof_value_thread_charge(&work, 1)
+                    return false if not proof_value_thread_charge(work, 1)
                     visited <- true if candidate == current
                 continue if visited
                 seen.push(current)
                 return false if:
-                    not proof_value_thread_effects_safe(functions, current, &work)
+                    not proof_value_thread_effects_safe(functions, current, work)
                     current >= functions.call_graph.call_starts.count or current >= functions.call_graph.call_counts.count
                 start: usize = functions.call_graph.call_starts[current]
                 for offset in 0..<functions.call_graph.call_counts[current] |offset, functions, start, pending, work|:
-                    return false if not proof_value_thread_charge(&work, 1)
+                    return false if not proof_value_thread_charge(work, 1)
                     slot: usize = start + offset
                     return false if slot >= functions.call_graph.all_call_targets.count or slot >= functions.call_graph.all_calls.count
                     target: usize = functions.call_graph.all_call_targets[slot]
@@ -135,7 +187,7 @@ extend ElisaProof:
                         called: sview = functions.call_graph.all_calls[slot]
                         external: mutable bool = false
                         for signature in functions.externs.extern_signatures |called, external, work|:
-                            return false if not proof_value_thread_charge(&work, 1 + sview_len(signature.name) + sview_len(called))
+                            return false if not proof_value_thread_charge(work, 1 + sview_len(signature.name) + sview_len(called))
                             external <- true if signature.name == called
                         return false if external
             return true
@@ -166,7 +218,7 @@ extend ElisaProof:
                 work <- PROOF_VALUE_THREAD_WORK_LIMIT
                 valid <- false
                 return expression
-            if not proof_value_thread_charge_cost(cost, parameters.count + 1, &work):
+            if not proof_value_thread_charge_cost(cost, parameters.count + 1, work):
                 work <- PROOF_VALUE_THREAD_WORK_LIMIT
                 valid <- false
                 return expression
@@ -177,7 +229,7 @@ extend ElisaProof:
             if depth >= PROOF_VALUE_THREAD_WALK_LIMIT:
                 valid <- false
                 return expression
-            if parameters.count > (PROOF_VALUE_THREAD_WORK_LIMIT - 2) / 2 or not proof_value_thread_charge_cost(cost, parameters.count * 2 + 2, &work):
+            if parameters.count > (PROOF_VALUE_THREAD_WORK_LIMIT - 2) / 2 or not proof_value_thread_charge_cost(cost, parameters.count * 2 + 2, work):
                 work <- PROOF_VALUE_THREAD_WORK_LIMIT
                 valid <- false
                 return expression
@@ -230,14 +282,25 @@ extend ElisaProof:
             start: usize = functions.parameters.metadata.param_starts[function_index]
             count: usize = functions.parameters.metadata.param_counts[function_index]
             return none if count != mapped_arguments.count
+            parameter_total: usize = functions.parameters.metadata.all_params.count
+            return none if:
+                start > parameter_total or count > parameter_total - start
+                functions.parameters.metadata.all_parameter_references.count != parameter_total
+                functions.parameters.metadata.all_parameter_mutable_references.count != parameter_total
+                functions.parameters.metadata.all_parameter_type_marker_complete.count != parameter_total
             plan: mutable ProofValueThreading = proof_value_threading_none()
             # Nested calls would be checked inside this one and see a half-threaded state.
             for argument in mapped_arguments |argument, plan|:
                 return none if not proof_value_thread_reserve_expr_scan(argument, &plan.work_used)
                 return none if proof_expr_has_call(argument)
-            for slot in 0..<count |slot, functions, start, mapped_arguments, caller_names, caller_values, caller_parameters, facts, report, plan|:
+            unsigned_marker_names: mutable darray[sview] = []
+            unsigned_marker_widths: mutable darray[i64] = []
+            unsigned_marker_hashes: mutable darray[u32] = []
+            unsigned_marker_values: mutable darray[usize] = []
+            unsigned_markers_ready: mutable bool = false
+            for slot in 0..<count |slot, functions, start, mapped_arguments, caller_names, caller_values, caller_parameters, facts, report, plan, unsigned_marker_names, unsigned_marker_widths, unsigned_marker_hashes, unsigned_marker_values, unsigned_markers_ready|:
                 param_slot: usize = start + slot
-                return none if param_slot >= functions.parameters.metadata.all_parameter_references.count or param_slot >= functions.parameters.metadata.all_parameter_mutable_references.count
+                return none if not functions.parameters.metadata.all_parameter_type_marker_complete[param_slot]
                 continue if not functions.parameters.metadata.all_parameter_references[param_slot]
                 return none if not functions.parameters.metadata.all_parameter_mutable_references[param_slot]
                 local: (complete: bool, name: sview) = proof_value_thread_local_with_work(mapped_arguments[slot], caller_names, caller_parameters, report, &plan.work_used)
@@ -257,11 +320,14 @@ extend ElisaProof:
                 return none if not proof_value_thread_charge(&plan.work_used, count)
                 return none if not proof_call_lend_is_confined(functions, function_index, slot)
                 pre_value: Ast::Expr = proof_substitute(Ast::Expr.Ident(local_name, Ast::expr_pos(mapped_arguments[slot])), caller_names, caller_values)
-                pre_width: (complete: bool, width: i64) = proof_value_thread_unsigned_width_with_work(facts, proof_ident_name(pre_value), &plan.work_used)
+                if not unsigned_markers_ready:
+                    return none if not proof_value_thread_unsigned_marker_snapshot_with_work(facts, &unsigned_marker_names, &unsigned_marker_widths, &unsigned_marker_hashes, &unsigned_marker_values, &plan.work_used)
+                    unsigned_markers_ready <- true
+                pre_width: (complete: bool, width: i64) = proof_value_thread_unsigned_snapshot_width_with_work(unsigned_marker_names, unsigned_marker_widths, unsigned_marker_hashes, unsigned_marker_values, proof_ident_name(pre_value), &plan.work_used)
                 return none if not pre_width.complete
                 width: mutable i64 = pre_width.width
                 if width <= 0:
-                    fallback_width: (complete: bool, width: i64) = proof_value_thread_unsigned_width_with_work(facts, local_name, &plan.work_used)
+                    fallback_width: (complete: bool, width: i64) = proof_value_thread_unsigned_snapshot_width_with_work(unsigned_marker_names, unsigned_marker_widths, unsigned_marker_hashes, unsigned_marker_values, local_name, &plan.work_used)
                     return none if not fallback_width.complete
                     width <- fallback_width.width
                 return none if width <= 0

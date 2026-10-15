@@ -6,9 +6,14 @@ extend ElisaProof:
             return false if:
                 source >= lemmas.termination.recursive.count or target >= lemmas.termination.recursive.count
                 not lemmas.termination.recursive[source] or not lemmas.termination.recursive[target]
-            if source < lemmas.termination.recursive_component_ids.count and target < lemmas.termination.recursive_component_ids.count:
+            return false if not lemmas.termination.recursive[source] or not lemmas.termination.recursive[target]
+            if lemmas.termination.recursive_component_ids.count == lemmas.identity.names.count:
+                return true if lemmas.termination.recursive_component_ids[source] >= lemmas.identity.names.count or lemmas.termination.recursive_component_ids[target] >= lemmas.identity.names.count
                 return lemmas.termination.recursive_component_ids[source] == lemmas.termination.recursive_component_ids[target]
-            return proof_lemma_reaches(lemmas, source, target) and proof_lemma_reaches(lemmas, target, source)
+            # Missing SCC metadata is uncertainty. Treat recursive nodes as related so
+            # lemma application requires a checked decreasing measure instead of using
+            # an unmetered, potentially incomplete reachability fallback.
+            return true
 
         # Map actual arguments to formal parameters using Elisa's named-argument rules. The
         # compiler stores labels separately from values, so positional substitution is not
@@ -91,17 +96,28 @@ extend ElisaProof:
                         report.proof_obligation(false)
                         proof_add_finding(report, "lemma-summary-unverified", position.line, name, "lemma body has not established a verified proof summary")
                         return false
-                    return false if lemma_index >= lemmas.parameters.param_counts.count or arguments.count > lemmas.parameters.param_counts[lemma_index]
+                    lemma_count: usize = lemmas.identity.names.count
+                    return false if:
+                        lemmas.parameters.param_starts.count != lemma_count or lemmas.parameters.param_counts.count != lemma_count
+                        lemmas.contracts.requires_starts.count != lemma_count or lemmas.contracts.requires_counts.count != lemma_count
+                        lemmas.contracts.ensure_starts.count != lemma_count or lemmas.contracts.ensure_counts.count != lemma_count
+                        lemmas.termination.decreases_starts.count != lemma_count or lemmas.termination.decreases_counts.count != lemma_count or lemmas.termination.decreases_unbounded.count != lemma_count or lemmas.termination.recursive.count != lemma_count
+                    return false if arguments.count > lemmas.parameters.param_counts[lemma_index]
                     parameter_names: mutable darray[sview] = []
                     argument_values: mutable darray[Ast::Expr] = []
                     param_start: usize = lemmas.parameters.param_starts[lemma_index]
-                    for argument_index in 0..<lemmas.parameters.param_counts[lemma_index] |parameter_names, arguments, lemmas, param_start|:
+                    param_count: usize = lemmas.parameters.param_counts[lemma_index]
+                    parameter_total: usize = lemmas.parameters.all_params.count
+                    return false if:
+                        lemmas.parameters.all_has_defaults.count != parameter_total or lemmas.parameters.all_defaults.count != parameter_total
+                        param_start > parameter_total or param_count > parameter_total - param_start
+                    for argument_index in 0..<param_count |parameter_names, arguments, lemmas, param_start|:
                         parameter_names.push(lemmas.parameters.all_params[param_start + argument_index])
                     mapped_arguments: mutable darray[Ast::Expr] = []
                     default_start: usize = lemmas.parameters.param_starts[lemma_index]
                     default_flags: mutable darray[bool] = []
                     default_values: mutable darray[Ast::Expr] = []
-                    for parameter_index in 0..<lemmas.parameters.param_counts[lemma_index] |default_flags, default_values, lemmas, default_start|:
+                    for parameter_index in 0..<param_count |default_flags, default_values, lemmas, default_start|:
                         default_flags.push(lemmas.parameters.all_has_defaults[default_start + parameter_index])
                         default_values.push(lemmas.parameters.all_defaults[default_start + parameter_index])
                     return false if not proof_map_call_arguments(parameter_names, default_flags, default_values, arguments, argument_names, &mapped_arguments)
@@ -119,10 +135,13 @@ extend ElisaProof:
                     require_goal_ids: mutable darray[usize] = []
                     requires_start: usize = lemmas.contracts.requires_starts[lemma_index]
                     requires_count: usize = lemmas.contracts.requires_counts[lemma_index]
+                    return false if requires_start > lemmas.contracts.all_requires.count or requires_count > lemmas.contracts.all_requires.count - requires_start
                     for requires_index in 0..<requires_count |requires_ok, facts, parameter_names, argument_values, lemmas, requires_start|:
                         required: Ast::Expr = proof_substitute(lemmas.contracts.all_requires[requires_start + requires_index], parameter_names, argument_values)
                         require_attempt_start: usize = report.results.goal_attempts.count
-                        required_proven: bool = (proof_certify_goal(facts, required, report, position.line, name, annotations) can Global{Read,Write})
+                        required_proven: mutable bool = (proof_certify_goal(facts, required, report, position.line, name, annotations) can Global{Read,Write})
+                        attribution_complete: bool = proof_mark_call_obligations_since(report, require_attempt_start, position)
+                        required_proven <- false if not attribution_complete
                         if report.results.goal_attempts.count <= require_attempt_start:
                             required_proven <- false
                         else:
@@ -155,6 +174,7 @@ extend ElisaProof:
                             caller_param_values: mutable darray[Ast::Expr] = []
                             caller_param_start: usize = lemmas.parameters.param_starts[caller_lemma_index]
                             caller_param_count: usize = lemmas.parameters.param_counts[caller_lemma_index]
+                            return false if caller_param_start > lemmas.parameters.all_params.count or caller_param_count > lemmas.parameters.all_params.count - caller_param_start
                             for parameter_index in 0..<caller_param_count |caller_param_names, caller_param_values, lemmas, caller_param_start, caller_names, caller_values, position|:
                                 parameter_name: sview = lemmas.parameters.all_params[caller_param_start + parameter_index]
                                 caller_param_names.push(parameter_name)
@@ -174,7 +194,10 @@ extend ElisaProof:
                                 component_expressions: mutable darray[Ast::Expr] = []
                                 component_expressions.push(component)
                                 relevant_facts: darray[Ast::Expr] = proof_relevant_facts_for_expressions(facts, component_expressions)
-                                component_proven: bool = (proof_certify_goal(relevant_facts, current_nonnegative, report, position.line, name, annotations) can Global{Read,Write})
+                                current_attempt_start: usize = report.results.goal_attempts.count
+                                component_proven: mutable bool = (proof_certify_goal(relevant_facts, current_nonnegative, report, position.line, name, annotations) can Global{Read,Write})
+                                attribution_complete: bool = proof_mark_call_obligations_since(report, current_attempt_start, position)
+                                component_proven <- false if not attribution_complete
                                 report.proof_obligation(component_proven)
                                 current_nonnegative_proven <- false if not component_proven
                                 proof_add_latest_goal_finding(report, "lemma-recursive-decreases-unproven", position.line, name, "recursive lemma decreases component is not proven nonnegative") if not component_proven
@@ -183,16 +206,23 @@ extend ElisaProof:
                                 component_expressions: mutable darray[Ast::Expr] = []
                                 component_expressions.push(component)
                                 relevant_facts: darray[Ast::Expr] = proof_relevant_facts_for_expressions(facts, component_expressions)
-                                component_proven: bool = (proof_certify_goal(relevant_facts, recursive_nonnegative, report, position.line, name, annotations) can Global{Read,Write})
+                                recursive_attempt_start: usize = report.results.goal_attempts.count
+                                component_proven: mutable bool = (proof_certify_goal(relevant_facts, recursive_nonnegative, report, position.line, name, annotations) can Global{Read,Write})
+                                attribution_complete: bool = proof_mark_call_obligations_since(report, recursive_attempt_start, position)
+                                component_proven <- false if not attribution_complete
                                 report.proof_obligation(component_proven)
                                 recursive_nonnegative_proven <- false if not component_proven
                                 proof_add_latest_goal_finding(report, "lemma-recursive-decreases-unproven", position.line, name, "recursive lemma callee measure is not proven nonnegative") if not component_proven
-                            smaller_proven: bool = (proof_lexicographic_smaller(current_components, recursive_components, facts, annotations, position, report, name) can Global{Read,Write})
+                            smaller_attempt_start: usize = report.results.goal_attempts.count
+                            smaller_proven: mutable bool = (proof_lexicographic_smaller(current_components, recursive_components, facts, annotations, position, report, name) can Global{Read,Write})
+                            attribution_complete: bool = proof_mark_call_obligations_since(report, smaller_attempt_start, position)
+                            smaller_proven <- false if not attribution_complete
                             report.proof_obligation(smaller_proven)
                             proof_add_latest_goal_finding(report, "lemma-recursive-decreases-unproven", position.line, name, "recursive lemma lexicographic measure is not proven to strictly decrease") if not smaller_proven
                             return false if not current_nonnegative_proven or not recursive_nonnegative_proven or not smaller_proven
                     ensures_start: usize = lemmas.contracts.ensure_starts[lemma_index]
                     ensures_count: usize = lemmas.contracts.ensure_counts[lemma_index]
+                    return false if ensures_start > lemmas.contracts.all_ensures.count or ensures_count > lemmas.contracts.all_ensures.count - ensures_start
                     for ensure_index in 0..<ensures_count |facts, parameter_names, argument_values, lemmas, ensures_start, report, name, position|:
                         ensure_expression: Ast::Expr = lemmas.contracts.all_ensures[ensures_start + ensure_index]
                         # A statement-form lemma call has no result slot to substitute. Do not
@@ -257,7 +287,7 @@ extend ElisaProof:
                     called_lookup: (complete: bool, found: bool, row: usize) = proof_structural_name_lookup(report, called_name)
                     own_index: usize = own_lookup.row if own_lookup.complete and own_lookup.found else report.analysis_1.structural.names.count
                     called_index: usize = called_lookup.row if called_lookup.complete and called_lookup.found else report.analysis_1.structural.names.count
-                    direct_recursive: bool = called_name == own_name
+                    direct_recursive: mutable bool = called_name == own_name
                     lookup_failed: bool = not own_lookup.complete or not own_lookup.found or not called_lookup.complete or direct_recursive and not called_lookup.found
                     proof_structural_termination_finding(report, position.line, name, "source callable name lookup exceeded its validated bound") if lookup_failed
                     direct_recursive <- false if lookup_failed

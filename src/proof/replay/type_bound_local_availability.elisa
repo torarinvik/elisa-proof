@@ -205,6 +205,51 @@ extend ElisaProof:
             empty_parameters: darray[Ast::ParamDecl] = []
             return proof_replay_type_bound_local_scalar_consumer_available_with_work(report, trace, empty_parameters, body, false, &work)
 
+        # A type-bound trace stores a spelling, while the kernel fact arena has no source
+        # binding IDs. Reject it if a same-name declaration can shadow its source binding
+        # before the consuming goal. Completed statements before the goal are scanned in full;
+        # a statement whose span overlaps the goal is treated as ambiguous and scanned whole.
+        def proof_replay_type_bound_binding_shadowed_before_consumer_with_work(report: ProofReport&, body: darray[Ast::Stmt]&, name: sview, source_position: Ast::Pos, after_source_statement: bool, work: mutable usize&) -> bool:
+            return true if name == "" or not proof_replay_type_bound_body_charge_with_work(body, work)
+            if report.analysis_2.trace_consumer_certificate_index == 0:
+                # Without a pinned consumer site, keep the legacy path conservative: the
+                # parameter spelling must remain unshadowed throughout the body.
+                return not proof_replay_source_body_declares_with_work(report.source.source_declarations, body, name, work)
+            return true if report.analysis_2.trace_consumer_certificate_index > report.analysis_1.certificates.count
+            certificate: ProofGoalCertificate = report.analysis_1.certificates[report.analysis_2.trace_consumer_certificate_index - 1]
+            return true if:
+                certificate.name != name or certificate.line != report.analysis_2.trace_owner_line
+                certificate.goal == Ast::Expr.Invalid
+            goal_position: Ast::Pos = Ast::expr_pos(certificate.goal)
+            return true if goal_position.line == 0
+            prefix: mutable darray[Ast::Stmt] = []
+            source_matches: mutable usize = 0
+            source_seen: mutable bool = not after_source_statement
+            for statement in body |report, name, source_position, goal_position, prefix, source_matches, source_seen, work|:
+                return true if not proof_replay_type_bound_local_work_charge(1, work)
+                position: Ast::Pos = proof_replay_statement_position(statement)
+                if after_source_statement and proof_replay_source_position_equal(position, source_position):
+                    source_matches <- source_matches + 1
+                    source_seen <- true
+                    continue
+                continue if not source_seen
+                return true if position.line == 0
+                extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(statement, 0)
+                before_goal: mutable bool = false
+                after_goal: mutable bool = false
+                if position.offset != 0 and goal_position.offset != 0 and extent.offsets_complete and extent.end_offset != 0:
+                    before_goal <- goal_position.offset > extent.end_offset
+                    after_goal <- position.offset > goal_position.offset
+                else:
+                    before_goal <- extent.end_line < goal_position.line
+                    after_goal <- position.line > goal_position.line
+                break if after_goal
+                return true if not proof_replay_type_bound_local_work_charge(1, work)
+                prefix.push(statement)
+                break if not before_goal
+            return true if after_source_statement and source_matches != 1
+            proof_replay_source_body_declares_with_work(report.source.source_declarations, prefix, name, work)
+
         def proof_replay_type_bound_local_scalar_consumer_available_with_work(report: ProofReport&, trace: ProofFactTrace, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, allow_result_substitution: bool, work: mutable usize&) -> bool:
             return true if report.analysis_2.trace_consumer_certificate_index == 0
             return false if report.analysis_2.trace_consumer_certificate_index > report.analysis_1.certificates.count or report.analysis_2.trace_owner_line == 0
@@ -238,6 +283,7 @@ extend ElisaProof:
                 attempt_matches != 1
                 not proof_replay_type_bound_body_charge_with_work(body, work)
             declarations: mutable usize = 0
+            binding_name: mutable sview = ""
             declaration_extent: mutable ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_extent_empty()
             for statement in body |trace, declarations, declaration_extent, work|:
                 match statement:
@@ -246,12 +292,17 @@ extend ElisaProof:
                         return false if not proof_replay_summary_expr_charge_with_work(trace.expression, work)
                         continue if not proof_expr_mentions_name(trace.expression, local_name)
                         declarations <- declarations + 1
+                        binding_name <- local_name
                         declaration_extent <- proof_replay_type_bound_extent_from_position(position)
                         declaration_extent <- proof_replay_type_bound_extent_merge(declaration_extent, proof_replay_type_bound_expr_extent(local_type, 0))
                         declaration_extent <- proof_replay_type_bound_extent_merge(declaration_extent, proof_replay_type_bound_expr_extent(initializer, 0))
                     _:
                         pass
             return false if declarations != 1
+            # A later declaration can shadow this spelling before the consumer goal. The
+            # kernel sees names rather than source binding identities, so require the source
+            # body to have exactly one declaration of this local name.
+            return false if proof_replay_type_bound_binding_shadowed_before_consumer_with_work(report, body, binding_name, Ast::expr_pos(trace.expression), true, work)
             # The contract appears before the body that computes `result`; the exact tail
             # substitution above supplies the source-order link for this narrow case.
             return true if result_substitution_consumer
@@ -259,6 +310,136 @@ extend ElisaProof:
             if declaration_extent.offsets_complete and goal_position.offset != 0:
                 return goal_position.offset > declaration_extent.end_offset
             return goal_position.line > declaration_extent.end_line
+
+        # Parameter type facts are valid only while the parameter binding is the active
+        # source binding. A report can retain an authentic entry marker after a local shadows
+        # the parameter, so bind it to the certificate's exact consumer site before admitting
+        # the fact into the kernel context.
+        def proof_replay_type_bound_parameter_consumer_binding_available_with_work(report: ProofReport&, trace: ProofFactTrace, parameter_name: sview, body: darray[Ast::Stmt]&, work: mutable usize&) -> bool:
+            return false if parameter_name == ""
+            if report.analysis_2.trace_consumer_certificate_index == 0:
+                # Without a pinned consumer site, keep this path conservative across the body.
+                return not proof_replay_source_body_declares_with_work(report.source.source_declarations, body, parameter_name, work)
+            return false if:
+                report.analysis_2.trace_consumer_certificate_index > report.analysis_1.certificates.count
+                report.analysis_2.trace_owner_line == 0
+            certificate: ProofGoalCertificate = report.analysis_1.certificates[report.analysis_2.trace_consumer_certificate_index - 1]
+            return false if:
+                not proof_replay_type_bound_local_text_compare_charge(certificate.name, trace.name, work)
+                certificate.name != trace.name or certificate.line != report.analysis_2.trace_owner_line
+                not proof_replay_type_bound_local_text_repeat_charge(parameter_name, 1, work)
+                report.results.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
+            work <- work + report.results.goal_attempts.count
+            attempt_matches: mutable usize = 0
+            for attempt in report.results.goal_attempts |attempt, report, certificate, attempt_matches, work|:
+                continue if not attempt.has_certificate or attempt.certificate_index != report.analysis_2.trace_consumer_certificate_index - 1
+                return false if:
+                    not proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, report.analysis_2.trace_consumer_certificate_index - 1, work)
+                    not proof_replay_type_bound_goal_position_matches(attempt.goal, certificate.goal)
+                attempt_matches <- attempt_matches + 1
+            return false if attempt_matches != 1
+            source_matches: mutable usize = 0
+            proof_replay_type_bound_consumer_source_site_in_body_with_work(body, certificate, &source_matches, work, 0)
+            return false if source_matches != 1
+            shadowed_at_consumer: mutable bool = false
+            return false if not proof_replay_type_bound_parameter_consumer_scope_in_body_with_work(body, certificate, parameter_name, report, false, &shadowed_at_consumer, work, 0)
+            not shadowed_at_consumer
+
+        def proof_replay_type_bound_parameter_assert_consumer_matches(expression: Ast::Expr, certificate: ProofGoalCertificate, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or not proof_replay_type_bound_local_work_charge(1, work)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_type_bound_parameter_assert_consumer_matches(inner, certificate, work, depth + 1)
+                Ast::Expr.Call(Ast::Expr.Ident("assert", _), arguments, _, position):
+                    return position.line == certificate.line and arguments.count == 1 and proof_replay_type_bound_goal_position_matches(arguments[0], certificate.goal, work)
+                _:
+                    return false
+
+        def proof_replay_type_bound_parameter_consumer_scope_in_body_with_work(body: darray[Ast::Stmt]&, certificate: ProofGoalCertificate, parameter_name: sview, report: ProofReport&, shadowed: bool, consumer_shadowed: mutable bool&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            current_shadowed: mutable bool = shadowed
+            for statement in body |statement, certificate, parameter_name, current_shadowed, consumer_shadowed, work, depth|:
+                return false if not proof_replay_type_bound_local_work_charge(1, work)
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, _, _, _):
+                        return false if not proof_replay_type_bound_local_text_compare_charge(local_name, parameter_name, work)
+                        current_shadowed <- true if local_name == parameter_name
+                    Ast::Stmt.Assign(target, operator, _, _):
+                        if operator == TokenKind.Assign:
+                            local_name: sview = proof_ident_name(target)
+                            if local_name != "":
+                                return false if not proof_replay_type_bound_local_text_compare_charge(local_name, parameter_name, work)
+                                current_shadowed <- true if local_name == parameter_name
+                    Ast::Stmt.Block(_, _, binding, nested, _):
+                        return false if not proof_replay_type_bound_local_text_compare_charge(binding, parameter_name, work)
+                        nested_shadowed: bool = current_shadowed or binding == parameter_name
+                        nested_source_matches: mutable usize = 0
+                        proof_replay_type_bound_consumer_source_site_in_body_with_work(nested, certificate, &nested_source_matches, work, depth + 1)
+                        return false if nested_source_matches > 1
+                        if nested_source_matches == 1:
+                            return false if not proof_replay_type_bound_parameter_consumer_scope_in_body_with_work(nested, certificate, parameter_name, report, nested_shadowed, consumer_shadowed, work, depth + 1)
+                            return true
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        condition_paths: (complete: bool, true_shadowed: bool, false_shadowed: bool) = proof_replay_type_bound_condition_alias_paths_with_work(condition, parameter_name, current_shadowed, report, work, depth + 1)
+                        return false if not condition_paths.complete
+                        then_matches: mutable usize = 0
+                        proof_replay_type_bound_consumer_source_site_in_body_with_work(then_body, certificate, &then_matches, work, depth + 1)
+                        return false if then_matches > 1
+                        if then_matches == 1:
+                            return proof_replay_type_bound_parameter_consumer_scope_in_body_with_work(then_body, certificate, parameter_name, report, condition_paths.true_shadowed, consumer_shadowed, work, depth + 1)
+                        else_matches: mutable usize = 0
+                        proof_replay_type_bound_consumer_source_site_in_body_with_work(else_body, certificate, &else_matches, work, depth + 1)
+                        return false if else_matches > 1
+                        if else_matches == 1:
+                            return proof_replay_type_bound_parameter_consumer_scope_in_body_with_work(else_body, certificate, parameter_name, report, condition_paths.false_shadowed, consumer_shadowed, work, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        condition_paths: (complete: bool, true_shadowed: bool, false_shadowed: bool) = proof_replay_type_bound_condition_alias_paths_with_work(condition, parameter_name, current_shadowed, report, work, depth + 1)
+                        return false if not condition_paths.complete
+                        nested_source_matches: mutable usize = 0
+                        proof_replay_type_bound_consumer_source_site_in_body_with_work(nested, certificate, &nested_source_matches, work, depth + 1)
+                        return false if nested_source_matches > 1
+                        if nested_source_matches == 1:
+                            return proof_replay_type_bound_parameter_consumer_scope_in_body_with_work(nested, certificate, parameter_name, report, condition_paths.true_shadowed, consumer_shadowed, work, depth + 1)
+                    Ast::Stmt.For(_, variables, iterable, nested, _):
+                        nested_source_matches: mutable usize = 0
+                        proof_replay_type_bound_consumer_source_site_in_body_with_work(nested, certificate, &nested_source_matches, work, depth + 1)
+                        return false if nested_source_matches > 1
+                        if nested_source_matches == 1:
+                            binder_shadowed: mutable bool = current_shadowed
+                            for variable in variables |variable, parameter_name, binder_shadowed, work|:
+                                return false if not proof_replay_type_bound_local_text_compare_charge(variable, parameter_name, work)
+                                binder_shadowed <- true if variable == parameter_name
+                            loop_filter: (complete: bool, shadowed: bool) = proof_replay_type_bound_loop_filter_shadow_with_work(iterable, parameter_name, binder_shadowed, report, work)
+                            return false if not loop_filter.complete
+                            return proof_replay_type_bound_parameter_consumer_scope_in_body_with_work(nested, certificate, parameter_name, report, loop_filter.shadowed, consumer_shadowed, work, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |arm, certificate, parameter_name, current_shadowed, consumer_shadowed, work, depth|:
+                            arm_source_matches: mutable usize = 0
+                            proof_replay_type_bound_consumer_source_site_in_body_with_work(arm.body, certificate, &arm_source_matches, work, depth + 1)
+                            return false if arm_source_matches > 1
+                            if arm_source_matches == 1:
+                                pattern_names: mutable darray[sview] = []
+                                return false if not proof_replay_call_pattern_bindings_with_work(arm.pattern, &pattern_names, work, depth + 1)
+                                binder_shadowed: mutable bool = current_shadowed
+                                for pattern_name in pattern_names |pattern_name, parameter_name, binder_shadowed, work|:
+                                    return false if not proof_replay_type_bound_local_text_compare_charge(pattern_name, parameter_name, work)
+                                    binder_shadowed <- true if pattern_name == parameter_name
+                                return proof_replay_type_bound_parameter_consumer_scope_in_body_with_work(arm.body, certificate, parameter_name, report, binder_shadowed, consumer_shadowed, work, depth + 1)
+                    Ast::Stmt.Contract(_, expression, _):
+                        if proof_replay_type_bound_goal_position_matches(expression, certificate.goal, work):
+                            consumer_shadowed <- current_shadowed
+                            return true
+                    Ast::Stmt.Expr(expression, _):
+                        if proof_replay_type_bound_parameter_assert_consumer_matches(expression, certificate, work, depth + 1):
+                            consumer_shadowed <- current_shadowed
+                            return true
+                    Ast::Stmt.Assign(_, _, _, _) | Ast::Stmt.Return(_, _) | Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    Ast::Stmt.Invalid:
+                        return false
+                    _:
+                        return false
+            return false
 
         # A postcondition over `result` can consume a local scalar bound through the exact
         # final return expression, whether it is written as an implicit tail or `return expr`.
@@ -386,178 +567,3 @@ extend ElisaProof:
                     _:
                         return false
             return local_matches == 1 and candidate_seen and ensure_matches == 1
-
-        # Later straight-line locals are harmless only when their initializers cannot call,
-        # move, perform a runtime index read, or dispatch to an overloaded operator. Reserve
-        # every visitor before running it;
-        # this keeps `let other = ...; result + digit` available without allowing a hidden write
-        # to invalidate the witnessed scalar range.
-        def proof_replay_type_bound_local_initializer_effect_free(initializer: Ast::Expr, operator_mask: usize, work: mutable usize&) -> bool:
-            cost: mutable usize = 0
-            if not proof_replay_summary_expr_cost_with_limit(initializer, &cost, work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT):
-                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                return false
-            if cost > (PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work) / 5:
-                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                return false
-            work <- work + cost * 5
-            return not proof_source_expression_has_overloaded_operator(initializer, operator_mask, 0) and not proof_expr_has_call(initializer) and not proof_expr_has_move(initializer) and not proof_replay_type_bound_expression_has_runtime_index(initializer, 0)
-
-        # Index reads can dispatch to an effectful user `__index__` implementation without
-        # appearing as a Call AST. Runtime index reads are outside this witness; type casts are
-        # compile-time indexing syntax and contain no runtime lookup.
-        def proof_replay_type_bound_expression_has_runtime_index(expression: Ast::Expr, depth: usize) -> bool:
-            return true if depth >= PROOF_REPLAY_TYPE_BOUND_AVAILABILITY_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Invalid:
-                    return true
-                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
-                    return false
-                Ast::Expr.Index(object, _, _) | Ast::Expr.IndexN(object, _, _):
-                    return true if not proof_is_type_cast_index(object)
-                    return proof_replay_type_bound_expression_has_runtime_index(object, depth + 1)
-                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Paren(object, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _):
-                    return proof_replay_type_bound_expression_has_runtime_index(object, depth + 1)
-                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Refinement(left, right, _):
-                    return proof_replay_type_bound_expression_has_runtime_index(left, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(right, depth + 1)
-                Ast::Expr.Call(callee, arguments, _, _):
-                    return true if proof_replay_type_bound_expression_has_runtime_index(callee, depth + 1)
-                    for argument in arguments:
-                        return true if proof_replay_type_bound_expression_has_runtime_index(argument, depth + 1)
-                    return false
-                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
-                    for candidate in candidates:
-                        for capture in candidate.captures:
-                            return true if proof_replay_type_bound_expression_has_runtime_index(capture, depth + 1)
-                    for argument in arguments:
-                        return true if proof_replay_type_bound_expression_has_runtime_index(argument, depth + 1)
-                    return false
-                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
-                    return proof_replay_type_bound_expression_has_runtime_index(object, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(low, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(high, depth + 1)
-                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
-                    for element in elements:
-                        return true if proof_replay_type_bound_expression_has_runtime_index(element, depth + 1)
-                    return false
-                Ast::Expr.DictLit(entries, _):
-                    for entry in entries:
-                        return true if proof_replay_type_bound_expression_has_runtime_index(entry.key, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(entry.value, depth + 1)
-                    return false
-                Ast::Expr.Construct(type_expression, fields, _):
-                    return true if proof_replay_type_bound_expression_has_runtime_index(type_expression, depth + 1)
-                    for field in fields:
-                        return true if proof_replay_type_bound_expression_has_runtime_index(field.value, depth + 1)
-                    return false
-                Ast::Expr.RecordUpdate(base, fields, _):
-                    return true if proof_replay_type_bound_expression_has_runtime_index(base, depth + 1)
-                    for field in fields:
-                        return true if proof_replay_type_bound_expression_has_runtime_index(field.value, depth + 1)
-                    return false
-                Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    return proof_replay_type_bound_expression_has_runtime_index(iterable, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(condition, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(body, depth + 1)
-                # These scoped/recovery forms are outside the local scalar result-witness tier.
-                Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
-                    return true
-                _:
-                    return true
-
-        # The name predicate compares each identifier with the candidate binding. Its AST
-        # traversal cost is bounded by the expression cost, with one extra factor for the
-        # target-name comparison at every visited node.
-        def proof_replay_type_bound_local_mention_pair_charge(local_name: sview, trace_cost: usize, returned_cost: usize, work: mutable usize&) -> bool:
-            return proof_replay_type_bound_local_work_exhaust(work) if:
-                work > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                returned_cost > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                trace_cost > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - returned_cost
-            target_length: usize = sview_len(local_name)
-            return proof_replay_type_bound_local_work_exhaust(work) if target_length >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-            remaining: usize = PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
-            pair_cost: usize = trace_cost + returned_cost
-            multiplier: usize = target_length + 1
-            return proof_replay_type_bound_local_work_exhaust(work) if multiplier == 0 or pair_cost > remaining / multiplier
-            work <- work + pair_cost * multiplier
-            return true
-
-        # Meter both the size walk and `proof_expr_mentions_name`; the target-name comparison
-        # can inspect up to target_length bytes at every visited identifier.
-        def proof_replay_type_bound_local_expr_mentions_name_with_work(expression: Ast::Expr, target: sview, work: mutable usize&) -> (complete: bool, mentions: bool):
-            return (false, false) if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-            cost: mutable usize = 0
-            if not proof_replay_summary_expr_cost_with_limit(expression, &cost, work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT):
-                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                return (false, false)
-            target_length: usize = sview_len(target)
-            return (false, false) if target_length > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - 2
-            multiplier: usize = target_length + 2
-            remaining: usize = PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
-            if cost > remaining / multiplier:
-                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                return (false, false)
-            work <- work + cost * multiplier
-            return (true, proof_expr_mentions_name(expression, target))
-
-        # Local arrays can supply a bound fact at a later index use, so locate the exact
-        # declaration by name and source position instead of assuming it shares the fact line.
-        # The local extent validator calls this only after resolving the fact's array root.
-        def proof_replay_type_bound_local_array_consumer_available(report: ProofReport&, body: darray[Ast::Stmt]&, use_position: Ast::Pos, trace_name: sview, local_name: sview, local_position: Ast::Pos) -> bool:
-            work: mutable usize = 0
-            return proof_replay_type_bound_local_array_consumer_available_with_work(report, body, use_position, trace_name, local_name, local_position, &work)
-
-        def proof_replay_type_bound_local_array_consumer_available_with_work(report: ProofReport&, body: darray[Ast::Stmt]&, use_position: Ast::Pos, trace_name: sview, local_name: sview, local_position: Ast::Pos, work: mutable usize&) -> bool:
-            return false if use_position.line == 0 or trace_name == "" or local_name == ""
-            has_consumer: bool = report.analysis_2.trace_consumer_certificate_index != 0
-            return false if has_consumer and (report.analysis_2.trace_consumer_certificate_index > report.analysis_1.certificates.count or report.analysis_2.trace_owner_line == 0)
-            certificate_index: usize = report.analysis_2.trace_consumer_certificate_index - 1 if has_consumer else 0
-            consumer_goal: mutable Ast::Expr = Ast::Expr.Invalid
-            if has_consumer:
-                certificate: ProofGoalCertificate = report.analysis_1.certificates[certificate_index]
-                return false if:
-                    not proof_replay_type_bound_local_text_compare_charge(certificate.name, trace_name, work)
-                    certificate.name != trace_name or certificate.line != report.analysis_2.trace_owner_line
-                    report.results.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-                consumer_goal <- certificate.goal
-                return false if:
-                    not proof_replay_summary_expr_charge_with_work(consumer_goal, work)
-                    not proof_replay_type_bound_extent_preflight_with_work(body, Ast::Expr.Absent, false, consumer_goal, true, work)
-                source_matches: mutable usize = 0
-                proof_replay_type_bound_consumer_source_site_in_body_with_work(body, certificate, &source_matches, work, 0)
-                return false if:
-                    source_matches != 1
-                    report.results.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
-                work <- work + report.results.goal_attempts.count
-                attempt_matches: mutable usize = 0
-                for attempt in report.results.goal_attempts |report, certificate, certificate_index, attempt_matches, work|:
-                    continue if not attempt.has_certificate or attempt.certificate_index != certificate_index
-                    return false if:
-                        not proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, certificate_index, work)
-                        attempt.source_phase != certificate.source_phase
-                        not proof_replay_type_bound_goal_position_matches(attempt.goal, certificate.goal)
-                    attempt_matches <- attempt_matches + 1
-                return false if attempt_matches != 1
-            else:
-                return false if not proof_replay_type_bound_extent_preflight_with_work(body, Ast::Expr.Absent, false, consumer_goal, false, work)
-            return false if:
-                not proof_replay_summary_owner_source_preflight(report, trace_name, report.analysis_2.replay_owner_line, work)
-                not proof_replay_type_bound_body_charge_with_work(body, work)
-                not proof_replay_source_single_declaration_with_work(report.source.source_declarations, body, local_name, work)
-            declarations: mutable usize = 0
-            declaration_extent: mutable ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_extent_empty()
-            for statement in body |local_name, local_position, declarations, declaration_extent, work|:
-                match statement:
-                    Ast::Stmt.VarDecl(name, local_type, initializer, position):
-                        return false if not proof_replay_type_bound_local_text_compare_charge(name, local_name, work)
-                        continue if name != local_name or not proof_replay_source_position_equal(position, local_position)
-                        declarations <- declarations + 1
-                        declaration_extent <- proof_replay_type_bound_extent_from_position(position)
-                        declaration_extent <- proof_replay_type_bound_extent_merge(declaration_extent, proof_replay_type_bound_expr_extent(local_type, 0))
-                        declaration_extent <- proof_replay_type_bound_extent_merge(declaration_extent, proof_replay_type_bound_expr_extent(initializer, 0))
-                    _:
-                        pass
-            return false if declarations != 1
-            # The fact must already describe this local at its source use. Checking only the
-            # later consumer would let a same-name outer array used in this initializer borrow
-            # the local's fixed extent.
-            return false if not proof_replay_type_bound_position_after_extent(use_position, declaration_extent)
-            if not has_consumer:
-                return true
-            goal_position: Ast::Pos = Ast::expr_pos(consumer_goal)
-            return proof_replay_type_bound_position_after_extent(goal_position, declaration_extent)

@@ -29,45 +29,46 @@ extend ElisaProof:
         # Source offsets remain monotone across `#line` directives, unlike source line numbers.
         # Use the outermost end offset when checking whether a consumer stays inside a scope.
         def proof_replay_body_last_offset(body: darray[Ast::Stmt]&, source_work: mutable usize&, complete: mutable bool&, depth: usize) -> u32:
-            if depth >= ProofReplayLocalAlias::DEPTH_LIMIT or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
-                complete <- false
-                return 0
-            last: mutable u32 = 0
-            for statement in body |last, source_work, complete, depth|:
-                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+            can Abort.Panic:
+                if depth >= ProofReplayLocalAlias::DEPTH_LIMIT or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                     complete <- false
                     return 0
-                source_work <- source_work + 1
-                position: Ast::Pos = proof_replay_statement_position(statement)
-                last <- position.end_offset if position.end_offset > last
-                nested: mutable u32 = 0
-                match statement:
-                    Ast::Stmt.If(_, yes, no, _):
-                        nested <- proof_replay_body_last_offset(yes, source_work, complete, depth + 1)
-                        return 0 if not complete
-                        no_last: u32 = proof_replay_body_last_offset(no, source_work, complete, depth + 1)
-                        return 0 if not complete
-                        nested <- no_last if no_last > nested
-                    Ast::Stmt.While(_, inner, _) | Ast::Stmt.For(_, _, _, inner, _) | Ast::Stmt.Block(_, _, _, inner, _):
-                        nested <- proof_replay_body_last_offset(inner, source_work, complete, depth + 1)
-                        return 0 if not complete
-                    Ast::Stmt.Match(_, arms, _):
-                        if arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
-                            proof_replay_mutable_local_work_exhaust(source_work)
-                            complete <- false
-                            return 0
-                        source_work <- source_work + arms.count
-                        for arm in arms |nested, source_work, complete, depth|:
-                            arm_last: u32 = proof_replay_body_last_offset(arm.body, source_work, complete, depth + 1)
-                            return 0 if not complete
-                            nested <- arm_last if arm_last > nested
-                    Ast::Stmt.Expr(Ast::Expr.Block(inner, _, _, _), _):
-                        nested <- proof_replay_body_last_offset(inner, source_work, complete, depth + 1)
-                        return 0 if not complete
-                    _:
-                        pass
-                last <- nested if nested > last
-            return last
+                last: mutable u32 = 0
+                for statement in body |last, source_work, complete, depth|:
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                        complete <- false
+                        return 0
+                    source_work <- source_work + 1
+                    position: Ast::Pos = proof_replay_statement_position(statement)
+                    last <- position.end_offset if position.end_offset > last
+                    nested: mutable u32 = 0
+                    match statement:
+                        Ast::Stmt.If(_, yes, no, _):
+                            nested <- proof_replay_body_last_offset(yes, source_work, complete, depth + 1)
+                            return 0 if not proof_goal_bool_ref_value(complete)
+                            no_last: u32 = proof_replay_body_last_offset(no, source_work, complete, depth + 1)
+                            return 0 if not proof_goal_bool_ref_value(complete)
+                            nested <- no_last if no_last > nested
+                        Ast::Stmt.While(_, inner, _) | Ast::Stmt.For(_, _, _, inner, _) | Ast::Stmt.Block(_, _, _, inner, _):
+                            nested <- proof_replay_body_last_offset(inner, source_work, complete, depth + 1)
+                            return 0 if not proof_goal_bool_ref_value(complete)
+                        Ast::Stmt.Match(_, arms, _):
+                            if arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                                proof_replay_mutable_local_work_exhaust(source_work)
+                                complete <- false
+                                return 0
+                            source_work <- source_work + arms.count
+                            for arm in arms |nested, source_work, complete, depth|:
+                                arm_last: u32 = proof_replay_body_last_offset(arm.body, source_work, complete, depth + 1)
+                                return 0 if not proof_goal_bool_ref_value(complete)
+                                nested <- arm_last if arm_last > nested
+                        Ast::Stmt.Expr(Ast::Expr.Block(inner, _, _, _), _):
+                            nested <- proof_replay_body_last_offset(inner, source_work, complete, depth + 1)
+                            return 0 if not proof_goal_bool_ref_value(complete)
+                        _:
+                            pass
+                    last <- nested if nested > last
+                return last
 
         def proof_replay_local_alias_call_value(value: Ast::Expr, expected_call: Ast::Expr) -> bool:
             match value:
@@ -310,16 +311,16 @@ extend ElisaProof:
                 work <- work + candidate_lookup_work
             return true
 
-        def proof_replay_local_alias_expr_touches_with_work(report: ProofReport&, expression: Ast::Expr, name: sview, writes: bool, source_work: mutable usize&) -> bool:
+        def proof_replay_local_alias_expr_touches_with_work(report: ProofReport&, owner_body: darray[Ast::Stmt]&, expression: Ast::Expr, name: sview, writes: bool, source_work: mutable usize&) -> bool:
             return true if not proof_replay_mutable_local_expr_work_charge(expression, source_work)
-            return proof_replay_source_expr_touches(report.source.source_declarations, expression, name, writes, 0)
+            return proof_replay_source_expr_touches(report.source.source_declarations, expression, name, writes, 0) or proof_replay_source_expr_calls_mutating_local_lambda(owner_body, expression, name, source_work, 0)
 
-        def proof_replay_local_alias_statement_touches_with_work(report: ProofReport&, statement: Ast::Stmt, name: sview, writes: bool, source_work: mutable usize&) -> bool:
+        def proof_replay_local_alias_statement_touches_with_work(report: ProofReport&, owner_body: darray[Ast::Stmt]&, statement: Ast::Stmt, name: sview, writes: bool, source_work: mutable usize&) -> bool:
             return true if not proof_replay_mutable_local_statement_work_charge_fail_closed(statement, source_work, 0)
-            return proof_replay_source_statement_touches(report.source.source_declarations, statement, name, writes, 0)
+            return proof_replay_source_statement_touches(report.source.source_declarations, statement, name, writes, 0) or proof_replay_source_body_calls_mutating_local_lambda(owner_body, [statement], name, source_work, 0)
 
         # The local's binding statement at `index` reaches the exact consumer position unchanged.
-        def proof_replay_local_alias_live(report: ProofReport&, body: darray[Ast::Stmt]&, index: usize, local_name: sview, binding_position: Ast::Pos, consumer_position: Ast::Pos, nested: bool, source_work: mutable usize&) -> bool:
+        def proof_replay_local_alias_live(report: ProofReport&, owner_body: darray[Ast::Stmt]&, body: darray[Ast::Stmt]&, index: usize, local_name: sview, binding_position: Ast::Pos, consumer_position: Ast::Pos, nested: bool, source_work: mutable usize&) -> bool:
             return false if:
                 index >= body.count or consumer_position.offset == 0 or binding_position.offset == 0
                 consumer_position.offset < binding_position.offset
@@ -332,17 +333,17 @@ extend ElisaProof:
                 later_position: Ast::Pos = proof_replay_statement_position(body[later])
                 if later_position.offset > consumer_position.offset:
                     break
-                touches: bool = proof_replay_local_alias_statement_touches_with_work(report, body[later], local_name, true, source_work)
+                touches: bool = proof_replay_local_alias_statement_touches_with_work(report, owner_body, body[later], local_name, true, source_work)
                 return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or touches
             return true
 
-        def proof_replay_local_alias_nested(report: ProofReport&, body: darray[Ast::Stmt]&, local_name: sview, binding_position: Ast::Pos, expected_call: Ast::Expr, consumer_position: Ast::Pos, reaching: bool, depth: usize, source_work: mutable usize&) -> usize:
+        def proof_replay_local_alias_nested(report: ProofReport&, owner_body: darray[Ast::Stmt]&, body: darray[Ast::Stmt]&, local_name: sview, binding_position: Ast::Pos, expected_call: Ast::Expr, consumer_position: Ast::Pos, reaching: bool, depth: usize, source_work: mutable usize&) -> usize:
             return ProofReplayLocalAlias::INVALID if depth >= ProofReplayLocalAlias::DEPTH_LIMIT
-            return proof_replay_local_alias_site(report, body, local_name, binding_position, expected_call, consumer_position, reaching, true, depth + 1, source_work)
+            return proof_replay_local_alias_site(report, owner_body, body, local_name, binding_position, expected_call, consumer_position, reaching, true, depth + 1, source_work)
 
         # Locate the alias site in `body`. `reaching` says whether, on entry to this list, the
         # local's value on every path is exactly the expected call's result.
-        def proof_replay_local_alias_site(report: ProofReport&, body: darray[Ast::Stmt]&, local_name: sview, binding_position: Ast::Pos, expected_call: Ast::Expr, consumer_position: Ast::Pos, reaching_on_entry: bool, nested: bool, depth: usize, source_work: mutable usize&) -> usize:
+        def proof_replay_local_alias_site(report: ProofReport&, owner_body: darray[Ast::Stmt]&, body: darray[Ast::Stmt]&, local_name: sview, binding_position: Ast::Pos, expected_call: Ast::Expr, consumer_position: Ast::Pos, reaching_on_entry: bool, nested: bool, depth: usize, source_work: mutable usize&) -> usize:
             return ProofReplayLocalAlias::INVALID if depth >= ProofReplayLocalAlias::DEPTH_LIMIT
             reaching: mutable bool = reaching_on_entry
             for index in 0..<body.count |index, body, report, local_name, binding_position, expected_call, consumer_position, nested, depth, reaching, source_work|:
@@ -364,7 +365,7 @@ extend ElisaProof:
                                 for child in inner |scoped|:
                                     scoped.push(child)
                                 scoped.push(Ast::Stmt.Expr(yielded, Ast::expr_pos(yielded)))
-                                found <- proof_replay_local_alias_nested(report, &scoped, local_name, binding_position, expected_call, consumer_position, false, depth, source_work)
+                                found <- proof_replay_local_alias_nested(report, owner_body, &scoped, local_name, binding_position, expected_call, consumer_position, false, depth, source_work)
                             _:
                                 pass
                     Ast::Stmt.Assign(Ast::Expr.Ident(name, _), operator, value, _):
@@ -377,50 +378,53 @@ extend ElisaProof:
                                 return ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_expr_work_charge(returned, source_work)
                                 if proof_replay_source_local_use(returned, local_name, binding_position, 0):
                                     return ProofReplayLocalAlias::INVALID if not reaching or consumer_position.offset < position.offset or consumer_position.offset >= position.end_offset
-                                    touches_return: bool = proof_replay_local_alias_expr_touches_with_work(report, returned, local_name, true, source_work)
+                                    touches_return: bool = proof_replay_local_alias_expr_touches_with_work(report, owner_body, returned, local_name, true, source_work)
                                     return ProofReplayLocalAlias::INVALID if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or touches_return
                                     found <- ProofReplayLocalAlias::VALID
                     Ast::Stmt.If(condition, yes, no, _):
-                        condition_touches: bool = proof_replay_local_alias_expr_touches_with_work(report, condition, local_name, true, source_work)
+                        condition_touches: bool = proof_replay_local_alias_expr_touches_with_work(report, owner_body, condition, local_name, true, source_work)
                         return ProofReplayLocalAlias::INVALID if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         branch_reaching: bool = reaching and not condition_touches
-                        found <- proof_replay_local_alias_nested(report, yes, local_name, binding_position, expected_call, consumer_position, branch_reaching, depth, source_work)
-                        found <- proof_replay_local_alias_nested(report, no, local_name, binding_position, expected_call, consumer_position, branch_reaching, depth, source_work) if found == ProofReplayLocalAlias::ABSENT
+                        found <- proof_replay_local_alias_nested(report, owner_body, yes, local_name, binding_position, expected_call, consumer_position, branch_reaching, depth, source_work)
+                        found <- proof_replay_local_alias_nested(report, owner_body, no, local_name, binding_position, expected_call, consumer_position, branch_reaching, depth, source_work) if found == ProofReplayLocalAlias::ABSENT
                     Ast::Stmt.Match(subject, arms, _):
-                        subject_touches: bool = proof_replay_local_alias_expr_touches_with_work(report, subject, local_name, true, source_work)
+                        subject_touches: bool = proof_replay_local_alias_expr_touches_with_work(report, owner_body, subject, local_name, true, source_work)
                         return ProofReplayLocalAlias::INVALID if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         subject_reaching: bool = reaching and not subject_touches
                         for arm in arms |found, report, local_name, binding_position, expected_call, consumer_position, subject_reaching, depth, source_work|:
                             continue if found != ProofReplayLocalAlias::ABSENT
-                            arm_reaching: bool = subject_reaching and not proof_replay_source_pattern_binds_with_work(arm.pattern, local_name, source_work, 0)
-                            found <- proof_replay_local_alias_nested(report, arm.body, local_name, binding_position, expected_call, consumer_position, arm_reaching, depth, source_work)
+                            guard_touches: bool = proof_replay_local_alias_expr_touches_with_work(report, owner_body, arm.guard, local_name, true, source_work)
+                            return ProofReplayLocalAlias::INVALID if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                            arm_reaching: bool = subject_reaching and not guard_touches and not proof_replay_source_pattern_binds_with_work(arm.pattern, local_name, source_work, 0)
+                            return ProofReplayLocalAlias::INVALID if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                            found <- proof_replay_local_alias_nested(report, owner_body, arm.body, local_name, binding_position, expected_call, consumer_position, arm_reaching, depth, source_work)
                     Ast::Stmt.While(_, inner, _) | Ast::Stmt.For(_, _, _, inner, _):
                         # A later iteration re-enters the body with whatever the body last wrote.
-                        loop_touches: bool = proof_replay_local_alias_statement_touches_with_work(report, statement, local_name, true, source_work)
+                        loop_touches: bool = proof_replay_local_alias_statement_touches_with_work(report, owner_body, statement, local_name, true, source_work)
                         return ProofReplayLocalAlias::INVALID if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         loop_reaching: bool = reaching and not loop_touches
-                        found <- proof_replay_local_alias_nested(report, inner, local_name, binding_position, expected_call, consumer_position, loop_reaching, depth, source_work)
+                        found <- proof_replay_local_alias_nested(report, owner_body, inner, local_name, binding_position, expected_call, consumer_position, loop_reaching, depth, source_work)
                     Ast::Stmt.Expr(Ast::Expr.Block(inner, _, _, _), _):
                         # The parser's captured-loop wrapper; treated as a loop for the same reason.
-                        block_touches: bool = proof_replay_local_alias_statement_touches_with_work(report, statement, local_name, true, source_work)
+                        block_touches: bool = proof_replay_local_alias_statement_touches_with_work(report, owner_body, statement, local_name, true, source_work)
                         return ProofReplayLocalAlias::INVALID if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         block_reaching: bool = reaching and not block_touches
-                        found <- proof_replay_local_alias_nested(report, inner, local_name, binding_position, expected_call, consumer_position, block_reaching, depth, source_work)
+                        found <- proof_replay_local_alias_nested(report, owner_body, inner, local_name, binding_position, expected_call, consumer_position, block_reaching, depth, source_work)
                     Ast::Stmt.Block(_, _, binding, inner, _):
-                        found <- proof_replay_local_alias_nested(report, inner, local_name, binding_position, expected_call, consumer_position, reaching and binding != local_name, depth, source_work)
+                        found <- proof_replay_local_alias_nested(report, owner_body, inner, local_name, binding_position, expected_call, consumer_position, reaching and binding != local_name, depth, source_work)
                     _:
                         pass
                 if direct_write and proof_replay_source_position_equal(position, binding_position):
                     return ProofReplayLocalAlias::INVALID if not proof_replay_local_alias_call_value(written_value, expected_call)
-                    return ProofReplayLocalAlias::VALID if proof_replay_local_alias_live(report, body, index, local_name, binding_position, consumer_position, nested, source_work)
+                    return ProofReplayLocalAlias::VALID if proof_replay_local_alias_live(report, owner_body, body, index, local_name, binding_position, consumer_position, nested, source_work)
                     return ProofReplayLocalAlias::INVALID
                 return found if found != ProofReplayLocalAlias::ABSENT
                 if direct_write:
-                    value_touches: bool = proof_replay_local_alias_expr_touches_with_work(report, written_value, local_name, true, source_work)
+                    value_touches: bool = proof_replay_local_alias_expr_touches_with_work(report, owner_body, written_value, local_name, true, source_work)
                     return ProofReplayLocalAlias::INVALID if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     reaching <- proof_replay_local_alias_call_value(written_value, expected_call) and not value_touches
                 else:
-                    statement_touches: bool = proof_replay_local_alias_statement_touches_with_work(report, statement, local_name, true, source_work)
+                    statement_touches: bool = proof_replay_local_alias_statement_touches_with_work(report, owner_body, statement, local_name, true, source_work)
                     return ProofReplayLocalAlias::INVALID if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     reaching <- false if statement_touches
             return ProofReplayLocalAlias::ABSENT
@@ -439,7 +443,7 @@ extend ElisaProof:
             return false if:
                 not proof_replay_source_owner_body_with_work(report, owner, report.analysis_2.replay_owner_line, &body, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 not proof_replay_local_alias_touch_work_reservation(report, body, local_name, source_work)
-            return proof_replay_local_alias_site(report, body, local_name, binding_position, call, consumer_position, false, false, 0, source_work) == ProofReplayLocalAlias::VALID
+            return proof_replay_local_alias_site(report, body, body, local_name, binding_position, call, consumer_position, false, false, 0, source_work) == ProofReplayLocalAlias::VALID
 
         # Ordinary aliases remain live through the source position consuming the summary.
         def proof_replay_summary_local_alias_valid(report: ProofReport&, owner: sview, local_name: sview, binding_position: Ast::Pos, call: Ast::Expr) -> bool:

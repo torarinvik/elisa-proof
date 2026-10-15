@@ -31,10 +31,10 @@ extend ElisaProof:
         # premise snapshots come from the frozen parser-origin source before any replay
         # bit is upgraded; incomplete admission or exhausted work leaves baseline replay
         # unchanged.
-        def proof_replay_source_typed_index_read_postconditions[@r](report: mutable ProofReport& @r, source: ProofSourceAnalysis[r]& @r, source_work: mutable usize&, source_binding_complete: bool) can[Memory.Allocate, Abort.Panic, Global{Read,Write}]:
+        def proof_replay_source_typed_index_read_postconditions[@r](report: mutable ProofReport& @r, source: ProofSourceAnalysis[r]& @r, scheduled_owners: darray[ProofSourceScheduledOwner]&, source_work: mutable usize&, source_binding_complete: bool) can[Memory.Allocate, Abort.Panic, Global{Read,Write}]:
             return if not source_binding_complete or not report.analysis_1.kernel.arena_validated or report.analysis_1.kernel.budget_exhausted
             return if report.analysis_2.replay_gaps == 0
-            return if proof_source_analysis_report_structure_bound_failure(source, report, &source_work) != ""
+            return if proof_source_analysis_report_structure_bound_failure(source, report, scheduled_owners, source_binding_complete, source_work) != ""
             # Avoid building any source/type indexes for the common case where baseline
             # replay left no shape-compatible postcondition certificate to retry. This
             # report-only preflight grants no authority and mutates no replay state.
@@ -51,14 +51,15 @@ extend ElisaProof:
                 continue if not obligation.found or obligation.entry.source_kind != "postcondition"
                 continue if obligation.entry.source_name != attempt.name or obligation.entry.owner_function_line != attempt.owner_function_line or obligation.entry.owner_function_offset != attempt.owner_function_offset
                 return if not proof_replay_source_work_charge(1, source_work)
+                return if not proof_replay_source_work_charge(2, source_work)
                 candidate_goals.push(attempt_index)
             return if candidate_goals.count == 0
             goal_findings: mutable darray[bool] = []
             # Zero here permits goal-level candidate analysis before refined diagnostic
             # filtering. Whole-report semantic errors still gate the final receipt below.
-            goal_candidates: (statuses: darray[bool], complete: bool, claims_admissible: bool) = proof_source_analysis_goal_admission_snapshot(source, report, source.import_failed, 0, &goal_findings, false, &source_work)
+            goal_candidates: (statuses: darray[bool], complete: bool, claims_admissible: bool) = proof_source_analysis_goal_admission_snapshot(source, report, source.import_failed, 0, &goal_findings, false, source_work)
             return if not goal_candidates.complete or goal_candidates.statuses.count != report.results.goal_attempts.count
-            fact_candidates: (statuses: darray[bool], complete: bool, claims_admissible: bool) = (proof_replay_attempt_fact_source_status_snapshot(report, goal_candidates.statuses, goal_candidates.complete, &source_work) can[Global{Read,Write}])
+            fact_candidates: (statuses: darray[bool], complete: bool, claims_admissible: bool) = (proof_replay_attempt_fact_source_status_snapshot(report, goal_candidates.statuses, goal_candidates.complete, source_work) can[Global{Read,Write}])
             return if not fact_candidates.complete or fact_candidates.statuses.count != report.results.goal_attempts.count
             candidate_count: mutable usize = 0
             for candidate_index in 0..<candidate_goals.count |candidate_index, candidate_goals, goal_candidates, fact_candidates, candidate_count, source_work|:
@@ -86,7 +87,7 @@ extend ElisaProof:
             generic_param_index.valid <- generic_param_index.valid and generic_line_index_ready
             base_context: (known: bool, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, generic_param_index: ProofSourceKernelGenericParamIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) = proof_source_kernel_base_context(file.top_decls, file.enum_annotations, generic_param_index, source_work)
             return if not base_context.known
-            owner_contexts: (complete: bool, index: ProofSourceKernelPostconditionContextIndex) = proof_source_kernel_postcondition_context_index_build(file.top_decls, file.generic_param_lines, file.generic_param_names, generic_valid, &source_work)
+            owner_contexts: (complete: bool, index: ProofSourceKernelPostconditionContextIndex) = proof_source_kernel_postcondition_context_index_build(file.top_decls, file.generic_param_lines, file.generic_param_names, generic_valid, source_work)
             return if not owner_contexts.complete
             validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
             typing_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayTypingWorkspace = ElisaProofKernelReplay::proof_kernel_replay_typing_workspace_new()
@@ -132,7 +133,7 @@ extend ElisaProof:
                 if cached_owner_matches:
                     environment <- (true, cached_environment)
                 else:
-                    environment <- proof_source_kernel_postcondition_environment_from_index(owner_contexts.index, attempt.name, attempt.owner_function_line, attempt.owner_function_offset, file.top_decls, base_context.type_index, base_context.tuple_label_index, base_context.generic_param_index, base_context.global_bindings, file.generic_param_lines, file.generic_param_names, generic_valid, &source_work, &scoped_function_index)
+                    environment <- proof_source_kernel_postcondition_environment_from_index(owner_contexts.index, attempt.name, attempt.owner_function_line, attempt.owner_function_offset, file.top_decls, base_context.type_index, base_context.tuple_label_index, base_context.generic_param_index, base_context.global_bindings, file.generic_param_lines, file.generic_param_names, generic_valid, source_work, &scoped_function_index)
                     if environment.known:
                         cached_owner_valid <- true
                         cached_owner_name <- attempt.name
@@ -142,6 +143,7 @@ extend ElisaProof:
                 return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 continue if not environment.known
                 kernel_facts: mutable darray[usize] = []
+                return if not proof_replay_source_work_charge(attempt.kernel_facts_count, source_work)
                 return if not proof_replay_source_work_charge(attempt.kernel_facts_count, source_work)
                 for fact_offset in 0..<attempt.kernel_facts_count |fact_offset, attempt, report, kernel_facts|:
                     kernel_facts.push(report.analysis_1.kernel.certificate_facts[attempt.kernel_facts_start + fact_offset])
@@ -155,7 +157,7 @@ extend ElisaProof:
                 # The report-structure check above requires sequential, unique
                 # certificate ownership for producer-proven attempts, so staging is
                 # linear and needs no repeated scan of prior candidates.
-                return if not proof_replay_source_work_charge(1, source_work)
+                return if not proof_replay_source_work_charge(2, source_work)
                 staged_replayed_certificates.push(attempt.certificate_index)
             return if not proof_replay_source_work_charge(staged_replayed_certificates.count, source_work)
             previous_staged_certificate: mutable usize = 0

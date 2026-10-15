@@ -30,19 +30,107 @@ extend ElisaProof:
             return (false, false, not_found, 0, 0)
 
         def proof_source_conversion_alias_formal_head(name: sview, owner_row: usize, report: mutable ProofReport&) -> (complete: bool, found: bool):
-            index: ProofSourceEffectIndex& = report.source_types.source_effect_index
-            alias_count: usize = index.aliases.alias_names.count
-            return (false, false) if:
-                owner_row >= alias_count
-                index.aliases.alias_generic_formal_starts.count != alias_count
-                index.aliases.alias_generic_formal_counts.count != alias_count
-                index.aliases.alias_generic_application_valid.count != alias_count
-                not index.aliases.alias_generic_application_valid[owner_row]
-            start: usize = index.aliases.alias_generic_formal_starts[owner_row]
-            count: usize = index.aliases.alias_generic_formal_counts[owner_row]
-            return (false, false) if start > index.aliases.alias_generic_formal_names.count or count > index.aliases.alias_generic_formal_names.count - start
-            for formal_index in 0..<count |formal_index, name, start, index, report|:
-                formal_name: sview = index.aliases.alias_generic_formal_names[start + formal_index]
-                return (false, false) if not proof_source_index_work_charge(report, sview_len(formal_name))
-                return (true, true) if formal_name == name
-            return (true, false)
+            lookup: (complete: bool, found: bool, count: usize, formal_index: usize) = proof_source_conversion_alias_formal_name_lookup(name, owner_row, report)
+            return (false, false) if not lookup.complete or lookup.count > 1
+            (true, lookup.found)
+
+        def proof_source_conversion_alias_formal_name_index_ensure(report: mutable ProofReport&) -> bool:
+            index: mutable ProofSourceEffectIndexAliases& = &report.source_types.source_effect_index.aliases
+            alias_count: usize = index.alias_names.count
+            formal_count: usize = index.alias_generic_formal_names.count
+            return false if:
+                index.alias_generic_formal_starts.count != alias_count
+                index.alias_generic_formal_counts.count != alias_count
+                index.alias_generic_application_valid.count != alias_count
+            capacity: usize = proof_name_index_capacity(formal_count)
+            if index.alias_generic_formal_name_index_valid:
+                if formal_count == 0:
+                    return index.alias_generic_formal_owner_rows.count == 0 and index.alias_generic_formal_name_index_hashes.count == 0 and index.alias_generic_formal_name_index_values.count == 0 and index.alias_generic_formal_name_index_counts.count == 0
+                return capacity != 0 and index.alias_generic_formal_owner_rows.count == formal_count and index.alias_generic_formal_name_index_hashes.count == capacity and index.alias_generic_formal_name_index_values.count == capacity and index.alias_generic_formal_name_index_counts.count == capacity
+            index.alias_generic_formal_name_index_valid <- false
+            index.alias_generic_formal_owner_rows.clear()
+            index.alias_generic_formal_name_index_hashes.clear()
+            index.alias_generic_formal_name_index_values.clear()
+            index.alias_generic_formal_name_index_counts.clear()
+            if formal_count == 0:
+                index.alias_generic_formal_name_index_valid <- capacity == 0
+                return capacity == 0
+            return false if capacity == 0 or capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+            return false if not proof_source_index_work_charge(report, formal_count) or not proof_source_index_work_charge(report, capacity * 4)
+            index.alias_generic_formal_owner_rows.resize(formal_count)
+            index.alias_generic_formal_name_index_hashes.resize(capacity)
+            index.alias_generic_formal_name_index_values.resize(capacity)
+            index.alias_generic_formal_name_index_counts.resize(capacity)
+            for slot in 0..<capacity |slot, index, formal_count, report|:
+                return false if not proof_source_index_work_charge(report, 1)
+                index.alias_generic_formal_name_index_values[slot] <- formal_count
+                index.alias_generic_formal_name_index_counts[slot] <- 0
+            next_formal: mutable usize = 0
+            for alias_row in 0..<alias_count |alias_row, index, formal_count, capacity, report, next_formal|:
+                return false if not proof_source_index_work_charge(report, 1)
+                start: usize = index.alias_generic_formal_starts[alias_row]
+                count: usize = index.alias_generic_formal_counts[alias_row]
+                return false if start != next_formal or start > formal_count or count > formal_count - start
+                next_formal <- start + count
+                for offset in 0..<count |offset, alias_row, start, index, formal_count, capacity, report|:
+                    flat: usize = start + offset
+                    name: sview = index.alias_generic_formal_names[flat]
+                    return false if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(name))
+                    index.alias_generic_formal_owner_rows[flat] <- alias_row
+                    hash: u32 = proof_expr_shape_mix(proof_name_hash(name), alias_row.i64())
+                    slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                    probes: mutable usize = 0
+                    placed: mutable bool = false
+                    while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, name, flat, alias_row, index, formal_count, capacity, report, placed|:
+                        return false if not proof_source_index_work_charge(report, 1)
+                        current: usize = index.alias_generic_formal_name_index_values[slot]
+                        if current == formal_count:
+                            return false if not proof_source_index_work_charge(report, 3)
+                            index.alias_generic_formal_name_index_hashes[slot] <- hash
+                            index.alias_generic_formal_name_index_values[slot] <- flat
+                            index.alias_generic_formal_name_index_counts[slot] <- 1
+                            placed <- true
+                            break
+                        if current < formal_count and index.alias_generic_formal_name_index_hashes[slot] == hash:
+                            current_name: sview = index.alias_generic_formal_names[current]
+                            return false if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(current_name))
+                            if index.alias_generic_formal_owner_rows[current] == alias_row and current_name == name:
+                                return false if not proof_source_index_work_charge(report, 1)
+                                index.alias_generic_formal_name_index_counts[slot] <- index.alias_generic_formal_name_index_counts[slot] + 1
+                                placed <- true
+                                break
+                        slot <- (slot + 1) % capacity
+                        probes <- probes + 1
+                    return false if not placed
+            return false if next_formal != formal_count
+            index.alias_generic_formal_name_index_valid <- true
+            return true
+
+        def proof_source_conversion_alias_formal_name_lookup(name: sview, owner_row: usize, report: mutable ProofReport&) -> (complete: bool, found: bool, count: usize, formal_index: usize):
+            index: mutable ProofSourceEffectIndexAliases& = &report.source_types.source_effect_index.aliases
+            alias_count: usize = index.alias_names.count
+            formal_count: usize = index.alias_generic_formal_names.count
+            return (false, false, 0, formal_count) if owner_row >= alias_count or index.alias_generic_formal_starts.count != alias_count or index.alias_generic_formal_counts.count != alias_count or index.alias_generic_application_valid.count != alias_count or not index.alias_generic_application_valid[owner_row]
+            return (false, false, 0, formal_count) if not proof_source_conversion_alias_formal_name_index_ensure(report)
+            return (true, false, 0, formal_count) if index.alias_generic_formal_counts[owner_row] == 0
+            return (false, false, 0, formal_count) if not proof_source_index_work_charge(report, sview_len(name))
+            capacity: usize = index.alias_generic_formal_name_index_hashes.count
+            return (false, false, 0, formal_count) if capacity == 0 or capacity != index.alias_generic_formal_name_index_values.count or capacity != index.alias_generic_formal_name_index_counts.count
+            hash: u32 = proof_expr_shape_mix(proof_name_hash(name), owner_row.i64())
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, name, owner_row, index, formal_count, capacity, report|:
+                return (false, false, 0, formal_count) if not proof_source_index_work_charge(report, 1)
+                current: usize = index.alias_generic_formal_name_index_values[slot]
+                return (true, false, 0, formal_count) if current == formal_count
+                return (false, false, 0, formal_count) if current > formal_count
+                if index.alias_generic_formal_name_index_hashes[slot] == hash:
+                    return (false, false, 0, formal_count) if current >= index.alias_generic_formal_owner_rows.count
+                    current_name: sview = index.alias_generic_formal_names[current]
+                    return (false, false, 0, formal_count) if not proof_source_index_work_charge(report, sview_len(current_name))
+                    if index.alias_generic_formal_owner_rows[current] == owner_row and current_name == name:
+                        return (false, false, 0, formal_count) if index.alias_generic_formal_name_index_counts[slot] == 0
+                        return (true, true, index.alias_generic_formal_name_index_counts[slot], current)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false, 0, formal_count)

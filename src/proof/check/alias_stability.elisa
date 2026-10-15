@@ -111,15 +111,37 @@ extend ElisaProof:
         # test has to be over types, and it is deliberately conservative: an unresolvable name, an
         # ambiguous alias and a form it does not recognize all count as able to hold a reference.
         def proof_call_lend_is_confined(functions: ProofFunctionTable&, callee_index: usize, lent_slot: usize) -> bool:
+            function_count: usize = functions.lookup.source.names.count
             return false if:
+                callee_index >= function_count
+                functions.parameters.metadata.param_starts.count != function_count or functions.parameters.metadata.param_counts.count != function_count
                 callee_index >= functions.parameters.metadata.param_starts.count or callee_index >= functions.parameters.metadata.param_counts.count
-                callee_index >= functions.parameters.regions.region_param_counts.count or functions.parameters.regions.region_param_counts[callee_index] != 0
+                functions.parameters.regions.region_param_starts.count != function_count or functions.parameters.regions.region_param_counts.count != function_count
                 callee_index >= functions.returns.return_references.count or functions.returns.return_references[callee_index]
                 callee_index >= functions.returns.return_regions.count or functions.returns.return_regions[callee_index] != ""
                 callee_index >= functions.returns.return_reference_free.count or not functions.returns.return_reference_free[callee_index]
                 callee_index >= functions.returns.return_type_marker_complete.count or not functions.returns.return_type_marker_complete[callee_index]
+            region_start: usize = functions.parameters.regions.region_param_starts[callee_index]
+            region_count: usize = functions.parameters.regions.region_param_counts[callee_index]
+            return false if:
+                region_count != 0
+                region_start > functions.parameters.regions.all_region_params.count
+                region_count > functions.parameters.regions.all_region_params.count - region_start
             parameter_start: usize = functions.parameters.metadata.param_starts[callee_index]
             parameter_count: usize = functions.parameters.metadata.param_counts[callee_index]
+            parameter_total: usize = functions.parameters.metadata.all_params.count
+            return false if:
+                lent_slot >= parameter_count
+                parameter_start > parameter_total or parameter_count > parameter_total - parameter_start
+                functions.parameters.metadata.all_parameter_references.count != parameter_total
+                functions.parameters.metadata.all_parameter_mutable_references.count != parameter_total
+                functions.parameters.metadata.all_parameter_type_marker_complete.count != parameter_total
+                functions.parameters.metadata.all_parameter_target_reference_free.count != parameter_total
+            selected_slot: usize = parameter_start + lent_slot
+            return false if:
+                not functions.parameters.metadata.all_parameter_type_marker_complete[selected_slot]
+                not functions.parameters.metadata.all_parameter_references[selected_slot]
+                functions.parameters.metadata.all_parameter_mutable_references[selected_slot]
             for offset in 0..<parameter_count |offset, functions, parameter_start, lent_slot|:
                 continue if offset == lent_slot
                 slot: usize = parameter_start + offset
@@ -156,8 +178,16 @@ extend ElisaProof:
                 if not known:
                     proof_push_aliased(aliased, argument_name)
                     continue
+                function_count: usize = functions.lookup.source.names.count
+                if index >= function_count or functions.parameters.metadata.param_starts.count != function_count or functions.parameters.metadata.param_counts.count != function_count:
+                    proof_push_aliased(aliased, argument_name)
+                    continue
                 parameter_start: usize = functions.parameters.metadata.param_starts[index]
                 parameter_count: usize = functions.parameters.metadata.param_counts[index]
+                parameter_total: usize = functions.parameters.metadata.all_params.count
+                if parameter_start > parameter_total or parameter_count > parameter_total - parameter_start or functions.parameters.metadata.all_parameter_references.count != parameter_total or functions.parameters.metadata.all_parameter_type_marker_complete.count != parameter_total:
+                    proof_push_aliased(aliased, argument_name)
+                    continue
                 slot: usize = proof_call_argument_slot(functions, index, argument_names, position, arguments.count)
                 if slot >= parameter_count or parameter_start + slot >= functions.parameters.metadata.all_parameter_references.count or parameter_start + slot >= functions.parameters.metadata.all_parameter_type_marker_complete.count or not functions.parameters.metadata.all_parameter_type_marker_complete[parameter_start + slot]:
                     proof_push_aliased(aliased, argument_name)
@@ -170,9 +200,12 @@ extend ElisaProof:
         # Which formal an actual lands on: its position, or the formal a named argument names.
         # `parameter_count` means the actual could not be placed.
         def proof_call_argument_slot(functions: ProofFunctionTable&, callee_index: usize, argument_names: darray[sview]&, position: usize, argument_count: usize) -> usize:
-            return 0 if callee_index >= functions.parameters.metadata.param_starts.count or callee_index >= functions.parameters.metadata.param_counts.count
+            parameter_total: usize = functions.parameters.metadata.all_params.count
+            function_count: usize = functions.lookup.source.names.count
+            return parameter_total if callee_index >= function_count or functions.parameters.metadata.param_starts.count != function_count or functions.parameters.metadata.param_counts.count != function_count
             parameter_start: usize = functions.parameters.metadata.param_starts[callee_index]
             parameter_count: usize = functions.parameters.metadata.param_counts[callee_index]
+            return parameter_total if parameter_start > parameter_total or parameter_count > parameter_total - parameter_start
             slot: mutable usize = parameter_count
             if argument_names.count == argument_count and position < argument_names.count and argument_names[position] != "":
                 for offset in 0..<parameter_count |offset, functions, parameter_start, argument_names, position, slot|:
@@ -216,7 +249,7 @@ extend ElisaProof:
                         confined: mutable bool = false
                         if confinable and callee_known and lend.known:
                             slot: usize = proof_call_argument_slot(functions, called_index, argument_names, position, arguments.count)
-                            confined <- slot < functions.parameters.metadata.param_counts[called_index] and proof_call_lend_is_confined(functions, called_index, slot)
+                            confined <- proof_call_lend_is_confined(functions, called_index, slot)
                         proof_collect_aliased_in_expression(lend.operand, functions, aliased, confinable, value_roots) if confined
                         proof_collect_aliased_in_expression(argument, functions, aliased, confinable, value_roots) if not confined
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
@@ -524,60 +557,6 @@ extend ElisaProof:
         # as a scalar one does. The binding is a current local or parameter, or a match payload
         # symbol `proof_freshen_opaque_bindings` registered because its scrutinee is such a
         # binding. A field chain under it is part of the same value. An index is not followed:
-        # its subscript is a separate term with its own stability question.
-        # First recognize the narrow place-chain subset. Complex arguments are rejected by the
-        # value shortcut at their root, so charging a full repeated AST/list scan for them would
-        # spend budget on work the classifier never performs. This bounded prefix scan is charged
-        # independently; supported chains reserve one metered shortcut traversal and terminal
-        # membership scan.
-        def proof_value_argument_shape_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, supported: bool, cost: usize, terminal_name: sview):
-            return (true, false, 0, "") if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            return (false, false, 0, "") if not proof_replay_source_work_charge_or_exhaust(1, source_work)
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    return (false, false, 0, "") if not proof_replay_source_work_charge_or_exhaust(sview_len(name), source_work)
-                    return (true, name != "", 1 + sview_len(name), name)
-                Ast::Expr.Field(object, field_name, _):
-                    return (false, false, 0, "") if not proof_replay_source_work_charge_or_exhaust(sview_len(field_name), source_work)
-                    return (true, false, 1 + sview_len(field_name), "") if field_name == ""
-                    nested: (complete: bool, supported: bool, cost: usize, terminal_name: sview) = proof_value_argument_shape_with_work(object, source_work, depth + 1)
-                    (nested.complete, nested.supported, nested.cost + 1 + sview_len(field_name), nested.terminal_name)
-                Ast::Expr.Paren(inner, _):
-                    nested: (complete: bool, supported: bool, cost: usize, terminal_name: sview) = proof_value_argument_shape_with_work(inner, source_work, depth + 1)
-                    (nested.complete, nested.supported, nested.cost + 1, nested.terminal_name)
-                _:
-                    (true, false, 1, "")
-
-        def proof_value_argument_stable(expression: Ast::Expr, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, local_extents: darray[sview]&, depth: usize) -> bool:
-            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    return false if:
-                        name == "" or not (any owned in local_extents where owned == name)
-                        any existing in aliased where existing == name
-                    return (any candidate in names where candidate == name) or (any parameter in parameters where parameter == name) or proof_name_is_reserved_internal(name)
-                Ast::Expr.Field(object, field_name, _):
-                    return false if field_name == ""
-                    return proof_value_argument_stable(object, names, parameters, aliased, local_extents, depth + 1)
-                Ast::Expr.Paren(inner, _):
-                    return proof_value_argument_stable(inner, names, parameters, aliased, local_extents, depth + 1)
-                _:
-                    return false
-
-        # The binding a pure place names through fields alone, or "" for any other form.
-        def proof_value_place_root(expression: Ast::Expr, depth: usize) -> sview:
-            return "" if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    return name
-                Ast::Expr.Field(object, field_name, _):
-                    return "" if field_name == ""
-                    return proof_value_place_root(object, depth + 1)
-                Ast::Expr.Paren(inner, _):
-                    return proof_value_place_root(inner, depth + 1)
-                _:
-                    return ""
-
         # Re-establish, after a nested opaque call, every pre-call fact that is call-stable for
         # the current function. Witnesses are read from the pre-call state, which still holds
         # every type bound the call could not remove.
@@ -587,3 +566,4 @@ extend ElisaProof:
         # point: this is the lend itself.
 
 include "./alias_stability_integrated_helpers.elisa"
+include "./alias_value_stability.elisa"

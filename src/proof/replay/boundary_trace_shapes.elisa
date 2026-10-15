@@ -117,15 +117,24 @@ extend ElisaProof:
                     not proof_replay_summary_owner_source_scan_with_limit(report, trace.name, owner_line, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     not proof_replay_summary_expr_charge_with_limit(trace.expression, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                # The control-flow validator has its own tighter work cap. Keep it local so
-                # certificates and boundary facts processed earlier in this batch cannot make
-                # this check fail just because the shared report-wide counter is already large.
-                control_work: mutable usize = 0
-                return false if:
-                    not (proof_replay_control_loop_fact_source_with_work(report, trace, &control_work) can Global{Read,Write})
-                    source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or control_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
-                source_work <- source_work + control_work
-                return true
+                # Control flow has a tighter per-check cap, while this replay batch also has a
+                # shared remaining allowance. Seed the local meter near its cap when the batch
+                # has less than one full control allowance, so the existing nested walkers can
+                # consume at most the caller's actual remaining budget without rethreading a new
+                # limit through every control helper.
+                return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                remaining_batch_work: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                control_allowance: usize = PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT if remaining_batch_work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT else remaining_batch_work
+                return false if control_allowance == 0
+                control_work_seed: usize = PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - control_allowance
+                control_work: mutable usize = control_work_seed
+                control_valid: bool = (proof_replay_control_loop_fact_source_with_work(report, trace, &control_work) can Global{Read,Write})
+                # Debit consumed work even when validation rejects the trace. Otherwise
+                # repeated invalid traces each receive a fresh local allowance.
+                return false if control_work < control_work_seed or control_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+                control_work_used: usize = control_work - control_work_seed
+                return false if not proof_replay_source_work_charge_or_exhaust(control_work_used, source_work)
+                return control_valid
             if trace.kind in {"runtime-assert", "runtime-guard"}:
                 return false if:
                     not proof_replay_summary_owner_source_preflight(report, trace.name, report.analysis_2.replay_owner_line, source_work)

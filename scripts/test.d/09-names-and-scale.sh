@@ -89,6 +89,13 @@ if [[ "$effect_containment_status" -ne 0 ]]; then
     exit 1
 fi
 
+run_json_report "$ROOT_DIR/examples/effect_containment_duplicate_module_names.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved", report.get("findings"); assert report["replay"]["gaps"] == 0; actions = [g for g in report["goals"] if g["rule"] == "effect-containment" and g["name"] == "action"]; assert len(actions) == 2 and all(g["replay_status"] == "replayed" for g in actions), actions'
+duplicate_effect_status=${PIPESTATUS[1]}
+if [[ "$duplicate_effect_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: same-named module effect rows did not both replay\n' >&2
+    exit 1
+fi
+
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_effect_containment.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; certified = {g["name"] for g in report["goals"] if g["rule"] == "effect-containment"}; assert not (certified & {"narrower_than_callee", "one_uncovered_callee", "opaque_callee"}); kinds = {f["name"]: (f["kind"], f["status"]) for f in report["findings"]}; assert kinds["narrower_than_callee"] == ("effect-row-exceeded", "unknown"); assert kinds["opaque_callee"] == ("effect-call-opaque", "unsupported")'
 rejected_effect_status=${PIPESTATUS[1]}

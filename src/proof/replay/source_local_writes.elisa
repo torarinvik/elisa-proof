@@ -49,6 +49,8 @@ extend ElisaProof:
             match callee:
                 Ast::Expr.Ident(name, _) | Ast::Expr.Scope(_, name, _):
                     return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_source_callee_name(inner)
                 _:
                     return ""
 
@@ -133,6 +135,175 @@ extend ElisaProof:
             return true if proof_replay_source_expr_touches(declarations, callee, name, writes, depth + 1)
             for argument in arguments |declarations, name, writes, depth|:
                 return true if proof_replay_source_expr_touches(declarations, argument, name, writes, depth + 1)
+            return false
+
+        # A local lambda can mutate a captured place even when called with no arguments. The
+        # ordinary call visitor cannot resolve that through its global declaration index, so
+        # source-site validators use this owner-body check for calls in a binding's live range.
+        def proof_replay_source_body_has_call(body: darray[Ast::Stmt]&, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= ProofReplaySourceLocal::DEPTH_LIMIT
+            for statement in body |work, depth|:
+                return true if not proof_replay_source_touch_work_charge(1, work)
+                match statement:
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                        return true if not proof_replay_mutable_local_expr_work_charge(expression, work)
+                        return true if proof_replay_expression_contains_call_node(expression, 0)
+                    Ast::Stmt.Return(value, _):
+                        if value is expression:
+                            return true if not proof_replay_mutable_local_expr_work_charge(expression, work)
+                            return true if proof_replay_expression_contains_call_node(expression, 0)
+                    Ast::Stmt.VarDecl(_, _, expression, _) | Ast::Stmt.Assign(_, _, expression, _):
+                        return true if not proof_replay_mutable_local_expr_work_charge(expression, work)
+                        return true if proof_replay_expression_contains_call_node(expression, 0)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        return true if not proof_replay_mutable_local_expr_work_charge(condition, work)
+                        return true if proof_replay_expression_contains_call_node(condition, 0)
+                        return true if proof_replay_source_body_has_call(yes, work, depth + 1) or proof_replay_source_body_has_call(no, work, depth + 1)
+                    Ast::Stmt.While(condition, nested, _) | Ast::Stmt.For(_, _, condition, nested, _):
+                        return true if not proof_replay_mutable_local_expr_work_charge(condition, work)
+                        return true if proof_replay_expression_contains_call_node(condition, 0) or proof_replay_source_body_has_call(nested, work, depth + 1)
+                    Ast::Stmt.Match(subject, arms, _):
+                        return true if not proof_replay_mutable_local_expr_work_charge(subject, work)
+                        return true if proof_replay_expression_contains_call_node(subject, 0)
+                        for arm in arms |work, depth|:
+                            return true if not proof_replay_source_touch_work_charge(1, work)
+                            return true if not proof_replay_mutable_local_expr_work_charge(arm.guard, work)
+                            return true if proof_replay_expression_contains_call_node(arm.guard, 0) or proof_replay_source_body_has_call(arm.body, work, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _) | Ast::Stmt.Expr(Ast::Expr.Block(nested, _, _, _), _):
+                        return true if proof_replay_source_body_has_call(nested, work, depth + 1)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return true
+            return false
+
+        def proof_replay_source_local_lambda_writes_body(body: darray[Ast::Stmt]&, callable: sview, tracked: sview, call_position: Ast::Pos, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= ProofReplaySourceLocal::DEPTH_LIMIT
+            found_direct_lambda: mutable bool = false
+            for statement in body |body, callable, tracked, call_position, work, depth, found_direct_lambda|:
+                return true if not proof_replay_source_touch_work_charge(1, work)
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, _, Ast::Expr.Lambda(_, lambda_body, _), declaration_position):
+                        if local_name == callable and declaration_position.offset > 0 and declaration_position.offset < call_position.offset:
+                            found_direct_lambda <- true
+                            return true if not proof_replay_mutable_local_body_work_charge(lambda_body, work, 0)
+                            return true if proof_replay_source_body_touches([], lambda_body, tracked, true, 0) or proof_replay_source_body_has_call(lambda_body, work, 0)
+                    Ast::Stmt.VarDecl(local_name, _, _, declaration_position):
+                        return true if local_name == callable and declaration_position.offset > 0 and declaration_position.offset < call_position.offset
+                    Ast::Stmt.Assign(Ast::Expr.Ident(local_name, _), TokenKind.Assign, Ast::Expr.Lambda(_, lambda_body, _), declaration_position):
+                        if local_name == callable and declaration_position.offset > 0 and declaration_position.offset < call_position.offset:
+                            found_direct_lambda <- true
+                            return true if not proof_replay_mutable_local_body_work_charge(lambda_body, work, 0)
+                            return true if proof_replay_source_body_touches([], lambda_body, tracked, true, 0) or proof_replay_source_body_has_call(lambda_body, work, 0)
+                    Ast::Stmt.Assign(Ast::Expr.Ident(local_name, _), _, _, declaration_position):
+                        return true if local_name == callable and declaration_position.offset > 0 and declaration_position.offset < call_position.offset
+                    Ast::Stmt.If(_, yes, no, _):
+                        return true if proof_replay_source_local_lambda_writes_body(yes, callable, tracked, call_position, work, depth + 1)
+                        return true if proof_replay_source_local_lambda_writes_body(no, callable, tracked, call_position, work, depth + 1)
+                    Ast::Stmt.For(_, variables, _, nested, _):
+                        return true if any variable in variables where variable == callable
+                        return true if proof_replay_source_local_lambda_writes_body(nested, callable, tracked, call_position, work, depth + 1)
+                    Ast::Stmt.While(_, nested, _):
+                        return true if proof_replay_source_local_lambda_writes_body(nested, callable, tracked, call_position, work, depth + 1)
+                    Ast::Stmt.Block(_, clause, binding, nested, _):
+                        return true if binding == callable or any word in clause where word == callable
+                        return true if proof_replay_source_local_lambda_writes_body(nested, callable, tracked, call_position, work, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |callable, tracked, call_position, work, depth|:
+                            return true if not proof_replay_source_touch_work_charge(1, work)
+                            return true if proof_replay_source_pattern_binds_with_work(arm.pattern, callable, work, 0)
+                            return true if proof_replay_source_local_lambda_writes_body(arm.body, callable, tracked, call_position, work, depth + 1)
+                    Ast::Stmt.Expr(Ast::Expr.Block(nested, _, _, _), _):
+                        return true if proof_replay_source_local_lambda_writes_body(nested, callable, tracked, call_position, work, depth + 1)
+                    _:
+                        pass
+            if not found_direct_lambda:
+                return true if not proof_replay_mutable_local_body_work_charge(body, work, 0)
+                return proof_replay_source_body_declares_unmetered([], body, callable)
+            return false
+
+        def proof_replay_source_expr_calls_mutating_local_lambda(body: darray[Ast::Stmt]&, expression: Ast::Expr, tracked: sview, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= ProofReplaySourceLocal::DEPTH_LIMIT
+            return true if not proof_replay_source_touch_work_charge(1, work)
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, position):
+                    callable: sview = proof_replay_source_callee_name(callee)
+                    return true if callable == ""
+                    return true if proof_replay_source_local_lambda_writes_body(body, callable, tracked, position, work, 0)
+                    return true if proof_replay_source_expr_calls_mutating_local_lambda(body, callee, tracked, work, depth + 1)
+                    for argument in arguments |body, tracked, work, depth|:
+                        return true if proof_replay_source_expr_calls_mutating_local_lambda(body, argument, tracked, work, depth + 1)
+                    return false
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _):
+                    return proof_replay_source_expr_calls_mutating_local_lambda(body, inner, tracked, work, depth + 1)
+                Ast::Expr.Index(left, right, _) | Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Refinement(left, right, _):
+                    return proof_replay_source_expr_calls_mutating_local_lambda(body, left, tracked, work, depth + 1) or proof_replay_source_expr_calls_mutating_local_lambda(body, right, tracked, work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    return proof_replay_source_expr_calls_mutating_local_lambda(body, object, tracked, work, depth + 1) or proof_replay_source_expr_calls_mutating_local_lambda(body, low, tracked, work, depth + 1) or proof_replay_source_expr_calls_mutating_local_lambda(body, high, tracked, work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_replay_source_expr_calls_mutating_local_lambda(body, object, tracked, work, depth + 1)
+                    for argument in arguments |body, tracked, work, depth|:
+                        return true if proof_replay_source_expr_calls_mutating_local_lambda(body, argument, tracked, work, depth + 1)
+                    return false
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |body, tracked, work, depth|:
+                        return true if proof_replay_source_expr_calls_mutating_local_lambda(body, element, tracked, work, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |body, tracked, work, depth|:
+                        return true if proof_replay_source_expr_calls_mutating_local_lambda(body, entry.key, tracked, work, depth + 1) or proof_replay_source_expr_calls_mutating_local_lambda(body, entry.value, tracked, work, depth + 1)
+                    return false
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_replay_source_expr_calls_mutating_local_lambda(body, base, tracked, work, depth + 1)
+                    for field in fields |body, tracked, work, depth|:
+                        return true if proof_replay_source_expr_calls_mutating_local_lambda(body, field.value, tracked, work, depth + 1)
+                    return false
+                Ast::Expr.Match(subject, arms, _) | Ast::Expr.Catch(subject, arms, _):
+                    return true if proof_replay_source_expr_calls_mutating_local_lambda(body, subject, tracked, work, depth + 1)
+                    for arm in arms |body, tracked, work, depth|:
+                        return true if proof_replay_source_expr_calls_mutating_local_lambda(body, arm.guard, tracked, work, depth + 1) or proof_replay_source_body_calls_mutating_local_lambda(body, arm.body, tracked, work, depth + 1)
+                    return false
+                Ast::Expr.Comprehension(_, iterable, condition, result, _):
+                    return proof_replay_source_expr_calls_mutating_local_lambda(body, iterable, tracked, work, depth + 1) or proof_replay_source_expr_calls_mutating_local_lambda(body, condition, tracked, work, depth + 1) or proof_replay_source_expr_calls_mutating_local_lambda(body, result, tracked, work, depth + 1)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return proof_replay_source_expr_calls_mutating_local_lambda(body, guarded, tracked, work, depth + 1) or proof_replay_source_body_calls_mutating_local_lambda(body, recovery, tracked, work, depth + 1)
+                Ast::Expr.Lambda(_, nested, _):
+                    return proof_replay_source_body_calls_mutating_local_lambda(body, nested, tracked, work, depth + 1)
+                Ast::Expr.Block(nested, value, _, _):
+                    return proof_replay_source_body_calls_mutating_local_lambda(body, nested, tracked, work, depth + 1) or proof_replay_source_expr_calls_mutating_local_lambda(body, value, tracked, work, depth + 1)
+                Ast::Expr.StaticEffectCall(_, _, _, arguments, _, _):
+                    for argument in arguments |body, tracked, work, depth|:
+                        return true if proof_replay_source_expr_calls_mutating_local_lambda(body, argument, tracked, work, depth + 1)
+                    return false
+                _:
+                    return false
+
+        def proof_replay_source_body_calls_mutating_local_lambda(owner_body: darray[Ast::Stmt]&, body: darray[Ast::Stmt]&, tracked: sview, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= ProofReplaySourceLocal::DEPTH_LIMIT
+            for statement in body |owner_body, tracked, work, depth|:
+                return true if not proof_replay_source_touch_work_charge(1, work)
+                match statement:
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_replay_source_expr_calls_mutating_local_lambda(owner_body, expression, tracked, work, depth + 1)
+                    Ast::Stmt.Return(value, _):
+                        if value is expression:
+                            return true if proof_replay_source_expr_calls_mutating_local_lambda(owner_body, expression, tracked, work, depth + 1)
+                    Ast::Stmt.VarDecl(_, _, expression, _) | Ast::Stmt.Assign(_, _, expression, _):
+                        return true if proof_replay_source_expr_calls_mutating_local_lambda(owner_body, expression, tracked, work, depth + 1)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        return true if proof_replay_source_expr_calls_mutating_local_lambda(owner_body, condition, tracked, work, depth + 1)
+                        return true if proof_replay_source_body_calls_mutating_local_lambda(owner_body, yes, tracked, work, depth + 1) or proof_replay_source_body_calls_mutating_local_lambda(owner_body, no, tracked, work, depth + 1)
+                    Ast::Stmt.While(condition, nested, _) | Ast::Stmt.For(_, _, condition, nested, _):
+                        return true if proof_replay_source_expr_calls_mutating_local_lambda(owner_body, condition, tracked, work, depth + 1) or proof_replay_source_body_calls_mutating_local_lambda(owner_body, nested, tracked, work, depth + 1)
+                    Ast::Stmt.Match(subject, arms, _):
+                        return true if proof_replay_source_expr_calls_mutating_local_lambda(owner_body, subject, tracked, work, depth + 1)
+                        for arm in arms |owner_body, tracked, work, depth|:
+                            return true if not proof_replay_source_touch_work_charge(1, work)
+                            return true if proof_replay_source_expr_calls_mutating_local_lambda(owner_body, arm.guard, tracked, work, depth + 1) or proof_replay_source_body_calls_mutating_local_lambda(owner_body, arm.body, tracked, work, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _) | Ast::Stmt.Expr(Ast::Expr.Block(nested, _, _, _), _):
+                        return true if proof_replay_source_body_calls_mutating_local_lambda(owner_body, nested, tracked, work, depth + 1)
+                    _:
+                        pass
             return false
 
         def proof_replay_source_arms_touch(declarations: darray[Ast::Decl]&, arms: darray[Ast::MatchArm]&, name: sview, writes: bool, depth: usize) -> bool:

@@ -1,0 +1,158 @@
+# Source-derived runtime-index admission with branch-local refinement aliases.
+struct ProofSourceRuntimeAliasSet:
+    names: mutable darray[sview]
+    hashes: mutable darray[u32]
+    values: mutable darray[usize]
+    indexed: bool
+    valid: bool
+
+extend ElisaProof:
+    private:
+        const PROOF_SOURCE_RUNTIME_ALIAS_INDEX_THRESHOLD: usize = 8
+        const PROOF_SOURCE_RUNTIME_ALIAS_INDEX_EMPTY: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+
+        def proof_source_runtime_alias_set_empty() -> ProofSourceRuntimeAliasSet:
+            ProofSourceRuntimeAliasSet{names: [], hashes: [], values: [], indexed: false, valid: true}
+
+        def proof_source_runtime_alias_index_build(aliases: mutable ProofSourceRuntimeAliasSet&, report: mutable ProofReport&) -> bool:
+            aliases.indexed <- false
+            aliases.valid <- false
+            count: usize = aliases.names.count
+            # Reserve room for geometric growth. Sizing exactly for `count` would
+            # cross the half-load rebuild threshold again on the next insertion.
+            return false if count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+            # `proof_name_index_capacity` already provides a half-load table. Include
+            # one future insertion in that target so growth does not rebuild again on
+            # the very next alias, without doubling the target a second time.
+            capacity: usize = proof_name_index_capacity(count + 1)
+            return false if:
+                capacity == 0
+                count > capacity / 2
+                not proof_source_index_work_charge(report, capacity) or not proof_source_index_work_charge(report, count)
+            hashes: mutable darray[u32] = []
+            values: mutable darray[usize] = []
+            hashes.resize(capacity)
+            values.resize(capacity)
+            for slot in 0..<capacity |slot, values|:
+                values[slot] <- PROOF_SOURCE_RUNTIME_ALIAS_INDEX_EMPTY
+            for row in 0..<count |row, aliases, hashes, values, count, capacity, report|:
+                name: sview = aliases.names[row]
+                return false if not proof_source_index_work_charge(report, sview_len(name))
+                hash: u32 = proof_name_hash(name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, row, name, hash, aliases, hashes, values, count, capacity, report, placed|:
+                    return false if not proof_source_index_work_charge(report, 1)
+                    current: usize = values[slot]
+                    if current == PROOF_SOURCE_RUNTIME_ALIAS_INDEX_EMPTY:
+                        hashes[slot] <- hash
+                        values[slot] <- row
+                        placed <- true
+                        break
+                    return false if current >= count
+                    if hashes[slot] == hash:
+                        current_name: sview = aliases.names[current]
+                        return false if not proof_source_index_work_charge(report, sview_len(current_name))
+                        return false if current_name == name
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            aliases.hashes <- hashes
+            aliases.values <- values
+            aliases.indexed <- true
+            aliases.valid <- true
+            return true
+
+        def proof_source_runtime_alias_lookup(aliases: ProofSourceRuntimeAliasSet, name: sview, report: mutable ProofReport&) -> (complete: bool, present: bool):
+            return (false, false) if not aliases.valid or not proof_source_index_work_charge(report, sview_len(name))
+            if not aliases.indexed:
+                return (false, false) if aliases.names.count >= PROOF_SOURCE_RUNTIME_ALIAS_INDEX_THRESHOLD or aliases.hashes.count != 0 or aliases.values.count != 0
+                for alias in aliases.names |alias, name, report|:
+                    return (false, false) if not proof_source_index_work_charge(report, 1) or not proof_source_index_work_charge(report, sview_len(alias))
+                    return (true, true) if alias == name
+                return (true, false)
+            capacity: usize = aliases.hashes.count
+            count: usize = aliases.names.count
+            return (false, false) if capacity == 0 or aliases.values.count != capacity or count < PROOF_SOURCE_RUNTIME_ALIAS_INDEX_THRESHOLD or count > capacity / 2
+            hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, name, hash, aliases, capacity, count, report|:
+                return (false, false) if not proof_source_index_work_charge(report, 1)
+                current: usize = aliases.values[slot]
+                return (true, false) if current == PROOF_SOURCE_RUNTIME_ALIAS_INDEX_EMPTY
+                return (false, false) if current >= count
+                if aliases.hashes[slot] == hash:
+                    current_name: sview = aliases.names[current]
+                    return (false, false) if not proof_source_index_work_charge(report, sview_len(current_name))
+                    return (true, true) if current_name == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false)
+
+        def proof_source_runtime_alias_index_insert(aliases: mutable ProofSourceRuntimeAliasSet&, row: usize, report: mutable ProofReport&) -> bool:
+            return false if not aliases.indexed or row >= aliases.names.count
+            capacity: usize = aliases.hashes.count
+            return false if capacity == 0 or aliases.values.count != capacity or aliases.names.count > capacity / 2
+            name: sview = aliases.names[row]
+            return false if not proof_source_index_work_charge(report, sview_len(name))
+            hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, row, name, hash, aliases, capacity, report|:
+                return false if not proof_source_index_work_charge(report, 1)
+                current: usize = aliases.values[slot]
+                if current == PROOF_SOURCE_RUNTIME_ALIAS_INDEX_EMPTY:
+                    aliases.hashes[slot] <- hash
+                    aliases.values[slot] <- row
+                    return true
+                return false if current >= row
+                if aliases.hashes[slot] == hash:
+                    current_name: sview = aliases.names[current]
+                    return false if not proof_source_index_work_charge(report, sview_len(current_name))
+                    return false if current_name == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return false
+
+        # The parser rewrites non-variant `is TARGET as NAME` to an `is` binary whose RHS
+        # is only `Ident(NAME)`. The original target type is no longer present in report.source.
+        # Keep such names as unknown in the true branch; this prevents accidentally resolving
+        # a same-named outer parameter as the alias's type.
+        def proof_source_runtime_alias_name_contains(aliases: ProofSourceRuntimeAliasSet, name: sview, report: mutable ProofReport&) -> bool:
+            lookup: (complete: bool, present: bool) = proof_source_runtime_alias_lookup(aliases, name, report)
+            return not lookup.complete or lookup.present
+
+        def proof_source_runtime_alias_add(aliases: mutable ProofSourceRuntimeAliasSet&, name: sview, report: mutable ProofReport&) -> bool:
+            return false if:
+                name == ""
+            lookup: (complete: bool, present: bool) = proof_source_runtime_alias_lookup(aliases, name, report)
+            return false if not lookup.complete
+            return true if lookup.present
+            aliases.valid <- false
+            aliases.names.push(name)
+            rebuild: bool = aliases.indexed and aliases.names.count > aliases.hashes.count / 2 or not aliases.indexed and aliases.names.count >= PROOF_SOURCE_RUNTIME_ALIAS_INDEX_THRESHOLD
+            if rebuild:
+                return false if not proof_source_runtime_alias_index_build(aliases, report)
+            else:
+                return false if aliases.indexed and not proof_source_runtime_alias_index_insert(aliases, aliases.names.count - 1, report)
+            aliases.valid <- true
+            return true
+
+        def proof_source_runtime_alias_set_from_names(names: darray[sview], report: mutable ProofReport&) -> (complete: bool, aliases: ProofSourceRuntimeAliasSet):
+            aliases: mutable ProofSourceRuntimeAliasSet = proof_source_runtime_alias_set_empty()
+            for name in names |aliases, report|:
+                return (false, aliases) if not proof_source_index_work_charge(report, 1) or not proof_source_runtime_alias_add(&aliases, name, report)
+            return (true, aliases)
+
+        # darray assignment copies only the header. Any branch-local append or hash-slot update
+        # would otherwise mutate storage still visible through the parent alias set. Rebuild a
+        # detached set under the same source-work meter before a scope mutates its aliases.
+        def proof_source_runtime_alias_set_clone_with_work(source: ProofSourceRuntimeAliasSet, report: mutable ProofReport&) -> (complete: bool, aliases: ProofSourceRuntimeAliasSet):
+            aliases: mutable ProofSourceRuntimeAliasSet = proof_source_runtime_alias_set_empty()
+            return (false, aliases) if not source.valid
+            for name in source.names |aliases, report|:
+                return (false, aliases) if not proof_source_index_work_charge(report, 1)
+                return (false, aliases) if not proof_source_runtime_alias_add(&aliases, name, report)
+            return (true, aliases)

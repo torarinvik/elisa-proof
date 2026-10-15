@@ -14,7 +14,7 @@ extend ElisaProof:
 
         def proof_quantified_call_source_expression_charge(expression: Ast::Expr, repetitions: usize, source_work: mutable usize&) -> bool:
             return false if source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT
-            complete: bool = proof_replay_summary_expr_repeat_charge_with_limit(expression, repetitions, &source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT)
+            complete: bool = proof_replay_summary_expr_repeat_charge_with_limit(expression, repetitions, source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT)
             if not complete:
                 source_work <- PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT + 1
                 return false
@@ -30,7 +30,7 @@ extend ElisaProof:
                 # Reserve the fact cost walk and the traversal performed by the
                 # subsequent expression-array copy separately. The element count
                 # above accounts for extending the destination array.
-                if not proof_replay_summary_expr_repeat_charge_with_limit(fact, 1, &source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT):
+                if not proof_replay_summary_expr_repeat_charge_with_limit(fact, 1, source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT):
                     source_work <- PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT + 1
                     return false
             true
@@ -50,87 +50,88 @@ extend ElisaProof:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, owner, "quantified call-summary preparation exceeded its bounded source-work budget", "quantified-call-source-work", source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT)
 
         def proof_add_quantified_call_summaries_depth(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, report: mutable ProofReport&, owner: sview, instantiated: bool, depth: usize, budget: mutable usize&, source_work: mutable usize&, solver_work: mutable usize&, solver_exhausted: mutable bool&) -> void can[Global{Read,Write}]:
-            return if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or budget == 0 or source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT or solver_exhausted
-            return if not proof_quantified_call_source_charge(1, source_work)
-            budget <- budget - 1
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    (proof_add_quantified_call_summaries_depth(inner, facts, functions, annotations, report, owner, instantiated, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
-                Ast::Expr.Unary(_, operand, _):
-                    (proof_add_quantified_call_summaries_depth(operand, facts, functions, annotations, report, owner, instantiated, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
-                Ast::Expr.Field(object, _, _):
-                    # The pure-call witness builder descends through field receivers.
-                    # Visit the same subtree here so calls reached through a field
-                    # argument get their own source-work reservation before witness
-                    # construction; otherwise a large receiver tree could be rescanned
-                    # outside the quantified traversal's per-node charges.
-                    (proof_add_quantified_call_summaries_depth(object, facts, functions, annotations, report, owner, instantiated, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
-                Ast::Expr.Binary(left, operator, right, _):
-                    (proof_add_quantified_call_summaries_depth(left, facts, functions, annotations, report, owner, instantiated, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
-                    return if source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT or solver_exhausted
-                    # Summary preparation is search, not admission. If the left
-                    # alternative already closes under these exact facts, no
-                    # right-side call equation is needed for this instance.
-                    # Keep the complete original goal and independent replay;
-                    # the enclosing contract's purity checks are unchanged.
-                    if operator == TokenKind.Or:
-                        return if (proof_goal_with_operator_mask_and_work(facts, left, annotations, report.source.source_primitive_operator_mask, false, false, &solver_work, &solver_exhausted) can Global{Read,Write})
-                    return if solver_exhausted
-                    (proof_add_quantified_call_summaries_depth(right, facts, functions, annotations, report, owner, instantiated, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
-                Ast::Expr.Block(statements, predicate, captures, _):
-                    quantifier_kind: sview = proof_quantifier_kind_with_work_limit(expression, annotations, source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT, 0)
-                    return if source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT or quantifier_kind == "" or captures.count != 0 or statements.count != 1
-                    return if not proof_logical_contract_supported_with_source_work(expression, annotations, functions, source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT, quantifier_kind) or source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT
-                    return if not proof_contract_calls_are_pure_with_source_work_limit(expression, functions, source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT)
-                    match statements[0]:
-                        Ast::Stmt.VarDecl(binder, _, Ast::Expr.Binary(low, operator, high, _), _):
-                            return if operator != TokenKind.RangeLt and operator != TokenKind.RangeLe
-                            lower: (known: bool, value: i64) = proof_constant_int(low)
-                            upper: (known: bool, value: i64) = proof_constant_int(high)
-                            return if not lower.known or not upper.known
-                            width: mutable (known: bool, value: i64) = proof_sub_safe(upper.value, lower.value)
-                            return if not width.known
-                            width <- proof_add_safe(width.value, 1) if operator == TokenKind.RangeLe
-                            return if not width.known or width.value <= 0 or width.value > PROOF_QUANTIFIED_CALL_INSTANCE_LIMIT
-                            binder_names: mutable darray[sview] = [binder]
-                            for offset in 0..<width.value |offset, lower, predicate, binder_names, facts, functions, annotations, report, owner, depth, budget, source_work, solver_work, solver_exhausted, quantifier_kind|:
-                                return if budget == 0 or source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT
-                                candidate: (known: bool, value: i64) = proof_add_safe(lower.value, offset)
-                                return if not candidate.known
-                                binder_values: mutable darray[Ast::Expr] = [proof_signed_quantifier_instance(candidate.value)]
-                                return if not proof_quantified_call_source_expression_charge(predicate, 1, source_work)
-                                instance: Ast::Expr = proof_substitute(predicate, &binder_names, &binder_values)
-                                return if proof_expr_is_invalid(instance)
-                                (proof_add_quantified_call_summaries_depth(instance, facts, functions, annotations, report, owner, true, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
-                                return if source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT
-                                # Match the kernel's lazy finite instantiation: a
-                                # forall cannot close while this instance is open;
-                                # an exists already has enough facts at a witness.
-                                # This is only a search cutoff. The unchanged full
-                                # goal still needs an independently replayed proof.
-                                instance_proven: bool = (proof_goal_with_operator_mask_and_work(facts, instance, annotations, report.source.source_primitive_operator_mask, false, false, &solver_work, &solver_exhausted) can Global{Read,Write})
-                                return if solver_exhausted
-                                return if quantifier_kind == "forall" and not instance_proven
-                                return if quantifier_kind == "exists" and instance_proven
-                        _:
-                            pass
-                Ast::Expr.Call(_, arguments, _, position):
-                    return if not proof_quantified_call_source_expression_charge(expression, 1, source_work)
-                    return if not instantiated or not proof_contract_calls_are_pure_with_source_work_limit(expression, functions, source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT)
-                    for argument in arguments |facts, functions, annotations, report, owner, depth, budget, source_work, solver_work, solver_exhausted|:
-                        (proof_add_quantified_call_summaries_depth(argument, facts, functions, annotations, report, owner, true, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
+            can Abort.Panic:
+                return if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or budget == 0 or source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT or proof_goal_bool_ref_value(solver_exhausted)
+                return if not proof_quantified_call_source_charge(1, source_work)
+                budget <- budget - 1
+                match expression:
+                    Ast::Expr.Paren(inner, _):
+                        (proof_add_quantified_call_summaries_depth(inner, facts, functions, annotations, report, owner, instantiated, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
+                    Ast::Expr.Unary(_, operand, _):
+                        (proof_add_quantified_call_summaries_depth(operand, facts, functions, annotations, report, owner, instantiated, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
+                    Ast::Expr.Field(object, _, _):
+                        # The pure-call witness builder descends through field receivers.
+                        # Visit the same subtree here so calls reached through a field
+                        # argument get their own source-work reservation before witness
+                        # construction; otherwise a large receiver tree could be rescanned
+                        # outside the quantified traversal's per-node charges.
+                        (proof_add_quantified_call_summaries_depth(object, facts, functions, annotations, report, owner, instantiated, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
+                    Ast::Expr.Binary(left, operator, right, _):
+                        (proof_add_quantified_call_summaries_depth(left, facts, functions, annotations, report, owner, instantiated, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
+                        return if source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT or proof_goal_bool_ref_value(solver_exhausted)
+                        # Summary preparation is search, not admission. If the left
+                        # alternative already closes under these exact facts, no
+                        # right-side call equation is needed for this instance.
+                        # Keep the complete original goal and independent replay;
+                        # the enclosing contract's purity checks are unchanged.
+                        if operator == TokenKind.Or:
+                            return if (proof_goal_with_operator_mask_and_work(facts, left, annotations, report.source.source_primitive_operator_mask, false, false, solver_work, solver_exhausted) can Global{Read,Write})
+                        return if proof_goal_bool_ref_value(solver_exhausted)
+                        (proof_add_quantified_call_summaries_depth(right, facts, functions, annotations, report, owner, instantiated, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
+                    Ast::Expr.Block(statements, predicate, captures, _):
+                        quantifier_kind: sview = proof_quantifier_kind_with_work_limit(expression, annotations, source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT, 0)
+                        return if source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT or quantifier_kind == "" or captures.count != 0 or statements.count != 1
+                        return if not proof_logical_contract_supported_with_source_work(expression, annotations, functions, source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT, quantifier_kind) or source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT
+                        return if not proof_contract_calls_are_pure_with_source_work_limit(expression, functions, source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT)
+                        match statements[0]:
+                            Ast::Stmt.VarDecl(binder, _, Ast::Expr.Binary(low, operator, high, _), _):
+                                return if operator != TokenKind.RangeLt and operator != TokenKind.RangeLe
+                                lower: (known: bool, value: i64) = proof_constant_int(low)
+                                upper: (known: bool, value: i64) = proof_constant_int(high)
+                                return if not lower.known or not upper.known
+                                width: mutable (known: bool, value: i64) = proof_sub_safe(upper.value, lower.value)
+                                return if not width.known
+                                width <- proof_add_safe(width.value, 1) if operator == TokenKind.RangeLe
+                                return if not width.known or width.value <= 0 or width.value > PROOF_QUANTIFIED_CALL_INSTANCE_LIMIT
+                                binder_names: mutable darray[sview] = [binder]
+                                for offset in 0..<width.value |offset, lower, predicate, binder_names, facts, functions, annotations, report, owner, depth, budget, source_work, solver_work, solver_exhausted, quantifier_kind|:
+                                    return if budget == 0 or source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT
+                                    candidate: (known: bool, value: i64) = proof_add_safe(lower.value, offset)
+                                    return if not candidate.known
+                                    binder_values: mutable darray[Ast::Expr] = [proof_signed_quantifier_instance(candidate.value)]
+                                    return if not proof_quantified_call_source_expression_charge(predicate, 1, source_work)
+                                    instance: Ast::Expr = proof_substitute(predicate, &binder_names, &binder_values)
+                                    return if proof_expr_is_invalid(instance)
+                                    (proof_add_quantified_call_summaries_depth(instance, facts, functions, annotations, report, owner, true, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
+                                    return if source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT
+                                    # Match the kernel's lazy finite instantiation: a
+                                    # forall cannot close while this instance is open;
+                                    # an exists already has enough facts at a witness.
+                                    # This is only a search cutoff. The unchanged full
+                                    # goal still needs an independently replayed proof.
+                                    instance_proven: bool = (proof_goal_with_operator_mask_and_work(facts, instance, annotations, report.source.source_primitive_operator_mask, false, false, solver_work, solver_exhausted) can Global{Read,Write})
+                                    return if proof_goal_bool_ref_value(solver_exhausted)
+                                    return if quantifier_kind == "forall" and not instance_proven
+                                    return if quantifier_kind == "exists" and instance_proven
+                            _:
+                                pass
+                    Ast::Expr.Call(_, arguments, _, position):
+                        return if not proof_quantified_call_source_expression_charge(expression, 1, source_work)
+                        return if not instantiated or not proof_contract_calls_are_pure_with_source_work_limit(expression, functions, source_work, PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT)
+                        for argument in arguments |facts, functions, annotations, report, owner, depth, budget, source_work, solver_work, solver_exhausted|:
+                            (proof_add_quantified_call_summaries_depth(argument, facts, functions, annotations, report, owner, true, depth + 1, budget, source_work, solver_work, solver_exhausted) can Global{Read,Write})
+                            return if source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT
+                        return if not proof_quantified_call_source_copy_facts(facts, source_work)
+                        before: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                        resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = (proof_index_call_result(expression, &before, functions, annotations, facts, report, owner, true) can Global{Read,Write})
                         return if source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT
-                    return if not proof_quantified_call_source_copy_facts(facts, source_work)
-                    before: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
-                    resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = (proof_index_call_result(expression, &before, functions, annotations, facts, report, owner, true) can Global{Read,Write})
-                    return if source_work > PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT
-                    return if resolved.known and not proof_quantified_call_source_expression_charge(expression, 1, source_work)
-                    if resolved.known:
-                        report.source_types.source_effect_index.work.implicit_effect_work <- source_work
-                        if not proof_add_pure_call_witnesses(expression, facts, functions, report, position.line, owner, 0):
-                            source_work <- PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT + 1
+                        return if resolved.known and not proof_quantified_call_source_expression_charge(expression, 1, source_work)
+                        if resolved.known:
                             report.source_types.source_effect_index.work.implicit_effect_work <- source_work
-                            return
-                        source_work <- report.source_types.source_effect_index.work.implicit_effect_work
-                _:
-                    pass
+                            if not proof_add_pure_call_witnesses(expression, facts, functions, report, position.line, owner, 0):
+                                source_work <- PROOF_QUANTIFIED_CALL_SOURCE_WORK_LIMIT + 1
+                                report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                                return
+                            source_work <- report.source_types.source_effect_index.work.implicit_effect_work
+                    _:
+                        pass

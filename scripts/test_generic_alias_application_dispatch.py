@@ -7,6 +7,7 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
     ROOT / "src/proof/check/source_conversion_alias_resolution.elisa",
+    ROOT / "src/proof/check/source_conversion_alias_formal_owner.elisa",
     ROOT / "src/proof/check/source_conversion_generic_alias_application.elisa",
     ROOT / "src/proof/check/source_conversion_type_aliases.elisa",
     ROOT / "src/proof/check/source_conversion_type_alias_collectors.elisa",
@@ -76,6 +77,18 @@ assert "index.aliases.alias_generic_application_valid[alias_row] <- generic_alia
 index_build = function_body("proof_source_conversion_indexes_build")
 assert index_build.index("index.callables.callable_scope_index_valid <- true") < index_build.index("proof_source_conversion_generic_alias_bodies_validate(report, source_work)")
 assert "index.aliases.alias_generic_application_valid.clear()" in index_build
+
+# Formal collection must not compare each new name against every prior name for its owner.
+# Duplicate names are counted by the bounded owner/name hash index and rejected by consumers.
+formal_build = function_body("proof_source_conversion_alias_formal_index_build")
+assert "for prior in formal_starts[active_owner]..<(formal_starts[active_owner] + formal_counts[active_owner])" not in formal_build
+assert "formal_names.push(annotation.name)" in formal_build
+formal_index = function_body("proof_source_conversion_alias_formal_name_index_ensure")
+assert "index.alias_generic_formal_name_index_counts[slot] <- index.alias_generic_formal_name_index_counts[slot] + 1" in formal_index
+formal_lookup = function_body("proof_source_conversion_alias_formal_name_lookup")
+assert "proof_source_conversion_alias_formal_name_index_ensure(report)" in formal_lookup
+assert "index.alias_generic_formal_name_index_counts[slot]" in formal_lookup
+assert "formal.count > 1" in unwrap
 
 replay_application = function_body("proof_replay_call_conversion_alias_application_target")
 global_name_fallback = replay_application.split("alias: (complete: bool, count: usize, row: usize) = proof_replay_call_conversion_name_lookup(name, aliases", 1)[1]

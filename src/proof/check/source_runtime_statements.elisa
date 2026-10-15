@@ -1,8 +1,10 @@
 extend ElisaProof:
     private:
-        def proof_source_statements_have_unsafe_runtime_index(statements: darray[Ast::Stmt], parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize, aliases: darray[sview], declaration_line: u32 = 0, caller_owner: sview = "", caller_owner_known: bool = false) -> bool:
+        def proof_source_statements_have_unsafe_runtime_index_with_set(statements: darray[Ast::Stmt], parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize, aliases: ProofSourceRuntimeAliasSet, declaration_line: u32 = 0, caller_owner: sview = "", caller_owner_known: bool = false) -> bool:
             return true if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
-            statement_aliases: mutable darray[sview] = aliases
+            detached_statement_aliases: (complete: bool, aliases: ProofSourceRuntimeAliasSet) = proof_source_runtime_alias_set_clone_with_work(aliases, report)
+            return true if not detached_statement_aliases.complete
+            statement_aliases: mutable ProofSourceRuntimeAliasSet = detached_statement_aliases.aliases
             for statement in statements |parameters, report, depth, statement_aliases, declaration_line, caller_owner, caller_owner_known|:
                 return true if not proof_source_index_work_charge(report, 1)
                 match statement:
@@ -10,45 +12,44 @@ extend ElisaProof:
                         return true
                     Ast::Stmt.Expr(expression, _):
                         return true if:
-                            proof_source_expression_has_unsafe_runtime_index(expression, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                            proof_source_expression_has_unsafe_runtime_index_with_set(expression, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
                             not proof_source_statement_expression_aliases_add(expression, &statement_aliases, parameters, report, depth + 1)
                     Ast::Stmt.Return(value, _):
-                        return true if value is returned and proof_source_expression_has_unsafe_runtime_index(returned, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                        return true if value is returned and proof_source_expression_has_unsafe_runtime_index_with_set(returned, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
                     Ast::Stmt.Block(_, _, binding, body, _):
                         return true if binding != "" and (proof_source_parameter_name_shadow(parameters, binding, report) or proof_source_name_is_type_or_callable(binding, report))
-                        block_aliases: mutable darray[sview] = statement_aliases
+                        detached_block_aliases: (complete: bool, aliases: ProofSourceRuntimeAliasSet) = proof_source_runtime_alias_set_clone_with_work(statement_aliases, report)
+                        return true if not detached_block_aliases.complete
+                        block_aliases: mutable ProofSourceRuntimeAliasSet = detached_block_aliases.aliases
                         return true if:
                             binding != "" and not proof_source_runtime_alias_add(&block_aliases, binding, report)
-                            proof_source_statements_have_unsafe_runtime_index(body, parameters, report, depth + 1, block_aliases, declaration_line, caller_owner, caller_owner_known)
+                            proof_source_statements_have_unsafe_runtime_index_with_set(body, parameters, report, depth + 1, block_aliases, declaration_line, caller_owner, caller_owner_known)
                     Ast::Stmt.VarDecl(name, _, initializer, _):
                         return true if:
                             proof_source_parameter_name_shadow(parameters, name, report) or proof_source_name_is_type_or_callable(name, report)
-                            proof_source_expression_has_unsafe_runtime_index(initializer, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                            proof_source_expression_has_unsafe_runtime_index_with_set(initializer, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
                             not proof_source_statement_expression_aliases_add(initializer, &statement_aliases, parameters, report, depth + 1)
                             not proof_source_runtime_alias_add(&statement_aliases, name, report)
                     Ast::Stmt.Assign(target, operator, initializer, _):
                         return true if:
-                            proof_source_expression_has_unsafe_runtime_index(initializer, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                            proof_source_expression_has_unsafe_runtime_index_with_set(initializer, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
                             not proof_source_statement_expression_aliases_add(initializer, &statement_aliases, parameters, report, depth + 1)
                             operator == TokenKind.Assign and proof_source_fresh_assignment_shadows_parameter(target, parameters, report, depth + 1)
-                            proof_source_expression_has_unsafe_runtime_index(target, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                            proof_source_expression_has_unsafe_runtime_index_with_set(target, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
                             operator == TokenKind.Assign and not proof_source_assignment_target_aliases_add(target, &statement_aliases, report, depth + 1)
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_source_expression_has_unsafe_runtime_index(condition, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
-                        then_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_true_aliases(condition, statement_aliases, report)
+                        return true if proof_source_expression_has_unsafe_runtime_index_with_set(condition, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                        condition_aliases: (complete: bool, true_aliases: ProofSourceRuntimeAliasSet, false_aliases: ProofSourceRuntimeAliasSet) = proof_source_condition_alias_paths(condition, statement_aliases, report, 0)
                         return true if:
-                            not then_aliases.complete
-                            proof_source_statements_have_unsafe_runtime_index(then_body, parameters, report, depth + 1, then_aliases.aliases, declaration_line, caller_owner, caller_owner_known)
-                        else_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_false_aliases(condition, statement_aliases, report)
-                        return true if:
-                            not else_aliases.complete
-                            proof_source_statements_have_unsafe_runtime_index(else_body, parameters, report, depth + 1, else_aliases.aliases, declaration_line, caller_owner, caller_owner_known)
+                            not condition_aliases.complete
+                            proof_source_statements_have_unsafe_runtime_index_with_set(then_body, parameters, report, depth + 1, condition_aliases.true_aliases, declaration_line, caller_owner, caller_owner_known)
+                            proof_source_statements_have_unsafe_runtime_index_with_set(else_body, parameters, report, depth + 1, condition_aliases.false_aliases, declaration_line, caller_owner, caller_owner_known)
                     Ast::Stmt.While(condition, body, _):
-                        return true if proof_source_expression_has_unsafe_runtime_index(condition, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
-                        body_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_true_aliases(condition, statement_aliases, report)
+                        return true if proof_source_expression_has_unsafe_runtime_index_with_set(condition, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                        body_aliases: (complete: bool, aliases: ProofSourceRuntimeAliasSet) = proof_source_condition_true_aliases_with_set(condition, statement_aliases, report)
                         return true if:
                             not body_aliases.complete
-                            proof_source_statements_have_unsafe_runtime_index(body, parameters, report, depth + 1, body_aliases.aliases, declaration_line, caller_owner, caller_owner_known)
+                            proof_source_statements_have_unsafe_runtime_index_with_set(body, parameters, report, depth + 1, body_aliases.aliases, declaration_line, caller_owner, caller_owner_known)
                     Ast::Stmt.For(_, variables, iterable, body, _):
                         for variable in variables |parameters, report, declaration_line, caller_owner, caller_owner_known|:
                             return true if proof_source_parameter_name_shadow(parameters, variable, report) or proof_source_name_is_type_or_callable(variable, report)
@@ -70,9 +71,11 @@ extend ElisaProof:
                             _:
                                 pass
                         return true if:
-                            not proof_structural_builtin_iteration_source(base_iterable, parameters, report, 0, statement_aliases, declaration_line, caller_owner, caller_owner_known)
-                            proof_source_expression_has_unsafe_runtime_index(base_iterable, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
-                        body_aliases: mutable darray[sview] = statement_aliases
+                            not proof_structural_builtin_iteration_source_with_set(base_iterable, parameters, report, 0, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                            proof_source_expression_has_unsafe_runtime_index_with_set(base_iterable, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                        detached_body_aliases: (complete: bool, aliases: ProofSourceRuntimeAliasSet) = proof_source_runtime_alias_set_clone_with_work(statement_aliases, report)
+                        return true if not detached_body_aliases.complete
+                        body_aliases: mutable ProofSourceRuntimeAliasSet = detached_body_aliases.aliases
                         for variable in variables |body_aliases, report, declaration_line, caller_owner, caller_owner_known|:
                             return true if not proof_source_runtime_alias_add(&body_aliases, variable, report)
                         if filter_predicates.count == 2:
@@ -80,22 +83,27 @@ extend ElisaProof:
                             # The outer refinement is a guard: it sees those binders but its
                             # own Is/As binders do not escape into the loop body.
                             return true if:
-                                not proof_source_loop_filter_aliases_add(filter_predicates[1], &body_aliases, parameters, report, depth, declaration_line, caller_owner, caller_owner_known)
-                                proof_source_expression_has_unsafe_runtime_index(filter_predicates[0], parameters, report, depth + 1, body_aliases, declaration_line, caller_owner, caller_owner_known)
+                                not proof_source_loop_filter_aliases_add_with_set(filter_predicates[1], &body_aliases, parameters, report, depth, declaration_line, caller_owner, caller_owner_known)
+                                proof_source_expression_has_unsafe_runtime_index_with_set(filter_predicates[0], parameters, report, depth + 1, body_aliases, declaration_line, caller_owner, caller_owner_known)
                         if filter_predicates.count == 1:
-                            return true if not proof_source_loop_filter_aliases_add(filter_predicates[0], &body_aliases, parameters, report, depth, declaration_line, caller_owner, caller_owner_known)
-                        return true if proof_source_statements_have_unsafe_runtime_index(body, parameters, report, depth + 1, body_aliases, declaration_line, caller_owner, caller_owner_known)
+                            return true if not proof_source_loop_filter_aliases_add_with_set(filter_predicates[0], &body_aliases, parameters, report, depth, declaration_line, caller_owner, caller_owner_known)
+                        return true if proof_source_statements_have_unsafe_runtime_index_with_set(body, parameters, report, depth + 1, body_aliases, declaration_line, caller_owner, caller_owner_known)
                     Ast::Stmt.Match(scrutinee, arms, _):
-                        return true if proof_source_expression_has_unsafe_runtime_index(scrutinee, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                        return true if proof_source_expression_has_unsafe_runtime_index_with_set(scrutinee, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
                         for arm in arms |parameters, report, depth, statement_aliases, declaration_line, caller_owner, caller_owner_known|:
                             return true if:
                                 proof_source_pattern_shadows_parameter(arm.pattern, parameters, report, depth + 1) or proof_source_pattern_shadows_type_or_callable(arm.pattern, report, depth + 1)
-                                proof_source_expression_has_unsafe_runtime_index(arm.guard, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
-                                proof_source_statements_have_unsafe_runtime_index(arm.body, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                                proof_source_expression_has_unsafe_runtime_index_with_set(arm.guard, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                                proof_source_statements_have_unsafe_runtime_index_with_set(arm.body, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
                     Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_source_expression_has_unsafe_runtime_index(expression, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
+                        return true if proof_source_expression_has_unsafe_runtime_index_with_set(expression, parameters, report, depth + 1, statement_aliases, declaration_line, caller_owner, caller_owner_known)
                     Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
                         return true
             return false
+
+        def proof_source_statements_have_unsafe_runtime_index(statements: darray[Ast::Stmt], parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize, aliases: darray[sview], declaration_line: u32 = 0, caller_owner: sview = "", caller_owner_known: bool = false) -> bool:
+            indexed_aliases: (complete: bool, aliases: ProofSourceRuntimeAliasSet) = proof_source_runtime_alias_set_from_names(aliases, report)
+            return true if not indexed_aliases.complete
+            return proof_source_statements_have_unsafe_runtime_index_with_set(statements, parameters, report, depth, indexed_aliases.aliases, declaration_line, caller_owner, caller_owner_known)

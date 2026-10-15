@@ -1,0 +1,210 @@
+# Replay the branch-local binders created by `is`/`as` conditions. The checker has
+# the same path equations over a name set; this version tracks only the parameter
+# spelling whose source binding is being authenticated.
+extend ElisaProof:
+    private:
+        def proof_replay_type_bound_alias_target_binds_name_with_work(target: Ast::Expr, name: sview, work: mutable usize&, depth: usize) -> (complete: bool, binds: bool):
+            return (false, false) if:
+                depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+                not proof_replay_type_bound_local_work_charge(1, work)
+            match target:
+                Ast::Expr.Ident(candidate, _):
+                    return (false, false) if not proof_replay_type_bound_local_text_compare_charge(candidate, name, work)
+                    return (true, candidate == name)
+                Ast::Expr.Call(_, arguments, _, _):
+                    for argument in arguments |argument, name, work, depth|:
+                        result: (complete: bool, binds: bool) = proof_replay_type_bound_alias_target_binds_name_with_work(argument, name, work, depth + 1)
+                        return (false, result.binds) if not result.complete
+                        return (true, true) if result.binds
+                    return (true, false)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |element, name, work, depth|:
+                        result: (complete: bool, binds: bool) = proof_replay_type_bound_alias_target_binds_name_with_work(element, name, work, depth + 1)
+                        return (false, result.binds) if not result.complete
+                        return (true, true) if result.binds
+                    return (true, false)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |field, name, work, depth|:
+                        result: (complete: bool, binds: bool) = proof_replay_type_bound_alias_target_binds_name_with_work(field.value, name, work, depth + 1)
+                        return (false, result.binds) if not result.complete
+                        return (true, true) if result.binds
+                    return (true, false)
+                Ast::Expr.Invalid:
+                    return (false, false)
+                _:
+                    return (true, false)
+
+        # Detect whether this exact source name is bound anywhere in a condition. The
+        # backend emits condition binders into the enclosing branch scope, while the
+        # resolver keeps them on the true edge only. Replay treats a matching binder as
+        # shadowing both edges so a backend-visible payload cannot authenticate a formal.
+        def proof_replay_type_bound_condition_pattern_binds_name_with_work(expression: Ast::Expr, name: sview, report: ProofReport&, work: mutable usize&, depth: usize) -> (complete: bool, binds: bool):
+            return (false, false) if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or not proof_replay_type_bound_local_work_charge(1, work)
+            found: mutable bool = false
+            match expression:
+                Ast::Expr.Binary(left, operator, right, position):
+                    left_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(left, name, report, work, depth + 1)
+                    return (false, false) if not left_result.complete
+                    found <- left_result.binds
+                    if operator == TokenKind.Is or operator == TokenKind.As:
+                        target_result: (complete: bool, binds: bool) = proof_replay_type_bound_alias_target_binds_name_with_work(right, name, work, depth + 1)
+                        return (false, false) if not target_result.complete
+                        found <- true if target_result.binds
+                        if operator == TokenKind.Is:
+                            match right:
+                                Ast::Expr.Field(_, _, target_position):
+                                    for annotation in report.source.source_annotations |annotation, name, position, target_position, report, work, found|:
+                                        return (false, false) if:
+                                            not proof_replay_type_bound_local_work_charge(1, work)
+                                            not proof_replay_type_bound_local_work_charge(sview_len(annotation.name), work)
+                                            not proof_replay_type_bound_local_work_charge(sview_len(annotation.owner), work)
+                                        continue if annotation.name != "__is_variant_alias" or (annotation.line != position.line and annotation.line != target_position.line)
+                                        return (false, false) if annotation.owner == ""
+                                        return (false, false) if not proof_replay_type_bound_local_text_compare_charge(annotation.owner, name, work)
+                                        found <- true if annotation.owner == name
+                                _:
+                                    pass
+                    else:
+                        right_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(right, name, report, work, depth + 1)
+                        return (false, false) if not right_result.complete
+                        found <- true if right_result.binds
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    return (false, false) if:
+                        not proof_replay_type_bound_local_work_charge(candidates.count, work)
+                        not proof_replay_type_bound_local_work_charge(arguments.count, work)
+                    for child in Ast::effect_runtime_children(candidates, arguments) |child, name, report, work, depth, found|:
+                        child_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(child, name, report, work, depth + 1)
+                        return (false, false) if not child_result.complete
+                        found <- true if child_result.binds
+                Ast::Expr.Call(callee, arguments, _, _):
+                    callee_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(callee, name, report, work, depth + 1)
+                    return (false, false) if not callee_result.complete
+                    found <- callee_result.binds
+                    for argument in arguments |argument, name, report, work, depth, found|:
+                        argument_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(argument, name, report, work, depth + 1)
+                        return (false, false) if not argument_result.complete
+                        found <- true if argument_result.binds
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Paren(object, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _):
+                    return proof_replay_type_bound_condition_pattern_binds_name_with_work(object, name, report, work, depth + 1)
+                Ast::Expr.Index(object, index, _) | Ast::Expr.Refinement(object, index, _):
+                    first: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(object, name, report, work, depth + 1)
+                    return (false, false) if not first.complete
+                    second: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(index, name, report, work, depth + 1)
+                    return (false, false) if not second.complete
+                    found <- true if first.binds or second.binds
+                Ast::Expr.Slice(object, low, high, _):
+                    first: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(object, name, report, work, depth + 1)
+                    return (false, false) if not first.complete
+                    second: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(low, name, report, work, depth + 1)
+                    return (false, false) if not second.complete
+                    third: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(high, name, report, work, depth + 1)
+                    return (false, false) if not third.complete
+                    found <- true if first.binds or second.binds or third.binds
+                Ast::Expr.IndexN(object, arguments, _):
+                    first: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(object, name, report, work, depth + 1)
+                    return (false, false) if not first.complete
+                    found <- first.binds
+                    for argument in arguments |argument, name, report, work, depth, found|:
+                        argument_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(argument, name, report, work, depth + 1)
+                        return (false, false) if not argument_result.complete
+                        found <- true if argument_result.binds
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |element, name, report, work, depth, found|:
+                        element_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(element, name, report, work, depth + 1)
+                        return (false, false) if not element_result.complete
+                        found <- true if element_result.binds
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |entry, name, report, work, depth, found|:
+                        key_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(entry.key, name, report, work, depth + 1)
+                        return (false, false) if not key_result.complete
+                        value_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(entry.value, name, report, work, depth + 1)
+                        return (false, false) if not value_result.complete
+                        found <- true if key_result.binds or value_result.binds
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |field, name, report, work, depth, found|:
+                        field_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(field.value, name, report, work, depth + 1)
+                        return (false, false) if not field_result.complete
+                        found <- true if field_result.binds
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    base_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(base, name, report, work, depth + 1)
+                    return (false, false) if not base_result.complete
+                    found <- base_result.binds
+                    for field in fields |field, name, report, work, depth, found|:
+                        field_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(field.value, name, report, work, depth + 1)
+                        return (false, false) if not field_result.complete
+                        found <- true if field_result.binds
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    condition_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(condition, name, report, work, depth + 1)
+                    return (false, false) if not condition_result.complete
+                    then_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(then_expression, name, report, work, depth + 1)
+                    return (false, false) if not then_result.complete
+                    else_result: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(else_expression, name, report, work, depth + 1)
+                    return (false, false) if not else_result.complete
+                    # Nested expression branches have a distinct source scope. Until replay
+                    # models that scope exactly, reject a same-name binder here.
+                    return (false, false) if condition_result.binds or then_result.binds or else_result.binds
+                Ast::Expr.Comprehension(_, iterable, _, _, _) | Ast::Expr.Match(iterable, _, _) | Ast::Expr.Catch(iterable, _, _):
+                    return proof_replay_type_bound_condition_pattern_binds_name_with_work(iterable, name, report, work, depth + 1)
+                Ast::Expr.GetElse(guarded, _, _):
+                    return proof_replay_type_bound_condition_pattern_binds_name_with_work(guarded, name, report, work, depth + 1)
+                Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _) | Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                _:
+                    return (false, false)
+            return (true, found)
+
+        def proof_replay_type_bound_condition_alias_paths_impl_with_work(condition: Ast::Expr, name: sview, inherited: bool, report: ProofReport&, work: mutable usize&, depth: usize) -> (complete: bool, true_shadowed: bool, false_shadowed: bool):
+            return (false, inherited, inherited) if:
+                depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+                not proof_replay_type_bound_local_work_charge(1, work)
+            match condition:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_type_bound_condition_alias_paths_impl_with_work(inner, name, inherited, report, work, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    paths: (complete: bool, true_shadowed: bool, false_shadowed: bool) = proof_replay_type_bound_condition_alias_paths_impl_with_work(inner, name, inherited, report, work, depth + 1)
+                    return (paths.complete, paths.false_shadowed, paths.true_shadowed)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    left_paths: (complete: bool, true_shadowed: bool, false_shadowed: bool) = proof_replay_type_bound_condition_alias_paths_impl_with_work(left, name, inherited, report, work, depth + 1)
+                    return (false, inherited, inherited) if not left_paths.complete
+                    right_paths: (complete: bool, true_shadowed: bool, false_shadowed: bool) = proof_replay_type_bound_condition_alias_paths_impl_with_work(right, name, left_paths.true_shadowed, report, work, depth + 1)
+                    return (false, inherited, inherited) if not right_paths.complete
+                    return (true, right_paths.true_shadowed, left_paths.false_shadowed and right_paths.false_shadowed)
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    left_paths: (complete: bool, true_shadowed: bool, false_shadowed: bool) = proof_replay_type_bound_condition_alias_paths_impl_with_work(left, name, inherited, report, work, depth + 1)
+                    return (false, inherited, inherited) if not left_paths.complete
+                    right_paths: (complete: bool, true_shadowed: bool, false_shadowed: bool) = proof_replay_type_bound_condition_alias_paths_impl_with_work(right, name, left_paths.false_shadowed, report, work, depth + 1)
+                    return (false, inherited, inherited) if not right_paths.complete
+                    return (true, left_paths.true_shadowed and right_paths.true_shadowed, right_paths.false_shadowed)
+                Ast::Expr.Binary(_, TokenKind.Is, _, _) | Ast::Expr.Binary(_, TokenKind.As, _, _):
+                    return (true, inherited, inherited)
+                Ast::Expr.Invalid:
+                    return (false, inherited, inherited)
+                _:
+                    return (true, inherited, inherited)
+
+        def proof_replay_type_bound_condition_alias_paths_with_work(condition: Ast::Expr, name: sview, inherited: bool, report: ProofReport&, work: mutable usize&, depth: usize) -> (complete: bool, true_shadowed: bool, false_shadowed: bool):
+            paths: (complete: bool, true_shadowed: bool, false_shadowed: bool) = proof_replay_type_bound_condition_alias_paths_impl_with_work(condition, name, inherited, report, work, depth)
+            return (false, inherited, inherited) if not paths.complete
+            pattern: (complete: bool, binds: bool) = proof_replay_type_bound_condition_pattern_binds_name_with_work(condition, name, report, work, depth)
+            return (false, inherited, inherited) if not pattern.complete
+            return (true, inherited or pattern.binds, inherited or pattern.binds) if pattern.binds
+            return paths
+
+        # `for` refinement nesting stores the outer guard first and the inner filter
+        # last. The inner filter's true-path binders survive into the loop body.
+        def proof_replay_type_bound_loop_filter_shadow_with_work(iterable: Ast::Expr, name: sview, inherited: bool, report: ProofReport&, work: mutable usize&) -> (complete: bool, shadowed: bool):
+            predicates: mutable darray[Ast::Expr] = []
+            base: mutable Ast::Expr = iterable
+            while true |predicates, base, work|:
+                return (false, inherited) if not proof_replay_type_bound_local_work_charge(1, work)
+                match base:
+                    Ast::Expr.Refinement(inner, predicate, _):
+                        return (false, inherited) if predicates.count >= 2
+                        return (false, inherited) if not proof_replay_type_bound_local_work_charge(2, work)
+                        predicates.push(predicate)
+                        base <- inner
+                    _:
+                        break
+            return (true, inherited) if predicates.count == 0
+            paths: (complete: bool, true_shadowed: bool, false_shadowed: bool) = proof_replay_type_bound_condition_alias_paths_with_work(predicates[predicates.count - 1], name, inherited, report, work, 0)
+            return (paths.complete, paths.true_shadowed)

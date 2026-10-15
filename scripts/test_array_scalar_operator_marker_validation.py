@@ -104,11 +104,13 @@ assert "bucket_size > PROOF_REPLAY_VARIANT_SCOPE_MAX_BUCKET" in scope_index_buil
 assert "while entry < chain_count and visits < PROOF_REPLAY_VARIANT_SCOPE_MAX_BUCKET" in scoped_operator_lookup
 assert "index.concrete_hashes[entry] == hash" in scoped_operator_lookup
 assert "index.concrete_next_indices[entry]" in scoped_operator_lookup
-assert "scope.self_operator_mask" in scoped_operator_lookup
-assert 'scope.annotation_owner, "__ext_concrete", source_work' in scoped_operator_lookup
-assert 'scope.annotation_owner != "__ext_concrete"' in scoped_operator_lookup
-assert "receiver_mask: usize = path_scope.self_operator_mask" in scoped_operator_lookup
-assert "path_scope.explicit_receiver_mask if path_scope.explicit_receiver_type == concrete" in scoped_operator_lookup
+assert "path_scope.annotation_marker_count == 1" in scoped_operator_lookup
+assert 'path_scope.annotation_owner, "__ext_concrete", source_work' in scoped_operator_lookup
+assert 'path_scope.annotation_owner != "__ext_concrete"' in scoped_operator_lookup
+assert 'path_scope.annotation_owner, "__impl_scope", source_work' in scoped_operator_lookup
+assert 'path_scope.annotation_owner != "__impl_scope"' in scoped_operator_lookup
+assert "receiver_mask: mutable usize = path_scope.self_operator_mask" in scoped_operator_lookup
+assert "receiver_mask <- receiver_mask | path_scope.explicit_receiver_mask if path_scope.explicit_receiver_type == concrete" in scoped_operator_lookup
 assert "(receiver_mask & wanted_mask) != 0" in scoped_operator_lookup
 variant_replay = ROOT / "src/proof/replay/variant_exclusion_validation.elisa"
 variant_mask_source = ROOT / "src/proof/replay/variant_operator_masks.elisa"
@@ -146,9 +148,9 @@ assert "proof_source_expression_has_overloaded_operator(iterable, report.source.
 assert "proof_replay_control_stable_expression(report, trace, low, source_work)" in loop_range
 assert "proof_replay_control_stable_expression(report, trace, high, source_work)" in loop_range
 assert "proof_replay_summary_expr_equal_with_limit(trace.expression, lower, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in loop_range
-assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, lower, 0, &source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in loop_range
+assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, lower, 0, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in loop_range
 assert "proof_replay_summary_expr_equal_with_limit(trace.expression, upper, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in loop_range
-assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, upper, 0, &source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in loop_range
+assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, upper, 0, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in loop_range
 
 for name in (
     "proof_replay_type_bound_local_array_witness_with_work",

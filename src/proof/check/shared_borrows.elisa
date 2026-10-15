@@ -1,13 +1,38 @@
 extend ElisaProof:
     private:
+        # Any mutable global path can invalidate a caller-shared fact without being passed as
+        # an argument. Plain `global` roots are writable through mutable fields even though only
+        # `global mutable` receives a `__global_mutable` annotation. Treat imports, externs, and
+        # incomplete declaration trees as potentially writable too; otherwise a hidden external
+        # path could make the frame-closure premise unsound.
+        def proof_file_has_writable_global_path(declarations: darray[Ast::Decl]&, report: mutable ProofReport&, depth: usize) -> bool:
+            return true if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            for declaration in declarations |declarations, report, depth|:
+                return true if not proof_source_index_work_charge(report, 1)
+                match declaration:
+                    Ast::Decl.Const(_, _, _, is_global, _):
+                        return true if is_global
+                    Ast::Decl.Import(_, _):
+                        return true
+                    Ast::Decl.Extern(_, _, _, _, _, _, _, _):
+                        return true
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        return true if proof_file_has_writable_global_path(body, report, depth + 1)
+                    Ast::Decl.Invalid:
+                        return true
+                    _:
+                        pass
+            return false
+
         # A shared borrow excludes every *borrowed* mutable path to the same object, but not a
-        # mutable global: a caller may lend one shared into this frame while a callee writes it
-        # directly, and the compiler accepts that. So both rules below are withdrawn from the
-        # whole program as soon as one mutable global is declared, rather than trying to decide
-        # per call which globals a callee can reach.
+        # writable global path: a caller may lend one shared into this frame while a callee writes
+        # through a global mutable field, and the compiler accepts that. So both rules below are
+        # withdrawn when the source contains globals or opaque external declarations, rather than
+        # trying to decide per call which globals a callee can reach.
         #
-        # `shared_extent_names` holds every parameter bound by a shared borrow: its element count
-        # is fixed for the frame. `shared_fixed_names` is the stronger claim that every field
+        # `shared_extent_names` holds parameters bound by a shared borrow only after every other
+        # formal has been shown unable to carry a mutable path into the frame. Their element counts
+        # are then fixed for the frame. `shared_fixed_names` is the stronger claim that every field
         # place behind the borrow is fixed for the frame. It does not lean on borrow exclusivity,
         # which the language does not promise for fields: it holds by reachability. Code in this
         # frame, and every callee it reaches, can write caller storage only through a mutable
@@ -15,10 +40,10 @@ extend ElisaProof:
         # parameter either a shared borrow or a value, each of whose types holds neither a
         # reference nor a borrowed view, the frame received no mutable path at all, and its own
         # locals are fresh storage that cannot name the caller's object.
-        def proof_record_shared_borrows(parameters: darray[Ast::ParamDecl]&, declaration_line: u32, owner_offset: u32, exact_metadata_complete: bool, has_mutable_global: bool, report: mutable ProofReport&) -> void:
+        def proof_record_shared_borrows(parameters: darray[Ast::ParamDecl]&, declaration_line: u32, owner_offset: u32, exact_metadata_complete: bool, has_writable_global_path: bool, report: mutable ProofReport&) -> void:
             report.aliases.shared_extent_names.clear()
             report.aliases.shared_fixed_names.clear()
-            return if has_mutable_global
+            return if has_writable_global_path
             closed_frame: mutable bool = true
             for parameter in parameters |report, closed_frame|:
                 markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(parameter.type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, declaration_line, owner_offset, exact_metadata_complete, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
@@ -33,7 +58,9 @@ extend ElisaProof:
                 continue if not reference or mutable_path
                 report.aliases.shared_extent_names.push(parameter.name)
                 report.aliases.shared_fixed_names.push(parameter.name) if reference
-            report.aliases.shared_fixed_names.clear() if not closed_frame
+            if not closed_frame:
+                report.aliases.shared_extent_names.clear()
+                report.aliases.shared_fixed_names.clear()
 
         def proof_shared_fixed_parameter(report: ProofReport&, names: darray[sview]&, parameters: darray[sview]&, name: sview) -> bool:
             return false if name == "" or not (any fixed in report.aliases.shared_fixed_names where fixed == name)

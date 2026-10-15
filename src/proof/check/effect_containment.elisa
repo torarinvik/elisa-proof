@@ -57,15 +57,37 @@ extend ElisaProof:
                 index.hashes.push(wanted_hash)
             return true
 
+        def proof_effect_containment_name_index_find(names: darray[sview]&, index: ProofEffectContainmentNameIndex&, wanted: sview, source_work: mutable usize&) -> (complete: bool, found: bool, row: usize):
+            capacity: usize = index.slots.count
+            return (false, false, names.count) if names.count != index.hashes.count
+            return (true, false, names.count) if names.count == 0 and capacity == 0
+            return (false, false, names.count) if capacity == 0 or not proof_report_source_work_charge(sview_len(wanted), source_work)
+            wanted_hash: u32 = proof_name_hash(wanted)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, wanted, names, index, capacity, source_work|:
+                return (false, false, names.count) if not proof_report_source_work_charge(1, source_work)
+                current: usize = index.slots[slot]
+                return (true, false, names.count) if current == 0
+                existing: usize = current - 1
+                return (false, false, names.count) if existing >= names.count or existing >= index.hashes.count
+                if index.hashes[existing] == wanted_hash:
+                    candidate: sview = names[existing]
+                    return (false, false, names.count) if not proof_report_source_work_charge(sview_len(candidate), source_work)
+                    return (true, true, existing) if candidate == wanted
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false, names.count)
+
         def proof_effect_containment_row_validation_charge(effects: darray[sview]&, source_work: mutable usize&) -> bool:
             return false if not proof_report_source_work_charge(effects.count, source_work)
             for effect in effects |source_work|:
                 return false if not proof_report_source_work_charge(sview_len(effect), source_work)
             return true
 
-        def proof_check_effect_containment(functions: ProofFunctionTable&, report: mutable ProofReport&, function_name: sview, line: u32) -> void:
-            caller: usize = proof_function_index(functions, function_name)
-            return if caller >= functions.lookup.source.names.count
+        def proof_check_effect_containment(functions: ProofFunctionTable&, report: mutable ProofReport&, function_name: sview, line: u32, offset: u32, caller: usize) -> void:
+            return if caller >= functions.lookup.source.names.count or caller >= functions.lookup.source.lines.count or caller >= functions.lookup.source.offsets.count
+            return if functions.lookup.source.names[caller] != function_name or functions.lookup.source.lines[caller] != line or functions.lookup.source.offsets[caller] != offset
             return if caller >= functions.summaries.effects_declared.count or not functions.summaries.effects_declared[caller]
             return if caller >= functions.summaries.effect_starts.count or caller >= functions.summaries.effect_counts.count
             declared_start: usize = functions.summaries.effect_starts[caller]
@@ -96,19 +118,38 @@ extend ElisaProof:
             return if caller >= functions.call_graph.call_starts.count or caller >= functions.call_graph.call_counts.count
             call_start: usize = functions.call_graph.call_starts[caller]
             call_count: usize = functions.call_graph.call_counts[caller]
-            return if call_start > functions.call_graph.all_calls.count or call_count > functions.call_graph.all_calls.count - call_start
+            return if functions.call_graph.all_calls.count != functions.call_graph.all_call_targets.count or functions.call_graph.all_calls.count != functions.call_graph.all_call_positions.count or functions.call_graph.all_calls.count != functions.call_graph.all_call_expressions.count or call_start > functions.call_graph.all_calls.count or call_count > functions.call_graph.all_calls.count - call_start
             if not proof_report_source_work_charge(call_count, &report.source_types.source_effect_index.work.implicit_effect_work):
                 report.proof_obligation(false)
                 proof_add_budget_finding(report, "resource-analysis-budget", line, function_name, "effect call-set scan exceeded its shared source-work bound", "effect-containment-source-work", report.source_types.source_effect_index.work.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
             callee_names: mutable darray[sview] = []
             callee_name_index: mutable ProofEffectContainmentNameIndex = ProofEffectContainmentNameIndex{}
+            callee_targets: mutable darray[usize] = []
             callee_starts: mutable darray[usize] = []
             callee_counts: mutable darray[usize] = []
             callee_effects: mutable darray[sview] = []
-            for offset in 0..<call_count |offset, functions, call_start, callee_names, callee_name_index, callee_starts, callee_counts, callee_effects, report, function_name, line, declared|:
+            for offset in 0..<call_count |offset, functions, call_start, callee_names, callee_name_index, callee_targets, callee_starts, callee_counts, callee_effects, report, function_name, line, declared|:
                 name: sview = functions.call_graph.all_calls[call_start + offset]
                 continue if name == ""
+                callee: usize = functions.call_graph.all_call_targets[call_start + offset]
+                return if callee > functions.lookup.source.names.count
+                identity: (complete: bool, found: bool, row: usize) = proof_effect_containment_name_index_find(callee_names, callee_name_index, name, &report.source_types.source_effect_index.work.implicit_effect_work)
+                if not identity.complete:
+                    if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                        report.proof_obligation(false)
+                        proof_add_budget_finding(report, "resource-analysis-budget", line, function_name, "effect target identity lookup exceeded its shared source-work bound", "effect-containment-source-work", report.source_types.source_effect_index.work.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    else:
+                        proof_add_finding(report, "effect-call-opaque", line, function_name, "the bounded effect target identity index is incomplete")
+                    return
+                if identity.found:
+                    if identity.row >= callee_targets.count:
+                        proof_add_finding(report, "effect-call-opaque", line, function_name, "the effect call target index is inconsistent")
+                        return
+                    if callee_targets[identity.row] != callee:
+                        proof_add_finding(report, "effect-call-opaque", line, function_name, "same-spelled callees resolve to distinct source declarations that this certificate format cannot distinguish")
+                        return
+                    continue
                 previous_count: usize = callee_names.count
                 if not proof_effect_containment_name_index_add(&callee_names, &callee_name_index, name, &report.source_types.source_effect_index.work.implicit_effect_work):
                     if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
@@ -119,7 +160,6 @@ extend ElisaProof:
                     return
                 continue if callee_names.count == previous_count
                 row: mutable darray[sview] = []
-                callee: usize = proof_function_index(functions, name)
                 if callee < functions.lookup.source.names.count:
                     if callee >= functions.summaries.effect_starts.count or callee >= functions.summaries.effect_counts.count:
                         proof_add_finding(report, "effect-call-opaque", line, function_name, "a called function has incomplete effect metadata")
@@ -182,6 +222,7 @@ extend ElisaProof:
                 callee_starts.push(callee_effects.count)
                 callee_counts.push(row.count)
                 callee_effects.extend(row)
+                callee_targets.push(callee)
             needed_nodes: usize = declared.count + callee_effects.count + 2 * callee_names.count + 2
             needed_children: usize = declared.count + callee_effects.count + callee_names.count
             if not proof_resource_kernel_capacity(report, needed_nodes, needed_children, function_name):
@@ -205,7 +246,7 @@ extend ElisaProof:
                 call_roots.push(proof_kernel_add_node(&report.analysis_1.kernel.nodes, "effect-call", "", callee_row, 0, 0, 0, 0, 0, callee_names[callee], ""))
             containment_children_start: usize = report.analysis_1.kernel.children.count
             report.analysis_1.kernel.children.extend(call_roots)
-            containment: usize = proof_kernel_add_node(&report.analysis_1.kernel.nodes, "effect-containment", "", declared_row, 0, 0, containment_children_start, call_roots.count, 0, function_name, "")
+            containment: usize = proof_kernel_add_node(&report.analysis_1.kernel.nodes, "effect-containment", "", declared_row, line.usize(), 0, containment_children_start, call_roots.count, offset.i64(), function_name, "")
             if not proof_replay_effect_source_valid_with_work(&report.source.source_declarations, &report.source.source_annotations, &report.source_contracts.source_extern_parameters, &report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, containment, function_name, line, &report.source_types.source_effect_index.work.implicit_effect_work):
                 if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                     report.proof_obligation(false)

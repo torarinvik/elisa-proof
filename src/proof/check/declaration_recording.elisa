@@ -14,7 +14,7 @@ extend ElisaProof:
         def proof_declaration_attempt_key_hash(name: sview, owner_line: u32, owner_offset: u32, source_work: mutable usize&) -> (complete: bool, hash: u32):
             return (false, 0) if not proof_report_source_work_charge(sview_len(name), source_work)
             return (false, 0) if not proof_report_source_work_charge(2, source_work)
-            hash: u32 = proof_expr_shape_mix(proof_name_hash(name), owner_line.i64())
+            hash: mutable u32 = proof_expr_shape_mix(proof_name_hash(name), owner_line.i64())
             hash <- proof_expr_shape_mix(hash, owner_offset.i64())
             return (true, hash)
 
@@ -49,7 +49,7 @@ extend ElisaProof:
                 probes: mutable usize = 0
                 while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, attempt, attempt_id, index, capacity, attempt_count, source_work|:
                     return ProofDeclarationAttemptIndex{} if not proof_report_source_work_charge(1, source_work)
-                    row: usize = index.slots[slot]
+                    row: mutable usize = index.slots[slot]
                     if row == capacity:
                         row <- index.names.count
                         index.names.push(attempt.name)
@@ -128,7 +128,54 @@ extend ElisaProof:
         # that remains the compiler effect checker's obligation. An unresolved callee or an
         # abstract row is reported and no certificate is emitted.
 
-        def proof_record_declaration(declaration: Ast::Decl, file: Ast::File&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, attempt_index: ProofDeclarationAttemptIndex, report: mutable ProofReport&, source_work: mutable usize&) -> void:
+        def proof_declaration_function_rows_valid(functions: ProofFunctionTable&, row: usize) -> bool:
+            function_count: usize = functions.lookup.source.names.count
+            return false if row >= function_count
+            return false if:
+                functions.parameters.metadata.param_starts.count != function_count or functions.parameters.metadata.param_counts.count != function_count
+                functions.contracts.obligations.requires_starts.count != function_count or functions.contracts.obligations.requires_counts.count != function_count
+                functions.contracts.obligations.ensure_starts.count != function_count or functions.contracts.obligations.ensure_counts.count != function_count
+                functions.contracts.frames.changes_counts.count != function_count or functions.contracts.frames.preserves_counts.count != function_count
+                functions.contracts.termination.decreases_counts.count != function_count or functions.contracts.termination.structural.count != function_count
+                functions.summaries.recursive.count != function_count or functions.summaries.pure.count != function_count
+            parameter_start: usize = functions.parameters.metadata.param_starts[row]
+            parameter_count: usize = functions.parameters.metadata.param_counts[row]
+            parameter_total: usize = functions.parameters.metadata.all_params.count
+            return false if parameter_start > parameter_total or parameter_count > parameter_total - parameter_start
+            requires_start: usize = functions.contracts.obligations.requires_starts[row]
+            requires_count: usize = functions.contracts.obligations.requires_counts[row]
+            return false if requires_start > functions.contracts.obligations.all_requires.count or requires_count > functions.contracts.obligations.all_requires.count - requires_start
+            ensures_start: usize = functions.contracts.obligations.ensure_starts[row]
+            ensures_count: usize = functions.contracts.obligations.ensure_counts[row]
+            return false if ensures_start > functions.contracts.obligations.all_ensures.count or ensures_count > functions.contracts.obligations.all_ensures.count - ensures_start
+            true
+
+        def proof_declaration_lemma_rows_valid(lemmas: ProofLemmaTable&, row: usize, source_parameter_count: usize) -> bool:
+            lemma_count: usize = lemmas.identity.names.count
+            return false if row >= lemma_count
+            return false if:
+                lemmas.parameters.param_starts.count != lemma_count or lemmas.parameters.param_counts.count != lemma_count
+                lemmas.contracts.requires_starts.count != lemma_count or lemmas.contracts.requires_counts.count != lemma_count
+                lemmas.contracts.ensure_starts.count != lemma_count or lemmas.contracts.ensure_counts.count != lemma_count
+                lemmas.termination.decreases_starts.count != lemma_count or lemmas.termination.decreases_counts.count != lemma_count
+                lemmas.termination.recursive.count != lemma_count
+            parameter_start: usize = lemmas.parameters.param_starts[row]
+            parameter_count: usize = lemmas.parameters.param_counts[row]
+            parameter_total: usize = lemmas.parameters.all_params.count
+            return false if parameter_count != source_parameter_count or lemmas.parameters.all_has_defaults.count != parameter_total or lemmas.parameters.all_defaults.count != parameter_total
+            return false if parameter_start > parameter_total or parameter_count > parameter_total - parameter_start
+            requires_start: usize = lemmas.contracts.requires_starts[row]
+            requires_count: usize = lemmas.contracts.requires_counts[row]
+            return false if requires_start > lemmas.contracts.all_requires.count or requires_count > lemmas.contracts.all_requires.count - requires_start
+            ensures_start: usize = lemmas.contracts.ensure_starts[row]
+            ensures_count: usize = lemmas.contracts.ensure_counts[row]
+            return false if ensures_start > lemmas.contracts.all_ensures.count or ensures_count > lemmas.contracts.all_ensures.count - ensures_start
+            decreases_start: usize = lemmas.termination.decreases_starts[row]
+            decreases_count: usize = lemmas.termination.decreases_counts[row]
+            return false if decreases_start > lemmas.termination.all_decreases.count or decreases_count > lemmas.termination.all_decreases.count - decreases_start
+            true
+
+        def proof_record_declaration(declaration: Ast::Decl, file: Ast::File&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, attempt_index: ProofDeclarationAttemptIndex, effect_row_markers: ProofFunctionEffectRowMarkerIndex, report: mutable ProofReport&, source_work: mutable usize&) -> void:
             summary: mutable ProofDeclarationSummary = proof_declaration_summary("declaration", "", 0)
             match declaration:
                 Ast::Decl.Func(name, parameters, _, _, declared_effects, _, position):
@@ -145,10 +192,24 @@ extend ElisaProof:
                     summary.effects_start <- report.analysis_1.declaration_effects.count
                     summary.effects_count <- declared_effects.count
                     summary.effects_declared <- declared_effects.count > 0
+                    if not summary.effects_declared:
+                        marker: (complete: bool, present: bool) = proof_function_effect_row_marker_index_lookup(effect_row_markers, file.enum_annotations, name, position.line, position.offset, source_work)
+                        if not marker.complete:
+                            source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        else:
+                            summary.effects_declared <- marker.present
                     for effect in declared_effects |report|:
                         report.analysis_1.declaration_effects.push(effect)
                     if summary.lemma:
-                        lemma_index: usize = lemma_lookup.index
+                        lemma_index: mutable usize = lemma_lookup.index
+                        lemma_metadata_invalid: mutable bool = false
+                        if lemma_index < lemmas.identity.names.count and not proof_declaration_lemma_rows_valid(lemmas, lemma_index, parameters.count):
+                            lemma_metadata_invalid <- true
+                            summary.verified <- false
+                            summary.verification_reason <- "lemma-metadata-invalid"
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "lemma-metadata-invalid", position.line, name, "lemma parameter or contract metadata is incomplete; theorem summary was withheld")
+                            lemma_index <- lemmas.identity.names.count
                         if lemma_index < lemmas.identity.names.count:
                             summary.requires_count <- lemmas.contracts.requires_counts[lemma_index]
                             summary.ensures_count <- lemmas.contracts.ensure_counts[lemma_index]
@@ -159,7 +220,7 @@ extend ElisaProof:
                             proof_goals_start: usize = report.analysis_1.theorems.proof_goal_ids.count
                             proof_goals_count: mutable usize = 0
                             attempt_row: (complete: bool, row: usize) = proof_declaration_attempt_index_find(attempt_index, name, position.line, position.offset, source_work)
-                            goal_owner_complete: bool = attempt_row.complete
+                            goal_owner_complete: mutable bool = attempt_row.complete
                             if goal_owner_complete and attempt_row.row < attempt_index.names.count and attempt_row.row < attempt_index.heads.count and attempt_row.row < attempt_index.tails.count:
                                 attempt_id: mutable usize = attempt_index.heads[attempt_row.row]
                                 expected_tail: usize = attempt_index.tails[attempt_row.row]
@@ -211,13 +272,20 @@ extend ElisaProof:
                                 report.analysis_1.theorems.decreases.push(lemmas.termination.all_decreases[decreases_start + index])
                             report.analysis_1.theorems.summaries.push(theorem)
                         else:
-                            # Two lemmas share this name: calls to it fail closed, and neither
-                            # body is scheduled, so the declaration is visibly unverified.
-                            summary.verification_reason <- "ambiguous-lemma-name"
-                            report.proof_obligation(false)
-                            proof_add_finding(report, "lemma-ambiguous", position.line, name, "another lemma has the same name; lemma names must be unique for their summaries to be used")
+                            if not lemma_metadata_invalid:
+                                # Two lemmas share this name: calls to it fail closed, and neither
+                                # body is scheduled, so the declaration is visibly unverified.
+                                summary.verification_reason <- "ambiguous-lemma-name"
+                                report.proof_obligation(false)
+                                proof_add_finding(report, "lemma-ambiguous", position.line, name, "another lemma has the same name; lemma names must be unique for their summaries to be used")
                     else:
-                        function_index: usize = proof_function_index_at_line(functions, name, position.line)
+                        function_index: mutable usize = proof_function_index_at_line(functions, name, position.line)
+                        if function_index < functions.lookup.source.names.count and not proof_declaration_function_rows_valid(functions, function_index):
+                            summary.verified <- false
+                            summary.verification_reason <- "function-metadata-invalid"
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "function-metadata-invalid", position.line, name, "function parameter or contract metadata is incomplete; executable summary was withheld")
+                            function_index <- functions.lookup.source.names.count
                         if function_index < functions.lookup.source.names.count:
                             summary.requires_count <- functions.contracts.obligations.requires_counts[function_index]
                             summary.ensures_count <- functions.contracts.obligations.ensure_counts[function_index]
@@ -234,8 +302,13 @@ extend ElisaProof:
                             for index in 0..<executable.parameters_count |index, parameter_start, functions, report|:
                                 report.analysis_1.executables.parameters.push(functions.parameters.metadata.all_params[parameter_start + index])
                                 parameter_slot: usize = parameter_start + index
-                                parameter_reference_known: bool = parameter_slot < functions.parameters.metadata.all_parameter_type_marker_complete.count and functions.parameters.metadata.all_parameter_type_marker_complete[parameter_slot]
-                                report.analysis_1.executables.parameter_references.push(parameter_reference_known and functions.parameters.metadata.all_parameter_references[parameter_slot])
+                                parameter_reference_known: mutable bool = false
+                                if parameter_slot < functions.parameters.metadata.all_parameter_type_marker_complete.count and parameter_slot < functions.parameters.metadata.all_parameter_references.count:
+                                    parameter_reference_known <- functions.parameters.metadata.all_parameter_type_marker_complete[parameter_slot]
+                                parameter_reference: bool = false
+                                if parameter_reference_known:
+                                    parameter_reference <- functions.parameters.metadata.all_parameter_references[parameter_slot]
+                                report.analysis_1.executables.parameter_references.push(parameter_reference)
                             requires_start: usize = functions.contracts.obligations.requires_starts[function_index]
                             for index in 0..<executable.requires_count |index, requires_start, functions, report|:
                                 report.analysis_1.executables.requires.push(functions.contracts.obligations.all_requires[requires_start + index])
@@ -276,18 +349,24 @@ extend ElisaProof:
 
         def proof_record_declarations(file: Ast::File&, declarations: darray[Ast::Decl]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&, source_work: mutable usize&) -> void:
             attempt_index: ProofDeclarationAttemptIndex = proof_declaration_attempt_index_build(report, source_work)
-            proof_record_declarations_indexed(file, declarations, lemmas, functions, attempt_index, report, source_work)
+            effect_row_markers: ProofFunctionEffectRowMarkerIndex = proof_function_effect_row_marker_index_build(file.enum_annotations, source_work)
+            if not effect_row_markers.valid:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function effect-row marker index could not be built within its validated work bound", "function-effect-row-marker-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                report.proof_obligation(false)
+                return
+            proof_record_declarations_indexed(file, declarations, lemmas, functions, attempt_index, effect_row_markers, report, source_work)
 
-        def proof_record_declarations_indexed(file: Ast::File&, declarations: darray[Ast::Decl]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, attempt_index: ProofDeclarationAttemptIndex, report: mutable ProofReport&, source_work: mutable usize&) -> void:
-            for declaration in declarations |file, lemmas, functions, report, source_work|:
+        def proof_record_declarations_indexed(file: Ast::File&, declarations: darray[Ast::Decl]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, attempt_index: ProofDeclarationAttemptIndex, effect_row_markers: ProofFunctionEffectRowMarkerIndex, report: mutable ProofReport&, source_work: mutable usize&) -> void:
+            for declaration in declarations |file, lemmas, functions, report, source_work, effect_row_markers|:
                 report.results.declarations <- report.results.declarations + 1
-                proof_record_declaration(declaration, file, lemmas, functions, attempt_index, report, source_work)
+                proof_record_declaration(declaration, file, lemmas, functions, attempt_index, effect_row_markers, report, source_work)
                 proof_refuse_struct_invariants(declaration, report)
                 match declaration:
                     Ast::Decl.Module(_, module_body, _):
-                        proof_record_declarations_indexed(file, module_body, lemmas, functions, attempt_index, report, source_work)
+                        proof_record_declarations_indexed(file, module_body, lemmas, functions, attempt_index, effect_row_markers, report, source_work)
                     Ast::Decl.Scoped(scoped_body, _):
-                        proof_record_declarations_indexed(file, scoped_body, lemmas, functions, attempt_index, report, source_work)
+                        proof_record_declarations_indexed(file, scoped_body, lemmas, functions, attempt_index, effect_row_markers, report, source_work)
                     Ast::Decl.Invalid:
                         report.proof_obligation(false)
                         proof_add_finding(report, "declaration-unsupported", 0, "", "invalid declaration cannot enter a verified proof state")
