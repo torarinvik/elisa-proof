@@ -67,7 +67,9 @@ for boolean_collision in ('bool_true_pattern_collision', 'bool_false_pattern_col
 char_guard = function_body(producer, "proof_pattern_unambiguous_char_literal")
 assert "length < 3" in char_guard
 assert "character >= 32 and character <= 126" in char_guard
+assert "character != PROOF_ASCII_SINGLE_QUOTE and character != PROOF_ASCII_BACKSLASH" in char_guard
 assert "interior_length == 2" in char_guard
+assert "escaped == 110 or escaped == 116 or escaped == 114 or escaped == PROOF_ASCII_DIGIT_ZERO or escaped == PROOF_ASCII_BACKSLASH or escaped == PROOF_ASCII_SINGLE_QUOTE" in char_guard
 assert "return false" in char_guard
 
 typed_literal = function_body(producer, "proof_pattern_typed_literal_expression")
@@ -187,7 +189,9 @@ assert "character < 32 or character > 126 or character == 34 or character == 92"
 assert "work <- work + length * 4 + 1" in replay_string_guard
 replay_char_guard = function_body(replay, "proof_replay_control_pattern_unambiguous_char")
 assert "character >= 32 and character <= 126" in replay_char_guard
+assert "character != 39 and character != 92" in replay_char_guard
 assert "escaped == 110 or escaped == 116 or escaped == 114 or escaped == 48" in replay_char_guard
+assert "escaped == 48 or escaped == 92 or escaped == 39" in replay_char_guard
 branch_replay = (ROOT / "src/proof/replay/boundary_branch_fact_sources.elisa").read_text(encoding="utf-8")
 exact_call = "proof_replay_control_pattern_exact(prior.pattern, pattern_type, work)"
 assert exact_call in branch_replay

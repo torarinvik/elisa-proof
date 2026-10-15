@@ -19,6 +19,9 @@ for route in (("--json",), ("--function-json", "impure_proof")):
     assert report["trust"]["trusted_assumptions"] == [], (route, report["trust"])
     assert any(finding["kind"] == "proof-impure" and finding["name"] == "impure_proof"
                for finding in report["findings"]), (route, report["findings"])
+    if route == ("--json",):
+        assert any(finding["kind"] == "lemma-impure" and finding["name"] == "shadowed_callable_fact"
+                   for finding in report["findings"]), (route, report["findings"])
     assert not any(goal["name"] == "impure_proof" and goal["rule"] == "goal" and goal["proven"]
                    for goal in report["goals"]), (route, report["goals"])
     details = {detail["name"]: detail for detail in report["declaration_details"]}

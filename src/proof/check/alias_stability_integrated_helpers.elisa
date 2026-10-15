@@ -51,13 +51,28 @@ extend ElisaProof:
             return result
 
         def proof_callee_is_shadowed_local(callee: Ast::Expr, caller_names: darray[sview]&, depth: usize) -> bool:
-            # The nesting cap must not turn an unresolved callable into a global summary hit.
+            work: mutable usize = 0
+            proof_callee_is_shadowed_local_with_work(callee, caller_names, depth, &work)
+
+        def proof_callee_is_shadowed_local_with_work(callee: Ast::Expr, caller_names: darray[sview]&, depth: usize, work: mutable usize&) -> bool:
+            # Charge each lexical comparison, including the bytes compared. A large caller
+            # scope must not turn one assertion into an unmetered name-table scan.
             return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
             match callee:
                 Ast::Expr.Ident(local_callee, _):
-                    return any local in caller_names where local == local_callee
+                    for local in caller_names |local_callee, work|:
+                        return true if not proof_match_lowering_charge(1, work)
+                        return true if not proof_match_lowering_charge(sview_len(local), work)
+                        return true if not proof_match_lowering_charge(sview_len(local_callee), work)
+                        return true if local == local_callee
+                    return false
                 Ast::Expr.Paren(inner, _):
-                    return proof_callee_is_shadowed_local(inner, caller_names, depth + 1)
+                    return proof_callee_is_shadowed_local_with_work(inner, caller_names, depth + 1, work)
+                Ast::Expr.Scope(base, _, _):
+                    # A module-qualified path can share its base spelling with a local
+                    # binding. Until that namespace collision is resolved at the call site,
+                    # do not use a global function summary for the leaf name.
+                    return proof_callee_is_shadowed_local_with_work(base, caller_names, depth + 1, work)
                 _:
                     return false
 
@@ -70,7 +85,7 @@ extend ElisaProof:
             return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Call(callee, arguments, _, _):
-                    return true if proof_callee_is_shadowed_local(callee, caller_names, 0)
+                    return true if proof_callee_is_shadowed_local_with_work(callee, caller_names, 0, work)
                     if proof_callable_name(callee) == "":
                         return true if not proof_resource_collection_builtin(callee, functions).known and not proof_runtime_numeric_conversion(callee, arguments.count, functions).known
                     return true if proof_expression_has_opaque_callable_call_with_work(callee, functions, caller_names, depth + 1, work)
@@ -112,8 +127,12 @@ extend ElisaProof:
                     return false
                 Ast::Expr.If(condition, then_expression, else_expression, _):
                     return proof_expression_has_opaque_callable_call_with_work(condition, functions, caller_names, depth + 1, work) or proof_expression_has_opaque_callable_call_with_work(then_expression, functions, caller_names, depth + 1, work) or proof_expression_has_opaque_callable_call_with_work(else_expression, functions, caller_names, depth + 1, work)
-                Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    return proof_expression_has_opaque_callable_call_with_work(iterable, functions, caller_names, depth + 1, work) or proof_expression_has_opaque_callable_call_with_work(condition, functions, caller_names, depth + 1, work) or proof_expression_has_opaque_callable_call_with_work(body, functions, caller_names, depth + 1, work)
+                Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+                    return true if proof_expression_has_opaque_callable_call_with_work(iterable, functions, caller_names, depth + 1, work)
+                    return true if not proof_match_lowering_charge(caller_names.count + 1, work) or not proof_match_lowering_charge(sview_len(variable), work)
+                    scoped_names: mutable darray[sview] = proof_copy_names(caller_names)
+                    scoped_names.push(variable)
+                    return proof_expression_has_opaque_callable_call_with_work(condition, functions, scoped_names, depth + 1, work) or proof_expression_has_opaque_callable_call_with_work(body, functions, scoped_names, depth + 1, work)
                 Ast::Expr.Refinement(base, predicate, _):
                     return proof_expression_has_opaque_callable_call_with_work(base, functions, caller_names, depth + 1, work) or proof_expression_has_opaque_callable_call_with_work(predicate, functions, caller_names, depth + 1, work)
                 Ast::Expr.Match(scrutinee, arms, position):

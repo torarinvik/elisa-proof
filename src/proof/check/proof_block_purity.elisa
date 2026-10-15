@@ -15,8 +15,9 @@ extend ElisaProof:
         # A proof block is erased by the backend. Admit calls as logical terms only when the
         # function table proves a total-pure summary; `pure` excludes requires and `verified`
         # establishes the completed body and termination checks.
-        def proof_assertion_calls_are_total_pure(expression: Ast::Expr, functions: mutable ProofFunctionTable&) -> bool:
+        def proof_assertion_calls_are_total_pure(expression: Ast::Expr, functions: mutable ProofFunctionTable&, caller_names: darray[sview]&, match_work_used: mutable usize&) -> bool:
             return true if not proof_expr_has_call(expression)
+            return false if proof_expression_has_opaque_callable_call_with_work(expression, functions, caller_names, 0, match_work_used)
             proof_contract_calls_are_pure(expression, functions)
 
         def proof_purity_work_charge(amount: usize, work: mutable ProofBlockPurityWork&) -> bool:
@@ -28,6 +29,11 @@ extend ElisaProof:
             return if work.reported
             proof_add_budget_finding(report, "resource-analysis-budget", line, name, "proof purity analysis exceeded its bounded source limit", dimension, observed, limit)
             work.reported <- true
+
+        def proof_purity_match_budget_check(report: mutable ProofReport&, name: sview, line: u32, work: mutable ProofBlockPurityWork&) -> bool:
+            return true if work.match_work_used <= PROOF_MATCH_LOWERING_WORK_LIMIT
+            proof_purity_budget_finding(report, name, line, "proof-purity-callable-scope-work", work.match_work_used, PROOF_MATCH_LOWERING_WORK_LIMIT, work)
+            return false
 
         # Meter expression shape before invoking the existing purity visitors. The AST cost walk
         # has its own 1M ceiling, while this local budget also includes statements and repeated
@@ -91,7 +97,7 @@ extend ElisaProof:
         # The lemma walker and assert-by walker share one work counter. Entering an assert-by
         # switches to the stricter proof-block grammar, while branches in a lemma remain in
         # lemma mode. This keeps nested erased proof bodies inside the declaration's budget.
-        def proof_check_purity_walk(body: darray[Ast::Stmt]&, functions: mutable ProofFunctionTable&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, lemma_mode: bool, work: mutable ProofBlockPurityWork&, depth: usize, first_statement: usize) -> void:
+        def proof_check_purity_walk(body: darray[Ast::Stmt]&, functions: mutable ProofFunctionTable&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, caller_names: darray[sview]&, lemma_mode: bool, work: mutable ProofBlockPurityWork&, depth: usize, first_statement: usize) -> void:
             if depth >= PROOF_PURITY_WALK_DEPTH_LIMIT:
                 proof_purity_budget_finding(report, name, 0, "proof-purity-recursion-depth", depth + 1, PROOF_PURITY_WALK_DEPTH_LIMIT, work)
                 return
@@ -101,7 +107,7 @@ extend ElisaProof:
             if not proof_purity_work_charge(body.count - first_statement, work):
                 proof_purity_budget_finding(report, name, 0, "proof-purity-source-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, work)
                 return
-            for index in first_statement..<body.count |index, body, report, name, functions, lemmas, lemma_mode, work, depth|:
+            for index in first_statement..<body.count |index, body, report, name, functions, lemmas, caller_names, lemma_mode, work, depth|:
                 return if work.reported
                 if not proof_purity_work_charge(1, work):
                     proof_purity_budget_finding(report, name, 0, "proof-purity-source-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, work)
@@ -113,7 +119,10 @@ extend ElisaProof:
                         match expression:
                             Ast::Expr.Call(callee, arguments, _, _):
                                 called: sview = proof_callable_name(callee)
+                                assert_shadowed: bool = called == "assert" and proof_callee_is_shadowed_local_with_work(callee, caller_names, 0, &work.match_work_used)
+                                return if not proof_purity_match_budget_check(report, name, position.line, work)
                                 if lemma_mode:
+                                    proof_add_finding(report, "lemma-impure", position.line, name, "lemma assertions must resolve to the bare `assert` builtin") if assert_shadowed
                                     proof_add_finding(report, "lemma-impure", position.line, name, "lemma assertions must use the bare `assert` builtin") if called == "assert" and proof_ident_name(callee) != "assert"
                                     if called != "assert" and (proof_callable_is_scoped(callee) or not proof_lemma_unqualified_usable(lemmas, called)):
                                         proof_add_finding(report, "lemma-impure", position.line, name, "lemma bodies may call only assert or another lemma")
@@ -121,9 +130,11 @@ extend ElisaProof:
                                     if called == "assert" and arguments.count == 1:
                                         fresh_value: bool = proof_block_expression_has_fresh_value(arguments[0], 0)
                                         overloaded_operator: bool = proof_source_expression_has_overloaded_operator(arguments[0], report.source.source_primitive_operator_mask, 0)
-                                        unsafe_assertion: bool = not proof_assertion_calls_are_total_pure(arguments[0], functions) or proof_expr_has_move(arguments[0]) or proof_expr_has_old(arguments[0]) or fresh_value or overloaded_operator
+                                        unsafe_assertion: bool = not proof_assertion_calls_are_total_pure(arguments[0], functions, caller_names, &work.match_work_used) or proof_expr_has_move(arguments[0]) or proof_expr_has_old(arguments[0]) or fresh_value or overloaded_operator
+                                        return if not proof_purity_match_budget_check(report, name, position.line, work)
                                         proof_add_finding(report, "lemma-impure", position.line, name, "lemma assertions may use only verified total pure calls and stable expressions") if unsafe_assertion
                                 else:
+                                    proof_add_finding(report, "proof-unknown", position.line, name, "proof assertions must resolve to the bare `assert` builtin") if assert_shadowed
                                     proof_add_finding(report, "proof-unknown", position.line, name, "proof assertions must use the bare `assert` builtin") if called == "assert" and proof_ident_name(callee) != "assert"
                                     if called != "assert" and (proof_callable_is_scoped(callee) or not proof_lemma_unqualified_usable(lemmas, called)):
                                         proof_add_finding(report, "proof-unknown", position.line, name, "proof blocks may contain only assert facts")
@@ -131,7 +142,8 @@ extend ElisaProof:
                                     if called == "assert" and arguments.count == 1:
                                         fresh_value: bool = proof_block_expression_has_fresh_value(arguments[0], 0)
                                         overloaded_operator: bool = proof_source_expression_has_overloaded_operator(arguments[0], report.source.source_primitive_operator_mask, 0)
-                                        unsafe_argument: bool = not proof_assertion_calls_are_total_pure(arguments[0], functions) or proof_expr_has_move(arguments[0]) or proof_expr_has_old(arguments[0]) or fresh_value or overloaded_operator
+                                        unsafe_argument: bool = not proof_assertion_calls_are_total_pure(arguments[0], functions, caller_names, &work.match_work_used) or proof_expr_has_move(arguments[0]) or proof_expr_has_old(arguments[0]) or fresh_value or overloaded_operator
+                                        return if not proof_purity_match_budget_check(report, name, position.line, work)
                                         proof_add_finding(report, "proof-impure", position.line, name, "proof assertions may use only verified total pure calls and stable primitive expressions") if unsafe_argument
                             _:
                                 if lemma_mode:
@@ -148,7 +160,8 @@ extend ElisaProof:
                                 return if not proof_purity_expression_charge(expression, PROOF_PURITY_EXPRESSION_VISITOR_MULTIPLIER, work, report, name, position.line)
                                 fresh_value: bool = proof_block_expression_has_fresh_value(expression, 0)
                                 overloaded_operator: bool = proof_source_expression_has_overloaded_operator(expression, report.source.source_primitive_operator_mask, 0)
-                                unsafe_assertion: bool = not proof_assertion_calls_are_total_pure(expression, functions) or proof_expr_has_move(expression) or proof_expr_has_old(expression) or fresh_value or overloaded_operator
+                                unsafe_assertion: bool = not proof_assertion_calls_are_total_pure(expression, functions, caller_names, &work.match_work_used) or proof_expr_has_move(expression) or proof_expr_has_old(expression) or fresh_value or overloaded_operator
+                                return if not proof_purity_match_budget_check(report, name, position.line, work)
                                 proof_add_finding(report, "lemma-impure", position.line, name, "lemma assertions may use only verified total pure calls and stable expressions") if unsafe_assertion
                         else:
                             proof_add_finding(report, "proof-unknown", position.line, name, "unsupported contract in proof block") if kind != "assert"
@@ -156,11 +169,12 @@ extend ElisaProof:
                                 return if not proof_purity_expression_charge(expression, PROOF_PURITY_EXPRESSION_VISITOR_MULTIPLIER, work, report, name, position.line)
                                 fresh_value: bool = proof_block_expression_has_fresh_value(expression, 0)
                                 overloaded_operator: bool = proof_source_expression_has_overloaded_operator(expression, report.source.source_primitive_operator_mask, 0)
-                                unsafe_assertion: bool = not proof_assertion_calls_are_total_pure(expression, functions) or proof_expr_has_move(expression) or proof_expr_has_old(expression) or fresh_value or overloaded_operator
+                                unsafe_assertion: bool = not proof_assertion_calls_are_total_pure(expression, functions, caller_names, &work.match_work_used) or proof_expr_has_move(expression) or proof_expr_has_old(expression) or fresh_value or overloaded_operator
+                                return if not proof_purity_match_budget_check(report, name, position.line, work)
                                 proof_add_finding(report, "proof-impure", position.line, name, "proof assertions may use only verified total pure calls and stable primitive expressions") if unsafe_assertion
                     Ast::Stmt.Block(block_kind, _, _, nested, _):
                         if block_kind == "assert_by":
-                            proof_check_purity_walk(nested, functions, lemmas, report, name, false, work, depth + 1, 0)
+                            proof_check_purity_walk(nested, functions, lemmas, report, name, caller_names, false, work, depth + 1, 0)
                         elif lemma_mode:
                             proof_add_finding(report, "lemma-impure", 0, name, "lemma bodies may contain only proof blocks")
                         else:
@@ -173,9 +187,9 @@ extend ElisaProof:
                             condition_has_fresh_value: bool = proof_block_expression_has_fresh_value(condition, 0)
                             if proof_expr_has_call(condition) or condition_has_unstable_operator or condition_has_move or condition_has_fresh_value:
                                 proof_add_finding(report, "lemma-impure", position.line, name, "lemma branch conditions may use only stable primitive expressions")
-                            proof_check_purity_walk(then_body, functions, lemmas, report, name, true, work, depth + 1, 0)
+                            proof_check_purity_walk(then_body, functions, lemmas, report, name, caller_names, true, work, depth + 1, 0)
                             return if work.reported
-                            proof_check_purity_walk(else_body, functions, lemmas, report, name, true, work, depth + 1, 0)
+                            proof_check_purity_walk(else_body, functions, lemmas, report, name, caller_names, true, work, depth + 1, 0)
                         else:
                             proof_add_finding(report, "proof-impure", position.line, name, "proof blocks may contain only assert facts")
                     _:
@@ -185,12 +199,12 @@ extend ElisaProof:
                             proof_add_finding(report, "proof-impure", 0, name, "proof blocks may not mutate or return")
                 return if work.reported
 
-        def proof_check_purity(body: darray[Ast::Stmt]&, functions: mutable ProofFunctionTable&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, work: mutable ProofBlockPurityWork&, depth: usize, first_statement: usize) -> void:
-            proof_check_purity_walk(body, functions, lemmas, report, name, false, work, depth, first_statement)
+        def proof_check_purity(body: darray[Ast::Stmt]&, functions: mutable ProofFunctionTable&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, caller_names: darray[sview]&, work: mutable ProofBlockPurityWork&, depth: usize, first_statement: usize) -> void:
+            proof_check_purity_walk(body, functions, lemmas, report, name, caller_names, false, work, depth, first_statement)
 
         # Lemmas are erased proof declarations too. Their body may contain contracts, checked
         # assertions, lemma applications, and nested assert-by blocks, but no executable state
         # change or return. Otherwise an assignment could manufacture a postcondition in the
         # symbolic evaluator even though the erased lemma never executes at runtime.
-        def proof_check_lemma_purity(body: darray[Ast::Stmt]&, functions: mutable ProofFunctionTable&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, work: mutable ProofBlockPurityWork&, depth: usize) -> void:
-            proof_check_purity_walk(body, functions, lemmas, report, name, true, work, depth, 0)
+        def proof_check_lemma_purity(body: darray[Ast::Stmt]&, functions: mutable ProofFunctionTable&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, caller_names: darray[sview]&, work: mutable ProofBlockPurityWork&, depth: usize) -> void:
+            proof_check_purity_walk(body, functions, lemmas, report, name, caller_names, true, work, depth, 0)
