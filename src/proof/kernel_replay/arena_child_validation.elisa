@@ -1,0 +1,295 @@
+# Whole-arena child and quantified-range structural validation helpers.
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_arena_child_valid(validity: darray[bool]&, root: usize) -> bool:
+            located: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, root)
+            return located.known and located.value
+
+        def proof_kernel_replay_arena_child_kind_valid(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, validity: darray[bool]&, root: usize, wanted: sview) -> bool:
+            return false if:
+                root >= validity.count or root >= nodes.count
+                not validity[root]
+                nodes[root].kind != wanted
+            return true
+
+        # Quantifier elimination substitutes one name for collection and integer ranges,
+        # and key/value names for dictionary ranges. Keep that representation invariant
+        # explicit so every consumer can rely on it after arena admission.
+        def proof_kernel_replay_quantifier_range_arity_valid(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, node: ElisaProofKernelCore::ProofKernelNode) -> bool:
+            return true if node.kind != "quantifier"
+            return false if node.left >= nodes.count
+            range: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
+            return (node.auxiliary == 1 and range.kind != "dict") or (node.auxiliary == 2 and range.kind == "dict")
+
+        # The serialized dictionary keeps every literal pair, while runtime dictionary
+        # construction overwrites earlier values for an equal key. Existential replay over
+        # the raw pairs is sound only when the keys are known and pairwise distinct. Accept
+        # only direct integer literals. Arithmetic keys could wrap at their source width and
+        # collide despite distinct mathematical values. Preserve the conservative common-tag
+        # and common-typed-sort requirement; the hash only narrows the duplicate check. Charge
+        # key decoding, probes, and collision reads to the arena budget.
+        def proof_kernel_replay_existential_dictionary_key_literal_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, work_used: mutable usize&, work_limit: usize) -> (known: bool, bits: u64, typed: bool, sort: sview, unsigned: bool, width: i64):
+            empty: (known: bool, bits: u64, typed: bool, sort: sview, unsigned: bool, width: i64) = (false, 0, false, "", false, 0)
+            return empty if root >= nodes.count
+            before: usize = work_used
+            return empty if not proof_kernel_replay_arena_shape_text_work_charge(sview_len(nodes[root].kind), &work_used, before, work_limit)
+            before <- work_used
+            return empty if not proof_kernel_replay_arena_shape_text_work_charge(sview_len(nodes[root].operator), &work_used, before, work_limit)
+            return empty if nodes[root].operator != ""
+            before <- work_used
+            return empty if not proof_kernel_replay_arena_shape_text_work_charge(sview_len(nodes[root].name), &work_used, before, work_limit)
+            before <- work_used
+            return empty if not proof_kernel_replay_arena_shape_text_work_charge(sview_len(nodes[root].secondary_name), &work_used, before, work_limit)
+            shape: (known: bool, valid: bool) = proof_kernel_replay_arena_scalar_shape(nodes[root])
+            return empty if not shape.known or not shape.valid
+            if nodes[root].kind == "typed-int":
+                literal: (known: bool, bits: u64, unsigned: bool, width: i64) = ElisaProofKernelCore::typed_literal_value(nodes[root])
+                return empty if not literal.known
+                return (true, literal.bits, true, nodes[root].name, literal.unsigned, literal.width)
+            return empty if nodes[root].kind != "int" or nodes[root].name != "" or nodes[root].value < 0
+            return (true, nodes[root].value.u64(), false, "", false, 0)
+
+        def proof_kernel_replay_existential_dictionary_keys_unique_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, range: ElisaProofKernelCore::ProofKernelNode, work_used: mutable usize&, work_limit: usize) -> bool:
+            return false if:
+                range.children_count > PROOF_KERNEL_REPLAY_MAX_QUANTIFIER_ENTRIES
+                not proof_kernel_replay_child_range_valid(range.children_start, range.children_count, children.count)
+            return true if range.children_count < 2
+            return false if work_used > work_limit
+            capacity: usize = proof_kernel_replay_name_index_capacity(range.children_count)
+            return false if capacity == 0 or capacity > work_limit / 2
+            reserve_before: usize = work_used
+            return false if not proof_kernel_replay_arena_shape_text_work_charge(capacity * 2, &work_used, reserve_before, work_limit)
+            hashes: mutable darray[u32] = []
+            slots: mutable darray[usize] = []
+            hashes.resize(capacity)
+            slots.resize(capacity)
+            for slot in 0..<capacity |slot, slots, work_used, work_limit|:
+                init_before: usize = work_used
+                return false if not proof_kernel_replay_arena_shape_text_work_charge(1, &work_used, init_before, work_limit)
+                slots[slot] <- 0
+            first_typed: mutable bool = false
+            has_first_key: mutable bool = false
+            first_sort: mutable sview = ""
+            first_unsigned: mutable bool = false
+            first_width: mutable i64 = 0
+            for key_index in 0..<range.children_count |key_index, range, children, nodes, work_used, work_limit, capacity, hashes, slots, first_typed, has_first_key, first_sort, first_unsigned, first_width|:
+                scan_before: usize = work_used
+                return false if not proof_kernel_replay_arena_shape_text_work_charge(1, &work_used, scan_before, work_limit)
+                entry_root: usize = children[range.children_start + key_index]
+                return false if entry_root >= nodes.count
+                entry: ElisaProofKernelCore::ProofKernelNode = nodes[entry_root]
+                entry_shape_before: usize = work_used
+                return false if not proof_kernel_replay_arena_shape_text_work(entry, &work_used, entry_shape_before, work_limit)
+                return false if not proof_kernel_replay_arena_shape_valid(entry) or entry.kind != "dict_entry"
+                return false if entry.left >= nodes.count or entry.right >= nodes.count
+                key_shape_before: usize = work_used
+                return false if not proof_kernel_replay_arena_shape_text_work(nodes[entry.left], &work_used, key_shape_before, work_limit)
+                return false if not proof_kernel_replay_arena_shape_valid(nodes[entry.left])
+                return false if nodes[entry.left].kind in {"absent", "unsupported"}
+                value_shape_before: usize = work_used
+                return false if not proof_kernel_replay_arena_shape_text_work(nodes[entry.right], &work_used, value_shape_before, work_limit)
+                return false if not proof_kernel_replay_arena_shape_valid(nodes[entry.right])
+                return false if nodes[entry.right].kind in {"absent", "unsupported"}
+                key: (known: bool, bits: u64, typed: bool, sort: sview, unsigned: bool, width: i64) = proof_kernel_replay_existential_dictionary_key_literal_with_work(nodes, entry.left, work_used, work_limit)
+                return false if not key.known
+                if not has_first_key:
+                    first_typed <- key.typed
+                    first_sort <- key.sort
+                    first_unsigned <- key.unsigned
+                    first_width <- key.width
+                    has_first_key <- true
+                # Preserve the existing conservative admission rule for mixed literal tags.
+                return false if first_typed != key.typed
+                return false if first_typed and (first_sort != key.sort or first_unsigned != key.unsigned or first_width != key.width)
+                sort_before: usize = work_used
+                return false if not proof_kernel_replay_arena_shape_text_work_charge(sview_len(key.sort), &work_used, sort_before, work_limit)
+                hash: u32 = proof_kernel_replay_type_hash_mix(proof_kernel_replay_name_hash(key.sort), key.bits.i64())
+                hash <- proof_kernel_replay_type_hash_mix(hash, (key.bits >> 32).i64())
+                hash <- proof_kernel_replay_type_hash_mix(hash, 1 if key.typed else 0)
+                hash <- proof_kernel_replay_type_hash_mix(hash, 1 if key.unsigned else 0)
+                hash <- proof_kernel_replay_type_hash_mix(hash, key.width)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                inserted: mutable bool = false
+                while probes < capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, slot, hash, key, key_index, range, children, nodes, work_used, work_limit, capacity, hashes, slots, inserted|:
+                    probe_before: usize = work_used
+                    return false if not proof_kernel_replay_arena_shape_text_work_charge(1, &work_used, probe_before, work_limit)
+                    current: usize = slots[slot]
+                    if current == 0:
+                        insert_before: usize = work_used
+                        return false if not proof_kernel_replay_arena_shape_text_work_charge(1, &work_used, insert_before, work_limit)
+                        hashes[slot] <- hash
+                        slots[slot] <- key_index + 1
+                        inserted <- true
+                        break
+                    return false if current > key_index
+                    if hashes[slot] == hash:
+                        prior_entry_root: usize = children[range.children_start + current - 1]
+                        return false if prior_entry_root >= nodes.count
+                        prior_entry: ElisaProofKernelCore::ProofKernelNode = nodes[prior_entry_root]
+                        return false if prior_entry.kind != "dict_entry"
+                        prior_key: (known: bool, bits: u64, typed: bool, sort: sview, unsigned: bool, width: i64) = proof_kernel_replay_existential_dictionary_key_literal_with_work(nodes, prior_entry.left, work_used, work_limit)
+                        prior_sort_before: usize = work_used
+                        return false if not prior_key.known or not proof_kernel_replay_arena_shape_text_work_charge(sview_len(prior_key.sort), &work_used, prior_sort_before, work_limit)
+                        return false if key.bits == prior_key.bits and key.typed == prior_key.typed and key.sort == prior_key.sort and key.unsigned == prior_key.unsigned and key.width == prior_key.width
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not inserted
+            return true
+
+        def proof_kernel_replay_arena_children_valid_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, node: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, validity: darray[bool]&, parent: usize, require_prior_children: bool, work_used: mutable usize&, work_limit: usize) -> bool:
+            if node.kind in {"frame-place", "frame-policy"}:
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                if node.kind == "frame-policy":
+                    return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, node.left, "frame-place")
+                for index in 0..<node.children_count |index, node, children, nodes, validity, parent, require_prior_children, work_used, work_limit|:
+                    child_work_before: usize = work_used
+                    return false if not proof_kernel_replay_arena_shape_text_work_charge(1, &work_used, child_work_before, work_limit)
+                    can Global{Read,Write}:
+                        proof_kernel_replay_child_table_edges_scanned <- proof_kernel_replay_child_table_edges_scanned + 1
+                    child_root: usize = children[node.children_start + index]
+                    return false if require_prior_children and child_root >= parent
+                    wanted: sview = "frame-field" if node.kind == "frame-place" else "frame-place"
+                    return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child_root, wanted)
+                return true
+            # These two value-result events point left to a resource-event witness, not to an
+            # AST child. Their event-specific replay validates that witness and its move/call
+            # provenance; arena validity applies only to the canonical type term on the right.
+            return proof_kernel_replay_arena_child_valid(validity, node.right) if:
+                node.kind == "resource-region-return" and node.operator == "value-param"
+                node.kind == "resource-call-result" and node.operator == "value"
+            if node.kind in {"unary", "move", "field", "scope", "call_arg", "field-init", "effect-call", "checked-get", "resource-call-arg", "resource-region-alloc", "resource-region-alloc-discard", "resource-region-return-alloc", "resource-region-call-alloc", "resource-region-rebind-alloc", "resource-region-assign", "resource-sview-param"}:
+                return proof_kernel_replay_arena_child_valid(validity, node.left)
+            if node.kind in {"resource-region-return", "resource-call-result"}:
+                return false if not proof_kernel_replay_arena_child_valid(validity, node.left)
+                return proof_kernel_replay_arena_child_valid(validity, node.right) if (node.auxiliary & PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG) != 0 or node.operator in {"value-param", "value"}
+                return true
+            if node.kind == "resource-region-bind":
+                return false if not proof_kernel_replay_arena_child_valid(validity, node.left)
+                return proof_kernel_replay_arena_child_valid(validity, node.right) if (node.auxiliary & PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG) != 0
+                return true
+            if node.kind in {"binary", "index", "dict_entry", "checked-index"}:
+                return false if not proof_kernel_replay_arena_child_valid(validity, node.left)
+                return proof_kernel_replay_arena_child_valid(validity, node.right)
+            if node.kind == "slice":
+                return false if:
+                    not proof_kernel_replay_arena_child_valid(validity, node.left)
+                    not proof_kernel_replay_arena_child_valid(validity, node.right)
+                return proof_kernel_replay_arena_child_valid(validity, node.auxiliary)
+            if node.kind == "if":
+                return false if:
+                    not proof_kernel_replay_arena_child_valid(validity, node.left)
+                    not proof_kernel_replay_arena_child_valid(validity, node.right)
+                return proof_kernel_replay_arena_child_valid(validity, node.auxiliary)
+            if node.kind == "quantifier":
+                return false if not proof_kernel_replay_arena_child_valid(validity, node.left)
+                return false if node.left >= nodes.count
+                range: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
+                range_kind_work_before: usize = work_used
+                return false if not proof_kernel_replay_arena_shape_text_work_charge(sview_len(range.kind), &work_used, range_kind_work_before, work_limit)
+                return false if not proof_kernel_replay_quantifier_range_arity_valid(nodes, node)
+                if node.operator == "exists" and node.auxiliary == 2:
+                    return false if not proof_kernel_replay_existential_dictionary_keys_unique_with_work(nodes, children, range, work_used, work_limit)
+                return proof_kernel_replay_arena_child_valid(validity, node.right)
+            if node.kind == "effect-containment":
+                declared_row: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.left)
+                return false if:
+                    not declared_row.known or not declared_row.value
+                    not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, children, nodes, validity, parent, require_prior_children, work_used, work_limit|:
+                    child_work_before: usize = work_used
+                    return false if not proof_kernel_replay_arena_shape_text_work_charge(1, &work_used, child_work_before, work_limit)
+                    can Global{Read,Write}:
+                        proof_kernel_replay_child_table_edges_scanned <- proof_kernel_replay_child_table_edges_scanned + 1
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if:
+                        not child.known
+                        require_prior_children and child.value >= parent
+                        not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "effect-call")
+                return true
+            if node.kind in {"index-n", "construct", "record-update", "call", "effect-row", "array", "tuple", "set", "dict", "resource-call", "resource-call-lend"}:
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                if node.kind in {"index-n", "construct", "record-update", "call", "resource-call"}:
+                    collection_head: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.left)
+                    return false if not collection_head.known or not collection_head.value
+                for index in 0..<node.children_count |index, node, children, nodes, validity, parent, require_prior_children, work_used, work_limit|:
+                    child_work_before: usize = work_used
+                    return false if not proof_kernel_replay_arena_shape_text_work_charge(1, &work_used, child_work_before, work_limit)
+                    can Global{Read,Write}:
+                        proof_kernel_replay_child_table_edges_scanned <- proof_kernel_replay_child_table_edges_scanned + 1
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if:
+                        not child.known
+                        require_prior_children and child.value >= parent
+                        not proof_kernel_replay_arena_child_valid(validity, child.value)
+                    # Encoded dictionaries store only pair nodes in their entry range.
+                    if node.kind == "dict":
+                        return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "dict_entry")
+                    if node.kind in {"construct", "record-update"}:
+                        return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "field-init")
+                    if node.kind == "call":
+                        return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "call_arg")
+                    if node.kind == "effect-row":
+                        return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "effect")
+                    if node.kind == "effect-containment":
+                        return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "effect-call")
+                    if node.kind == "resource-call" and index < node.auxiliary:
+                        return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "resource-call-arg")
+                    if node.kind == "resource-call" and index >= node.auxiliary:
+                        return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "resource-call-region")
+                    if node.kind == "resource-call-lend" and index < node.auxiliary:
+                        return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "resource-call-arg")
+                        shared_child: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, child.value)
+                        return false if not shared_child.known or shared_child.node.operator == "region-new"
+                    if node.kind == "resource-call-lend" and index >= node.auxiliary and index < node.auxiliary * 2:
+                        return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "resource-call-formal")
+                    if node.kind == "resource-call-lend" and index >= node.auxiliary * 2:
+                        return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "resource-call-region")
+                return true
+            if node.kind in {"resource-scope", "resource-alternatives", "resource-safety", "structural-safety", "structural-edge"}:
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, children, nodes, validity, parent, require_prior_children, work_used, work_limit|:
+                    child_work_before: usize = work_used
+                    return false if not proof_kernel_replay_arena_shape_text_work_charge(1, &work_used, child_work_before, work_limit)
+                    can Global{Read,Write}:
+                        proof_kernel_replay_child_table_edges_scanned <- proof_kernel_replay_child_table_edges_scanned + 1
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if:
+                        not child.known
+                        require_prior_children and child.value >= parent
+                        not proof_kernel_replay_arena_child_valid(validity, child.value)
+                    if node.kind == "structural-safety":
+                        return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "structural-edge")
+                    if node.kind == "structural-edge":
+                        return false if not proof_kernel_replay_arena_child_kind_valid(nodes, validity, child.value, "structural-argument")
+                return true
+            if node.kind == "resource-disjoint":
+                left_child: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.left)
+                return false if not left_child.known or not left_child.value
+                right_child: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.right)
+                return false if not right_child.known or not right_child.value
+                goal_child: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.auxiliary)
+                return false if:
+                    not goal_child.known or not goal_child.value
+                    not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, children, nodes, validity, parent, require_prior_children, work_used, work_limit|:
+                    child_work_before: usize = work_used
+                    return false if not proof_kernel_replay_arena_shape_text_work_charge(1, &work_used, child_work_before, work_limit)
+                    can Global{Read,Write}:
+                        proof_kernel_replay_child_table_edges_scanned <- proof_kernel_replay_child_table_edges_scanned + 1
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if not child.known or (require_prior_children and child.value >= parent)
+                    child_validity: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, child.value)
+                    return false if not child_validity.known or not child_validity.value
+                return true
+            if node.kind == "resource-bind":
+                return true if node.operator in {"value", "external-shared", "external-mutable"}
+                source: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.left)
+                return source.known and source.value
+            if node.kind in {"resource-write", "resource-move"}:
+                place: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.left)
+                return place.known and place.value
+            if node.kind == "resource-use":
+                place: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.left)
+                return place.known and place.value
+            return true

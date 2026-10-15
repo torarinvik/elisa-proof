@@ -27,6 +27,7 @@ python3 "$ROOT_DIR/scripts/test_requires_call_owner_identity.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_source_owner_offset.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_source_admission_inventory_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_source_admission_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_report_output_loop_layout.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_source_return_work_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_quantified_call_work_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_pure_call_witness_marker_reuse.py" || exit 1

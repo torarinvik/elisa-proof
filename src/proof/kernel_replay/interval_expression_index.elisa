@@ -7,28 +7,37 @@ extend ElisaProofKernelReplay:
         const PROOF_KERNEL_REPLAY_INTERVAL_EXPR_PRECHECK_ROWS: usize = 4
 
         struct ProofKernelReplayIntervalExprIndex:
-            mutable enabled: bool
-            mutable complete: bool
-            mutable lookup_complete: bool
-            mutable capacity: usize
-            mutable build_attempted: bool
-            mutable setup_work_ceiling: usize
-            mutable setup_refused: bool
+            enabled: mutable bool
+            complete: mutable bool
+            lookup_complete: mutable bool
+            capacity: mutable usize
+            build_attempted: mutable bool
+            setup_work_ceiling: mutable usize
+            setup_refused: mutable bool
             # 0 unseen, 1 hashing, 2 cached hash, 3 unsupported hash, 4 complete ordered miss.
-            mutable states: darray[u8]
-            mutable hashes: darray[u32]
+            states: mutable darray[u8]
+            hashes: mutable darray[u32]
             # First source-ordered bound row proven equal to each query root.
-            mutable matched_rows: darray[usize]
-            mutable heads: darray[usize]
-            mutable tails: darray[usize]
-            mutable next_rows: darray[usize]
+            representative_rows: mutable darray[usize]
+            heads: mutable darray[usize]
+            bucket_tails: mutable darray[usize]
+            next_rows: mutable darray[usize]
 
         def proof_kernel_replay_empty_interval_expr_index() -> ProofKernelReplayIntervalExprIndex:
-            ProofKernelReplayIntervalExprIndex{enabled: false, complete: false, lookup_complete: false, capacity: 0, build_attempted: false, setup_work_ceiling: 0, setup_refused: false, states: [], hashes: [], matched_rows: [], heads: [], tails: [], next_rows: []}
+            states: mutable darray[u8] = []
+            hashes: mutable darray[u32] = []
+            representative_rows: mutable darray[usize] = []
+            heads: mutable darray[usize] = []
+            bucket_tails: mutable darray[usize] = []
+            next_rows: mutable darray[usize] = []
+            ProofKernelReplayIntervalExprIndex{enabled: false, complete: false, lookup_complete: false, capacity: 0, build_attempted: false, setup_work_ceiling: 0, setup_refused: false, states: states, hashes: hashes, representative_rows: representative_rows, heads: heads, bucket_tails: bucket_tails, next_rows: next_rows}
 
         def proof_kernel_replay_interval_expr_setup_charge_amount(index: mutable ProofKernelReplayIntervalExprIndex&, work: mutable usize&, amount: usize) -> bool:
             ceiling: usize = index.setup_work_ceiling
-            if ceiling == 0 or work >= ceiling or amount > ceiling - work:
+            if ceiling == 0 or work >= ceiling:
+                index.setup_refused <- true
+                return false
+            if amount > ceiling - work:
                 index.setup_refused <- true
                 return false
             proof_kernel_replay_goal_search_charge_amount(work, amount)
@@ -198,9 +207,9 @@ extend ElisaProofKernelReplay:
             return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge_amount(index, work, slots)
             index.states.resize(nodes.count)
             index.hashes.resize(nodes.count)
-            index.matched_rows.resize(nodes.count)
+            index.representative_rows.resize(nodes.count)
             index.heads.resize(capacity)
-            index.tails.resize(capacity)
+            index.bucket_tails.resize(capacity)
             index.next_rows.resize(bounds.count)
             for node in 0..<nodes.count |node, index, work|:
                 return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge(index, work)
@@ -208,12 +217,12 @@ extend ElisaProofKernelReplay:
                 return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge(index, work)
                 index.hashes[node] <- 0
                 return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge(index, work)
-                index.matched_rows[node] <- bounds.count
+                index.representative_rows[node] <- bounds.count
             for slot in 0..<capacity |slot, index, bounds, work|:
                 return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge(index, work)
                 index.heads[slot] <- bounds.count
                 return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge(index, work)
-                index.tails[slot] <- bounds.count
+                index.bucket_tails[slot] <- bounds.count
             for row in 0..<bounds.count |row, index, bounds, work|:
                 return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge(index, work)
                 index.next_rows[row] <- bounds.count
@@ -240,12 +249,12 @@ extend ElisaProofKernelReplay:
                 if index.heads[slot] >= bounds.count:
                     return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge_amount(index, work, 2)
                     index.heads[slot] <- row
-                    index.tails[slot] <- row
+                    index.bucket_tails[slot] <- row
                 else:
-                    tail: usize = index.tails[slot]
+                    prior_row: usize = index.bucket_tails[slot]
                     return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge_amount(index, work, 2)
-                    index.next_rows[tail] <- row
-                    index.tails[slot] <- row
+                    index.next_rows[prior_row] <- row
+                    index.bucket_tails[slot] <- row
             index.enabled <- true
             # Query hashing is search work, not optional setup work.
             index.setup_work_ceiling <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
@@ -256,11 +265,11 @@ extend ElisaProofKernelReplay:
             index.lookup_complete <- false
             return empty if:
                 root >= nodes.count or index.capacity == 0
-                index.states.count != nodes.count or index.hashes.count != nodes.count or index.matched_rows.count != nodes.count
-                index.heads.count != index.capacity or index.tails.count != index.capacity or index.next_rows.count != bounds.count
+                index.states.count != nodes.count or index.hashes.count != nodes.count or index.representative_rows.count != nodes.count
+                index.heads.count != index.capacity or index.bucket_tails.count != index.capacity or index.next_rows.count != bounds.count
             if not proof_kernel_replay_goal_search_charge(work):
                 return empty
-            cached_row: usize = index.matched_rows[root]
+            cached_row: usize = index.representative_rows[root]
             if cached_row < bounds.count:
                 return bounds[cached_row] if bounds[cached_row].term_expression_key
                 return empty
@@ -280,7 +289,7 @@ extend ElisaProofKernelReplay:
                 prechecked: (found: bool, row: usize, scanned_rows: usize) = proof_kernel_replay_interval_expr_ordered_precheck(nodes, children, bounds, root, index, work)
                 prechecked_rows <- prechecked.scanned_rows
                 if prechecked.found:
-                    index.matched_rows[root] <- prechecked.row
+                    index.representative_rows[root] <- prechecked.row
                     return bounds[prechecked.row]
                 return empty if work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             query: (known: bool, hash: u32) = proof_kernel_replay_interval_expr_hash_node(nodes, children, root, 0, index, work)
@@ -294,16 +303,16 @@ extend ElisaProofKernelReplay:
                 # repeating potentially deep exact comparisons for hash collisions.
                 if row >= prechecked_rows and bound.term_expression_key and bound.term_root < nodes.count and index.states[bound.term_root] == 2 and index.hashes[bound.term_root] == query.hash:
                     if bound.term_root == root:
-                        index.matched_rows[root] <- row
+                        index.representative_rows[root] <- row
                         return bound
                     if proof_kernel_replay_goal_search_expr_equal(nodes, children, bound.term_root, root, work):
-                        index.matched_rows[root] <- row
+                        index.representative_rows[root] <- row
                         return bound
                     return empty if work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 row <- index.next_rows[row]
             return empty if row != bounds.count
             index.lookup_complete <- index.complete
-            index.matched_rows[root] <- bounds.count + 1 if index.complete
+            index.representative_rows[root] <- bounds.count + 1 if index.complete
             empty
 
         def proof_kernel_replay_loop_range_atom_key_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, work_used: mutable usize&) -> (known: bool, name: sview, offset: i64):
@@ -353,7 +362,7 @@ extend ElisaProofKernelReplay:
                     expression_rows <- expression_rows + 1 if bound.term_expression_key
                     continue if not bound.term_expression_key or bound.term_root >= nodes.count
                     if bound.term_root == root:
-                        index.matched_rows[root] <- row if cached_state == 2 and index.enabled and index.matched_rows.count == nodes.count
+                        index.representative_rows[root] <- row if cached_state == 2 and index.enabled and index.representative_rows.count == nodes.count
                         return bound
                     bound_node: ElisaProofKernelCore::ProofKernelNode = nodes[bound.term_root]
                     same_kind: bool = proof_kernel_replay_goal_search_text_equal(bound_node.kind, query_node.kind, work_used)
@@ -363,7 +372,7 @@ extend ElisaProofKernelReplay:
                     return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     continue if not same_operator
                     if proof_kernel_replay_goal_search_expr_equal(nodes, children, bound.term_root, root, work_used):
-                        index.matched_rows[root] <- row if cached_state == 2 and index.enabled and index.matched_rows.count == nodes.count
+                        index.representative_rows[root] <- row if cached_state == 2 and index.enabled and index.representative_rows.count == nodes.count
                         return bound
                     return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 proof_kernel_replay_interval_expr_cache_scan_miss(root, index, work_used)

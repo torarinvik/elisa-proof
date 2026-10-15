@@ -79,4 +79,12 @@ for required in (
 ):
     assert required in metered_closure, required
 
+prepared_query = body(goal_difference, "proof_kernel_replay_difference_prepared_affine_comparison_with_work")
+assert "index_edge_hint: usize = constraints.count + 1" in prepared_query
+assert "index_edge_hint <- ElisaProofKernelCore::PROOF_DIFFERENCE_NODE_LIMIT" in prepared_query
+assert "proof_kernel_replay_equality_vertex_index_build(index_edge_hint" in prepared_query
+assert "proof_kernel_replay_equality_vertex_index_insert(&vertex_index, &names" in prepared_query
+assert "proof_kernel_replay_equality_vertex_index_find(vertex_index, names" in prepared_query
+assert "proof_kernel_replay_difference_node_index_with_work" not in goal_difference.read_text(encoding="utf-8")
+
 print("kernel difference closure: unsigned fixed-point propagation shares the goal budget and refuses exhaustion")

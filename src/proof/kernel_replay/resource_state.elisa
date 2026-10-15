@@ -72,20 +72,21 @@ extend ElisaProofKernelReplay:
             count: usize = parent.bindings.binding_names.count
             child_count: usize = child.bindings.binding_names.count
             return false if:
-                parent.bindings.binding_scope_depth.count != count or parent.bindings.binding_reference.count != count or parent.bindings.binding_mutable_reference.count != count
+                parent.bindings.binding_event_roots.count != count or parent.bindings.binding_scope_depth.count != count or parent.bindings.binding_reference.count != count or parent.bindings.binding_mutable_reference.count != count
                 parent.bindings.binding_writable.count != count or parent.bindings.binding_borrowable.count != count or parent.bindings.binding_moved.count != count
                 parent.bindings.binding_origin_places.count != count or parent.scope.pending_join_moves.count != count
                 parent.provenance.binding_region.count != count or parent.provenance.binding_region_live.count != count or parent.provenance.binding_region_owner.count != count
                 parent.borrows.borrow_target_slots.count != count or parent.borrows.borrow_target_places.count != count or parent.borrows.borrow_mutable.count != count or parent.borrows.borrow_present.count != count
                 child_count < count
-                child.bindings.binding_scope_depth.count != child_count or child.bindings.binding_reference.count != child_count or child.bindings.binding_mutable_reference.count != child_count
+                child.bindings.binding_event_roots.count != child_count or child.bindings.binding_scope_depth.count != child_count or child.bindings.binding_reference.count != child_count or child.bindings.binding_mutable_reference.count != child_count
                 child.bindings.binding_writable.count != child_count or child.bindings.binding_borrowable.count != child_count or child.bindings.binding_moved.count != child_count
                 child.bindings.binding_origin_places.count != child_count or child.scope.pending_join_moves.count != child_count
                 child.provenance.binding_region.count != child_count or child.provenance.binding_region_live.count != child_count or child.provenance.binding_region_owner.count != child_count
                 child.borrows.borrow_target_slots.count != child_count or child.borrows.borrow_target_places.count != child_count or child.borrows.borrow_mutable.count != child_count or child.borrows.borrow_present.count != child_count
             for index in 0..<count |index, parent, child|:
                 return false if:
-                    not proof_kernel_replay_resource_charge_work_used(&parent.scope.resource_work_used, 6)
+                    not proof_kernel_replay_resource_charge_work_used(&parent.scope.resource_work_used, 7)
+                    parent.bindings.binding_event_roots[index] != child.bindings.binding_event_roots[index]
                     not proof_kernel_replay_resource_charge_text_pair_used(&parent.scope.resource_work_used, parent.bindings.binding_names[index], child.bindings.binding_names[index])
                     parent.bindings.binding_names[index] != child.bindings.binding_names[index]
                     parent.bindings.binding_scope_depth[index] != child.bindings.binding_scope_depth[index]
@@ -153,6 +154,19 @@ extend ElisaProofKernelReplay:
                 return state.bindings.binding_names.count if not proof_kernel_replay_resource_charge_text_pair_used(&state.scope.resource_work_used, state.bindings.binding_names[index], name)
                 found <- index if state.bindings.binding_names[index] == name
             return found
+
+        # Resource read/write transitions carry the source bind-event root selected by the
+        # producer. Requiring that exact active slot identity prevents same-spelled bindings in
+        # synthetic or forged scopes from redirecting a source-authenticated identifier.
+        def proof_kernel_replay_resource_binding_event_identity_matches(state: mutable ProofKernelReplayResourceState&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, slot: usize, encoded_root: usize) -> bool:
+            count: usize = state.bindings.binding_names.count
+            return false if:
+                encoded_root == 0 or slot >= count or encoded_root > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+                state.bindings.binding_event_roots.count != count
+            root: usize = encoded_root - 1
+            return false if root >= nodes.count or nodes[root].kind not in {"resource-bind", "resource-region-alloc", "resource-region-bind", "resource-call-result"}
+            return false if not proof_kernel_replay_resource_charge_text_pair(state, nodes[root].name, state.bindings.binding_names[slot])
+            nodes[root].name == state.bindings.binding_names[slot]
 
         def proof_kernel_replay_resource_lookup_place(state: ProofKernelReplayResourceState&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, place: ProofKernelReplayResourcePlace) -> usize:
             return state.bindings.binding_names.count if not proof_kernel_replay_resource_place_root_valid(nodes, place)
@@ -296,7 +310,8 @@ extend ElisaProofKernelReplay:
         # Derived scalar projections such as `nodes.count` remain valid value terms; their shape
         # is intentionally handled by the recursive no-region check above.
         def proof_kernel_replay_resource_value_term_is_direct_reference(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, state: ProofKernelReplayResourceState&, root: usize) -> bool:
-            return false if root >= nodes.count or nodes[root].kind != "ident"
+            return false if root >= nodes.count
+            return false if nodes[root].kind != "ident"
             slot: usize = proof_kernel_replay_resource_lookup(state, nodes[root].name)
             return slot < state.bindings.binding_names.count and slot < state.bindings.binding_reference.count and state.bindings.binding_reference[slot]
 
@@ -344,9 +359,11 @@ extend ElisaProofKernelReplay:
             state.bindings.binding_borrowable[slot]
 
         def proof_kernel_replay_resource_invalidate_region_bindings(state: mutable ProofKernelReplayResourceState&, region: sview) -> bool:
+            return false if state.provenance.binding_region_live.count != state.provenance.binding_region.count
             for index in 0..<state.provenance.binding_region.count |index, state, region|:
                 return false if not proof_kernel_replay_resource_charge_text_pair(state, state.provenance.binding_region[index], region)
-                if index < state.provenance.binding_region_live.count and state.provenance.binding_region[index] == region:
+                if state.provenance.binding_region[index] == region:
+                    return false if not proof_kernel_replay_resource_charge_work(state, 1)
                     state.provenance.binding_region_live[index] <- false
             true
 
@@ -421,7 +438,8 @@ extend ElisaProofKernelReplay:
         # resource-join-move transitions emitted after the scope, keeping the parent-state update
         # flat and replayable without aliasing the nested state object.
         def proof_kernel_replay_resource_parameters(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, state: mutable ProofKernelReplayResourceState&, names: mutable darray[sview]&, references: mutable darray[bool]&, mutable_references: mutable darray[bool]&, regions: mutable darray[sview]&) -> bool:
-            return false if root >= nodes.count or nodes[root].kind != "resource-safety"
+            return false if root >= nodes.count
+            return false if nodes[root].kind != "resource-safety"
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return false if:
                 node.auxiliary > node.children_count
@@ -508,7 +526,7 @@ extend ElisaProofKernelReplay:
                 return (false, empty, state.bindings.binding_names.count, false, false) if:
                     not allocation_recorded.complete or not allocation_recorded.found
                     not proof_kernel_replay_resource_region_active(state, nodes[argument_root].secondary_name)
-                    not arena_admitted and not proof_kernel_replay_arena_valid(nodes, children, [], nodes[allocation_root].left)
+                    not arena_admitted and not (proof_kernel_replay_arena_valid(nodes, children, [], nodes[allocation_root].left) can Global{Read,Write})
                 # A fresh allocation has no pre-existing caller place and is writable for the
                 # duration of this call. Its callee effects are checked as temporary effects and
                 # are not exported to the caller state.

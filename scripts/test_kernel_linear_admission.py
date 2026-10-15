@@ -49,6 +49,15 @@ assert "proof_kernel_replay_comparison_root_untrusted_with_markers_and_work" in 
 assert "relation_admission.untrusted" in disequality
 assert "proof_kernel_replay_primitive_comparison_with_markers_with_work" in disequality
 
+linear_marker = body(kernel / "goal_metered_linear_disequality.elisa", "proof_kernel_replay_linear_marker_with_work")
+assert linear_marker.index("return false if root >= nodes.count") < linear_marker.index("nodes[root].kind")
+assert "root >= nodes.count or nodes[root]" not in linear_marker
+linear_labels = body(kernel / "goal_metered_linear_disequality.elisa", "proof_kernel_replay_linear_call_argument_labels_with_work")
+assert linear_labels.index("return false if root >= nodes.count") < linear_labels.index("nodes[root].kind")
+assert linear_labels.index("return false if node.left >= nodes.count") < linear_labels.index("nodes[node.left].kind")
+assert "return false if not argument.known or argument.value >= nodes.count" in linear_labels
+assert "continue if not argument.known or argument.value >= nodes.count or nodes[argument.value]" not in linear_labels
+
 pruning = body(kernel / "goal_metered_linear_pruning.elisa", "proof_kernel_replay_linear_prune_with_goal_work")
 assert "proof_kernel_replay_comparison_root_untrusted_with_markers_and_work" in pruning
 assert "relation_admission.untrusted" in pruning

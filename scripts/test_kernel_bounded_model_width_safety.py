@@ -87,6 +87,23 @@ assert "proof_kernel_replay_unsigned_expression_safe_with_goal_work" in body(
     unsigned_path, "proof_kernel_replay_unsigned_report_safe_with_goal_work"
 )
 unsigned_safety = body(unsigned_path, "proof_kernel_replay_unsigned_expression_safe_with_replay_work")
+# Machine shifts require a proven count interval within the left operand's actual
+# width. A bound valid for i64 does not automatically validate an i8/u8 shift.
+shared_safety_path = ROOT / "src/proof/kernel_replay/goal_metered_unsigned_widening.elisa"
+shared_safety = body(shared_safety_path, "proof_kernel_replay_signed_expression_safe_with_bounds_goal_cached_work")
+shift_check = shared_safety.split('if node.operator == "<<" or node.operator == ">>":', 1)[1].split("if width == 0:", 1)[0]
+assert "shift_width: i64 = width if width != 0 else unsigned_width" in shift_check
+assert "not shift_count.has_lower or not shift_count.has_upper" in shift_check
+assert "shift_count.lower < 0" in shift_check
+assert "shift_count.upper >= shift_width" in shift_check
+assert shared_safety.index("shift_count.upper >= shift_width") < shared_safety.index("if width == 0:")
+unsigned_shift = unsigned_safety.split('if node.operator == "<<" or node.operator == ">>":', 1)[1].split("# A guarded unsigned subtraction", 1)[0]
+assert "shift_count.upper >= width" in unsigned_shift
+assert unsigned_safety.index("return true if width == 0") < unsigned_safety.index("shift_count.upper >= width")
+report_safety = body(unsigned_path, "proof_kernel_replay_unsigned_report_safe_with_goal_work")
+assert "proof_kernel_replay_signed_expression_safe_with_bounds_goal_work(nodes, children, fact" in report_safety
+assert "proof_kernel_replay_signed_expression_safe_with_bounds_goal_work(nodes, children, root" in report_safety
+assert "not unsigned_safe or not signed_safe" in report_safety
 conditional_gate = unsigned_safety.index('if node.kind == "if":')
 shortcut = unsigned_safety.index("proof_kernel_replay_unsigned_conditional_difference_safe_with_goal_work", conditional_gate)
 shortcut_accept = unsigned_safety.index("return true if conditional_safe", shortcut)

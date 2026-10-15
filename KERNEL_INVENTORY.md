@@ -62,7 +62,7 @@ Consumers are all kernel modules unless the row names specific ones. Structural 
 | `effect-call` | effect | `left` = callee row, `name` = callee | `check/declaration_checks.elisa` |
 | `effect-containment` | effect | `left` = declared row, children = calls, `name` = function | `check/declaration_checks.elisa` |
 | `resource-sview-param` | resource binding | `name`, `secondary_name` = region, `auxiliary` = sview flag | `resources/sview_certificates.elisa` |
-| `resource-bind` | resource binding | `operator` = mode, `left` = source, `auxiliary` = flags | `resources/state_and_regions.elisa` |
+| `resource-bind` | resource binding | `operator` = mode, `left` = source, `auxiliary` = flags, local immutable value binds carry their source declaration end offset in `value`; integer range-loop value binds carry the iterable end offset; formal-prefix binds keep zero. Source-bound replay checks the exact `VarDecl` and non-reference type or exact syntactic range-loop variable | `resources/state_and_regions.elisa`, `replay/resource_event_source_validation.elisa` |
 | `resource-region-param` | resource binding | `operator` = external, `name` = region | `resources/statement_checker.elisa` |
 | `resource-region-return` | resource binding | `operator` in {param, param-call, sview, sview-call}; `param`/`sview` `left` = the returned root's own use or allocation, `param-call`/`sview-call` `left` = the immediately preceding call, `secondary_name` = the caller formal that replay re-derives from the callee summary; summaries are read with returns nested in branch scopes; an empty `name` is admitted only for a `param`/`param-call` reference return, whose `param` witness must be a use of a region-less reference formal of equal mutability | `resources/statement_checker.elisa`, `resources/return_witnesses.elisa`, `resources/sview_certificates.elisa` |
 | `resource-region-open` | resource region | `name` = region | `resources/statement_checker.elisa` |
@@ -74,13 +74,13 @@ Consumers are all kernel modules unless the row names specific ones. Structural 
 | `resource-region-call-alloc` | resource region | `left` = call, `secondary_name` = region | `resources/call_regions.elisa` |
 | `resource-region-rebind-alloc` | resource region | `left` = value, `name` = target, `secondary_name` = region | `resources/state_and_regions.elisa` |
 | `resource-region-assign` | resource region | `left` = value, `name` = target, `secondary_name` = region | `resources/region_flow.elisa` |
-| `resource-write` | resource event | `name` = place root, `left` = place | `resources/region_flow.elisa` |
-| `resource-move` | resource event | `name` = place root, `left` = place | `resources/expression_checker.elisa` |
-| `resource-use` | resource event | `name` = place root, `left` = place | `resources/expression_checker.elisa` |
+| `resource-write` | resource event | `name` = place root, `left` = place, `auxiliary` = source-bound binder root + 1 | `resources/region_flow.elisa`, replay annotation in `replay/resource_write_coverage.elisa` |
+| `resource-move` | resource event | `name` = place root, `left` = place, `auxiliary` = source-bound binder root + 1 | `resources/expression_checker.elisa`, replay annotation in `replay/resource_write_coverage.elisa` |
+| `resource-use` | resource event | `name` = place root, `left` = place, `auxiliary` = source-bound binder root + 1 | `resources/expression_checker.elisa`, replay annotation in `replay/resource_write_coverage.elisa` |
 | `resource-call-arg` | resource event | `operator` in {value, borrow, reference, region-new}, `left` = argument | `resources/borrows_and_bindings.elisa`, `resources/call_regions.elisa` |
 | `resource-call-formal` | resource event | `operator` = formal mode, `name` = formal | `resources/borrows_and_bindings.elisa` |
-| `resource-call-lend` | resource call | children = lend pairs plus `right` extra roots | `resources/borrows_and_bindings.elisa` |
-| `resource-call` | resource call | `left` = call, children = arguments then `auxiliary` formals | `resources/call_regions.elisa` |
+| `resource-call-lend` | resource call | `value` = source call offset, children = lend pairs plus `right` extra roots | `resources/borrows_and_bindings.elisa` |
+| `resource-call` | resource call | `value` = source call offset, `left` = callee summary, children = arguments then `auxiliary` regions; replay binds the linked summary to the exact overload declaration selected at this call site by name, module, line, and byte offset | `resources/call_regions.elisa` |
 | `resource-call-region` | resource call | `operator` = param, `name`/`secondary_name` = formal/actual region | `resources/borrows_and_bindings.elisa`, `resources/call_regions.elisa` |
 | `resource-call-result` | resource call | `operator` in {"", sview}, `left` = call, `auxiliary` = flags | `resources/statement_checker.elisa`, `resources/sview_certificates.elisa` |
 | `resource-scope` | resource summary | children = events in scope | `resources/state_and_regions.elisa` |
@@ -145,7 +145,7 @@ goal attempt, bound every fact to a trace and re-matched the AST against the are
 | `checked-get` | `proof_kernel_replay_checked_get_report_with_workspace` | |
 | `quantifier-forall` | `proof_kernel_replay_quantifier_report_with_workspace` | mode `forall` |
 | `quantifier-exists` | `proof_kernel_replay_quantifier_report_with_workspace` | mode `exists` |
-| `resource-safety` | `proof_kernel_replay_resource_report_with_workspace` | trace certificate; source goal is literal `true`; `resource-v2` root is admitted by `proof/certificate_admission.elisa`; function owner identity is carried in `secondary_name`; embedded facts checked by `proof_replay_resource_event_facts_with_owner` |
+| `resource-safety` | `proof_kernel_replay_resource_report_with_workspace` | trace certificate; source goal is literal `true`; `resource-v2` root is admitted by `proof/certificate_admission.elisa`; exact function owner identity is carried by source line in `right`, byte offset in `value` (including valid offset zero), and module in `secondary_name`; replay binds that key to one parser-owned function before using its body; embedded facts are checked by `proof_replay_resource_event_facts_with_owner`; each admitted resource-transition leaf has a source check: prefix binds map to the parser-owned parameter row and unique authorized arena edge, uses/writes/regions map to owner-body AST positions, returns map to a source return and witness, return allocations are linked uniquely to the exact source return, and discarded region allocations are counted against direct source allocation statements; replay compares nondecreasing normalized source offsets for positioned local binds, region opens/closes, uses, writes, moves, return allocations, and return markers across flattened scope traces, normalizing post-body closes to statement end, move events to the maximum positioned operand descendant (after evaluating operand reads), and return events to the maximum positioned descendant of supported value expressions (or the keyword end for bare returns); same-offset transitions generally have no ordering rule here, except a return-allocation witness must precede its return marker; resource-call and resource-call-lend are ordered at the maximum descendant end offset of the exact resolved source call, after argument evaluation; other event kinds without source positions are not ordered by this check; all named source place-root moves are counted against `resource-move` events, and each event is tied to the exact move offset, operand, and place-root name; scope nodes do not carry source-scope identities, so source admission reconstructs lexical identity from parser-owned AST for supported `if`, `while`, `for` integer-range binders, statement-block, and expression-block scopes; use, move, and write events carry a bind-event root plus one, which kernel replay checks against the active binding slot; same-name shadowing is accepted when the source walk resolves each operation to the active declaration, while match, non-range loop captures, invalid, and unsupported binder forms fail closed; alternative arms replay from a common baseline with moved-state union and mandatory join consumption (join events are currently rejected); any newly admitted stateful transition must add an exact source-scope bridge; resource-call/lend event counts are compared against every parser-owned source call occurrence by callee name using bounded, source-work-metered open addressing with full string equality after hash matches; call omission is disabled whenever source imports or extern declarations make transitive target resolution opaque; otherwise an omitted call is allowed only when every same-name candidate has scalar value-only parameters, an explicit scalar non-reference return type, and a replay-checked pure scalar body consisting of one return over scalar parameters and transitively checked pure scalar helper calls, and no caller parameter, local declaration, loop binder, assignment-introduced local, or same-named field or scoped dispatch or non-function declaration shadows the omitted callee name; dynamic callees and unknown body forms fail closed; global reads, mutable state, defaults, unresolved or overloaded calls, and builtin or user-defined operator overrides are excluded; each emitted call/lend event is linked to one unique owner-body call offset, resolved callee owner, and checked argument/formal metadata; unsupported allocation, rebind, assignment, join, and result transitions fail closed |
 | `structural-safety` | `proof_kernel_replay_structural_report_with_workspace` | trace certificate; root admitted as `structural-v2`, then independently matched to the source call graph and complete regenerated certificate set |
 | `effect-containment` | `proof_kernel_replay_effect_report_with_workspace` | trace certificate |
 <!-- /inventory:certificate-rules -->
@@ -248,37 +248,43 @@ resource tree:
 - It accepts exactly the leaves below as carrying no facts.
 - Any other kind fails closed.
 
-Nested scope replay snapshots resource bindings but carries event-use history forward. Call events,
-pending call allocations, and return witnesses are available after alternatives only when every arm
-produces them; allocation, call-result, and return-witness consumption is merged across arms so no
-path can reuse a one-shot event. Sequential scopes append their child history after validating the
+This fact-provenance walk is separate from source authentication. Replay binds accepted call,
+write, use, move, return, region-scope, and selected local-bind events to the exact owner AST, with
+reverse coverage checks for the supported call/write/use/move/return and region-scope cases. Event
+kinds whose state transitions do not yet have a source bridge (including region allocation/bind,
+region assignment/rebinding, call results, and join moves) are rejected at this boundary. This
+keeps those unimplemented transitions fail-closed, but it does not yet prove a complete AST/event
+bijection for every event the producer can emit; that source-coverage obligation remains open.
+Direct `RegionNew` storage in a local declaration or assignment is also refused at owner admission
+until its allocation/rebind event has a source bridge, so deleting that unsupported event cannot
+make the body admissible. Direct returned allocations, discarded allocations, and call-argument
+allocations retain their separate source checks. Body-local value binds are matched to exact declaration positions, and the owner-wide source walk
+reconstructs active bind identities through supported `if`, `while`, statement-block, and
+expression-block scopes, plus `for` loops whose iterable has a supported integer range shape.
+Same-name shadowing, including formal shadowing, is accepted only when each operation resolves to
+the active declaration and its bind-event root matches the kernel slot. Match patterns, non-range
+loop captures, and other unsupported binder forms remain fail-closed.
+
+Nested scope replay uses metered stack-length marks and truncation for lexical binder state, while
+carrying event-use history forward. A scope wrapper has no source-scope identity, but replay
+requires inherited bindings and region state to be preserved at its exit; the only inherited
+binding transition it can propagate is a moved bit that
+must be consumed by an explicit join event. Alternatives replay every arm from the same parent
+state and conservatively union moved slots. These state-preservation checks do not by themselves bind each resource use to the source
+declaration it resolves to. The separate source walk derives binder identities through supported
+`if`, `while`, integer range `for`, statement-block, and expression-block scopes; use/move/write
+nodes carry the resolved bind-event root, which kernel replay checks against the active slot. Match
+patterns, non-range loop captures, and unsupported binder forms remain fail-closed.
+
+Call events, pending call allocations, and return witnesses are available after alternatives only
+when every arm produces them; allocation, call-result, and return-witness consumption is merged
+across arms so no path can reuse a one-shot event. Sequential scopes append their child history after validating the
 inherited prefix. The work meter charges these comparisons and merges.
 
 <!-- inventory:resource-fact-free-leaves -->
 | Kind |
 |---|
-| `resource-region-open` |
-| `resource-region-close` |
-| `resource-region-alloc` |
-| `resource-region-bind` |
-| `resource-sview-param` |
-| `resource-region-alloc-discard` |
-| `resource-region-return-alloc` |
-| `resource-region-call-alloc` |
-| `resource-region-rebind-alloc` |
-| `resource-region-assign` |
-| `resource-region-return` |
-| `resource-region-param` |
-| `resource-write` |
-| `resource-move` |
-| `resource-use` |
-| `resource-join-move` |
-| `resource-call-arg` |
-| `resource-call-formal` |
-| `resource-call-region` |
-| `resource-call-result` |
-| `resource-call-lend` |
-| `resource-bind` |
+| `<none>` |
 <!-- /inventory:resource-fact-free-leaves -->
 
 ## Trust ledger
@@ -407,10 +413,12 @@ source-adapter rows below. Threaded-summary replay now derives bare callable nam
 stripping and expression-name mentions in replay-local, depth-bounded helpers. Threaded-summary
 checks now use source indexes rebuilt in a replay-owned scratch report. Each function-generic row
 must match one exact identity annotation, and marker/row cardinality rejects omitted function rows.
-The resource type-marker and
-reference-free/storage-alias classifiers themselves remain shared with source analysis. Independent
-semantic re-derivation and source mutations with alias/lifetime controls remain required; these
-dependencies are not a verification claim.
+Threaded-summary replay independently derives reference markers through explicit wrappers and
+unambiguous root-scope alias targets, then compares them with the shared marker result. Generic
+alias exclusion still relies on parser alias-owner annotations, and reference-free/storage-alias
+classification still shares source-analysis helpers. Independent semantic re-derivation and source
+mutations with alias/lifetime controls remain required; these dependencies are not a verification
+claim.
 
 2. **Caller-supplied typing contexts are not source-authenticated by the typed kernel API.**
    `proof_kernel_replay_goal_report_typed` checks proposition formation against the supplied
@@ -422,12 +430,35 @@ dependencies are not a verification claim.
    the checked source. Merely passing the caller-supplied environment into congruence would cross
    that trust boundary.
 
+3. **General arena admission shares the goal-search work ceiling.** The checked goal replay API
+   debits full arena validation (including per-node workspace initialization) to the same
+   262,144-unit budget used by goal search. Since workspace setup alone costs eight units per
+   node, large arenas can be rejected before their graph is traversed, even though the arena
+   validator has a larger standalone work ceiling. This is an intentional combined-work bound;
+   raising arena capacity safely requires preserving an aggregate limit across repeated goal and
+   arena work, rather than simply increasing the per-call arena limit.
+
+4. **Some source operator checks remain type-erased.** The shared AST walk cannot authenticate an
+   operator receiver's sort, so any indexed implementation contributes its operator bits to the
+   global deny mask. This prevents a custom operator from being replayed with primitive semantics,
+   but can reject unrelated primitive expressions in the same source. The structural operator
+   guard already does per-receiver lookup when it derives one unique receiver type; it falls back
+   to the global mask for unknown types. Extending that source-authenticated receiver lookup to
+   other type-erased consumers can recover proof coverage; the scalar spelling classifier alone
+   is not sufficient evidence.
+
+5. **Ordinary arena admission is root-reachable.** Goal and fact replay validates nodes reachable
+   from those supplied roots. The `*_checked_arena` entry points validate every serialized node,
+   including disconnected nodes, before invoking implementations that rely on whole-arena
+   admission. A helper must not use a disconnected node's payload as semantic evidence unless it
+   uses complete-arena admission or validates that node independently. Scratch-array initialization
+   and fail-closed scans that only reject a collision do not establish node validity.
+
 <!-- inventory:replay-external-calls -->
 | Function | Defined in | Tier |
 |---|---|---|
 | `proof_add_finding` | `proof/model/report_recording.elisa` | report model |
 | `proof_add_latest_goal_finding` | `proof/model/report_recording.elisa` | report model |
-| `proof_bind_pattern` | `proof/check/pattern_binding.elisa` | source adapter |
 | `proof_build_enum_index` | `proof/check/enum_index.elisa` | source adapter |
 | `proof_build_module_alias_index` | `proof/check/module_alias_resolution.elisa` | source adapter |
 | `proof_build_operator_impl_index` | `proof/check/operator_impl_index_build.elisa` | source adapter |
@@ -436,6 +467,8 @@ dependencies are not a verification claim.
 | `proof_builtin_operator_protocol` | `proof/check/operator_witness_markers.elisa` | source adapter |
 | `proof_builtin_scalar_type_name` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_builtin_unary_operator_protocol` | `proof/check/operator_witness_markers.elisa` | source adapter |
+| `proof_resource_marker_type_name_with_work` | `proof/resources/type_markers.elisa` | source adapter |
+| `proof_untrusted_operator_marker` | `proof/check/operator_witness_markers.elisa` | shared proof dependency; deny-only operator marker constructor |
 | `proof_check_core` | `proof/check/api.elisa` | untrusted producer |
 | `proof_check_structural_function` | `proof/check/function_termination.elisa` | source adapter |
 | `proof_check_with_source_analysis` | `proof/check/api.elisa` | source adapter |
@@ -473,7 +506,6 @@ dependencies are not a verification claim.
 | `proof_loop_binder_value` | `proof/check/loop_range_facts.elisa` | source adapter; loop binder expression |
 | `proof_loop_range_base` | `proof/check/loop_range_facts.elisa` | source adapter; canonical loop range base expression |
 | `proof_lower_static_effect_call` | `proof/expr/static_effects.elisa` | source adapter |
-| `proof_match_closed_pattern` | `proof/expr/pattern_support.elisa` | source adapter |
 | `proof_module_alias_lookup_global` | `proof/check/module_alias_resolution.elisa` | source adapter |
 | `proof_module_alias_target` | `proof/check/module_alias_resolution.elisa` | source adapter |
 | `proof_module_alias_targets_compatible` | `proof/check/module_alias_resolution.elisa` | source adapter |
@@ -484,15 +516,6 @@ dependencies are not a verification claim.
 | `proof_name_index_capacity` | `proof/check/name_index_build.elisa` | source adapter |
 | `proof_name_index_cluster_status` | `proof/check/name_index_build.elisa` | source adapter |
 | `proof_name_is_reserved_internal` | `proof/check/internal_name_safety.elisa` | source adapter; reserved compiler-generated name check |
-| `proof_pattern_condition` | `proof/check/pattern_lowering.elisa` | source adapter |
-| `proof_pattern_condition_exact` | `proof/expr/pattern_support.elisa` | source adapter |
-| `proof_pattern_condition_exact_typed` | `proof/check/pattern_lowering.elisa` | source adapter |
-| `proof_pattern_condition_typed` | `proof/check/pattern_lowering.elisa` | source adapter |
-| `proof_pattern_is_char_type` | `proof/check/pattern_lowering.elisa` | source adapter |
-| `proof_pattern_is_string_type` | `proof/check/pattern_lowering.elisa` | source adapter |
-| `proof_pattern_type_name` | `proof/check/pattern_lowering.elisa` | source adapter |
-| `proof_pattern_unambiguous_char_literal` | `proof/check/pattern_lowering.elisa` | source adapter |
-| `proof_pattern_unambiguous_string_literal` | `proof/check/pattern_lowering.elisa` | source adapter |
 | `proof_payload_binder_types` | `proof/check/enum_value_types.elisa` | source adapter; pattern binder types |
 | `proof_prepare_semantic_source_with_diagnostics` | `proof/check/api.elisa` | source formation |
 | `proof_qualified_path_segments` | `proof/check/module_alias_resolution.elisa` | source adapter |
@@ -565,9 +588,6 @@ dependencies are not a verification claim.
 | `proof_structural_typed_operator_expression_has_overload` | `proof/check/structural_operator_statements.elisa` | source adapter |
 | `proof_structural_typed_operator_statements_have_overload` | `proof/check/structural_operator_statements.elisa` | source adapter |
 | `proof_type_audit_work_charge` | `proof/check/struct_members.elisa` | source adapter |
-| `proof_type_contains_borrowed_view_with_work` | `proof/check/flow_and_type_model.elisa` | source adapter |
-| `proof_type_is_reference_free_with_work` | `proof/check/flow_and_type_model.elisa` | source adapter |
-| `proof_type_strip_reference` | `proof/check/flow_and_type_model.elisa` | source adapter |
 | `proof_unsigned_place_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); unsigned place marker construction |
 | `proof_unsigned_place_marker_width` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); bounded marker-width lookup |
 | `proof_unsigned_primitive_width` | `proof/check/flow_and_type_model.elisa` | source adapter; fixed-width unsigned primitive classification |
@@ -576,12 +596,17 @@ dependencies are not a verification claim.
 | `proof_unsigned_width_max` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); maximum value for a bounded unsigned width |
 <!-- /inventory:replay-external-calls -->
 
-2. **Scalar fingerprint encoding.** `proof_push_kernel_identity` (`app/runtime.elisa`) hashes some
-   kinds (`field-init`, `resource-*`, `effect-*`) without their operand subtrees. Distinct goals
-   can therefore share a `goal_fingerprint`. The fingerprint is a staleness guard only:
+2. **Scalar package identity encoding.** `proof_push_kernel_identity` (`app/portable_io.elisa`)
+   serializes some kinds (`field-init`, `resource-*`, `effect-*`) without their operand subtrees.
+   Distinct goals can therefore share both the package's `statement` identity and its
+   `goal_fingerprint`; checking the supplied statement against this encoding does not prove that
+   it uniquely describes the complete certificate root. Both fields are identity hints only:
    - A targeted tactic run is replayed against the goal and facts regenerated from the imported
      source (`app/cli.elisa`), not against the fingerprint.
    - Certificate reuse requires exact `proof_expr_equal` of the goal and every fact.
+   - Portable package replay still checks the actual admitted roots with the kernel, but it does
+     not authenticate the package's source or the displayed statement against source. Consumers
+     must not treat `statement`, its fingerprint, theorem name, or source line as source evidence.
 3. **No floating point.** `float` terms are rejected until IEEE semantics, including NaN, are
    modelled.
 4. **Boundary facts are trusted, not replayed.** A producer bug that emits a boundary fact for the

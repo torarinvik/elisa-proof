@@ -217,7 +217,9 @@ def resource_fact_free_leaves() -> set[str]:
             if len(literals) != len(set(literals)):
                 raise AssertionError("resource fact-free leaf membership has duplicate kinds")
             return set(literals)
-    raise AssertionError("resource fact-free leaf list not found")
+    # An empty allow-list is meaningful: every resource-event leaf now has an explicit
+    # source validator or is rejected. Keep that closed state visible in the inventory.
+    return {"<none>"}
 
 
 def replay_external_calls() -> set[str]:
@@ -357,11 +359,30 @@ def main() -> int:
             failures.append(f"{table}: undocumented {sorted(source - documented)}, stale {sorted(documented - source)}")
 
     kinds = checks["node-kinds"]
-    if not checks["resource-fact-free-leaves"] <= kinds:
+    if checks["resource-fact-free-leaves"] != {"<none>"} and not checks["resource-fact-free-leaves"] <= kinds:
         failures.append("resource-fact-free-leaves: names a kind the arena does not admit")
     if checks["boundary-trace-kinds"] & (checks["derived-trace-kinds"] | checks["summary-trace-kinds"]):
         failures.append("boundary trace kinds overlap derived or summary kinds")
     shapes = read(PROOF / "kernel_replay" / "arena_shapes.elisa")
+    resource_lend = read(PROOF / "kernel_replay" / "resource_call_lend.elisa")
+    lend_shape = function_body(shapes, "proof_kernel_replay_resource_call_lend_child_counts_valid")
+    lend_transition = function_body(resource_lend, "proof_kernel_replay_resource_lend")
+    if "node.auxiliary >= PROOF_KERNEL_REPLAY_MAX_RESOURCE_CHILDREN" not in lend_shape or "node.children_count - node.right == node.auxiliary * 2" not in lend_shape:
+        failures.append("resource-call-lend arena shape must stage its bounded, overflow-safe count equation")
+    if "return false if lend_root >= nodes.count\n            lend_node:" not in lend_transition or "proof_kernel_replay_resource_call_lend_child_counts_valid(lend_node)" not in lend_transition or "nodes[lend_root].auxiliary * 2 + nodes[lend_root].right" in lend_transition:
+        failures.append("resource-call-lend transition must reuse the staged arena count validator")
+    effect_replay = read(PROOF / "kernel_replay" / "resource_model_integrated_helpers.elisa")
+    effect_contains = function_body(effect_replay, "proof_kernel_replay_effect_row_contains_with_work")
+    effect_within = function_body(effect_replay, "proof_kernel_replay_effect_row_within_with_work")
+    effect_goal = function_body(effect_replay, "proof_kernel_replay_effect_goal")
+    if effect_contains.index("row_root >= nodes.count") > effect_contains.index("nodes[row_root].kind") or "row_root >= nodes.count or nodes[row_root]" in effect_contains:
+        failures.append("effect-row membership must validate its root before indexing")
+    if effect_within.index("inner_root >= nodes.count") > effect_within.index("nodes[inner_root].kind") or "inner_root >= nodes.count or nodes[inner_root]" in effect_within:
+        failures.append("effect-row containment must validate its root before indexing")
+    if effect_goal.index("goal_root >= nodes.count") > effect_goal.index("nodes[goal_root].kind") or effect_goal.index("declared_row >= nodes.count") > effect_goal.index("nodes[declared_row].kind"):
+        failures.append("effect-goal replay must validate roots before indexing")
+    if "member.value >= nodes.count or nodes[member.value]" in effect_contains + effect_within or "entry.value >= nodes.count or nodes[entry.value]" in effect_goal:
+        failures.append("effect replay must validate child roots before indexing")
     if "return false" not in function_body(shapes, "proof_kernel_replay_arena_float_scalar_shape").strip().splitlines()[-1]:
         failures.append("float scalar shape is no longer unconditionally rejected; update the inventory")
     structural_protocol = {
@@ -401,6 +422,17 @@ def main() -> int:
     call_transitions = function_body(resource_events, "proof_kernel_replay_resource_events_remaining")
     if call_transitions.count("proof_kernel_replay_resource_usize_sorted_membership(state.scope.resource_call_events_seen") < 2 or call_transitions.count("proof_kernel_replay_resource_record_call_event(state, root)") < 2:
         failures.append("call and lend transitions do not reject and record repeated event roots")
+    staged_resource_reads = (
+        ("return false if node.left >= nodes.count", "nodes[node.left].kind != \"resource-use\""),
+        ("return false if value_slot >= state.bindings.binding_reference.count", "state.bindings.binding_reference[value_slot]"),
+        ("return false if witness_slot >= state.bindings.binding_moved.count", "state.bindings.binding_moved[witness_slot]"),
+        ("return false if target_slot >= state.borrows.borrow_present.count", "state.borrows.borrow_present[target_slot]"),
+        ("return false if borrow_target_slot >= state.provenance.binding_region.count", "state.provenance.binding_region[borrow_target_slot]"),
+        ("return false if slot >= state.scope.pending_join_moves.count", "state.scope.pending_join_moves[slot]"),
+    )
+    for bounds_check, indexed_read in staged_resource_reads:
+        if bounds_check not in call_transitions or indexed_read not in call_transitions or call_transitions.rfind(bounds_check) > call_transitions.rfind(indexed_read):
+            failures.append(f"resource-event indexed read is not staged after its bounds check: {indexed_read}")
     if "resource_call_events_seen.count" not in resource_copy or "source.scope.resource_call_events_seen |seen_call_event" not in resource_copy:
         failures.append("resource state copies do not meter and preserve the duplicate-call history")
     congruence = read(PROOF / "kernel_replay" / "goal_metered_congruence.elisa")

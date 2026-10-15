@@ -1,8 +1,7 @@
 # Validated segmented environments share declarations; local bindings are scoped per expression.
 extend ElisaProofKernelReplay:
     private:
-        # Type-index hashing is only an accelerator; exact owner/signature checks still decide
-        # identity. Keep the mixer inside the kernel so replay has no dependency on AST helpers.
+        # Type-index hashes only accelerate lookup; exact owner/signature checks decide identity.
         def proof_kernel_replay_type_hash_mix(hash: u32, value: i64) -> u32:
             low: i64 = value & 4294967295
             return (((hash.i64() ^ low) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS).u32()
@@ -21,14 +20,16 @@ extend ElisaProofKernelReplay:
         def proof_kernel_replay_empty_function_group_index() -> ProofKernelReplayFunctionGroupIndex:
             return ProofKernelReplayFunctionGroupIndex{source_binding_count: 0, function_count: 0, capacity: 0, hashes: [], slots: [], heads: [], tails: [], counts: [], next_rows: []}
 
-        # String equality can inspect every byte. Charge the longer side before comparing so
-        # untrusted environment names cannot bypass the replay work limit.
+        # Charge the longer string before equality so hostile names cannot bypass the work limit.
         def proof_kernel_replay_type_text_equal(left: sview, right: sview, work: mutable usize&) -> bool:
             ensure result == (work <= ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET and left == right)
             left_length: usize = sview_len(left)
             right_length: usize = sview_len(right)
             comparison_length: usize = left_length if left_length > right_length else right_length
-            if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET or comparison_length > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET - work:
+            if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET:
+                work <- ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET + 1
+                return false
+            if comparison_length > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET - work:
                 work <- ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET + 1
                 return false
             work <- work + comparison_length
@@ -50,7 +51,7 @@ extend ElisaProofKernelReplay:
             reuse_global_function_parameter_index: mutable bool
 
     public:
-        # Reusable allocation scratch only; every index row is rebuilt from validated input.
+        # Public indexes are rebuilt scratch; cached globals are copied only from validated input.
         struct ProofKernelReplayTypingWorkspace:
             value_binding_indices: mutable darray[usize]
             function_parameter_indices: mutable darray[usize]
@@ -179,9 +180,11 @@ extend ElisaProofKernelReplay:
                     "proposition": true
                     _: false
                 if is_value_binding:
+                    return (false, empty) if not proof_kernel_replay_type_work_consume_amount(2, work)
                     value_indices.push(binding_index)
                     value_binding_count <- value_binding_count + 1
                 if binding.kind == "function-parameter":
+                    return (false, empty) if not proof_kernel_replay_type_work_consume_amount(2, work)
                     parameter_indices.push(binding_index)
                     parameter_binding_count <- parameter_binding_count + 1
             return (false, empty) if:
@@ -224,6 +227,7 @@ extend ElisaProofKernelReplay:
                     owner_name_hash: u32 = proof_kernel_replay_name_owner_hash(binding.owner, binding.owner_type_identity)
                     parameter_hash: u32 = proof_kernel_replay_type_hash_mix(owner_name_hash, binding.signature_identity.i64())
                     slot: usize = (parameter_hash.i64() % parameter_binding_count.i64()).usize()
+                    return (false, empty) if not proof_kernel_replay_type_work_consume_amount(2, work)
                     parameter_next_indices[parameter_offset] <- parameter_bucket_heads[slot]
                     parameter_bucket_heads[slot] <- parameter_offset
             call_capacity: mutable usize = 0
@@ -274,9 +278,11 @@ extend ElisaProofKernelReplay:
                     "proposition": true
                     _: false
                 if is_value_binding:
+                    return (false, 0, 0) if not proof_kernel_replay_type_work_consume_amount(2, work)
                     scratch.value_binding_indices.push(binding_index)
                     value_binding_count <- value_binding_count + 1
                 if binding.kind == "function-parameter":
+                    return (false, 0, 0) if not proof_kernel_replay_type_work_consume_amount(2, work)
                     scratch.function_parameter_indices.push(binding_index)
                     parameter_binding_count <- parameter_binding_count + 1
             return (false, 0, 0) if not proof_kernel_replay_build_call_owner_lookup_index(environment, work, &scratch.call_owner_name_capacity, &scratch.call_owner_name_hashes, &scratch.call_owner_name_slots, &scratch.call_owner_name_ids, &scratch.call_owner_marker_counts, &scratch.call_owner_shadowed)
@@ -323,6 +329,7 @@ extend ElisaProofKernelReplay:
                     owner_name_hash: u32 = proof_kernel_replay_name_owner_hash(binding.owner, binding.owner_type_identity)
                     parameter_hash: u32 = proof_kernel_replay_type_hash_mix(owner_name_hash, binding.signature_identity.i64())
                     slot: usize = (parameter_hash.i64() % parameter_binding_count.i64()).usize()
+                    return false if not proof_kernel_replay_type_work_consume_amount(2, work)
                     scratch.function_parameter_next_indices[parameter_offset] <- scratch.function_parameter_bucket_heads[slot]
                     scratch.function_parameter_bucket_heads[slot] <- parameter_offset
             return true
@@ -342,15 +349,12 @@ extend ElisaProofKernelReplay:
             return false if global_bindings.count > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
             for binding in global_bindings |scratch, work|:
                 return false if not proof_kernel_replay_type_work_consume(work)
-                # The declaration-wide snapshot has no proposition-local source selector.
-                # Reject markers here instead of letting the intentionally deferred
-                # cross-row validation admit caller-supplied marker rows.
+                # Global snapshots lack a local selector; reject markers deferred to row validation.
                 return false if binding.kind in {"bare-call-owner", "local-call-shadow"}
                 return false if not proof_kernel_replay_type_work_consume_amount(2, work)
                 scratch.cache.bindings.push(binding)
             environment: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: scratch.cache.bindings, bindings: []}
-            # Global declarations are cached before any proposition-local owner markers exist.
-            # Cross-row marker validation belongs to complete and combined environments.
+            # Validate cross-row markers only after source-local rows have been combined.
             return false if not proof_kernel_replay_build_typing_workspace_internal(environment, &work, scratch, false)
             for binding_index in scratch.value_binding_indices |binding_index, scratch, work|:
                 return false if not proof_kernel_replay_type_work_consume_amount(2, work)
@@ -368,13 +372,11 @@ extend ElisaProofKernelReplay:
             scratch.cache.ready <- true
             return true
 
-        # Revalidates every local binding but reuses the independently validated immutable global
-        # prefix. The resulting combined index is scratch-only and never escapes replay.
+        # Revalidate locals against the private immutable global prefix; the combined index stays scratch.
         def proof_kernel_replay_build_typing_workspace_with_globals(local_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], work: mutable usize&, scratch: mutable ProofKernelReplayTypingWorkspace&) -> bool:
             return false if not scratch.cache.ready
             local_environment: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: [], bindings: local_bindings}
-            # The local declaration index would be immediately replaced by the combined one.
-            # Skip that full scan; keep the local call-owner index, which has different scope.
+            # Skip the soon-replaced local declaration index but retain the local-scope owner index.
             collected: (known: bool, value_binding_count: usize, function_parameter_count: usize) = proof_kernel_replay_collect_typing_indices(local_environment, work, scratch, false)
             return false if not collected.known
             scratch.global_function_group_index <- scratch.cache.function_group_index
@@ -431,6 +433,7 @@ extend ElisaProofKernelReplay:
                         owner_name_hash: u32 = proof_kernel_replay_name_owner_hash(binding.owner, binding.owner_type_identity)
                         parameter_hash: u32 = proof_kernel_replay_type_hash_mix(owner_name_hash, binding.signature_identity.i64())
                         slot: usize = (parameter_hash.i64() % parameter_count.i64()).usize()
+                        return false if not proof_kernel_replay_type_work_consume_amount(2, work)
                         scratch.cache.combined_function_parameter_next_indices[parameter_offset] <- scratch.cache.combined_function_parameter_bucket_heads[slot]
                         scratch.cache.combined_function_parameter_bucket_heads[slot] <- parameter_offset
             return true
@@ -555,9 +558,7 @@ extend ElisaProofKernelReplay:
                     binding.signature_identity != 0 or binding.parameter_index != 0 or binding.parameter_count != 0 or binding.parameter_has_default or binding.parameter_by_reference
             elif binding.kind == "function-parameter":
                 return false if binding.owner == "" or binding.signature_identity == 0 or binding.parameter_count != 0
-                # The parameter's owner identity is part of the signature key. A zero identity
-                # remains valid for source-neutral examples, while imported declarations carry
-                # their module owner identity through parameter lookup.
+                # Owner identity keys the signature; zero is valid for neutral examples, imports carry it.
             elif binding.kind == "enum-member":
                 return false if:
                     binding.owner == "" or binding.sort != "named" or not proof_kernel_replay_type_text_equal(binding.type_name, binding.owner, work)

@@ -24,6 +24,67 @@ extend ElisaProofKernelReplay:
                 not proof_kernel_replay_substitution_charge(work_used, work_limit, sview_len(node.name))
             proof_kernel_replay_substitution_charge(work_used, work_limit, sview_len(node.secondary_name))
 
+        # Substitution under a distinct quantifier binder is safe when that binder's name is
+        # absent from the replacement's free variables. This bounded recognizer deliberately
+        # supports the expression forms understood by arena substitution; an unknown replacement
+        # shape still fails closed. A nested quantifier masks its binder in the body, but not in
+        # its range.
+        def proof_kernel_replay_substitution_capture_safe(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, binder: sview, depth: usize, shadowed: bool, work_used: mutable usize&, work_limit: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if:
+                depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+                root >= nodes.count
+                not proof_kernel_replay_substitution_charge(work_used, work_limit, 1)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return false if not proof_kernel_replay_substitution_node_charge(node, work_used, work_limit)
+            if node.kind == "ident":
+                return true if shadowed
+                return node.name != binder
+            if node.kind in {"int", "bool", "char", "float", "opaque-float-literal", "string", "shorthand", "absent"}:
+                return true
+            if node.kind == "typed-int":
+                return ElisaProofKernelCore::typed_literal_value(node).known
+            if node.kind in {"unary", "move", "field", "scope", "call_arg", "field-init", "checked-get"}:
+                return proof_kernel_replay_substitution_capture_safe(nodes, children, node.left, binder, depth + 1, shadowed, work_used, work_limit)
+            if node.kind in {"binary", "index", "dict_entry", "checked-index"}:
+                return false if not proof_kernel_replay_substitution_capture_safe(nodes, children, node.left, binder, depth + 1, shadowed, work_used, work_limit)
+                return proof_kernel_replay_substitution_capture_safe(nodes, children, node.right, binder, depth + 1, shadowed, work_used, work_limit)
+            if node.kind == "slice":
+                return false if not proof_kernel_replay_substitution_capture_safe(nodes, children, node.left, binder, depth + 1, shadowed, work_used, work_limit)
+                return false if not proof_kernel_replay_substitution_capture_safe(nodes, children, node.right, binder, depth + 1, shadowed, work_used, work_limit)
+                return proof_kernel_replay_substitution_capture_safe(nodes, children, node.auxiliary, binder, depth + 1, shadowed, work_used, work_limit)
+            if node.kind == "if":
+                return false if not proof_kernel_replay_substitution_capture_safe(nodes, children, node.left, binder, depth + 1, shadowed, work_used, work_limit)
+                return false if not proof_kernel_replay_substitution_capture_safe(nodes, children, node.right, binder, depth + 1, shadowed, work_used, work_limit)
+                return proof_kernel_replay_substitution_capture_safe(nodes, children, node.auxiliary, binder, depth + 1, shadowed, work_used, work_limit)
+            if node.kind in {"call", "index-n"}:
+                return false if not proof_kernel_replay_substitution_capture_safe(nodes, children, node.left, binder, depth + 1, shadowed, work_used, work_limit)
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, children, nodes, binder, depth, shadowed, work_used, work_limit|:
+                    return false if not proof_kernel_replay_substitution_charge(work_used, work_limit, 1)
+                    return false if not proof_kernel_replay_substitution_capture_safe(nodes, children, children[node.children_start + index], binder, depth + 1, shadowed, work_used, work_limit)
+                return true
+            if node.kind in {"array", "tuple", "set", "dict"}:
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, children, nodes, binder, depth, shadowed, work_used, work_limit|:
+                    return false if not proof_kernel_replay_substitution_charge(work_used, work_limit, 1)
+                    return false if not proof_kernel_replay_substitution_capture_safe(nodes, children, children[node.children_start + index], binder, depth + 1, shadowed, work_used, work_limit)
+                return true
+            if node.kind in {"construct", "record-update"}:
+                return false if not proof_kernel_replay_substitution_capture_safe(nodes, children, node.left, binder, depth + 1, shadowed, work_used, work_limit)
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, children, nodes, binder, depth, shadowed, work_used, work_limit|:
+                    return false if not proof_kernel_replay_substitution_charge(work_used, work_limit, 1)
+                    return false if not proof_kernel_replay_substitution_capture_safe(nodes, children, children[node.children_start + index], binder, depth + 1, shadowed, work_used, work_limit)
+                return true
+            if node.kind == "quantifier":
+                range_safe: bool = proof_kernel_replay_substitution_capture_safe(nodes, children, node.left, binder, depth + 1, shadowed, work_used, work_limit)
+                return false if not range_safe
+                body_shadowed: bool = shadowed or node.name == binder or node.secondary_name == binder
+                return proof_kernel_replay_substitution_capture_safe(nodes, children, node.right, binder, depth + 1, body_shadowed, work_used, work_limit)
+            return false
+
         def proof_kernel_replay_substitution_memo_store(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, original_node_count: usize, memo_root: mutable usize&, memo_value: mutable usize&, memo_depth: mutable usize&, root: usize, depth: usize, result: usize) -> usize:
             # Check against the post-rewrite arena count: add_node returns its pre-append
             # count as a new root, while failure returns the current count sentinel.
@@ -74,35 +135,33 @@ extend ElisaProofKernelReplay:
             return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, root) if node.kind in {"int", "bool", "float", "opaque-float-literal", "string", "char", "shorthand", "absent", "unsupported"}
             if node.kind in {"unary", "move"}:
                 child: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or child >= nodes.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, node.kind, node.operator, child, 0, 0, 0, 0, node.value, node.name, node.secondary_name))
             if node.kind in {"binary", "index", "dict_entry"}:
                 left: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or left >= nodes.count
                 right: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.right, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or right >= nodes.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, node.kind, node.operator, left, right, node.auxiliary, 0, 0, node.value, node.name, node.secondary_name))
             if node.kind == "slice":
                 object: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or object >= nodes.count
                 low: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.right, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or low >= nodes.count
                 high: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.auxiliary, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or high >= nodes.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "slice", "", object, low, high, 0, 0, 0, "", ""))
             if node.kind == "index-n":
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "unsupported", "index-n-children", 0, 0, 0, 0, 0, 0, "", "")) if:
                     node.children_count == 0
-                    node.children_start > children.count
-                    node.children_count > children.count - node.children_start
                     not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
                 argument_roots: mutable darray[usize] = []
                 for index in 0..<node.children_count |index, node, children, nodes, name, value_root, depth, argument_roots, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit|:
                     argument: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, children[node.children_start + index], name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                    return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                    return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or argument >= nodes.count
                     argument_roots.push(argument)
                 object: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or object >= nodes.count
                 start: usize = children.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if:
                     not proof_kernel_replay_substitution_charge(work_used, work_limit, node.children_count)
@@ -110,44 +169,43 @@ extend ElisaProofKernelReplay:
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "index-n", "", object, 0, 0, start, node.children_count, 0, "", ""))
             if node.kind == "checked-index":
                 guarded: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or guarded >= nodes.count
                 fallback: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.right, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or fallback >= nodes.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "checked-index", "", guarded, fallback, 0, 0, 0, 0, "", ""))
             if node.kind == "checked-get":
                 guarded: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or guarded >= nodes.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "checked-get", "", guarded, 0, 0, 0, 0, 0, "", ""))
             if node.kind == "if":
                 condition: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or condition >= nodes.count
                 then_value: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.right, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or then_value >= nodes.count
                 else_value: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.auxiliary, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or else_value >= nodes.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "if", "", condition, then_value, else_value, 0, 0, 0, "", ""))
             if node.kind in {"field", "scope"}:
                 object: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or object >= nodes.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, node.kind, node.operator, object, 0, 0, 0, 0, node.value, node.name, node.secondary_name))
             if node.kind == "call_arg":
                 argument: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or argument >= nodes.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "call_arg", "", argument, 0, 0, 0, 0, 0, node.name, node.secondary_name))
             if node.kind == "field-init":
                 field_value: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or field_value >= nodes.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "field-init", "", field_value, 0, 0, 0, 0, 0, node.name, node.secondary_name))
             if node.kind == "call":
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "unsupported", "call-children", 0, 0, 0, 0, 0, 0, "", "")) if:
-                    node.children_start > children.count or node.children_count > children.count - node.children_start
                     not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
                 callee: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or callee >= nodes.count
                 argument_roots: mutable darray[usize] = []
                 for index in 0..<node.children_count |index, node, children, nodes, name, value_root, depth, argument_roots, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit|:
                     argument: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, children[node.children_start + index], name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                    return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                    return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or argument >= nodes.count
                     argument_roots.push(argument)
                 start: usize = children.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if:
@@ -156,24 +214,24 @@ extend ElisaProofKernelReplay:
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "call", node.operator, callee, 0, node.auxiliary, start, node.children_count, node.value, node.name, node.secondary_name))
             if node.kind == "quantifier":
                 range: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or range >= nodes.count
                 body: mutable usize = node.right
                 if node.name != name and node.secondary_name != name:
-                    # Substitution under another binder needs alpha-renaming or explicit binding
-                    # levels to prevent a free name in `value_root` from being captured. The
-                    # current source-neutral arena has neither, so fail closed for this branch;
-                    # substitutions whose name is shadowed remain unchanged and are safe.
-                    return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "unsupported", "substitution-under-quantifier", 0, 0, 0, 0, 0, 0, "", ""))
+                    capture_safe: bool = proof_kernel_replay_substitution_capture_safe(nodes, children, value_root, node.name, 0, false, work_used, work_limit)
+                    return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "unsupported", "substitution-under-quantifier", 0, 0, 0, 0, 0, 0, "", "")) if not capture_safe
+                    if node.secondary_name != "":
+                        capture_safe <- proof_kernel_replay_substitution_capture_safe(nodes, children, value_root, node.secondary_name, 0, false, work_used, work_limit)
+                        return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "unsupported", "substitution-under-quantifier", 0, 0, 0, 0, 0, 0, "", "")) if not capture_safe
+                    body <- proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.right, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
+                    return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or body >= nodes.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "quantifier", node.operator, range, body, node.auxiliary, 0, 0, node.value, node.name, node.secondary_name))
             if node.kind in {"array", "tuple", "set", "dict"}:
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "unsupported", "collection-substitution", 0, 0, 0, 0, 0, 0, "", "")) if:
-                    node.children_start > children.count
-                    node.children_count > children.count - node.children_start
                     not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
                 element_roots: mutable darray[usize] = []
                 for index in 0..<node.children_count |index, node, children, nodes, name, value_root, depth, element_roots, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit|:
                     element: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, children[node.children_start + index], name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                    return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                    return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or element >= nodes.count
                     element_roots.push(element)
                 start: usize = children.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if:
@@ -182,15 +240,13 @@ extend ElisaProofKernelReplay:
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, node.kind, "", 0, 0, 0, start, node.children_count, 0, "", ""))
             if node.kind in {"construct", "record-update"}:
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, ElisaProofKernelCore::add_node(nodes, "unsupported", "construction-substitution", 0, 0, 0, 0, 0, 0, "", "")) if:
-                    node.children_start > children.count
-                    node.children_count > children.count - node.children_start
                     not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
                 base: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, node.left, name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or base >= nodes.count
                 field_roots: mutable darray[usize] = []
                 for index in 0..<node.children_count |index, node, children, nodes, name, value_root, depth, field_roots, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit|:
                     field: usize = proof_kernel_replay_substitute_recursive_with_work_limit(nodes, children, children[node.children_start + index], name, value_root, depth + 1, original_node_count, memo_root, memo_value, memo_depth, work_used, work_limit)
-                    return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit)
+                    return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if work_used > proof_kernel_replay_substitution_effective_limit(work_limit) or field >= nodes.count
                     field_roots.push(field)
                 start: usize = children.count
                 return proof_kernel_replay_substitution_memo_store(nodes, original_node_count, memo_root, memo_value, memo_depth, root, depth, nodes.count) if:
