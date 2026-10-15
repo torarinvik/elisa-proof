@@ -247,7 +247,7 @@ assert "work_limit: usize" in runtime_fingerprint.split("def proof_goal_fingerpr
 assert "work > work_limit" in fingerprint_preflight
 assert "work_limit - work" in fingerprint_preflight
 assert "PROOF_JSON_EXPRESSION_WORK_LIMIT + 1" not in fingerprint_limit_body
-assert "&identity_bytes, 0, PROOF_JSON_EXPRESSION_WORK_LIMIT" in runtime_fingerprint
+assert "identity_bytes, 0, PROOF_JSON_EXPRESSION_WORK_LIMIT" in runtime_fingerprint
 parameter_identity = termination_helpers.split("def proof_structural_parameter_identity_with_work(", 1)[1].split("def proof_structural_call_argument(", 1)[0]
 assert "proof_report_source_work_charge(sview_len(parameter_name), source_work)" in parameter_identity
 assert "proof_report_source_work_charge(sview_len(wanted), source_work)" in parameter_identity
@@ -585,8 +585,8 @@ local_return_fixture = (ROOT / "scripts/test_direct_api_semantic_admission.py").
 assert 'ensure result == 7\\n    status: u8 = 7\\n    return status' in local_return_fixture
 shared_goal = linear_goal_api.split("def proof_goal_with_shared_work(", 1)[1].split("def proof_goal_with_precomputed_operator_mask(", 1)[0]
 shared_float = shared_goal.split("if (proof_float_mode can Global.Read):", 1)[1].split("goal_width_probe:", 1)[0]
-assert "proof_goal_tactic_preflight_charge_scaled(&preflight_work, float_square_cost, 8)" in shared_float
-assert "proof_goal_tactic_preflight_charge_scaled(&preflight_work, shape_cost, 16)" in shared_float
+assert "proof_goal_tactic_preflight_charge_scaled(preflight_work, float_square_cost, 8)" in shared_float
+assert "proof_goal_tactic_preflight_charge_scaled(preflight_work, shape_cost, 16)" in shared_float
 assert "proof_float_goal_with_work(facts, goal, operator_mask, &float_work, &float_exhausted)" in shared_float
 assert "proof_float_goal(facts, goal)" not in shared_float
 assert "proof_float_propositional_goal_with_shared_work(facts, goal, operator_mask, preflight_work, PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT)" in shared_float
