@@ -256,7 +256,7 @@ resource_call_shadow_expr = function_body(
 )
 assert "Ast::Expr.Field(_, method, _)" in resource_call_shadow_expr
 assert "method == wanted" in resource_call_shadow_expr
-assert "Ast::Expr.Scope(_, _, _)" in resource_call_shadow_expr
+assert "Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _) | Ast::Expr.Move(inner, _)" in resource_call_shadow_expr
 assert "A dynamic callee has no name-only purity proof." in resource_call_shadow_expr
 resource_call_nonfunction_guard = function_body(
     ROOT / "src/proof/replay/resource_call_shadow_validation.elisa",

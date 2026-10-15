@@ -298,6 +298,42 @@ extend ElisaProof:
                         leading <- false
             return false
 
+        # The retained signature table is keyed by source line, which is not a unique function
+        # identity when declarations share a line. Bind each clause expression to the nearest
+        # preceding function declaration on that line; absent or tied offsets are ambiguous.
+        def proof_replay_precondition_signature_clause_owned_by(declarations: darray[Ast::Decl]&, declaration_line: u32, expression_offset: u32, best_offset: mutable u32&, best_name: mutable sview&, best_matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
+            for declaration in declarations |declaration_line, expression_offset, best_offset, best_name, best_matches, work, depth|:
+                return false if not proof_replay_precondition_work_add(work, 1)
+                match declaration:
+                    Ast::Decl.Func(candidate, _, _, _, _, _, position):
+                        if position.line == declaration_line and position.offset <= expression_offset:
+                            return false if not proof_replay_precondition_work_add(work, sview_len(candidate))
+                            if best_matches == 0 or position.offset > best_offset:
+                                best_offset <- position.offset
+                                best_name <- candidate
+                                best_matches <- 1
+                            elif position.offset == best_offset:
+                                best_matches <- best_matches + 1
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_precondition_signature_clause_owned_by(nested, declaration_line, expression_offset, &best_offset, &best_name, &best_matches, &work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+            return true
+
+        def proof_replay_precondition_signature_clause_matches(report: ProofReport&, trace: ProofFactTrace, declaration_line: u32, requirement: Ast::Expr, candidate_source_cost: usize, work: mutable usize&) -> bool:
+            best_offset: mutable u32 = 0
+            best_name: mutable sview = ""
+            best_matches: mutable usize = 0
+            expression_position: Ast::Pos = Ast::expr_pos(requirement)
+            return false if:
+                expression_position.offset == 0
+                not proof_replay_precondition_signature_clause_owned_by(report.source.source_declarations, declaration_line, expression_position.offset, &best_offset, &best_name, &best_matches, &work, 0)
+                best_matches != 1 or best_name != trace.name
+            return proof_replay_precondition_contract_expr_matches(report, trace, requirement, candidate_source_cost, work)
+
         def proof_replay_precondition_source_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
             work: mutable usize = 0
             return proof_replay_precondition_source_valid_with_work(report, trace, &work)
@@ -368,7 +404,7 @@ extend ElisaProof:
                 continue if report.source_contracts.source_signature_contract_lines[index] != trace.line
                 continue if report.source_contracts.source_signature_contract_kinds[index] != "requires"
                 requirement: Ast::Expr = report.source_contracts.source_signature_contracts[index]
-                return true if proof_replay_precondition_contract_expr_matches(report, trace, requirement, candidate_source_cost, source_work)
+                return true if proof_replay_precondition_signature_clause_matches(report, trace, trace.line, requirement, candidate_source_cost, source_work)
             for parameter in parameters |report, trace, parameters|:
                 return true if parameter.name != "" and proof_replay_precondition_refinement_matches(parameter.type_expression, report.source.source_declarations, parameters, parameter.name, trace.expression, source_work, 0)
             return false
