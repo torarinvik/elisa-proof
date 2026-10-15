@@ -8,6 +8,7 @@ index = (ROOT / "src/proof/replay/source_generic_parameter_index.elisa").read_te
 generic_walk = (ROOT / "src/proof/replay/threaded_type_generics.elisa").read_text(encoding="utf-8")
 threaded = (ROOT / "src/proof/replay/threaded_summaries.elisa").read_text(encoding="utf-8")
 structural_cache = (ROOT / "src/proof/replay/structural_source_cache_validation.elisa").read_text(encoding="utf-8")
+type_markers = (ROOT / "src/proof/replay/threaded_type_markers.elisa").read_text(encoding="utf-8")
 
 exact_lookup = index.split(
     "def proof_replay_source_generic_param_owner_name_count_with_work(", 1
@@ -24,6 +25,15 @@ assert "|element, declaration_line, owner_offset, owner_offset_valid, report, so
 assert "position.offset.usize(), true" in threaded
 assert "source_report.analysis_2.replay_owner_offset, source_report.analysis_2.replay_owner_offset_valid" in threaded
 assert "proof_resource_type_marker_summary_for_owner_at_offset_with_work" in threaded
+
+# Builtin marker spellings must not bypass a visible source alias or nominal declaration.
+direct_markers = type_markers.split(
+    "def proof_replay_thread_direct_type_markers(", 1
+)[1].split("def ", 1)[0]
+assert direct_markers.index("if builtin:") < direct_markers.index("proof_replay_thread_nearest_type_declaration")
+assert "not nearest.complete or nearest.count > 0" in direct_markers
+assert "proof_replay_thread_import_shadow_check(report, name, owner_path, work)" in direct_markers
+assert direct_markers.index("if declaration.count == 0:") < direct_markers.index("proof_replay_thread_nearest_type_declaration")
 
 # The function generic-row census must ignore compiler generic-identity markers for
 # non-function declarations while still requiring every function marker to have a row.
