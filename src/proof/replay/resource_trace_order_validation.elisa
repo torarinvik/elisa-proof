@@ -172,6 +172,10 @@ extend ElisaProof:
                         return_ends.push(finish)
                         last_return_start <- start
                     Ast::Stmt.Block(kind, clause, binding, nested, position):
+                        # Deferred bodies execute at scope exit, so their resource transitions
+                        # cannot be ordered as if they ran at this source position. Until replay
+                        # has an exit-time transition model, refuse this owner's trace.
+                        return false if kind == "defer"
                         start: usize = position.offset.usize()
                         finish: usize = position.end_offset.usize()
                         return false if start == 0 or finish < start or block_starts.count > 0 and start <= last_block_start
@@ -206,8 +210,12 @@ extend ElisaProof:
                         for arm in arms |block_starts, block_ends, return_starts, return_ends, expected_region_open_offsets, expected_region_open_names, expected_region_close_offsets, expected_region_close_names, last_block_start, last_return_start, source_work, depth|:
                             return false if not proof_replay_owner_work_charge(1, source_work)
                             return false if not proof_replay_resource_order_statement_spans_build_with_work(arm.body, block_starts, block_ends, return_starts, return_ends, expected_region_open_offsets, expected_region_open_names, expected_region_close_offsets, expected_region_close_names, last_block_start, last_return_start, source_work, depth + 1)
-                    _:
+                    Ast::Stmt.VarDecl(_, _, _, _) | Ast::Stmt.Expr(_, _) | Ast::Stmt.Contract(_, _, _) | Ast::Stmt.Assign(_, _, _, _) | Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
+                    Ast::Stmt.Invalid:
+                        return false
+                    _:
+                        return false
             return false if block_starts.count != block_ends.count or return_starts.count != return_ends.count
             true
 
@@ -267,12 +275,20 @@ extend ElisaProof:
             # Writes carry the assignment's parser-owned offset too. Omitting them allowed a
             # trace to move an authenticated write across a move or region transition while
             # retaining individually valid source witnesses.
-            positioned: bool = node.kind in {"resource-region-open", "resource-region-close", "resource-region-alloc-discard", "resource-region-return-alloc", "resource-use", "resource-write", "resource-move", "resource-region-return", "resource-call", "resource-call-lend"} or node.kind == "resource-bind" and node.value > 0
+            positioned: bool = node.kind in {"resource-region-open", "resource-region-close", "resource-region-alloc-discard", "resource-region-return-alloc", "resource-region-assign", "resource-use", "resource-write", "resource-move", "resource-region-return", "resource-call", "resource-call-lend"} or node.kind == "resource-bind" and node.value > 0
             if positioned:
                 return false if node.value < 0 or node.value > 4294967295
                 return true if node.kind == "resource-region-close" and node.value == 0 and node.auxiliary == 0
                 return false if node.value == 0
                 current_offset: usize = node.value.usize()
+                if node.kind == "resource-region-assign":
+                    assignment_matches: mutable usize = 0
+                    assignment_value: mutable Ast::Expr = Ast::Expr.Invalid
+                    return false if not proof_replay_resource_event_find_statements_with_work(body, current_offset, node.kind, node.name, assignment_matches, assignment_value, source_work, 0)
+                    return false if assignment_matches != 1 or assignment_value is Ast::Expr.Invalid
+                    assignment_end: mutable usize = current_offset
+                    return false if not proof_replay_resource_return_expr_end_with_work(assignment_value, source_work, 0, &assignment_end) or assignment_end < current_offset
+                    current_offset <- assignment_end
                 if node.kind == "resource-call" or node.kind == "resource-call-lend":
                     call_position: Ast::Pos = Ast::Pos{line: 0, column: 0, offset: current_offset.u32(), end_line: 0, end_column: 0, end_offset: 0}
                     frame_work: mutable usize = 0
@@ -320,6 +336,9 @@ extend ElisaProof:
                     body <- declared_body
                 _:
                     return false
+            defer_blocks: mutable usize = 0
+            found_expression: mutable Ast::Expr = Ast::Expr.Absent
+            return false if not proof_replay_resource_event_find_statements_with_work(body, 0, "resource-defer-inventory", "", defer_blocks, found_expression, source_work, 0) or defer_blocks != 0
             block_starts: mutable darray[usize] = []
             block_ends: mutable darray[usize] = []
             return_starts: mutable darray[usize] = []

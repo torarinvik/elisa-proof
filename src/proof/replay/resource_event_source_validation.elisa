@@ -1,61 +1,5 @@
 extend ElisaProof:
     private:
-        # Direct storage allocations in declarations and assignments produce state-changing
-        # events whose source bridge is not admitted by the fact boundary yet. Do not let a
-        # forged trace omit such an event and thereby erase the source transition.
-        def proof_replay_resource_unbridged_storage_allocation(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, found: bool):
-            return (false, false) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    proof_replay_resource_unbridged_storage_allocation(inner, source_work, depth + 1)
-                Ast::Expr.RegionNew(_, _, _):
-                    (true, true)
-                _:
-                    (true, false)
-
-        def proof_replay_resource_unbridged_storage_allocations_absent(body: darray[Ast::Stmt]&, source_work: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
-            for statement in body |source_work, depth|:
-                return false if not proof_replay_owner_work_charge(1, source_work)
-                match statement:
-                    Ast::Stmt.VarDecl(_, _, initializer, _):
-                        allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(initializer, source_work, 0)
-                        return false if not allocation.complete or allocation.found
-                    Ast::Stmt.Assign(_, _, value, _):
-                        allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(value, source_work, 0)
-                        return false if not allocation.complete or allocation.found
-                    Ast::Stmt.If(_, yes, no, _):
-                        return false if not proof_replay_resource_unbridged_storage_allocations_absent(yes, source_work, depth + 1)
-                        return false if not proof_replay_resource_unbridged_storage_allocations_absent(no, source_work, depth + 1)
-                    Ast::Stmt.While(_, nested, _) | Ast::Stmt.For(_, _, _, nested, _) | Ast::Stmt.Block(_, _, _, nested, _):
-                        return false if not proof_replay_resource_unbridged_storage_allocations_absent(nested, source_work, depth + 1)
-                    Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |source_work, depth|:
-                            return false if not proof_replay_owner_work_charge(1, source_work)
-                            return false if not proof_replay_resource_unbridged_storage_allocations_absent(arm.body, source_work, depth + 1)
-                    Ast::Stmt.Expr(expression, _):
-                        match expression:
-                            Ast::Expr.RegionNew(_, _, _):
-                                pass # Discarded allocations have an exact offset census.
-                            _:
-                                allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(expression, source_work, 0)
-                                return false if not allocation.complete or allocation.found
-                    Ast::Stmt.Return(expression, _):
-                        # Direct return allocations have their own source-linked witness.
-                        match expression:
-                            Ast::Expr.RegionNew(_, _, _):
-                                pass
-                            _:
-                                allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(expression, source_work, 0)
-                                return false if not allocation.complete or allocation.found
-                    Ast::Stmt.Contract(_, _, _) | Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
-                        pass
-                    Ast::Stmt.Invalid:
-                        return false
-                    _:
-                        return false
-            true
-
         def proof_replay_resource_event_find_expression_with_work(expression: Ast::Expr, offset: usize, wanted_kind: sview, wanted_name: sview, matches: mutable usize&, found: mutable Ast::Expr&, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
             match expression:
@@ -101,6 +45,10 @@ extend ElisaProof:
                     return false if not proof_replay_resource_event_find_expression_with_work(base, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     return proof_replay_resource_event_find_expression_with_work(predicate, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                 Ast::Expr.RegionNew(operand, region, position):
+                    if wanted_kind == "resource-unbridged-storage-allocation":
+                        return false if position.offset == 0 or position.offset > 4294967295 or not proof_replay_owner_work_charge(sview_len(region), source_work)
+                        matches <- matches + 1
+                        found <- expression
                     if wanted_kind == "resource-region-alloc-discard" and position.offset == offset.u32():
                         return false if not proof_replay_owner_work_charge(sview_len(region), source_work) or not proof_replay_owner_work_charge(sview_len(wanted_name), source_work)
                         if region == wanted_name:
@@ -126,7 +74,8 @@ extend ElisaProof:
                     for entry in entries |offset, wanted_kind, wanted_name, matches, found, source_work, depth|:
                         return false if not proof_replay_resource_event_find_expression_with_work(entry.key, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                         return false if not proof_replay_resource_event_find_expression_with_work(entry.value, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
-                Ast::Expr.Construct(_, fields, _):
+                Ast::Expr.Construct(base, fields, _):
+                    return false if not proof_replay_resource_event_find_expression_with_work(base, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     for field in fields |offset, wanted_kind, wanted_name, matches, found, source_work, depth|:
                         return false if not proof_replay_resource_event_find_expression_with_work(field.value, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                 Ast::Expr.RecordUpdate(base, fields, _):
@@ -168,6 +117,22 @@ extend ElisaProof:
                 return false if not proof_replay_owner_work_charge(1, source_work)
                 match statement:
                     Ast::Stmt.VarDecl(name, type_expression, initializer, position):
+                        if wanted_kind == "resource-region-alloc-inventory" and position.offset == offset.u32():
+                            return false if not proof_replay_owner_work_charge(sview_len(name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted_name), source_work)
+                            if name == wanted_name:
+                                match initializer:
+                                    Ast::Expr.RegionNew(_, _, _):
+                                        return false if matches != 0
+                                        matches <- matches + 1
+                                        found <- initializer
+                                    _:
+                                        pass
+                        if wanted_kind == "resource-region-alloc-type-inventory" and position.offset == offset.u32():
+                            return false if not proof_replay_owner_work_charge(sview_len(name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted_name), source_work)
+                            if name == wanted_name:
+                                return false if matches != 0
+                                matches <- matches + 1
+                                found <- type_expression
                         if wanted_kind == "resource-bind-name-inventory" or wanted_kind == "resource-bind-nested-inventory" and depth > 0:
                             return false if not proof_replay_owner_work_charge(sview_len(name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted_name), source_work)
                             if name == wanted_name:
@@ -193,7 +158,12 @@ extend ElisaProof:
                         return false if not proof_replay_resource_event_find_expression_with_work(expression, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):
                         return false if not proof_replay_resource_event_find_expression_with_work(expression, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
-                    Ast::Stmt.Assign(target, _, value, _):
+                    Ast::Stmt.Assign(target, operator, value, position):
+                        if wanted_kind == "resource-region-assign" and position.offset == offset.u32():
+                            target_name: (complete: bool, name: sview) = proof_replay_resource_region_assignment_direct_name_with_work(target, source_work, 0)
+                            return false if not target_name.complete or target_name.name != wanted_name or (operator != TokenKind.Assign and operator != TokenKind.LArrow) or matches != 0
+                            matches <- matches + 1
+                            found <- value
                         return false if not proof_replay_resource_event_find_expression_with_work(target, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                         return false if not proof_replay_resource_event_find_expression_with_work(value, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     Ast::Stmt.If(condition, yes, no, _):
@@ -220,7 +190,9 @@ extend ElisaProof:
                         for arm in arms |offset, wanted_kind, wanted_name, matches, found, source_work, depth|:
                             return false if not proof_replay_resource_event_find_expression_with_work(arm.guard, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                             return false if not proof_replay_resource_event_find_statements_with_work(arm.body, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
-                    Ast::Stmt.Block(_, _, _, nested, _):
+                    Ast::Stmt.Block(kind, _, _, nested, _):
+                        if wanted_kind == "resource-defer-inventory" and kind == "defer":
+                            matches <- matches + 1
                         return false if not proof_replay_resource_event_find_statements_with_work(nested, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
@@ -228,6 +200,227 @@ extend ElisaProof:
                         return false
                     _:
                         return false
+            true
+
+        def proof_replay_resource_region_assignment_direct_name_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, name: sview):
+            return (false, "") if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return (false, "") if name == "" or not proof_replay_owner_work_charge(sview_len(name), source_work)
+                    (true, name)
+                Ast::Expr.Paren(inner, _):
+                    proof_replay_resource_region_assignment_direct_name_with_work(inner, source_work, depth + 1)
+                _:
+                    (false, "")
+
+        def proof_replay_resource_region_assignment_source_value_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, value: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return (false, Ast::Expr.Invalid) if name == "" or not proof_replay_owner_work_charge(sview_len(name), source_work)
+                    (true, expression)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Move(inner, _):
+                    proof_replay_resource_region_assignment_source_value_with_work(inner, source_work, depth + 1)
+                _:
+                    (false, Ast::Expr.Invalid)
+
+        def proof_replay_resource_region_assignment_source_valid_with_work(report: ProofReport&, resource_root: usize, event: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if not proof_replay_owner_work_charge(sview_len(event.kind), source_work)
+            return false if event.kind != "resource-region-assign" or event.value < 0 or event.value > 4294967295 or event.name == "" or event.secondary_name == "" or event.left >= report.analysis_1.kernel.nodes.count or resource_root >= report.analysis_1.kernel.nodes.count or owner == "" or owner_line == 0 or owner_offset > 4294967295
+            return false if not proof_replay_owner_work_charge(sview_len(event.name), source_work) or not proof_replay_owner_work_charge(sview_len(event.secondary_name), source_work) or not proof_replay_owner_work_charge(sview_len(owner), source_work) or not proof_replay_owner_work_charge(sview_len(owner_module), source_work)
+            root_node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[resource_root]
+            positions: (complete: bool, count: usize) = proof_replay_resource_event_count_in_root_with_work(report, root_node, event.kind, event.value.usize(), event.name, source_work)
+            return false if not positions.complete or positions.count != 1
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            caller: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
+            return false if not caller.complete or caller.matches != 1 or caller.row >= cache.deterministic_calls.declaration_index.entries.count
+            entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[caller.row]
+            return false if not proof_replay_owner_work_charge(sview_len(entry.owner), source_work)
+            return false if entry.owner != owner_module
+            body: darray[Ast::Stmt] = []
+            match entry.declaration:
+                Ast::Decl.Func(_, _, _, declared_body, _, _, _):
+                    body <- declared_body
+                _:
+                    return false
+            matches: mutable usize = 0
+            found: mutable Ast::Expr = Ast::Expr.Invalid
+            return false if not proof_replay_resource_event_find_statements_with_work(body, event.value.usize(), event.kind, event.name, matches, found, source_work, 0)
+            return false if matches != 1
+            source_value: (complete: bool, value: Ast::Expr) = proof_replay_resource_region_assignment_source_value_with_work(found, source_work, 0)
+            return false if not source_value.complete
+            match source_value.value:
+                Ast::Expr.Ident(name, _):
+                    return false if name == ""
+                _:
+                    return false
+            return proof_replay_ast_matches_kernel_with_work(report, source_value.value, event.left, source_work, 0)
+
+        def proof_replay_resource_region_binding_tree_find_with_work(report: ProofReport&, node_index: usize, wanted_name: sview, matches: mutable usize&, region: mutable sview&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or node_index >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
+            node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[node_index]
+            if node.kind in {"resource-bind", "resource-region-alloc", "resource-region-bind", "resource-sview-param", "resource-region-rebind-alloc", "resource-call-result", "resource-region-assign"}:
+                return false if not proof_replay_owner_work_charge(sview_len(node.name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted_name), source_work)
+                if node.name == wanted_name:
+                    return true if node.secondary_name == "" and node.kind in {"resource-bind", "resource-call-result"}
+                    return false if node.secondary_name == "" or not proof_replay_owner_work_charge(sview_len(node.secondary_name), source_work)
+                    matches <- matches + 1
+                    region <- node.secondary_name
+                return true
+            return true if node.kind not in {"resource-scope", "resource-alternatives"}
+            return false if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
+            for index in 0..<node.children_count |index, report, node, wanted_name, matches, region, source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                child: usize = report.analysis_1.kernel.children[node.children_start + index]
+                return false if not proof_replay_resource_region_binding_tree_find_with_work(report, child, wanted_name, matches, region, source_work, depth + 1)
+            true
+
+        def proof_replay_resource_region_binding_for_name_with_work(report: ProofReport&, root: ElisaProofKernelCore::ProofKernelNode, prefix_end: usize, wanted_name: sview, source_work: mutable usize&) -> (complete: bool, region: sview):
+            return (false, "") if root.children_start > report.analysis_1.kernel.children.count or root.children_count > report.analysis_1.kernel.children.count - root.children_start or prefix_end > root.children_count
+            matches: mutable usize = 0
+            region: mutable sview = ""
+            # Search the complete owner trace, not only the formal prefix: local region
+            # allocations and aliases are nested in the later scope/alternative events.
+            for index in 0..<root.children_count |index, report, root, wanted_name, matches, region, source_work|:
+                return (false, "") if not proof_replay_owner_work_charge(1, source_work)
+                child: usize = report.analysis_1.kernel.children[root.children_start + index]
+                return (false, "") if not proof_replay_resource_region_binding_tree_find_with_work(report, child, wanted_name, matches, region, source_work, 0)
+            (true, region)
+
+        def proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report: ProofReport&, root: ElisaProofKernelCore::ProofKernelNode, prefix_end: usize, expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Block(statements, value, _, _):
+                    return false if not proof_replay_resource_region_assignment_statements_covered_with_work(report, root, prefix_end, statements, source_work, depth + 1)
+                    return proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, value, source_work, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, callee, source_work, depth + 1)
+                    for argument in arguments |report, root, prefix_end, source_work, depth|:
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, argument, source_work, depth + 1)
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    return false if candidates.count != 1
+                    for capture in candidates[0].captures |report, root, prefix_end, source_work, depth|:
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, capture, source_work, depth + 1)
+                    for argument in arguments |report, root, prefix_end, source_work, depth|:
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, argument, source_work, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _):
+                    return proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, inner, source_work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, left, source_work, depth + 1)
+                    return proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, right, source_work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, object, source_work, depth + 1)
+                    for argument in arguments |report, root, prefix_end, source_work, depth|:
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, argument, source_work, depth + 1)
+                Ast::Expr.Array(arguments, _) | Ast::Expr.Tuple(arguments, _) | Ast::Expr.SetLit(arguments, _):
+                    for argument in arguments |report, root, prefix_end, source_work, depth|:
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, argument, source_work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, object, source_work, depth + 1)
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, low, source_work, depth + 1)
+                    return proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, high, source_work, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, base, source_work, depth + 1)
+                    return proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, predicate, source_work, depth + 1)
+                Ast::Expr.RegionNew(inner, _, _):
+                    return proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, inner, source_work, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |report, root, prefix_end, source_work, depth|:
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, entry.key, source_work, depth + 1)
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, entry.value, source_work, depth + 1)
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, base, source_work, depth + 1)
+                    for field in fields |report, root, prefix_end, source_work, depth|:
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, field.value, source_work, depth + 1)
+                Ast::Expr.If(condition, yes, no, _):
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, condition, source_work, depth + 1)
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, yes, source_work, depth + 1)
+                    return proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, no, source_work, depth + 1)
+                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, scrutinee, source_work, depth + 1)
+                    for arm in arms |report, root, prefix_end, source_work, depth|:
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, arm.guard, source_work, depth + 1)
+                        return false if not proof_replay_resource_region_assignment_statements_covered_with_work(report, root, prefix_end, arm.body, source_work, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, iterable, source_work, depth + 1)
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, condition, source_work, depth + 1)
+                    return proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, body, source_work, depth + 1)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, guarded, source_work, depth + 1)
+                    return proof_replay_resource_region_assignment_statements_covered_with_work(report, root, prefix_end, recovery, source_work, depth + 1)
+                Ast::Expr.Lambda(_, body, _):
+                    return proof_replay_resource_region_assignment_statements_covered_with_work(report, root, prefix_end, body, source_work, depth + 1)
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Ident(_, _):
+                    pass
+                _:
+                    return false
+            true
+
+        # Authenticate each region-tracked binding assignment against one positioned event.
+        def proof_replay_resource_region_assignment_statements_covered_with_work(report: ProofReport&, root: ElisaProofKernelCore::ProofKernelNode, prefix_end: usize, body: darray[Ast::Stmt]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for statement in body |report, root, prefix_end, source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.Assign(target, operator, value, position):
+                        target_root: (complete: bool, name: sview, position: Ast::Pos) = proof_replay_resource_return_place_root_with_work(target, source_work, 0)
+                        return false if not target_root.complete
+                        target_region: (complete: bool, region: sview) = proof_replay_resource_region_binding_for_name_with_work(report, root, prefix_end, target_root.name, source_work)
+                        return false if not target_region.complete
+                        source_root: (complete: bool, name: sview, position: Ast::Pos) = proof_replay_resource_return_place_root_with_work(value, source_work, 0)
+                        # A non-place RHS cannot rebind a tracked formal through this rule.
+                        # Let ordinary scalar/call updates continue through their dedicated
+                        # source and effect checks, but refuse the unsupported region write.
+                        return false if not source_root.complete and target_region.region != ""
+                        if source_root.complete:
+                            source_region: (complete: bool, region: sview) = proof_replay_resource_region_binding_for_name_with_work(report, root, prefix_end, source_root.name, source_work)
+                            return false if not source_region.complete
+                            if target_region.region != "" or source_region.region != "":
+                                target_name: (complete: bool, name: sview) = proof_replay_resource_region_assignment_direct_name_with_work(target, source_work, 0)
+                                source_value: (complete: bool, value: Ast::Expr) = proof_replay_resource_region_assignment_source_value_with_work(value, source_work, 0)
+                                return false if:
+                                    not target_name.complete or target_name.name != target_root.name
+                                    not source_value.complete or source_region.region == ""
+                                    (operator != TokenKind.Assign and operator != TokenKind.LArrow) or position.offset == 0 or position.offset > 4294967295
+                                recorded: (complete: bool, count: usize, region: sview) = proof_replay_resource_region_assignment_event_label_in_root_with_work(report, root, position.offset.usize(), target_root.name, source_work)
+                                return false if not recorded.complete or recorded.count != 1 or recorded.region == ""
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, target, source_work, depth + 1)
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, value, source_work, depth + 1)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, condition, source_work, depth + 1)
+                        return false if not proof_replay_resource_region_assignment_statements_covered_with_work(report, root, prefix_end, yes, source_work, depth + 1)
+                        return false if not proof_replay_resource_region_assignment_statements_covered_with_work(report, root, prefix_end, no, source_work, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, condition, source_work, depth + 1)
+                        return false if not proof_replay_resource_region_assignment_statements_covered_with_work(report, root, prefix_end, nested, source_work, depth + 1)
+                    Ast::Stmt.For(_, _, iterable, nested, _):
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, iterable, source_work, depth + 1)
+                        return false if not proof_replay_resource_region_assignment_statements_covered_with_work(report, root, prefix_end, nested, source_work, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        return false if not proof_replay_resource_region_assignment_statements_covered_with_work(report, root, prefix_end, nested, source_work, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, scrutinee, source_work, depth + 1)
+                        for arm in arms |report, root, prefix_end, source_work, depth|:
+                            return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, arm.guard, source_work, depth + 1)
+                            return false if not proof_replay_resource_region_assignment_statements_covered_with_work(report, root, prefix_end, arm.body, source_work, depth + 1)
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, expression, source_work, depth + 1)
+                    Ast::Stmt.VarDecl(_, type_expression, initializer, _):
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, type_expression, source_work, depth + 1)
+                        return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, initializer, source_work, depth + 1)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    Ast::Stmt.Invalid:
+                        return false
+                    _:
+                        return false
+            true
+
+        def proof_replay_resource_region_assignments_covered_with_work(report: ProofReport&, root_index: usize, root: ElisaProofKernelCore::ProofKernelNode, prefix_end: usize, body: darray[Ast::Stmt]&, source_work: mutable usize&) -> bool:
+            return false if root_index >= report.analysis_1.kernel.nodes.count or root.kind != "resource-safety"
+            return false if not proof_replay_resource_region_assignment_statements_covered_with_work(report, root, prefix_end, body, source_work, 0)
             true
 
         def proof_replay_resource_moves_covered_with_work(report: ProofReport&, root: ElisaProofKernelCore::ProofKernelNode, body: darray[Ast::Stmt]&, source_work: mutable usize&) -> bool:
@@ -312,6 +505,7 @@ extend ElisaProof:
         def proof_replay_resource_discard_event_position_count_with_work(report: ProofReport&, root: usize, offset: usize, source_work: mutable usize&, depth: usize) -> (complete: bool, count: usize):
             return (false, 0) if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
             node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
+            return (false, 0) if not proof_replay_owner_work_charge(sview_len(node.kind), source_work) or not proof_replay_owner_work_charge(sview_len(node.kind), source_work) or not proof_replay_owner_work_charge(sview_len(node.kind), source_work) or not proof_replay_owner_work_charge(sview_len(node.kind), source_work) or not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
             return (false, 0) if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
             return (true, 0) if node.kind == "resource-disjoint"
             return (true, 1 if node.kind == "resource-region-alloc-discard" and node.value == offset.i64() else 0) if node.kind not in {"resource-safety", "resource-scope", "resource-alternatives"}
@@ -325,13 +519,16 @@ extend ElisaProof:
             (true, count)
 
         def proof_replay_resource_discard_allocation_source_valid_with_work(report: ProofReport&, resource_root: usize, event: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if not proof_replay_owner_work_charge(sview_len(event.kind), source_work)
             return false if event.kind != "resource-region-alloc-discard" or event.value <= 0 or event.value > 4294967295 or event.name != "" or event.secondary_name == "" or owner == "" or owner_line == 0 or owner_offset > 4294967295
+            return false if not proof_replay_owner_work_charge(sview_len(event.secondary_name), source_work) or not proof_replay_owner_work_charge(sview_len(owner), source_work) or not proof_replay_owner_work_charge(sview_len(owner_module), source_work)
             positioned_events: (complete: bool, count: usize) = proof_replay_resource_discard_event_position_count_with_work(report, resource_root, event.value.usize(), source_work, 0)
             return false if not positioned_events.complete or positioned_events.count != 1
             return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
             caller: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
             return false if not caller.complete or caller.matches != 1 or caller.row >= cache.deterministic_calls.declaration_index.entries.count
             entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[caller.row]
+            return false if not proof_replay_owner_work_charge(sview_len(entry.owner), source_work)
             return false if entry.owner != owner_module
             body: darray[Ast::Stmt] = []
             match entry.declaration:
@@ -351,5 +548,6 @@ extend ElisaProof:
                     source_region <- source_region_name
                 _:
                     return false
+            return false if not proof_replay_owner_work_charge(sview_len(source_region), source_work)
             return false if source_region != event.secondary_name or event.left >= report.analysis_1.kernel.nodes.count
             proof_replay_ast_matches_kernel_with_work(report, operand, event.left, source_work, 0)

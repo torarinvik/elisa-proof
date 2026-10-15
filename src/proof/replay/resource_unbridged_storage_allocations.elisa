@@ -1,0 +1,80 @@
+extend ElisaProof:
+    private:
+        # Direct storage allocations in declarations and assignments produce state-changing
+        # events whose source bridge is not admitted yet. Prevent omitted transitions.
+        def proof_replay_resource_unbridged_storage_allocation(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, found: bool):
+            return (false, false) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            matches: mutable usize = 0
+            found_expression: mutable Ast::Expr = Ast::Expr.Invalid
+            complete: bool = proof_replay_resource_event_find_expression_with_work(expression, 0, "resource-unbridged-storage-allocation", "", matches, found_expression, source_work, depth)
+            (complete, matches != 0)
+
+        def proof_replay_resource_unbridged_storage_allocations_absent(report: ProofReport&, resource_root: ElisaProofKernelCore::ProofKernelNode, body: darray[Ast::Stmt]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for statement in body |source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.VarDecl(name, type_expression, initializer, position):
+                        type_allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(type_expression, source_work, 0)
+                        return false if not type_allocation.complete or type_allocation.found
+                        match initializer:
+                            Ast::Expr.RegionNew(operand, _, _):
+                                return false if position.offset == 0 or position.offset > 4294967295
+                                recorded: (complete: bool, count: usize) = proof_replay_resource_event_count_in_root_with_work(report, resource_root, "resource-region-alloc", position.offset.usize(), name, source_work)
+                                return false if not recorded.complete or recorded.count != 1
+                                nested: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(operand, source_work, 0)
+                                return false if not nested.complete or nested.found
+                            _:
+                                allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(initializer, source_work, 0)
+                                return false if not allocation.complete or allocation.found
+                    Ast::Stmt.Assign(target, _, value, _):
+                        target_allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(target, source_work, 0)
+                        return false if not target_allocation.complete or target_allocation.found
+                        allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(value, source_work, 0)
+                        return false if not allocation.complete or allocation.found
+                    Ast::Stmt.If(condition, yes, no, _):
+                        allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(condition, source_work, 0)
+                        return false if not allocation.complete or allocation.found
+                        return false if not proof_replay_resource_unbridged_storage_allocations_absent(report, resource_root, yes, source_work, depth + 1)
+                        return false if not proof_replay_resource_unbridged_storage_allocations_absent(report, resource_root, no, source_work, depth + 1)
+                    Ast::Stmt.While(condition, nested, _) | Ast::Stmt.For(_, _, condition, nested, _):
+                        allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(condition, source_work, 0)
+                        return false if not allocation.complete or allocation.found
+                        return false if not proof_replay_resource_unbridged_storage_allocations_absent(report, resource_root, nested, source_work, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        return false if not proof_replay_resource_unbridged_storage_allocations_absent(report, resource_root, nested, source_work, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(scrutinee, source_work, 0)
+                        return false if not allocation.complete or allocation.found
+                        for arm in arms |source_work, depth|:
+                            return false if not proof_replay_owner_work_charge(1, source_work)
+                            guard_allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(arm.guard, source_work, 0)
+                            return false if not guard_allocation.complete or guard_allocation.found
+                            return false if not proof_replay_resource_unbridged_storage_allocations_absent(report, resource_root, arm.body, source_work, depth + 1)
+                    Ast::Stmt.Expr(expression, _):
+                        match expression:
+                            Ast::Expr.RegionNew(operand, _, _):
+                                # The discarded outer allocation has an exact offset census.
+                                allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(operand, source_work, 0)
+                                return false if not allocation.complete or allocation.found
+                            _:
+                                allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(expression, source_work, 0)
+                                return false if not allocation.complete or allocation.found
+                    Ast::Stmt.Return(expression, _):
+                        match expression:
+                            Ast::Expr.RegionNew(operand, _, _):
+                                allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(operand, source_work, 0)
+                                return false if not allocation.complete or allocation.found
+                            _:
+                                allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(expression, source_work, 0)
+                                return false if not allocation.complete or allocation.found
+                    Ast::Stmt.Contract(_, expression, _):
+                        allocation: (complete: bool, found: bool) = proof_replay_resource_unbridged_storage_allocation(expression, source_work, 0)
+                        return false if not allocation.complete or allocation.found
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    Ast::Stmt.Invalid:
+                        return false
+                    _:
+                        return false
+            true

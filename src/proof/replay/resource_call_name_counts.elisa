@@ -8,6 +8,64 @@ struct ProofReplayResourceCallNameCounts:
 
 extend ElisaProof:
     private:
+        # Collect transition names and require each event to occupy a unique source offset.
+        # Per-event source binding plus name counts then proves one-to-one coverage for every
+        # name; duplicate offsets could otherwise mask an omitted same-named call.
+        def proof_replay_resource_call_names_at_with_work(report: ProofReport&, root: usize, names: mutable darray[sview]&, offsets: mutable darray[usize]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
+            node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
+            return false if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
+            return true if node.kind == "resource-disjoint"
+            if node.kind == "resource-call" or node.kind == "resource-call-lend":
+                return false if node.value < 0 or node.value > 4294967295
+                return false if not proof_replay_owner_work_charge(sview_len(node.name), source_work) or not proof_replay_owner_work_charge(1, source_work)
+                names.push(node.name)
+                offsets.push(node.value.usize())
+                return true
+            if node.kind not in {"resource-safety", "resource-scope", "resource-alternatives"}:
+                return false if node.children_start != 0 or node.children_count != 0
+                return true
+            for index in 0..<node.children_count |index, report, node, names, offsets, source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                child: usize = report.analysis_1.kernel.children[node.children_start + index]
+                return false if not proof_replay_resource_call_names_at_with_work(report, child, names, offsets, source_work, depth + 1)
+            true
+
+        # Reject duplicate source positions with a bounded hash table. A pairwise scan made
+        # this preflight quadratic in the number of call events and could consume the replay
+        # budget before the indexed name census started.
+        def proof_replay_resource_call_event_offsets_unique_with_work(offsets: darray[usize]&, source_work: mutable usize&) -> bool:
+            return true if offsets.count == 0
+            capacity: usize = proof_name_index_capacity(offsets.count)
+            return false if capacity == 0 or capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+            return false if not proof_replay_owner_work_charge(capacity * 2, source_work)
+            values: mutable darray[usize] = []
+            occupied: mutable darray[bool] = []
+            values.resize(capacity)
+            occupied.resize(capacity)
+            for slot in 0..<capacity |slot, values, occupied, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                values[slot] <- 0
+                occupied[slot] <- false
+            for offset in offsets |offset, values, occupied, capacity, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                hash: u32 = proof_expr_shape_mix(ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS.u32(), offset.i64())
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                inserted: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, offset, values, occupied, capacity, source_work, inserted|:
+                    return false if not proof_replay_owner_work_charge(1, source_work)
+                    if not occupied[slot]:
+                        values[slot] <- offset
+                        occupied[slot] <- true
+                        inserted <- true
+                        break
+                    return false if values[slot] == offset
+                    slot <- slot + 1 if slot + 1 < capacity else 0
+                    probes <- probes + 1
+                return false if not inserted
+            true
+
         def proof_replay_resource_call_name_count_add(index: mutable ProofReplayResourceCallNameCounts&, name: sview, is_event: bool, capacity: usize, source_work: mutable usize&) -> bool:
             return false if name == "" or capacity == 0
             return false if not proof_replay_owner_work_charge(sview_len(name), source_work)

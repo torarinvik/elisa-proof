@@ -21143,6 +21143,7 @@ each hop still uses the charged lexical/global lookup paths, and cycles still ex
 finite traversal bound. `git diff --check` and the source-length gate pass; tests and compiler-backed
 qualification were not run.
 
+
 ### 23.27.1653 Remove unused unmetered kernel bound scans (2026-10-15)
 
 The kernel retained private linear bound lookup and update helpers with no call sites, alongside
@@ -28126,7 +28127,6 @@ analysis is needed only for source calls with no event. Removed the redundant na
 per-event validation and kept it in the occurrence-count omission branch. This avoids rescanning
 all same-name candidates and their bodies for each emitted call while preserving the no-event
 proof and exact event binding. The static guard now pins that ownership boundary. `git diff --check`
-and the source-length gate pass; tests and compiler/runtime qualification were not run.
 
 ### 23.27.1687 Preserve capture avoidance in quantifier substitution (2026-10-15)
 
@@ -28214,6 +28214,82 @@ admission share this predicate, and tactic arena admission calls it for every no
 `git diff --check` and the source-length gate pass; tests and compiler/runtime qualification were
 not run.
 
+### 23.27.1701 Bind region-owner assignment transitions in replay (2026-10-15)
+
+The producer's `proof_resource_handle_region_assignment` marks a moved region owner unavailable
+and emits `resource-region-assign` for a valid direct binding transfer. Kernel replay applies that
+state transition, but `proof_replay_resource_event_facts_with_owner` currently rejects this event
+because no source bridge exists. The owner census checks moves, writes, calls, and selected
+allocations, but does not require a region-assignment transition for each matching source
+assignment. A complete bridge needs the producer to persist the assignment offset, arena admission
+to bound that offset, replay to match the exact target and source expression to the owner AST, and
+reverse coverage to require each region-owner assignment event. This is an unclosed source/event
+completeness risk; source review did not construct a fully checked-view exploit. Source review only;
+no code, test, or compiler change was made.
+
+### 23.27.1700 Make portable rule fallback exhaustive (2026-10-15)
+
+Portable rule dispatch had a final generic fallback that allowed any known rule to inherit goal
+replay, and any quantified conclusion to inherit quantifier replay based only on its shape. Kept
+generic goal replay available for quantified goals, but require quantified specialized rules to
+use their dedicated `quantifier-forall` or `quantifier-exists` path. The ordinary goal replay
+fallback now accepts only the explicit generic goal, index, and slice rule labels. New known rules
+must receive a dedicated replay mapping or fail closed. `git diff --check` and the source-length
+gate pass; tests and compiler/runtime qualification were not run.
+
+### 23.27.1701 Check package conclusion before rule dispatch (2026-10-15)
+
+The theorem parser validates the conclusion index before calling the private package dispatcher,
+but the dispatcher itself read the arena node before any replay API validated that index. Added a
+local bounds check before reading conclusion shape, keeping the helper safe if another caller is
+introduced. `git diff --check` and the source-length gate pass; tests and compiler/runtime
+qualification were not run.
+
+### 23.27.1702 Fail closed on unknown resource-order statements (2026-10-15)
+
+The source-order span builder previously ignored every statement variant outside its span-bearing
+cases. That could let a future AST statement carry resource transitions without participating in
+return/close normalization. It now explicitly permits the current span-free declaration,
+expression, contract, assignment, break, and continue forms, and rejects invalid or future
+variants. The companion event finder already rejects unknown forms. `git diff --check` and the
+source-length gate pass; tests and compiler/runtime qualification were not run.
+
+### 23.27.1703 Record resource-assignment coverage boundary and Stage1 qualification failure (2026-10-15)
+
+The resource-assignment replay path has since gained a forward source bridge in
+`resource_event_source_validation.elisa`: each `resource-region-assign` event is tied to one
+unique assignment offset in the exact owner, and its assigned identifier or moved identifier is
+matched to the event's kernel expression. The metered owner census checks direct transfers
+between tracked bindings and requires one event at each matching source offset. Its lookup
+recognizes `resource-bind`, `resource-region-alloc`, and `resource-region-bind`, and descends
+through `resource-scope` and `resource-alternatives` nodes across the complete owner trace with
+depth and source-work bounds. It also reads the lifetime marker for by-value `sview` formals,
+whose paired `resource-bind` does not carry the region. Ambiguous same-name bindings fail closed.
+The source-fact boundary still rejects local `resource-region-alloc` and `resource-region-bind`
+events: admitting them requires binding both their positioned declaration and type-derived
+reference, mutability, and lifetime metadata. Projected flows need a complete reverse census, so
+source-event omission remains open.
+
+The source-level coverage remains statically reviewed only; no runtime test or compiler
+qualification was run for the new reverse walk or the `sview` marker lookup.
+
+I also attempted a fresh f7b6 Stage1 seed using the pinned Stage0 in the isolated clean worktree
+`/private/tmp/elisa-proof-compiler-f7b6-qualify`. The build exited 1 after 48,414 log lines,
+including 48,128 warnings and region-inference, lifetime, and effect diagnostics. No Stage1
+product was created. The complete log is `/private/tmp/elisa-proof-f7b6-seed.log`; this does not
+qualify the current proof source.
+
+### 23.27.1704 Refuse deferred blocks in resource trace ordering (2026-10-15)
+
+The compiler lowers `defer` bodies to execute at block or function exit, while the resource
+producer currently walks their AST bodies as nested blocks at the declaration site. Source-order
+replay cannot justify that timing. Resource trace owner admission now rejects a `defer` block
+until exit-time resource transitions are modeled and replayed. The source resource checker now
+emits `resource-defer-unsupported` and skips its body rather than constructing an immediate-effect
+trace. The metered replay AST walk also rejects `defer` blocks nested in lambda, match, and
+expression-block bodies. Ordinary non-resource proofs are unaffected. `git diff --check` and the
+source-length gate pass; tests and compiler/runtime qualification were not run.
+
 ### 23.27.1694 Admit parser-retained signature preconditions (2026-10-15)
 
 Precondition facts can be produced from signature-level `requires`, but replay previously searched
@@ -28221,9 +28297,11 @@ only leading body contracts and parameter refinements. Replay now validates the 
 contract table's parallel-array shape, meters its expressions, and checks `requires` rows at the
 uniquely resolved function declaration line against the fact expression. Since that table is keyed
 by line, replay also binds each candidate clause expression offset to the nearest preceding
-function declaration on that line; missing or tied offsets fail closed. Body and signature clauses
-share exact comparison and the same validated global-constant normalization path. `git diff
---check` passes; no tests or compiler qualification were run.
+function declaration on that line and requires the expression to begin after that owner's start;
+missing or tied offsets fail closed. Alias-derived refinement facts retain the alias expression's
+source position, so they fall through to the independent parameter-refinement validator. Body and
+signature clauses share exact comparison and the same validated global-constant normalization
+path. `git diff --check` passes; no tests or compiler qualification were run.
 
 ### 23.27.1695 Bound resource-call source offsets in arena shapes (2026-10-15)
 
@@ -28233,6 +28311,7 @@ arena admission accepted oversized nonnegative values. Added the same `u32` maxi
 arena shape contract and executable predicate, so malformed offsets fail at kernel admission.
 `git diff --check` and the source-length gate pass; tests and compiler/runtime qualification were
 not run.
+
 
 ### 23.27.1696 Confirm nested resource calls remain visible to owner census (2026-10-15)
 
@@ -28256,3 +28335,141 @@ region-return witnesses. Their child edges remain mandatory through shape-specif
 validation, which checks node zero like any other root. Untyped variants retain their zero sentinel.
 `git diff --check` and the source-length gate pass; tests and compiler/runtime qualification were
 not run.
+
+### 23.27.1698 Recompute resource-call-lend storage confinement in replay (2026-10-15)
+
+The producer admitted summary-free `resource-call-lend` only when the callee's declared return
+cannot retain a reference and every other by-value or mutable-reference formal cannot store the
+lent capability. Replay checked direct reference syntax and call modes but did not recompute either
+type-level premise, leaving forged lend events able to hide a capability escape through a nested
+aggregate. Replay now derives return reference-freedom and each writable formal's target
+reference-freedom from parser-owned declarations, rejects owner generics and unknown type shapes,
+and charges both walks to the caller's source-work meter. Added static guards for the independent
+premises. `git diff --check`, Python syntax validation, and the source-length gate pass; tests and
+compiler qualification were not run.
+
+### 23.27.1699 Bind portable frame rule labels to frame-policy replay (2026-10-15)
+
+Portable package admission listed `frame-spec`, `frame-allow`, and `frame-preserve` as known
+certificate rules, but its dispatcher sent them through ordinary goal replay. Added a bounded
+workspace API that admits each supplied arena root, requires no hypotheses, checks the frame-policy
+shape semantics, and binds each external rule label to its corresponding serialized operator.
+Portable replay now uses this path for all three frame rules. This preserves the package's explicit
+source-untrusted trust boundary while allowing valid source-neutral frame-policy certificates to
+replay. `git diff --check` and the source-length gate pass; tests and compiler/runtime qualification
+were not run.
+
+### 23.27.1700 Reject borrowed views in summary-free lend confinement (2026-10-15)
+
+Independent review found that `proof_type_is_reference_free_with_work` intentionally treats
+`view[T]` as reference-free because its elements cannot store references, even though a view itself
+is a borrowed window. A summary-free lend could therefore write a view of a lent source into a
+second writable formal while replay recorded only the destination write. Producer metadata and
+replay now independently reject borrowed views in writable formal targets and declared return
+types, including aliases and nested aggregate paths recognized by the existing borrowed-view
+classifier. Added static source guards for both replay premises. `git diff --check`, Python syntax
+validation, and the source-length gate pass; tests and compiler qualification were not run.
+
+### 23.27.1701 Order region-owner assignments with source transitions (2026-10-15)
+
+Review of the newly admitted `resource-region-assign` found that its source bridge authenticated the
+assignment offset but the trace-order validator did not treat the state transition as positioned.
+A forged trace could therefore replay a later owner move before an earlier source use, despite both
+events being individually tied to the right AST locations. The order walk now includes region
+assignments and compares them at the end of the authenticated RHS expression, after its reads and
+before subsequent source transitions. This closes the transition reordering path while preserving
+producer evaluation order. `git diff --check` and the source-length gate pass; tests and compiler
+qualification were not run.
+
+### 23.27.1705 Permit non-region assignments in resource owner census (2026-10-15)
+
+The reverse `resource-region-assign` source census previously required every assignment RHS to
+resolve to a direct place root. That rejected ordinary arithmetic and scalar/call updates in any
+function with a resource summary. The census now allows non-place RHS forms only when the target
+is not a tracked region binding; a complex RHS targeting a tracked region formal still fails
+closed. Direct tracked-region transfers retain exact source event matching. `git diff --check`
+and the source-length gate pass; tests and compiler/runtime qualification were not run.
+
+### 23.27.1706 Bind region assignment labels to source metadata (2026-10-15)
+
+The source bridge matched a region assignment's offset, target name, and RHS expression, but did
+not verify that the event's `secondary_name` was the region assigned in the source owner's
+bindings. Added a bounded, metered event lookup and made the reverse assignment census compare
+the serialized label against both source-derived binding regions. Forged region labels now fail
+source admission. `git diff --check` and the source-length gate pass; tests and compiler/runtime
+qualification were not run.
+
+### 23.27.1707 Find nested unbridged region allocations in storage expressions (2026-10-15)
+
+The resource source preflight rejected direct `RegionNew` initializers and assignments but only
+looked through parentheses. A nested allocation inside an aggregate or other initializer could
+therefore evade the check. Storage expressions now use the existing bounded AST walk to locate
+allocations at any supported expression depth and reject them until an exact storage-event bridge
+exists. `git diff --check` and the source-length gate pass; tests and compiler/runtime
+qualification were not run.
+
+### 23.27.1708 Scan beneath witnessed direct region allocations (2026-10-15)
+
+The unbridged-allocation scan allowed direct `RegionNew` expression statements and returns
+because separate source witnesses cover their outer allocation, but skipped the allocation
+operand. It now scans that operand for additional `RegionNew` nodes while retaining the exact
+witnessed outer event. The scan lives in a separate replay module to keep source files within the
+size limit. `git diff --check` and the source-length gate pass; tests and compiler/runtime
+qualification were not run.
+
+### 23.27.1708 Record failed direct Stage0 qualification attempt (2026-10-15)
+
+The currently configured proof pin is compiler source `c5a6616a740434c2e2002582970b004b5ca0ecfa`
+with Stage0 pin `ba2691aa610b59d935b12d5e0d9005a0383cc9bf`. I ran the repository build entrypoint
+with the provenance-checked Stage0 product from that pin. The compiler emitted 146 hard source
+diagnostics in the proof snapshot (98 docs/119 E10 capture errors, 36 E11 loop-binding errors, and
+12 E4 effect errors), alongside broad Stage0 lifetime warnings, and did not replace the installed
+proof binary or manifest. Several proof files were edited after the snapshot was taken, so this
+attempt does not qualify the current dirty tree even if its older snapshot can be repaired. This
+confirms the remaining qualification blocker is a compatible Stage1 compiler product for the
+pinned source, not another direct Stage0 proof build. The retained `stage1-c5a6616-seed.log` also
+ends with the pinned Stage0 seed exiting with status 1; among its terminal diagnostics are region
+inference failures in `emit_edir.elisa:1374` and lifetime errors in compiler assignment lowering.
+Thus the current toolchain has neither a qualifying direct Stage0 build nor a seedable pinned
+Stage1. No tests were run.
+
+### 23.27.1709 Inspect constructor heads during allocation census (2026-10-15)
+
+The bounded resource allocation finder visited constructor field values but skipped the constructor
+base expression. It now visits that expression too, keeping the census exhaustive over every child
+of the AST constructor node. `git diff --check` and the source-length gate pass; tests and compiler
+qualification were not run.
+
+### 23.27.1710 Reject unrepresented overloaded operators in resource owners (2026-10-15)
+
+Independent review found that overloaded operators are lowered as protocol calls but absent from
+the parser-owned call-name inventory used for resource-call coverage. An owner whose only call-like
+operation was an overloaded operator could therefore pass with no resource-call event, bypassing
+the omission purity audit. Resource-owner replay now uses the typed operator audit over the full
+body and default arguments and rejects any owner with overloaded dispatch until the trace carries
+an exact source-bound operator-call event. The operator audit's work is debited to the resource
+replay source-work budget. `git diff --check` and the source-length gate pass; tests and compiler
+qualification were not run.
+
+### 23.27.1711 Check storage through the lent mutable formal (2026-10-15)
+
+Summary-free resource lending skipped the lent formal when checking whether writable targets can
+store references. That also exempted the lent mutable reference's own pointee. Producer and replay
+now require that pointee to be reference-free while retaining the shared-reference exception.
+`git diff --check` and the source-length gate pass; tests and compiler qualification were not run.
+
+### 23.27.1712 Charge resource source-label comparisons and pointee traversal (2026-10-15)
+
+Resource allocation and assignment source bridges compared serialized event kinds, owner/module
+names, declaration owners, and source region labels without charging their text lengths. The
+assignment event-label census also repeated event-kind dispatch comparisons without a corresponding
+text debit. These paths now charge the compared text before dispatch/equality, and the allocation
+type-wrapper walk charges each visited AST node against the same replay work budget. The whitespace
+diff check passes; compiler and runtime qualification remain unavailable for the pinned source.
+
+### 23.27.1713 Meter discard-allocation source validation (2026-10-15)
+
+The discarded-region-allocation replay path performed recursive kernel-node kind dispatch and
+compared source-derived region labels and owner module names without charging those text lengths.
+The source bridge and event census now debit those comparisons, including the declaration owner
+identity check. The whitespace diff check passes; runtime qualification remains open.
