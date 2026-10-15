@@ -185,22 +185,22 @@ indexed_find = interval_index[indexed_find_start:indexed_find_end]
 ordered_precheck = function_body(interval_index, "proof_kernel_replay_interval_expr_ordered_precheck")
 assert "index.states.resize(nodes.count)" in builder
 assert "index.hashes.resize(nodes.count)" in builder
-assert "index.matched_rows.resize(nodes.count)" in builder
+assert "index.representative_rows.resize(nodes.count)" in builder
 assert "index.heads.resize(capacity)" in builder
-assert "index.tails.resize(capacity)" in builder
+assert "index.bucket_tails.resize(capacity)" in builder
 assert "index.next_rows.resize(bounds.count)" in builder
 assert "slots: usize = nodes.count * 3 + capacity * 2 + bounds.count" in builder
-assert "index.next_rows[tail] <- row" in builder
-assert "index.tails[slot] <- row" in builder
+assert "index.next_rows[prior_row] <- row" in builder
+assert "index.bucket_tails[slot] <- row" in builder
 assert "row: usize = index.heads[" in indexed_find
 assert "row <- index.next_rows[row]" in indexed_find
 assert "index.hashes[bound.term_root] == query.hash" in indexed_find
 assert "proof_kernel_replay_goal_search_expr_equal(nodes, children, bound.term_root, root, work)" in indexed_find
 assert "index.lookup_complete <- index.complete" in indexed_find
-assert "cached_row: usize = index.matched_rows[root]" in indexed_find
-assert "index.matched_rows[root] <- prechecked.row" in indexed_find
+assert "cached_row: usize = index.representative_rows[root]" in indexed_find
+assert "index.representative_rows[root] <- prechecked.row" in indexed_find
 assert "cached_row == bounds.count + 1 and index.complete" in indexed_find
-assert "index.matched_rows[root] <- bounds.count + 1 if index.complete" in indexed_find
+assert "index.representative_rows[root] <- bounds.count + 1 if index.complete" in indexed_find
 assert "if index.states.count == nodes.count and index.states[root] == 2:" in indexed_find
 assert "prechecked: (found: bool, row: usize, scanned_rows: usize) = proof_kernel_replay_interval_expr_ordered_precheck" in indexed_find
 assert indexed_find.index("proof_kernel_replay_interval_expr_ordered_precheck") < indexed_find.index("proof_kernel_replay_interval_expr_hash_node(nodes, children, root")
