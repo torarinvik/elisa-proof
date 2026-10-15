@@ -334,14 +334,15 @@ extend ElisaProof:
             return functions.lookup.owner_modules[function_index] if function_index < functions.lookup.owner_modules.count
             return ""
 
-        # How many declared functions carry this exact leaf name. `proof_resource_function_index` answers
-        # the missing index for both "no such function" and "two with this leaf", and the
-        # builtin admission below must not confuse them: a builtin is a name *no* declaration has.
+        # Return zero only for a complete indexed miss. One means the name exists; two is the
+        # fail-closed sentinel for a malformed or incomplete index. Callers only need the
+        # zero/nonzero distinction when deciding whether a spelling is a builtin.
         def proof_resource_function_name_count(functions: ProofFunctionTable&, name: sview) -> usize:
-            found: mutable usize = 0
-            for candidate in functions.lookup.names |candidate, name, found|:
-                found <- found + 1 if candidate == name
-            return found
+            work: mutable usize = 0
+            lookup: (complete: bool, row: usize, repeated: bool) = proof_function_name_lookup_with_work(functions, name, &work)
+            return 2 if not lookup.complete or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or lookup.row > functions.lookup.names.count
+            return 1 if lookup.row < functions.lookup.names.count
+            return 0
 
         # `as_sview` is a borrowing builtin only when no source declaration shadows its name.
         # Keep this check shared by region inference and event construction so a user method
@@ -364,14 +365,17 @@ extend ElisaProof:
         # A collection builtin invoked as a method on a place: `values.push(x)`, `a.extend(b)`,
         # `a.clear()`, `a.resize(n)`, `a.pop()`. The receiver is returned so the call can be
         # recorded as what it is -- a write to that place.
-        def proof_resource_collection_builtin(callee: Ast::Expr, functions: ProofFunctionTable&, report: mutable ProofReport&) -> (known: bool, receiver: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
-            stripped: Ast::Expr = proof_resource_strip_parens_with_work(callee, report, 0)
+        # Alias analysis has no resource binding/type environment. Keep its coarse candidate
+        # classification separate; only the resource producer admits a write after the typed
+        # `_with_state` check above.
+        def proof_resource_collection_builtin(callee: Ast::Expr, functions: ProofFunctionTable&) -> (known: bool, receiver: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            stripped: Ast::Expr = proof_strip_parens(callee)
             match stripped:
                 Ast::Expr.Field(receiver, method, _):
                     return (false, Ast::Expr.Invalid) if:
-                        method != "push" and method != "extend" and method != "clear" and method != "resize" and method != "pop" and method != "truncate"
+                        method not in {"push", "extend", "clear", "resize", "pop", "truncate"}
                         proof_resource_function_name_count(functions, method) != 0
-                        proof_resource_place_root(receiver, report) == ""
+                        proof_place_root_name(receiver, 0) == ""
                     return (true, receiver)
                 _:
                     return (false, Ast::Expr.Invalid)
@@ -407,30 +411,6 @@ extend ElisaProof:
                     _:
                         pass
             return false
-
-        def proof_resource_function_region_param_count(functions: ProofFunctionTable&, function_index: usize) -> usize:
-            return functions.parameters.regions.region_param_counts[function_index] if function_index < functions.parameters.regions.region_param_counts.count
-            return 0
-
-        def proof_resource_function_region_param_at[@r](functions: ProofFunctionTable& @r, function_index: usize, region_index: usize) -> sview @r:
-            return "" if:
-                function_index >= functions.parameters.regions.region_param_starts.count or function_index >= functions.parameters.regions.region_param_counts.count
-                region_index >= functions.parameters.regions.region_param_counts[function_index]
-            slot: usize = functions.parameters.regions.region_param_starts[function_index] + region_index
-            return functions.parameters.regions.all_region_params[slot] if slot < functions.parameters.regions.all_region_params.count
-            return ""
-
-        def proof_resource_function_parameter_region[@r](functions: ProofFunctionTable& @r, function_index: usize, parameter_index: usize) -> sview @r:
-            return "" if:
-                function_index >= functions.parameters.regions.all_param_region_starts.count or function_index >= functions.parameters.metadata.param_counts.count
-                parameter_index >= functions.parameters.metadata.param_counts[function_index]
-            slot: usize = functions.parameters.regions.all_param_region_starts[function_index] + parameter_index
-            return functions.parameters.regions.all_param_regions[slot] if slot < functions.parameters.regions.all_param_regions.count
-            return ""
-
-        def proof_resource_function_return_region[@r](functions: ProofFunctionTable& @r, function_index: usize) -> sview @r:
-            return functions.returns.return_regions[function_index] if function_index < functions.returns.return_regions.count
-            return ""
 
         # Resource summaries are recorded at the exact function-table slot when the body pass
         # emits them. Recheck that binding here so a stale or misaligned root can only refuse a
@@ -499,7 +479,7 @@ extend ElisaProof:
             return true if not proof_source_index_work_charge(report, 1)
             return false if:
                 proof_resource_expr_is_collection_extent(expression, state, report)
-                proof_resource_is_scalar_reference_index_value(expression, state, report, state.context.function_name)
+                proof_resource_is_scalar_reference_index_value(expression, state, report)
             borrowed: (known: bool, place: ProofResourcePlace) = proof_resource_borrow_place(expression, report)
             return true if borrowed.known
             match expression:
@@ -542,41 +522,6 @@ extend ElisaProof:
                     # Ambiguous dispatch has no unique resource transition. Keep it resource-
                     # bearing so the caller cannot erase it as an ordinary value.
                     return true
-                _:
-                    return false
-
-        def proof_resource_strip_parens_with_work(expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> Ast::Expr:
-            return Ast::Expr.Invalid if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT or not proof_source_index_work_charge(report, 1)
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    return proof_resource_strip_parens_with_work(inner, report, depth + 1)
-                _:
-                    return expression
-
-        # Reading the sole primitive element of a typed scalar reference produces a scalar
-        # value, not another capability. Keep that distinction only for the current formal
-        # binding and literal zero; a shadowing local, a different index, or a non-scalar target
-        # retains the ordinary conservative resource classification.
-        def proof_resource_is_scalar_reference_index_value(expression: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&, function_name: sview) -> bool:
-            stripped: Ast::Expr = proof_resource_strip_parens_with_work(expression, report, 0)
-            match stripped:
-                Ast::Expr.Index(object, index, _):
-                    root: sview = proof_ident_name(object)
-                    stripped_index: Ast::Expr = proof_resource_strip_parens_with_work(index, report, 0)
-                    match stripped_index:
-                        Ast::Expr.IntLit(offset, _):
-                            return false if offset != 0
-                        _:
-                            return false
-                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, root, report)
-                    return false if not binding.complete
-                    slot: usize = binding.slot
-                    return false if root == "" or slot >= state.context.formal_count or slot >= state.bindings.binding_reference.count or not state.bindings.binding_reference[slot]
-                    source_parameter: (count: usize, type_expression: Ast::Expr) = proof_scalar_reference_parameter_type_in_declarations_with_work(report.source.source_declarations, function_name, root, 0, &report.source_types.source_effect_index.work.implicit_effect_work)
-                    return false if source_parameter.count != 1 or report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                    scalar_target: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type_with_work(source_parameter.type_expression, report.source.source_declarations, 0, &report.source_types.source_effect_index.work.implicit_effect_work)
-                    return false if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                    return scalar_target.known
                 _:
                     return false
 

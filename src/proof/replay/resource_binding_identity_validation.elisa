@@ -60,7 +60,7 @@ extend ElisaProof:
             true
 
         # Resource wrappers carry the owner trace. Calls and disjointness facts are separate
-        # subproofs; only source-local use/write/move/bind leaves belong in this index.
+        # subproofs; source-local binding operations and return markers belong in this index.
         def proof_replay_resource_binding_positions_at_with_work(report: ProofReport&, root: usize, positions: mutable ProofReplayResourceBindingPositionIndex&, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
             event: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
@@ -73,10 +73,10 @@ extend ElisaProof:
                     return false if not proof_replay_resource_binding_positions_at_with_work(report, child, positions, source_work, depth + 1)
                 return true
             return true if event.kind == "resource-disjoint"
-            if event.kind not in {"resource-use", "resource-write", "resource-move", "resource-bind"}:
-                return true if event.kind in {"resource-region-open", "resource-region-close", "resource-region-alloc", "resource-region-bind", "resource-sview-param", "resource-region-alloc-discard", "resource-region-return-alloc", "resource-region-call-alloc", "resource-region-rebind-alloc", "resource-region-assign", "resource-region-return", "resource-region-param", "resource-call", "resource-call-lend", "resource-call-arg", "resource-call-formal", "resource-call-region", "resource-call-result", "resource-join-move"}
+            if event.kind not in {"resource-use", "resource-write", "resource-move", "resource-bind", "resource-region-return"}:
+                return true if event.kind in {"resource-region-open", "resource-region-close", "resource-region-alloc", "resource-region-bind", "resource-sview-param", "resource-region-alloc-discard", "resource-region-return-alloc", "resource-region-call-alloc", "resource-region-rebind-alloc", "resource-region-assign", "resource-region-param", "resource-call", "resource-call-lend", "resource-call-arg", "resource-call-formal", "resource-call-region", "resource-call-result", "resource-join-move"}
                 return false
-            return false if event.value < 0 or event.value > 4294967295 or event.name == ""
+            return false if event.value < 0 or event.value > 4294967295 or (event.name == "" and event.kind != "resource-region-return")
             return false if event.kind in {"resource-use", "resource-write", "resource-move"} and event.value == 0
             return false if not proof_replay_owner_work_charge(sview_len(event.name), source_work)
             offset: usize = event.value.usize()
@@ -114,6 +114,7 @@ extend ElisaProof:
             selected: mutable usize = 0
             current: mutable usize = low
             while current < index.offsets.count |current, index, offset, kind, name, count, selected, source_work|:
+                return (false, false, 0) if not proof_replay_owner_work_charge(1, source_work)
                 break if index.offsets[current] != offset
                 return (false, false, 0) if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(index.kinds[current]), source_work) or not proof_replay_owner_work_charge(sview_len(index.names[current]), source_work)
                 if index.kinds[current] == kind and index.names[current] == name:
@@ -123,6 +124,30 @@ extend ElisaProof:
                 current <- current + 1
             return (false, false, 0) if count != 1 or selected >= report.analysis_1.kernel.nodes.count or selected >= ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
             (true, true, selected + 1)
+
+        def proof_replay_resource_binding_position_kind_count_at_with_work(index: ProofReplayResourceBindingPositionIndex&, kind: sview, offset: usize, source_work: mutable usize&) -> (complete: bool, count: usize):
+            return (false, 0) if index.offsets.count != index.kinds.count or index.offsets.count != index.names.count or index.offsets.count != index.event_roots.count
+            return (false, 0) if not proof_replay_owner_work_charge(sview_len(kind), source_work)
+            low: mutable usize = 0
+            high: usize = index.offsets.count
+            while low < high |low, high, index, offset, source_work|:
+                return (false, 0) if not proof_replay_owner_work_charge(1, source_work)
+                middle: usize = low + (high - low) / 2
+                return (false, 0) if middle >= index.offsets.count
+                if index.offsets[middle] < offset:
+                    low <- middle + 1
+                else:
+                    high <- middle
+            count: mutable usize = 0
+            current: mutable usize = low
+            while current < index.offsets.count |current, index, offset, kind, count, source_work|:
+                return (false, 0) if not proof_replay_owner_work_charge(1, source_work)
+                break if index.offsets[current] != offset
+                return (false, 0) if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(index.kinds[current]), source_work)
+                count <- count + 1 if index.kinds[current] == kind
+                return (false, 0) if count > 1
+                current <- current + 1
+            (true, count)
 
         def proof_replay_resource_binding_event_annotate_with_work(report: mutable ProofReport&, index: ProofReplayResourceBindingPositionIndex&, kind: sview, offset: usize, name: sview, identity: usize, source_work: mutable usize&) -> bool:
             found: (complete: bool, found: bool, identity: usize) = proof_replay_resource_binding_position_find_with_work(report, index, kind, offset, name, source_work)
@@ -342,10 +367,8 @@ extend ElisaProof:
                         return false
             true
 
-        def proof_replay_resource_binding_identities_source_valid_with_work(report: mutable ProofReport&, root: ElisaProofKernelCore::ProofKernelNode, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, source_work: mutable usize&) -> bool:
-            built: (complete: bool, index: ProofReplayResourceBindingPositionIndex) = proof_replay_resource_binding_position_index_build_with_work(report, root, source_work)
-            return false if not built.complete or built.index.kinds.count != built.index.event_roots.count
-            index: ProofReplayResourceBindingPositionIndex = built.index
+        def proof_replay_resource_binding_identities_source_valid_with_work(report: mutable ProofReport&, root: ElisaProofKernelCore::ProofKernelNode, index: ProofReplayResourceBindingPositionIndex&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, source_work: mutable usize&) -> bool:
+            return false if index.kinds.count != index.event_roots.count
             # Discard producer IDs and derive them from the authenticated source walk. This makes
             # an unmatched forged event fail closed even if its attacker-chosen ID names a live slot.
             for entry in 0..<index.event_roots.count |entry, index, report, source_work|:

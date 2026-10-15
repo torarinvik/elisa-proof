@@ -45,125 +45,155 @@ extend ElisaProof:
                 probes <- probes + 1
             return (false, false)
 
+        def proof_replay_call_receiver_has_place_root(receiver: Ast::Expr, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 64 or not proof_replay_call_work_add(work, 1)
+            match receiver:
+                Ast::Expr.Ident(name, _):
+                    return name != "" and proof_replay_call_work_add(work, sview_len(name))
+                Ast::Expr.Field(base, _, _) | Ast::Expr.Index(base, _, _) | Ast::Expr.IndexN(base, _, _) | Ast::Expr.Slice(base, _, _, _) | Ast::Expr.Scope(base, _, _) | Ast::Expr.Paren(base, _):
+                    return proof_replay_call_receiver_has_place_root(base, work, depth + 1)
+                _:
+                    return false
+
+        def proof_replay_call_argument_is_move(expression: Ast::Expr, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= 64 or not proof_replay_call_work_add(work, 1)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_call_argument_is_move(inner, work, depth + 1)
+                Ast::Expr.Move(_, _):
+                    return true
+                _:
+                    return false
+
+        def proof_replay_call_receiver_type(receiver: Ast::Expr, bindings: darray[sview]&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> (known: bool, type_expression: Ast::Expr, type_owner: sview, caller_generic_context: bool):
+            return (false, Ast::Expr.Invalid, "", false) if depth >= 64 or not proof_replay_call_work_add(work, 1)
+            match receiver:
+                Ast::Expr.Ident(name, _):
+                    active_matches: mutable usize = 0
+                    for bound in bindings |name, active_matches, work|:
+                        return (false, Ast::Expr.Invalid, "", false) if not proof_replay_call_string_compare_charge(bound, name, work)
+                        active_matches <- active_matches + 1 if bound == name
+                    return (false, Ast::Expr.Invalid, "", false) if active_matches != 1
+                    selected: mutable Ast::Expr = Ast::Expr.Invalid
+                    matches: mutable usize = 0
+                    for parameter in call_target.conversions.field_conversion_parameters |name, selected, matches, work|:
+                        return (false, Ast::Expr.Invalid, "", false) if not proof_replay_call_work_add(work, 1) or not proof_replay_call_string_compare_charge(parameter.name, name, work)
+                        if parameter.name == name:
+                            selected <- parameter.type_expression
+                            matches <- matches + 1
+                    return (false, Ast::Expr.Invalid, "", false) if matches > 1 or call_target.capture.captured_local_type_names.count != call_target.capture.captured_local_type_expressions.count
+                    local_matches: mutable usize = 0
+                    for local_index in 0..<call_target.capture.captured_local_type_names.count |local_index, name, call_target, local_matches, selected, work|:
+                        local_name: sview = call_target.capture.captured_local_type_names[local_index]
+                        return (false, Ast::Expr.Invalid, "", false) if not proof_replay_call_work_add(work, 1) or not proof_replay_call_string_compare_charge(local_name, name, work)
+                        if local_name == name:
+                            local_matches <- local_matches + 1
+                            selected <- call_target.capture.captured_local_type_expressions[local_index]
+                    return (false, Ast::Expr.Invalid, "", false) if matches > 0 and local_matches > 0
+                    return (true, selected, call_target.generics.field_conversion_generic_param_owner, true) if matches == 1
+                    return (local_matches == 1, selected, call_target.generics.field_conversion_generic_param_owner, true)
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_call_receiver_type(inner, bindings, call_target, work, depth + 1)
+                Ast::Expr.Field(base, field, _):
+                    base_type: (known: bool, type_expression: Ast::Expr, type_owner: sview, caller_generic_context: bool) = proof_replay_call_receiver_type(base, bindings, call_target, work, depth + 1)
+                    return (false, Ast::Expr.Invalid, "", false) if not base_type.known
+                    return proof_replay_call_projected_field_type(base_type.type_expression, base_type.type_owner, true, base_type.caller_generic_context, field, call_target, work, depth + 1)
+                _:
+                    return (false, Ast::Expr.Invalid, "", false)
+
+        def proof_replay_call_type_head_name(type_expression: Ast::Expr, work: mutable usize&, depth: usize) -> sview:
+            return "" if depth >= 64 or not proof_replay_call_work_add(work, 1)
+            match type_expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_replay_call_type_head_name(inner, work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_replay_call_type_head_name(inner, work, depth + 1) if operator in {TokenKind.Ampersand, TokenKind.Lmut, TokenKind.Mutable, TokenKind.Static, TokenKind.Heap, TokenKind.Stack, TokenKind.Tail}
+                    return ""
+                Ast::Expr.Index(head, _, _) | Ast::Expr.IndexN(head, _, _):
+                    head_name: sview = proof_ident_name(head)
+                    return "" if not proof_replay_call_work_add(work, sview_len(head_name))
+                    return head_name
+                _:
+                    return ""
+
+        # Mirror the resource producer's supported receiver-mutating collection methods.
+        # Their separate resource-write events prove the actual mutation; they are omitted
+        # from the user-call census just like pure conversions.
+        def proof_replay_call_field_collection_builtin_is_modeled(callee: Ast::Expr, arguments: darray[Ast::Expr], argument_names: darray[sview], bindings: darray[sview]&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&) -> bool:
+            match proof_strip_parens(callee):
+                Ast::Expr.Field(receiver, method, _):
+                    return false if method not in {"push", "extend", "clear", "resize", "pop", "truncate"}
+                    return false if call_target.conversions.field_dispatch_imports_present or call_target.conversions.collection_method_name_shadowed
+                    return false if not proof_replay_call_receiver_has_place_root(receiver, work, 0)
+                    receiver_type: (known: bool, type_expression: Ast::Expr, type_owner: sview, caller_generic_context: bool) = proof_replay_call_receiver_type(receiver, bindings, call_target, work, 0)
+                    return false if not receiver_type.known
+                    active_aliases: mutable darray[usize] = []
+                    unwrapped_type: (complete: bool, type_expression: Ast::Expr) = proof_replay_call_conversion_type_alias_unwrap(receiver_type.type_expression, call_target.generics.field_conversion_generic_param_line, receiver_type.caller_generic_context, receiver_type.type_owner, call_target, &active_aliases, work, 0)
+                    return false if not unwrapped_type.complete
+                    receiver_type_name: sview = proof_replay_call_type_head_name(unwrapped_type.type_expression, work, 0)
+                    return false if not (receiver_type_name == "darray")
+                    match unwrapped_type.type_expression:
+                        Ast::Expr.Index(head, _, _) | Ast::Expr.IndexN(head, _, _):
+                            return false if not proof_replay_call_conversion_builtin_generic_type_head(head, receiver_type.type_owner, true, call_target, work)
+                        _:
+                            return false
+                    return false if argument_names.count != 0 and argument_names.count != arguments.count
+                    for label in argument_names |work|:
+                        return false if not proof_replay_call_work_add(work, 1) or not proof_replay_call_work_add(work, sview_len(label)) or label != ""
+                    if method == "clear":
+                        return false if arguments.count != 0
+                    elif method == "pop":
+                        return false if arguments.count > 1
+                    else:
+                        return false if arguments.count != 1
+                    for argument in arguments |work|:
+                        return false if proof_replay_call_argument_is_move(argument, work, 0)
+                    declared: (complete: bool, present: bool) = proof_replay_call_field_conversion_name_present(method, call_target, work)
+                    return declared.complete and not declared.present
+                _:
+                    return false
+
         def proof_replay_call_type_is_byte_darray(expression: Ast::Expr, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 64 or not proof_replay_call_work_add(work, 1)
             match expression:
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
                     return proof_replay_call_type_is_byte_darray(inner, work, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
-                    return proof_replay_call_type_is_byte_darray(inner, work, depth + 1) if operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return proof_replay_call_type_is_byte_darray(inner, work, depth + 1) if operator in {TokenKind.Ampersand, TokenKind.Lmut, TokenKind.Mutable, TokenKind.Static, TokenKind.Heap, TokenKind.Stack, TokenKind.Tail}
                     return false
                 Ast::Expr.Index(head, element, _):
-                    return false if not proof_replay_call_work_add(work, sview_len(proof_ident_name(head))) or not proof_replay_call_work_add(work, sview_len(proof_ident_name(element)))
-                    return proof_ident_name(head) == "darray" and proof_ident_name(element) == "u8"
+                    head_name: sview = proof_ident_name(head)
+                    element_name: sview = proof_ident_name(element)
+                    return false if not proof_replay_call_work_add(work, sview_len(head_name)) or not proof_replay_call_work_add(work, sview_len(element_name))
+                    return head_name == "darray" and element_name == "u8"
                 Ast::Expr.IndexN(head, elements, _):
-                    return false if elements.count != 1 or not proof_replay_call_work_add(work, sview_len(proof_ident_name(head))) or not proof_replay_call_work_add(work, sview_len(proof_ident_name(elements[0])))
-                    return proof_ident_name(head) == "darray" and proof_ident_name(elements[0]) == "u8"
+                    head_name: sview = proof_ident_name(head)
+                    return false if elements.count != 1 or not proof_replay_call_work_add(work, sview_len(head_name)) or not proof_replay_call_work_add(work, sview_len(proof_ident_name(elements[0])))
+                    return head_name == "darray" and proof_ident_name(elements[0]) == "u8"
                 _:
                     return false
 
-        def proof_replay_call_container_element_type(type_expression: Ast::Expr, work: mutable usize&, depth: usize) -> (known: bool, element: Ast::Expr):
-            return (false, Ast::Expr.Invalid) if depth >= 64 or not proof_replay_call_work_add(work, 1)
-            match type_expression:
-                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
-                    return proof_replay_call_container_element_type(inner, work, depth + 1)
-                Ast::Expr.Unary(operator, inner, _):
-                    return proof_replay_call_container_element_type(inner, work, depth + 1) if operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                    return (false, Ast::Expr.Invalid)
-                Ast::Expr.Ident(name, position):
-                    return (false, Ast::Expr.Invalid) if not proof_replay_call_work_add(work, sview_len(name))
-                    if name in {"sview", "cstr", "dstr", "str"}:
-                        return (true, Ast::Expr.Ident("char", position))
-                    return (false, Ast::Expr.Invalid)
-                Ast::Expr.Index(head, argument, _):
-                    head_name: sview = proof_ident_name(head)
-                    argument_name: sview = proof_ident_name(argument)
-                    return (false, Ast::Expr.Invalid) if not proof_replay_call_work_add(work, sview_len(head_name)) or not proof_replay_call_work_add(work, sview_len(argument_name))
-                    return (true, argument) if head_name in {"darray", "view"}
-                    return (true, head) if proof_source_expression_is_int_literal(argument)
-                    return (false, Ast::Expr.Invalid)
-                Ast::Expr.IndexN(head, arguments, _):
-                    head_name: sview = proof_ident_name(head)
-                    return (false, Ast::Expr.Invalid) if not proof_replay_call_work_add(work, sview_len(head_name))
-                    for argument in arguments |work|:
-                        return (false, Ast::Expr.Invalid) if not proof_replay_call_work_add(work, sview_len(proof_ident_name(argument)))
-                    if head_name in {"darray", "view"}:
-                        return (true, arguments[0]) if arguments.count == 1
-                        return (false, Ast::Expr.Invalid)
-                    if head_name == "array":
-                        return (true, arguments[0]) if arguments.count == 2 and proof_source_expression_is_int_literal(arguments[1])
-                    return (false, Ast::Expr.Invalid)
-                _:
-                    return (false, Ast::Expr.Invalid)
-
-        def proof_replay_call_receiver_type(receiver: Ast::Expr, bindings: darray[sview]&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> (known: bool, type_expression: Ast::Expr):
-            return (false, Ast::Expr.Invalid) if depth >= 64 or not proof_replay_call_work_add(work, 1)
-            match receiver:
-                Ast::Expr.Ident(name, _):
-                    selected: mutable Ast::Expr = Ast::Expr.Invalid
-                    matches: mutable usize = 0
-                    active_matches: mutable usize = 0
-                    for bound in bindings |name, active_matches, work|:
-                        return (false, Ast::Expr.Invalid) if not proof_replay_call_work_add(work, 1) or not proof_replay_call_work_add(work, sview_len(bound)) or not proof_replay_call_work_add(work, sview_len(name))
-                        active_matches <- active_matches + 1 if bound == name
-                    # A formal's spelling is not enough to establish its type once a
-                    # lexical declaration can shadow it. Bindings are kept in scope order,
-                    # so a repeated active name makes the receiver opaque.
-                    return (false, Ast::Expr.Invalid) if active_matches != 1
-                    for parameter in call_target.conversions.field_conversion_parameters |name, selected, matches, work|:
-                        return (false, Ast::Expr.Invalid) if not proof_replay_call_work_add(work, 1) or not proof_replay_call_work_add(work, sview_len(name)) or not proof_replay_call_work_add(work, sview_len(parameter.name))
-                        if parameter.name == name:
-                            selected <- parameter.type_expression
-                            matches <- matches + 1
-                    return (matches == 1, selected)
-                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
-                    return proof_replay_call_receiver_type(inner, bindings, call_target, work, depth + 1)
-                Ast::Expr.Index(object, _, _):
-                    parent: (known: bool, type_expression: Ast::Expr) = proof_replay_call_receiver_type(object, bindings, call_target, work, depth + 1)
-                    return (false, Ast::Expr.Invalid) if not parent.known
-                    element: (known: bool, element: Ast::Expr) = proof_replay_call_container_element_type(parent.type_expression, work, depth + 1)
-                    return (element.known, element.element)
-                Ast::Expr.IndexN(object, arguments, _):
-                    parent: (known: bool, type_expression: Ast::Expr) = proof_replay_call_receiver_type(object, bindings, call_target, work, depth + 1)
-                    return (false, Ast::Expr.Invalid) if not parent.known or arguments.count == 0
-                    selected: mutable Ast::Expr = parent.type_expression
-                    for _argument in arguments |work, selected|:
-                        element: (known: bool, element: Ast::Expr) = proof_replay_call_container_element_type(selected, work, depth + 1)
-                        return (false, Ast::Expr.Invalid) if not element.known
-                        selected <- element.element
-                    return (true, selected)
-                _:
-                    return (false, Ast::Expr.Invalid)
-
-        def proof_replay_call_type_head_name(type_expression: Ast::Expr, work: mutable usize&, depth: usize) -> sview:
-            return "" if depth >= 32 or not proof_replay_call_work_add(work, 1)
-            match type_expression:
-                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
-                    return proof_replay_call_type_head_name(inner, work, depth + 1)
-                Ast::Expr.Unary(operator, inner, _):
-                    return proof_replay_call_type_head_name(inner, work, depth + 1) if operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                    return ""
-                _:
-                    type_name: sview = proof_head_name(type_expression)
-                    return "" if not proof_replay_call_work_add(work, sview_len(type_name))
-                    return type_name
-
-        def proof_replay_call_field_conversion_is_intrinsic(callee: Ast::Expr, arguments: darray[Ast::Expr], argument_names: darray[sview], bindings: darray[sview]&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&) -> bool:
+        def proof_replay_call_field_dispatch_is_accounted_for(callee: Ast::Expr, arguments: darray[Ast::Expr], argument_names: darray[sview], bindings: darray[sview]&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&) -> bool:
+            return true if proof_replay_call_field_collection_builtin_is_modeled(callee, arguments, argument_names, bindings, call_target, work)
             return false if arguments.count != 0 or argument_names.count != 0
             match proof_strip_parens(callee):
                 Ast::Expr.Field(receiver, method, _):
                     return false if:
                         not proof_resource_pure_conversion(method)
                         not proof_replay_call_work_add(work, 1)
-                    receiver_type: (known: bool, type_expression: Ast::Expr) = proof_replay_call_receiver_type(receiver, bindings, call_target, work, 0)
+                    return false if not proof_replay_call_receiver_has_place_root(receiver, work, 0)
+                    receiver_type: (known: bool, type_expression: Ast::Expr, type_owner: sview, caller_generic_context: bool) = proof_replay_call_receiver_type(receiver, bindings, call_target, work, 0)
                     return false if not receiver_type.known
                     active_aliases: mutable darray[usize] = []
-                    unwrapped_type: (complete: bool, type_expression: Ast::Expr) = proof_replay_call_conversion_type_alias_unwrap(receiver_type.type_expression, call_target.generics.field_conversion_generic_param_line, true, "", call_target, &active_aliases, work, 0)
+                    unwrapped_type: (complete: bool, type_expression: Ast::Expr) = proof_replay_call_conversion_type_alias_unwrap(receiver_type.type_expression, call_target.generics.field_conversion_generic_param_line, receiver_type.caller_generic_context, receiver_type.type_owner, call_target, &active_aliases, work, 0)
                     return false if not unwrapped_type.complete
-                    return proof_replay_call_type_is_byte_darray(unwrapped_type.type_expression, work, 0) if method == "as_sview"
-                    return false if call_target.conversions.field_conversion_custom_cast_present
+                    if method == "as_sview":
+                        declared: (complete: bool, present: bool) = proof_replay_call_field_conversion_name_present(method, call_target, work)
+                        return false if not declared.complete or declared.present or call_target.conversions.field_conversion_custom_cast_present
+                        return proof_replay_call_type_is_byte_darray(unwrapped_type.type_expression, work, 0)
                     method_declared: (complete: bool, present: bool) = proof_replay_call_field_conversion_name_present(method, call_target, work)
                     return false if not method_declared.complete or method_declared.present
+                    return false if call_target.conversions.field_conversion_custom_cast_present
                     receiver_type_name: sview = proof_replay_call_type_head_name(unwrapped_type.type_expression, work, 0)
                     return receiver_type_name in {"sview", "dstr", "cstr"} if method == "sview"
                     return proof_builtin_scalar_type_name(receiver_type_name)

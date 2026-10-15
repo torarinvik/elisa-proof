@@ -1,0 +1,67 @@
+# Type-directed admission for receiver-mutating collection methods. The call walker lives next
+# to place resolution; keep this extra typed check separate to preserve the source-size budget.
+extend ElisaProof:
+    private:
+        def proof_resource_collection_builtin_receiver_is_darray(receiver: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&, depth: usize) -> bool:
+            return false if depth >= 64 or not proof_source_index_work_charge(report, 1)
+            match receiver:
+                Ast::Expr.Ident(name, _):
+                    binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, name, report)
+                    return false if not binding.complete or binding.slot >= state.bindings.binding_darray.count
+                    state.bindings.binding_darray[binding.slot]
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_resource_collection_builtin_receiver_is_darray(inner, state, report, depth + 1)
+                _:
+                    return false
+
+        def proof_resource_type_name_is_unshadowed_darray(report: mutable ProofReport&, state: ProofResourceState&, functions: ProofFunctionTable&) -> bool:
+            owner: mutable sview = ""
+            if functions.call_graph.current_caller_is_lemma:
+                owner <- functions.call_graph.current_caller_module
+            else:
+                function_index: usize = proof_function_index_of_current(functions, state.context.function_name)
+                return false if function_index >= functions.lookup.names.count or function_index >= functions.lookup.owner_modules.count
+                owner <- proof_resource_function_owner(functions, function_index)
+            owner_target: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal: bool, blocks_parent: bool) = proof_source_conversion_alias_target_in_owner("darray", owner, report)
+            return false if not owner_target.complete or owner_target.count != 0 or owner_target.nominal or owner_target.blocks_parent
+            if owner != "":
+                root_target: (complete: bool, count: usize, row: usize, target: Ast::Expr, nominal: bool, blocks_parent: bool) = proof_source_conversion_alias_target_in_owner("darray", "", report)
+                return false if not root_target.complete or root_target.count != 0 or root_target.nominal or root_target.blocks_parent
+            global_target: (complete: bool, count: usize, row: usize, target: Ast::Expr) = proof_source_conversion_alias_target("darray", report)
+            global_target.complete and global_target.count == 0
+
+        def proof_resource_type_is_darray(expression: Ast::Expr, depth: usize, report: mutable ProofReport&, state: ProofResourceState&, functions: ProofFunctionTable&) -> bool:
+            return false if depth >= 64 or not proof_source_index_work_charge(report, 1)
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_resource_type_is_darray(inner, depth + 1, report, state, functions)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_resource_type_is_darray(inner, depth + 1, report, state, functions) if operator in {TokenKind.Ampersand, TokenKind.Lmut, TokenKind.Mutable, TokenKind.Static, TokenKind.Heap, TokenKind.Stack, TokenKind.Tail}
+                    return false
+                Ast::Expr.Index(head, _, _):
+                    head_name: sview = proof_ident_name(head)
+                    return false if not proof_source_index_work_charge(report, sview_len(head_name))
+                    return false if head_name != "darray"
+                    return proof_resource_type_name_is_unshadowed_darray(report, state, functions)
+                Ast::Expr.IndexN(head, arguments, _):
+                    head_name: sview = proof_ident_name(head)
+                    return false if arguments.count != 1 or not proof_source_index_work_charge(report, sview_len(head_name))
+                    return false if head_name != "darray"
+                    return proof_resource_type_name_is_unshadowed_darray(report, state, functions)
+                _:
+                    return false
+
+        def proof_resource_collection_builtin_with_state(callee: Ast::Expr, functions: ProofFunctionTable&, report: mutable ProofReport&, state: ProofResourceState&) -> (known: bool, receiver: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            stripped: Ast::Expr = proof_resource_strip_parens_with_work(callee, report, 0)
+            match stripped:
+                Ast::Expr.Field(receiver, method, _):
+                    return (false, Ast::Expr.Invalid) if:
+                        method != "push" and method != "extend" and method != "clear" and method != "resize" and method != "pop" and method != "truncate"
+                        not report.source.collection_method_name_shadow_checked or report.source.collection_method_name_shadowed
+                        report.source_types.source_effect_index.conversions.collection_method_name_shadowed
+                        report.source_types.source_effect_index.conversions.field_dispatch_imports_present
+                        proof_resource_place_root(receiver, report) == ""
+                        not proof_resource_collection_builtin_receiver_is_darray(receiver, state, report, 0)
+                    return (true, receiver)
+                _:
+                    return (false, Ast::Expr.Invalid)

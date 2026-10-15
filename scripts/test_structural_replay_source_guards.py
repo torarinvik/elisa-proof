@@ -87,7 +87,7 @@ call_walk = call_coverage.split("def proof_replay_call_expression_with_index(", 
 assert "Ast::Expr.Call(callee, arguments, argument_names, position)" in call_walk
 assert "for bound in bindings |bound, name, shadowed, work|" in call_walk
 assert "call_target.selection.unresolved_dispatch_found <- true" in call_walk
-assert "Ast::Stmt.VarDecl(name, _, value, _)" in call_coverage
+assert "Ast::Stmt.VarDecl(name, type_expression, value, _)" in call_coverage
 assert "bindings.push(name)" in call_coverage
 
 call_site_match = call_sites.split("def proof_replay_structural_call_site_matches(", 1)[1]

@@ -3,7 +3,6 @@
 from pathlib import Path
 import re
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -32,7 +31,6 @@ def visibility_before(path: Path, name: str) -> str:
             return stripped[:-1]
     raise AssertionError(f"visibility for {name} not found")
 
-
 receipt_model = ROOT / "src/proof/model/replay_receipt.elisa"
 receipt_text = receipt_model.read_text(encoding="utf-8")
 for type_name in ("ProofReplayReceipt", "ProofSourceAnalysis", "ProofCheckedView"):
@@ -49,9 +47,11 @@ assert "proof_source_struct_invariant_scan(nested, source_work, depth + 1)" in s
 assert "_:\n                        return (false, false)" in struct_invariant_scan
 source_admission = function_body(checked_view, "proof_source_analysis_report_admission_snapshot")
 assert "not source.source_struct_invariant_scan_complete" in source_admission
-struct_failure = source_admission.index('"unsupported-source-struct-invariant"')
-struct_refusal = source_admission.index("source.source_has_struct_invariants")
-assert struct_failure < struct_refusal < source_admission.index("proof_report_source_postcondition_inventory_consistent_with_work")
+postcondition_inventory = function_body(ROOT / "src/proof/model/report_postcondition_ast_inventory.elisa", "proof_source_postcondition_ast_inventory_collect")
+for statement in ("Ast::Stmt.Expr(expression, _):", "Ast::Stmt.Return(expression, _):"):
+    statement_body = postcondition_inventory.split(statement, 1)[1].split("Ast::Stmt.", 1)[0]
+    assert "return_supported <- false if expression == Ast::Expr.Absent or expression == Ast::Expr.Invalid" in statement_body
+assert source_admission.index('"unsupported-source-struct-invariant"') < source_admission.index("source.source_has_struct_invariants") < source_admission.index("proof_report_source_postcondition_inventory_consistent_with_work")
 goal_admission_snapshot = function_body(checked_view, "proof_source_analysis_goal_admission_snapshot")
 assert "not source.source_struct_invariant_scan_complete or source.source_has_struct_invariants" in goal_admission_snapshot
 assert "proof_report_source_goal_finding_snapshot(report, source_work)" in goal_admission_snapshot
@@ -59,6 +59,8 @@ finding_snapshot_path = ROOT / "src/proof/model/report_goal_finding_snapshot.eli
 finding_snapshot = function_body(finding_snapshot_path, "proof_report_source_goal_finding_snapshot")
 assert "finding.has_goal and finding.goal_id >= report.results.goal_attempts.count" in finding_snapshot
 source_import = function_body(checked_view, "proof_source_analysis_import_parse")
+assert source_import.index("source_bytes: usize = source.count") < source_import.index("source.push(0)") < source_import.index("source_identity: uintptr = (&source[0]).cast[uintptr]")
+assert "proof_source_analysis_hash(source, source_bytes)" in source_import
 struct_scan = source_import.index("proof_source_struct_invariant_scan(top_declarations, &inventory_source_work, 0)")
 assert struct_scan < source_import.index("proof_source_literal_ensure_inventory_with_work")
 assert "source_struct_invariant_scan_complete: struct_invariant_scan.complete" in source_import
@@ -180,7 +182,7 @@ resource_write_coverage_path = ROOT / "src/proof/replay/resource_write_coverage.
 resource_write_coverage = function_body(
     resource_source_path, "proof_replay_resource_safety_owner_valid_with_work"
 )
-assert "proof_replay_resource_parameter_writes_covered_with_work(report, root, body, parameters, parameter.name" in resource_write_coverage
+assert "proof_replay_resource_parameter_writes_covered_with_work(report, root, resource_positions.index, body, parameters, parameter.name" in resource_write_coverage
 resource_prefix_edges = function_body(
     resource_source_path, "proof_replay_resource_prefix_edges_unique_with_work"
 )
@@ -209,19 +211,19 @@ assert "proof_replay_resource_local_borrows_absent_in_root_with_work(report, roo
 assert "Ast::Expr.StaticEffectCall(_, _, _, _, _, _):\n                    return false" in coverage_text
 assert 'Ast::Stmt.VarDecl(name, type_expression, initializer, position):' in coverage_text
 assert "proof_replay_resource_local_value_bind_source_valid_with_work" in (ROOT / "src/proof/replay/certificate_validation.elisa").read_text(encoding="utf-8")
-assert 'Ast::Stmt.For(_, _, iterable, nested, _):\n                        return false if not proof_replay_resource_write_builtin_call_covered_with_work(report, root, parameters, index, iterable, parameter_name, source_work, depth + 1)\n                        return false if not proof_replay_resource_parameter_writes_covered_with_work(report, root, nested, parameters, parameter_name, index, source_work, depth + 1)' in coverage_text
+assert 'Ast::Stmt.For(_, _, iterable, nested, _):\n                        return false if not proof_replay_resource_write_builtin_call_covered_with_work(report, root, resource_positions, parameters, index, iterable, parameter_name, source_work, depth + 1)\n                        return false if not proof_replay_resource_parameter_writes_covered_with_work(report, root, resource_positions, nested, parameters, parameter_name, index, source_work, depth + 1)' in coverage_text
 assert 'Ast::Expr.RegionNew(_, _, _) | Ast::Expr.Lambda' in coverage_text
 assert "receiver_formal_matches != 1" in coverage_text
 assert "formal_root_matches != 1" in coverage_text
-assert 'proof_replay_resource_parameter_writes_covered_with_work(report, root, body, parameters, "", cache.deterministic_calls.declaration_index' in resource_owner
+assert 'proof_replay_resource_parameter_writes_covered_with_work(report, root, resource_positions.index, body, parameters, "", cache.deterministic_calls.declaration_index' in resource_owner
 # The owner-wide mutation scan delegates direct and module-qualified call effects to the
 # independent resource-call coverage pass, while keeping unknown method dispatch closed.
 write_call_coverage = function_body(resource_write_coverage_path, "proof_replay_resource_write_builtin_call_covered_with_work")
 call_clause = write_call_coverage[write_call_coverage.index("Ast::Expr.Call(callee, arguments, _, position):"):write_call_coverage.index("Ast::Expr.StaticEffectCall(_, _, _, _, _, _):")]
 assert 'method not in {"push", "extend", "clear", "resize", "pop", "truncate"}' in call_clause
 assert 'Ast::Expr.Ident(_, _):' in call_clause
-assert 'return false if not proof_replay_resource_write_builtin_call_covered_with_work(report, root, parameters, index, callee' in call_clause
-assert 'for argument in arguments |report, root, index, parameter_name, source_work, depth|:' in call_clause
+assert 'return false if not proof_replay_resource_write_builtin_call_covered_with_work(report, root, resource_positions, parameters, index, callee' in call_clause
+assert 'for argument in arguments |report, root, resource_positions, index, parameter_name, source_work, depth|:' in call_clause
 resource_event_facts = function_body(
     ROOT / "src/proof/replay/certificate_validation.elisa",
     "proof_replay_resource_event_facts_with_owner",
@@ -472,6 +474,10 @@ for gate in ("state.complete", 'state.state == "proved"',
              "proof_checked_view_source_admissible(checked_view)",
              "proof_checked_view_goal_source_admissions_complete(checked_view)"):
     assert gate in exit_gate, gate
+tactic_admission = function_body(ROOT / "src/app/cli_tactics.elisa", "proof_tactic_result_admitted")
+assert all(guard in tactic_admission for guard in ("source_complete: bool = proof_checked_view_source_complete(checked_view)", "not target_bound and source_complete", "target_bound and target_admission_base and target_source_admitted"))
+source_report_snapshot = function_body(checked_view, "proof_source_analysis_report_admission_snapshot")
+assert all(guard in source_report_snapshot for guard in ("report.results.producer_proven_count == report.results.obligations", "source_checks_complete and replay_complete", "source_checks_complete <- false if not attempt.producer_proven"))
 serialized_goals = function_body(report_output, "proof_push_json_report_with_replay")
 assert (
     "replay_proven: bool = producer_claim and "
@@ -550,11 +556,11 @@ resource_owner = function_body(
     ROOT / "src/proof/replay/resource_call_source_validation.elisa",
     "proof_replay_resource_safety_owner_valid_with_work",
 )
-assert "proof_replay_resource_binding_identities_source_valid_with_work(report, root, parameters, body, source_work)" in resource_owner
+assert "proof_replay_resource_binding_position_index_build_with_work(report, root, source_work)" in resource_owner
+assert "proof_replay_resource_binding_identities_source_valid_with_work(report, root, resource_positions.index, parameters, body, source_work)" in resource_owner
 resource_identity_pass = function_body(
     resource_identity_path, "proof_replay_resource_binding_identities_source_valid_with_work"
 )
-assert "proof_replay_resource_binding_position_index_build_with_work(report, root, source_work)" in resource_identity_pass
 assert 'report.analysis_1.kernel.nodes[event_root].auxiliary <- 0' in resource_identity_pass
 assert "proof_replay_resource_binding_statements_covered_with_work(report, index, names, binders, body" in resource_identity_pass
 resource_event_walk = function_body(
@@ -591,5 +597,4 @@ resource_identity_kernel = function_body(
 )
 assert 'nodes[root].kind not in {"resource-bind", "resource-region-alloc", "resource-region-bind", "resource-call-result"}' in resource_identity_kernel
 assert "nodes[root].name == state.bindings.binding_names[slot]" in resource_identity_kernel
-
 print("source authority guards: receipt boundaries and bounded resource-prefix capabilities remain enforced")

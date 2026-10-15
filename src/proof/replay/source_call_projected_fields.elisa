@@ -1,0 +1,50 @@
+# Resolve only globally unique, non-generic nominal fields for source-call conversions.
+extend ElisaProof:
+    private:
+        def proof_replay_call_projected_struct_field_in(declarations: darray[Ast::Decl]&, current_owner: sview, wanted_owner: sview, wanted_type: sview, wanted_field: sview, work: mutable usize&, depth: usize, structs: mutable usize&, fields: mutable usize&, result: mutable Ast::Expr) -> bool:
+            return false if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT
+            for declaration in declarations |current_owner, wanted_owner, wanted_type, wanted_field, work, depth, structs, fields, result|:
+                return false if not proof_replay_call_conversion_alias_work_add(work, 1)
+                match declaration:
+                    Ast::Decl.Struct(name, members, _, _, _, _, _):
+                        return false if not proof_replay_call_conversion_alias_work_add(work, sview_len(name)) or not proof_replay_call_conversion_alias_work_add(work, sview_len(current_owner)) or not proof_replay_call_conversion_alias_work_add(work, sview_len(wanted_type)) or not proof_replay_call_conversion_alias_work_add(work, sview_len(wanted_owner))
+                        if name == wanted_type and current_owner == wanted_owner:
+                            structs <- structs + 1
+                            for member in members |wanted_field, work, fields, result|:
+                                return false if not proof_replay_call_conversion_alias_work_add(work, 1) or not proof_replay_call_conversion_alias_work_add(work, sview_len(member.name)) or not proof_replay_call_conversion_alias_work_add(work, sview_len(wanted_field))
+                                if member.name == wanted_field:
+                                    fields <- fields + 1
+                                    result <- member.type_expression
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if not proof_replay_call_conversion_alias_work_add(work, sview_len(module_name))
+                        return false if not proof_replay_call_projected_struct_field_in(nested, module_name, wanted_owner, wanted_type, wanted_field, work, depth + 1, structs, fields, result)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_call_projected_struct_field_in(nested, current_owner, wanted_owner, wanted_type, wanted_field, work, depth + 1, structs, fields, result)
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+            return true
+
+        def proof_replay_call_projected_field_type(base_type: Ast::Expr, base_owner: sview, base_owner_known: bool, caller_generic_context: bool, field: sview, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> (known: bool, type_expression: Ast::Expr, type_owner: sview, caller_generic_context: bool):
+            return (false, Ast::Expr.Invalid, "", false) if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT or call_target.conversions.field_dispatch_imports_present
+            return (false, Ast::Expr.Invalid, "", false) if not proof_replay_call_conversion_alias_work_add(work, sview_len(field))
+            active_aliases: mutable darray[usize] = []
+            unwrapped: (complete: bool, type_expression: Ast::Expr) = proof_replay_call_conversion_type_alias_unwrap(base_type, call_target.generics.field_conversion_generic_param_line, caller_generic_context, base_owner, call_target, &active_aliases, work, 0)
+            return (false, Ast::Expr.Invalid, "", false) if not unwrapped.complete
+            match unwrapped.type_expression:
+                Ast::Expr.Ident(name, _):
+                    return (false, Ast::Expr.Invalid, "", false) if not base_owner_known or not call_target.types.field_conversion_declared_type_generic_formal_counts_valid or call_target.types.field_conversion_declared_type_generic_formal_counts.count != call_target.types.field_conversion_declared_types.count or call_target.types.field_conversion_declared_type_owners.count != call_target.types.field_conversion_declared_types.count
+                    nominal: (complete: bool, count: usize, row: usize) = proof_replay_call_conversion_name_lookup(name, call_target.types.field_conversion_declared_types, call_target.types.field_conversion_declared_type_index_hashes, call_target.types.field_conversion_declared_type_index_values, call_target.types.field_conversion_declared_type_index_counts, call_target.types.field_conversion_declared_type_index_valid, work)
+                    return (false, Ast::Expr.Invalid, "", false) if not nominal.complete or nominal.count != 1 or nominal.row >= call_target.types.field_conversion_declared_types.count
+                    return (false, Ast::Expr.Invalid, "", false) if call_target.types.field_conversion_declared_type_generic_formal_counts[nominal.row] != 0
+                    owner: sview = call_target.types.field_conversion_declared_type_owners[nominal.row]
+                    structs: mutable usize = 0
+                    fields: mutable usize = 0
+                    result: mutable Ast::Expr = Ast::Expr.Invalid
+                    complete: bool = proof_replay_call_projected_struct_field_in(call_target.capture.source_declarations, "", owner, name, field, work, 0, &structs, &fields, &result)
+                    return (false, Ast::Expr.Invalid, "", false) if not complete or structs != 1 or fields != 1
+                    # The field annotation's bare aliases resolve where this struct is declared.
+                    return (true, result, owner, false)
+                _:
+                    return (false, Ast::Expr.Invalid, "", false)

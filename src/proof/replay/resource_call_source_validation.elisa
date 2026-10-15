@@ -390,23 +390,25 @@ extend ElisaProof:
                     # event. The event validator below checks the reverse direction. Together
                     # these checks prevent a certificate from silently omitting a tracked
                     # parameter mutation. Ambiguous/unsupported target roots refuse admission.
-                    for parameter in parameters |parameter, report, root, body, source_work|:
-                        return false if not proof_replay_resource_parameter_writes_covered_with_work(report, root, body, parameters, parameter.name, cache.deterministic_calls.declaration_index, source_work, 0)
+                    resource_positions: (complete: bool, index: ProofReplayResourceBindingPositionIndex) = proof_replay_resource_binding_position_index_build_with_work(report, root, source_work)
+                    return false if not resource_positions.complete
+                    for parameter in parameters |parameter, report, root, body, source_work, resource_positions|:
+                        return false if not proof_replay_resource_parameter_writes_covered_with_work(report, root, resource_positions.index, body, parameters, parameter.name, cache.deterministic_calls.declaration_index, source_work, 0)
                     # Run the syntax coverage walk even for zero-parameter owners: local
                     # binders, region creation, and unaccounted calls must not disappear merely
                     # because no formal root was available to seed the per-parameter pass.
-                    return false if not proof_replay_resource_parameter_writes_covered_with_work(report, root, body, parameters, "", cache.deterministic_calls.declaration_index, source_work, 0)
+                    return false if not proof_replay_resource_parameter_writes_covered_with_work(report, root, resource_positions.index, body, parameters, "", cache.deterministic_calls.declaration_index, source_work, 0)
                     return false if not proof_replay_resource_moves_covered_with_work(report, root, body, source_work)
                     return false if not proof_replay_resource_discard_allocations_covered_with_work(report, root, body, source_work)
                     return false if not proof_replay_resource_unbridged_storage_allocations_absent(report, root, body, source_work, 0)
-                    return false if not proof_replay_resource_binding_identities_source_valid_with_work(report, root, parameters, body, source_work)
+                    return false if not proof_replay_resource_binding_identities_source_valid_with_work(report, root, resource_positions.index, parameters, body, source_work)
                     return_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(return_type, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, root.right.u32(), root.value.u32(), report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work)
                     return false if not return_markers.complete
                     return_scalar: mutable (complete: bool, scalar: bool) = (true, false)
                     if return_type is declared_return_type:
                         return_scalar <- proof_replay_resource_scalar_type_with_work(declared_return_type, report, source_work, 0)
                     return false if not return_scalar.complete
-                    return false if not proof_replay_resource_return_markers_covered_with_work(report, root, body, parameters, root.right.u32(), return_markers.reference, return_markers.mutable_reference, return_scalar.scalar, source_work, 0)
+                    return false if not proof_replay_resource_return_markers_covered_indexed_with_work(report, root, resource_positions.index, body, parameters, root.right.u32(), return_markers.reference, return_markers.mutable_reference, return_scalar.scalar, source_work, 0)
                     return false if not proof_replay_resource_local_borrows_absent_in_root_with_work(report, root, scan, source_work)
                     prefix_end <- scan
                     return false if not proof_replay_resource_region_assignments_covered_with_work(report, root_index, root, prefix_end, body, source_work)
@@ -414,23 +416,6 @@ extend ElisaProof:
                     true
                 _:
                     false
-
-        def proof_replay_resource_call_position_count_with_work(report: ProofReport&, root: usize, offset: usize, source_work: mutable usize&, depth: usize) -> (complete: bool, count: usize):
-            return (false, 0) if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
-            node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
-            return (false, 0) if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
-            return (true, 0) if node.kind == "resource-disjoint"
-            if node.kind not in {"resource-safety", "resource-scope", "resource-alternatives"}:
-                return (false, 0) if node.kind != "resource-call" and node.kind != "resource-call-lend" and (node.children_start != 0 or node.children_count != 0)
-                return (true, 1 if (node.kind == "resource-call" or node.kind == "resource-call-lend") and node.value == offset.i64() else 0)
-            count: mutable usize = 0
-            for index in 0..<node.children_count |index, report, node, offset, source_work, depth, count|:
-                return (false, 0) if not proof_replay_owner_work_charge(1, source_work)
-                child: usize = report.analysis_1.kernel.children[node.children_start + index]
-                nested: (complete: bool, count: usize) = proof_replay_resource_call_position_count_with_work(report, child, offset, source_work, depth + 1)
-                return (false, 0) if not nested.complete or count > report.analysis_1.kernel.nodes.count or nested.count > report.analysis_1.kernel.nodes.count - count
-                count <- count + nested.count
-            (true, count)
 
         # Default arguments execute at the call site, outside the callee body. The
         # omitted-transition shortcut may therefore accept only defaults whose syntax
@@ -467,8 +452,10 @@ extend ElisaProof:
         def proof_replay_resource_call_site_matches_owner_with_work(report: mutable ProofReport&, resource_root: usize, event: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
             return false if event.value < 0 or event.value > 4294967295 or owner == "" or owner_line == 0 or owner_offset > 4294967295 or event.name == ""
             return false if event.kind != "resource-call" and event.kind != "resource-call-lend"
-            positioned: (complete: bool, count: usize) = proof_replay_resource_call_position_count_with_work(report, resource_root, event.value.usize(), source_work, 0)
-            return false if not positioned.complete or positioned.count != 1
+            # This validator is reached only while recursively visiting resource_root. Its
+            # owner preflight already counts every call offset and rejects duplicates, so a
+            # second whole-root walk per event would add quadratic work without new evidence.
+            return false if resource_root >= report.analysis_1.kernel.nodes.count or report.analysis_1.kernel.nodes[resource_root].kind != "resource-safety"
             return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
             caller_owner: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
             return false if not caller_owner.complete or caller_owner.matches != 1 or caller_owner.row >= cache.deterministic_calls.declaration_index.entries.count
@@ -562,7 +549,9 @@ extend ElisaProof:
             # Use the replay-built source snapshot for overload resolution. The input report's
             # operator index and protocol mask are producer claims and may be invalidated or
             # cleared independently of the parser-owned declarations.
-            return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
             if cache.scratch.source_types.source_effect_index.work.implicit_effect_work > source_work:
                 prior_operator_work: usize = cache.scratch.source_types.source_effect_index.work.implicit_effect_work - source_work
                 return false if not proof_replay_owner_work_charge(prior_operator_work, source_work)
@@ -576,7 +565,11 @@ extend ElisaProof:
             operator_work_used: usize = operator_work_after - operator_work_before
             return false if not proof_replay_owner_work_charge(operator_work_used, source_work) or overloaded_body or overloaded_defaults
             source_calls: mutable darray[sview] = []
-            return false if not proof_replay_source_calls_with_work(parameters, body, report.source.source_annotations, &source_calls, source_work, 0, "", false, true)
+            # Fail closed on calls the walker cannot inventory, including omitted receiver calls.
+            # Include executable contract calls so body occurrences cannot balance them.
+            call_target: mutable ProofReplayCallSiteTarget = proof_replay_source_call_target_context(parameters, cache.scratch.source.source_annotations, &cache.scratch, entry.name, entry.owner, owner_line, owner_offset, source_work, true, true)
+            return false if not proof_replay_source_calls_with_target_work(parameters, body, cache.scratch.source.source_annotations, &source_calls, call_target, source_work)
+            return false if call_target.selection.unresolved_dispatch_found
             event_names: mutable darray[sview] = []
             event_offsets: mutable darray[usize] = []
             return false if not proof_replay_resource_call_names_at_with_work(report, root, event_names, event_offsets, source_work, 0)
