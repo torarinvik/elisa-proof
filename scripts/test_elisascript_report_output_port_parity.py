@@ -60,6 +60,8 @@ assert "EsBoundedText::read_utf8(source_file, 16777216)" in elisa_source
 assert "MAX_BYTES: usize = 16777216" in bounded_reader
 assert "PATH_BYTES: usize = 4096" in bounded_reader
 assert "chunk_capacity: usize = maximum_bytes + 1" in bounded_reader
+assert "initial_capacity: usize = maximum_bytes if maximum_bytes < Limits::READ_CHUNK_BYTES else Limits::READ_CHUNK_BYTES" in reader_body
+assert "initial_capacity <- opened.size.usize() if opened.size.usize() < maximum_bytes" in reader_body
 assert "opened.size < 0" in reader_body
 assert "chunk_capacity <- opened.size.usize() + 1 if opened.size.usize() < maximum_bytes" in reader_body
 assert "chunk_capacity <- Limits::READ_CHUNK_BYTES if chunk_capacity > Limits::READ_CHUNK_BYTES" in bounded_reader
@@ -67,6 +69,7 @@ assert "chunk.reserve(chunk_capacity)" in bounded_reader
 assert "for _ in 0..<chunk_capacity |chunk|:" in bounded_reader
 assert reader_body.index("raise ReadError.LimitExceeded if maximum_bytes > Limits::MAX_BYTES") < reader_body.index("chunk_capacity: usize = maximum_bytes + 1")
 assert reader_body.index("chunk_capacity <- opened.size.usize() + 1") < reader_body.index("chunk_capacity <- Limits::READ_CHUNK_BYTES") < reader_body.index("chunk.reserve(chunk_capacity)")
+assert reader_body.index("initial_capacity <- opened.size.usize()") < reader_body.index("bytes.reserve(initial_capacity)")
 assert reader_body.index("if read_count > remaining:") < reader_body.index("for offset in 0..<read_count |bytes, chunk|:")
 assert 'getattr(os, "O_NONBLOCK"' in python_source and 'getattr(os, "O_CLOEXEC"' in python_source
 assert "DarwinOpenFlags::NONBLOCK" in bounded_reader and "DarwinOpenFlags::CLOSE_ON_EXEC" in bounded_reader

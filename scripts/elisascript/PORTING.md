@@ -10,7 +10,7 @@ tooling work; do not put Elisa-Proof scripts there.
 
 | Python reference | ElisaScript counterpart | Status |
 | --- | --- | --- |
-| `scripts/test_report_output_loop_layout.py` | `scripts/elisascript/test_report_output_loop_layout.elisascript` | Active source port. `scripts/test_elisascript_report_output_port_parity.py` pins their repository-root path derivation, fragments, diagnostics, strict UTF-8, byte/path bounds, full-precision file mutation checks, file-size-aware reader scratch sizing, and universal newline normalization. Runtime parity remains unqualified; retain Python. |
+| `scripts/test_report_output_loop_layout.py` | `scripts/elisascript/test_report_output_loop_layout.elisascript` | Active source port. `scripts/test_elisascript_report_output_port_parity.py` pins their repository-root path derivation, fragments, diagnostics, strict UTF-8, byte/path bounds, full-precision file mutation checks, file-size-aware reader and content-buffer sizing, and universal newline normalization. Runtime parity remains unqualified; retain Python. |
 | `scripts/test_global_mutable_array_owner_identity.py` | queued | No candidate promoted until the active port has parity evidence. |
 | `scripts/test_resource_call_storage_confinement_static.py` | queued | No candidate promoted until the active port has parity evidence. |
 

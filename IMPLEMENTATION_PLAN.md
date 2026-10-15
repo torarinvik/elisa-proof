@@ -29120,6 +29120,17 @@ resource-work meter; inherited-prefix mismatches are rejected before those suffi
 scans. Static diff and source-length checks pass; compiler/runtime qualification remains open
 under the validation hold.
 
+### 23.27.1799 Preserve reserved numeric-cast precedence in resource proofs (2026-10-15)
+
+Resource call admission used the ordinary function-name census for every conversion spelling,
+although the compiler dispatches reserved numeric selectors as builtin casts before ordinary
+UFCS lookup. A same-named function or extern could therefore make producer admission reject a
+valid cast, and producer/replay disagreed because their name indexes contain different declaration
+kinds. Producer and replay now bypass the ordinary name veto for the shared numeric-cast selector
+set while retaining the file-wide custom `__cast__` veto and the existing shadow checks for other
+conversion methods. `git diff --check` passes; compiler and runtime qualification remain under the
+validation hold.
+
 ### 23.27.1778 Keep resource join transitions source-closed until alternatives carry identity (2026-10-15)
 
 The resource kernel validates `resource-join-move` against pending moved slots, but source
@@ -29285,8 +29296,50 @@ passes; no tests or compiler build were run.
 
 ### 23.27.1794 Account for function-index initialization work (2026-10-15)
 
-The function-name index preflight now charges for the three capacity-sized arrays whose entries
-are initialized, plus the row-sized duplicate-link array. Previously it charged two capacity
-arrays and two row arrays, which did not match the initialization loops and could reject smaller
+The function-name index preflight now charges for all four capacity-sized arrays and the
+row-sized duplicate-link array before allocating or initializing them. Previously it charged two
+capacity arrays and two row arrays, which did not match the storage shape and could reject smaller
 inputs while undercounting larger indexes. Source review and `git diff --check` pass; compiler
 qualification remains open under the validation hold.
+
+### 23.27.1795 Replay uniquely resolved qualified resource calls (2026-10-15)
+
+The producer can emit resource events for scoped calls, but exact source-call replay only
+recognized bare identifiers. Replay now locates the call expression at the event's source offset,
+retains its scoped callee AST, and resolves the complete path through the report-scoped source
+declaration and module-alias indexes. It then checks the resolved function owner and argument
+metadata against the event. Ambiguous or incomplete paths remain rejected. `git diff --check` and
+the source-length gate pass; compiler/runtime qualification remains open under the validation hold.
+
+### 23.27.1796 Size bounded-reader content storage from verified file metadata (2026-10-15)
+
+The shared ElisaScript bounded reader now reserves its retained byte array from the verified file
+size when that size is below the caller's cap. A growing or changing input still expands through
+the existing bounded read path and is rejected if it exceeds the cap; final metadata checks still
+detect mutation. The source parity guard pins the new sizing rule. Runtime parity remains
+unqualified under the validation hold.
+
+### 23.27.1797 Census calls nested inside scalar casts (2026-10-15)
+
+Resource source-call census previously skipped the argument walk for builtin scalar casts, so
+effectful calls nested inside a cast could disappear from the source inventory. It now recursively
+walks cast arguments, and rejects the cast when a local or parameter callable shadows its spelling.
+Global declaration/import scanning was removed because compiler lookup gives primitive casts
+precedence there. Diff and source-length checks pass; compiler/runtime qualification remains open.
+
+### 23.27.1800 Locate resource calls through nested source control flow (2026-10-15)
+
+The exact-offset call locator now follows calls inside array, tuple, dictionary, record, slice,
+comprehension, match/catch, block, and lambda expressions, plus expression/return statements,
+loops, matches, and nested statement blocks. This lets source replay inspect qualified resource calls
+inside common nested bodies while retaining exact-position uniqueness and bounded work accounting.
+Unsupported AST forms and depth/work exhaustion still fail closed. `git diff --check` and the
+source-length gate pass; compiler/runtime qualification remains open under the validation hold.
+
+### 23.27.1798 Require builtin type-head evidence for `as_sview` replay (2026-10-15)
+
+The resource call replay accepted a receiver spelled `darray[u8]` after alias expansion without
+checking whether `darray` resolved to the builtin in the declaring module. It now applies the same
+source-aware generic-head lookup used by builtin collection methods and refuses imported dispatch
+for this classification. `git diff --check` passes; tests and compiler qualification remain open
+under the validation hold.
