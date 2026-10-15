@@ -4,6 +4,13 @@ The Python versions remain authoritative until each ElisaScript counterpart has
 been compiled and run against the same input, with matching exit status and
 output. Migrate and qualify one script at a time.
 
+The inventory covers the tracked and nonignored Python source files in this
+checkout. Ignored `build/` and `.codex-worktrees/` copies are generated build or
+worktree snapshots, not canonical source entries. As of 2026-10-15, all 575
+canonical Python paths are represented by unique colocated `.elisascript`
+destination paths and current source hashes in `PORTING_INVENTORY.csv`; the
+inventory currently has one active unqualified candidate and 574 queued entries.
+
 Proof-specific ElisaScript ports and their tests stay in this repository, and
 each `.elisascript` counterpart lives beside its original Python script. The
 sibling `elisa-script` repository is for general-purpose language, runtime, and
