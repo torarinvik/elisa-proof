@@ -61,6 +61,11 @@ assert "AMBIGUOUS_SPELLING_STRING_PATTERN_CONTROLS" in collision_tests
 assert "MIXED_QUOTED_BARE_STRING_PATTERN_CONTROLS" in mixed_spelling_tests
 assert "sview_quoted_and_bare_digit_pattern_control" in mixed_spelling_tests
 assert "cstr_quoted_and_bare_digit_pattern_control" in mixed_spelling_tests
+overloaded_eq_tests = (ROOT / "scripts/pattern_literal_overloaded_eq_case.py").read_text(encoding="utf-8")
+assert "impl Eq for char:" in overloaded_eq_tests
+assert "char_pattern_overloaded_eq_collision" in overloaded_eq_tests
+assert "STRING_EQ_OVERRIDE_COLLISIONS" in collision_tests
+assert "PATTERN_COLLISIONS.update(STRING_EQ_OVERRIDE_COLLISIONS)" in collision_tests
 mixed_controls = mixed_spelling_tests.split("MIXED_QUOTED_BARE_STRING_PATTERN_CONTROLS = '''", 1)[1].split("'''", 1)[0]
 assert '        "1":' in mixed_controls and "        1:" in mixed_controls
 assert "sview_escaped_newline_pattern_refused" in collision_tests

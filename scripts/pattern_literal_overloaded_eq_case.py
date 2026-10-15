@@ -1,4 +1,4 @@
-"""Adversarial source where match bytes differ from overloaded string equality."""
+"""Adversarial source where match lowering must respect overloaded equality."""
 
 STRING_EQ_OVERRIDE_PRELUDE = '''
 protocol Eq:
@@ -34,6 +34,10 @@ impl Eq for i8:
 
 impl Eq for u8:
     def __eq__(self: u8, other: u8) -> bool:
+        return false
+
+impl Eq for char:
+    def __eq__(self: char, other: char) -> bool:
         return false
 '''
 
@@ -89,6 +93,15 @@ def u8_pattern_overloaded_eq_collision(value: u8) -> bool:
     match value:
         7:
             return value == 7
+        _:
+            return true
+''',
+    'char_pattern_overloaded_eq_collision': '''
+def char_pattern_overloaded_eq_collision(value: char) -> bool:
+    ensure result == true
+    match value:
+        'a':
+            return value == 'a'
         _:
             return true
 ''',
