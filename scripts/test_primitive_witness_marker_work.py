@@ -82,6 +82,12 @@ def main() -> None:
         assert width in core
     assert "ensure result ==" in core
     assert "proof_kernel_unsigned_width_valid(width_work.value)" in unsigned_marker
+    # Keep validated unsigned widths separate from scalar-element path depth in the cache.
+    assert "kind: PROOF_KERNEL_REPLAY_WITNESS_UNSIGNED_TYPE, root: marker.name_root, depth: 0, width: marker.width" in fill
+    assert "width <- marker.width if matches" in function_body(
+        REPLAY / "goal_metered_conditional_plans.elisa",
+        "proof_kernel_replay_unsigned_width_from_markers_with_goal_work",
+    )
     # Indexed container markers require an indexed path. Element.Ref applies to the
     # exact reference and every single-index read rooted there, including dynamic indexes.
     assert "subscripts.count == 0" in element_apply
