@@ -10,6 +10,7 @@ SOURCES = (
     ROOT / "src/proof/check/source_conversion_generic_alias_application.elisa",
     ROOT / "src/proof/check/source_conversion_type_aliases.elisa",
     ROOT / "src/proof/check/source_conversion_type_alias_collectors.elisa",
+    ROOT / "src/proof/check/source_conversion_name_lookups.elisa",
     ROOT / "src/proof/replay/source_call_type_aliases.elisa",
     ROOT / "src/proof/replay/source_call_type_argument_shape.elisa",
 )
@@ -38,6 +39,24 @@ assert unwrap.count("proof_source_conversion_type_alias_expand_applied(applicati
 assert unwrap.count("proof_source_conversion_type_alias_unwrap_with_formals(") >= 3
 assert unwrap.count("proof_source_conversion_alias_type_expression_safe(") >= 2
 assert "index.aliases.alias_generic_formal_counts[application.row] != arguments.count" in unwrap
+
+# Once normalization enters a declaration-owned alias RHS, caller generics must not
+# shadow names there. Keep the lookup used for caller-owned syntax indexed and bounded.
+alias_expand = function_body("proof_source_conversion_alias_expand")
+assert "proof_source_conversion_type_alias_unwrap(target, index.aliases.alias_lines[row], false, index.aliases.alias_owners[row], true" in alias_expand
+assert "Generic shadowing applies to explicit call-site syntax" in alias_expand
+
+generic_line_lookup = function_body("proof_source_conversion_generic_line_lookup")
+assert "generic_param_line_index_hashes" in generic_line_lookup
+assert "while probes < hashes_count and probes <= PROOF_NAME_INDEX_MAX_CLUSTER" in generic_line_lookup
+assert "index.generics.generic_param_line_index_counts[slot] != 1" in generic_line_lookup
+assert "not index.generics.generic_param_line_index_valid" in generic_line_lookup
+
+generic_name = function_body("proof_source_conversion_generic_name")
+assert "proof_source_conversion_generic_owner_lookup(name, active_line" in generic_name
+assert "proof_source_conversion_generic_function_owner_lookup(active_line" in generic_name
+assert "return (false, 0) if owner_known" in generic_name
+assert "for generic_index in report.source_types.source_generic_param_lines" not in generic_name
 
 applied = function_body("proof_source_conversion_type_alias_expand_applied")
 assert "actuals.count != index.aliases.alias_generic_formal_counts[row]" in applied
