@@ -4,21 +4,25 @@ import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
-source = ROOT / "src/proof/kernel_replay/quantifiers_and_arena.elisa"
+sources = (
+    ROOT / "src/proof/kernel_replay/arena_child_validation.elisa",
+    ROOT / "src/proof/kernel_replay/quantifiers_and_arena.elisa",
+)
 
 
 def body(name: str) -> str:
-    lines = source.read_text(encoding="utf-8").splitlines()
-    for index, line in enumerate(lines):
-        if re.match(rf"\s*def {re.escape(name)}\b", line):
-            indent = len(line) - len(line.lstrip())
-            end = index + 1
-            while end < len(lines):
-                following = lines[end]
-                if following.strip() and len(following) - len(following.lstrip()) <= indent:
-                    break
-                end += 1
-            return "\n".join(lines[index:end])
+    for source in sources:
+        lines = source.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if re.match(rf"\s*def {re.escape(name)}\b", line):
+                indent = len(line) - len(line.lstrip())
+                end = index + 1
+                while end < len(lines):
+                    following = lines[end]
+                    if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                        break
+                    end += 1
+                return "\n".join(lines[index:end])
     raise AssertionError(f"missing {name}")
 
 
@@ -37,14 +41,18 @@ for field in ("kind", "operator", "name", "secondary_name"):
 
 unique = body("proof_kernel_replay_existential_dictionary_keys_unique_with_work")
 assert "PROOF_KERNEL_REPLAY_MAX_QUANTIFIER_ENTRIES" in unique
-assert "pair_count > work_limit - work_used" in unique
+assert "return false if work_used > work_limit" in unique
+assert "capacity > work_limit / 2" in unique
+assert "proof_kernel_replay_arena_shape_text_work_charge(capacity * 2, &work_used, reserve_before, work_limit)" in unique
+assert "while probes < capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER" in unique
+assert "proof_kernel_replay_arena_shape_text_work_charge(1, &work_used, probe_before, work_limit)" in unique
+assert "return false if current > key_index" in unique
 assert "proof_kernel_replay_existential_dictionary_key_literal_with_work" in unique
-assert "left_key.typed != right_key.typed" in unique
-assert "left_key.sort != right_key.sort" in unique
-assert "left_key.unsigned != right_key.unsigned or left_key.width != right_key.width" in unique
-assert "left_key.bits == right_key.bits" in unique
-assert "sview_len(left_key.sort)" in unique
-assert "sview_len(right_key.sort)" in unique
+assert "first_typed != key.typed" in unique
+assert "prior_key.known" in unique
+assert "key.bits == prior_key.bits and key.typed == prior_key.typed and key.sort == prior_key.sort and key.unsigned == prior_key.unsigned and key.width == prior_key.width" in unique
+assert "sview_len(key.sort)" in unique
+assert "sview_len(prior_key.sort)" in unique
 
 arena = body("proof_kernel_replay_arena_children_valid_with_work")
 assert 'if node.operator == "exists" and node.auxiliary == 2:' in arena

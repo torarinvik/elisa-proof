@@ -9,103 +9,107 @@ extend ElisaProof:
         const PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG: usize = 16
         const PROOF_SOURCE_OPERATOR_DIVISION_FLAG: usize = 32
         const PROOF_SOURCE_OPERATOR_NEGATION_FLAG: usize = 64
+        const PROOF_SOURCE_OPERATOR_ALL_FLAGS: usize = 127
 
-        # A proposition over a literal has no binding at which the importer can attach the
-        # ordinary operator witness. Keep a source-level policy for those closed terms: if the
-        # imported program replaces a primitive operator, the arithmetic kernel must not evaluate
-        # any source expression with that operator using built-in semantics. This is deliberately
-        # conservative across primitive spellings; type inference for unsuffixed literals belongs
-        # to the compiler, not to this source-neutral proof fragment.
+        # The backend rewrites these source members for operators. Keep the mapping here so
+        # source admission, witness lookup, and replay use one protocol-independent dispatch
+        # model while compiler dispatch is being made protocol-aware.
+        def proof_source_operator_dunder_mask(name: sview) -> usize:
+            if name == "__eq__": return PROOF_SOURCE_OPERATOR_EQUALITY_FLAG
+            if name == "__cmp__": return PROOF_SOURCE_OPERATOR_ORDERING_FLAG
+            if name == "__add__": return PROOF_SOURCE_OPERATOR_ADDITION_FLAG
+            if name == "__sub__": return PROOF_SOURCE_OPERATOR_SUBTRACTION_FLAG
+            if name == "__mul__": return PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
+            if name == "__div__": return PROOF_SOURCE_OPERATOR_DIVISION_FLAG
+            if name == "__neg__": return PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+            PROOF_SOURCE_OPERATOR_MASK_EMPTY
+
+        def proof_source_operator_mask_for_protocol(protocol: sview) -> usize:
+            return when protocol:
+                "Eq" -> PROOF_SOURCE_OPERATOR_EQUALITY_FLAG
+                "Ord" | "Less" -> PROOF_SOURCE_OPERATOR_ORDERING_FLAG
+                "Add" -> PROOF_SOURCE_OPERATOR_ADDITION_FLAG
+                "Sub" -> PROOF_SOURCE_OPERATOR_SUBTRACTION_FLAG
+                "Mul" -> PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
+                "Div" -> PROOF_SOURCE_OPERATOR_DIVISION_FLAG
+                "Neg" -> PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+                _ -> PROOF_SOURCE_OPERATOR_MASK_EMPTY
+
+        # Classify scalar spellings for drop/effect analysis. This does not authenticate the
+        # receiver type of an AST operator and must not be used to narrow the type-erased
+        # operator mask below.
         def proof_source_operator_guard_primitive(concrete: sview) -> bool:
             return true if:
                 concrete in {"i8", "i16", "i32", "i64", "i128", "isize", "int"}
                 concrete in {"u8", "u16", "u32", "u64", "u128", "usize", "uintptr", "byte"}
             return concrete in {"f32", "f64", "bool", "char", "sview", "cstr", "dstr"}
 
-        def proof_source_primitive_operator_overloaded_with_work(annotations: darray[Ast::EnumAnnotation]&, protocol: sview, source_work: mutable usize&) -> (complete: bool, overloaded: bool):
-            return (true, false) if protocol == ""
-            # Imported files can add annotations and restart line numbering; retain exact
-            # same-line pairing while charging every row and compared name.
-            for annotation in annotations |protocol, source_work|:
+        def proof_source_primitive_operator_overloaded_with_work(annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&) -> (complete: bool, overloaded: bool):
+            # The parser emits each impl impl_scope immediately before its concrete marker. Use that
+            # source-order identity rather than matching only by line, which can repeat after an
+            # include or `#line` directive.
+            for annotation_index in 0..<annotations.count |annotation_index, annotations, source_work|:
+                annotation: Ast::EnumAnnotation = annotations[annotation_index]
                 return (false, false) if:
                     not proof_report_source_work_charge(1, source_work)
                     not proof_report_source_work_charge(sview_len(annotation.owner), source_work)
-                if annotation.owner in {"__ext_concrete", "__impl_concrete"}:
+                if annotation.owner == "__ext_concrete":
                     return (false, false) if not proof_report_source_work_charge(sview_len(annotation.name), source_work)
-                    if proof_source_operator_guard_primitive(annotation.name):
-                        return (true, true) if annotation.owner == "__ext_concrete"
-                        for scope in annotations |annotation, protocol, source_work|:
-                            return (false, false) if:
-                                not proof_report_source_work_charge(1, source_work)
-                                not proof_report_source_work_charge(sview_len(scope.owner), source_work)
-                            continue if scope.owner != "__impl_scope" or scope.line != annotation.line
-                            return (false, false) if not proof_report_source_work_charge(sview_len(scope.name), source_work)
-                            return (true, true) if scope.name == protocol or (protocol == "Ord" and scope.name == "Less")
+                    return (true, true)
+                if annotation.owner == "__impl_scope":
+                    return (false, false) if annotation_index + 1 >= annotations.count
+                    paired_concrete: Ast::EnumAnnotation = annotations[annotation_index + 1]
+                    return (false, false) if not proof_report_source_work_charge(sview_len(paired_concrete.owner), source_work) or not proof_report_source_work_charge(sview_len(paired_concrete.name), source_work)
+                    return (false, false) if paired_concrete.owner != "__impl_concrete" or paired_concrete.line != annotation.line or paired_concrete.name == ""
+                    return (false, false) if paired_concrete.offset != 0 and annotation.offset != 0 and paired_concrete.offset != annotation.offset
+                if annotation.owner == "__impl_concrete":
+                    return (false, false) if annotation_index == 0
+                    impl_scope: Ast::EnumAnnotation = annotations[annotation_index - 1]
+                    return (false, false) if:
+                        not proof_report_source_work_charge(1, source_work)
+                        not proof_report_source_work_charge(sview_len(impl_scope.owner), source_work)
+                        not proof_report_source_work_charge(sview_len(impl_scope.name), source_work)
+                        not proof_report_source_work_charge(sview_len(annotation.name), source_work)
+                        impl_scope.owner != "__impl_scope" or impl_scope.line != annotation.line or impl_scope.name == ""
+                        impl_scope.offset != 0 and annotation.offset != 0 and impl_scope.offset != annotation.offset
+                    # The compiler currently dispatches each operator to a dunder method on
+                    # the concrete receiver without checking that the impl's protocol is the
+                    # corresponding operator protocol. The source-neutral proof walk has no
+                    # receiver types, so any impl can shadow any operator it inspects.
+                    return (true, true)
             return (true, false)
 
         def proof_source_primitive_operator_mask_with_work(annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&) -> (complete: bool, mask: usize):
             mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
-            equality: (complete: bool, overloaded: bool) = proof_source_primitive_operator_overloaded_with_work(annotations, "Eq", source_work)
-            return (false, mask) if not equality.complete
-            mask <- mask | PROOF_SOURCE_OPERATOR_EQUALITY_FLAG if equality.overloaded
-            ordering: (complete: bool, overloaded: bool) = proof_source_primitive_operator_overloaded_with_work(annotations, "Ord", source_work)
-            return (false, mask) if not ordering.complete
-            mask <- mask | PROOF_SOURCE_OPERATOR_ORDERING_FLAG if ordering.overloaded
-            addition: (complete: bool, overloaded: bool) = proof_source_primitive_operator_overloaded_with_work(annotations, "Add", source_work)
-            return (false, mask) if not addition.complete
-            mask <- mask | PROOF_SOURCE_OPERATOR_ADDITION_FLAG if addition.overloaded
-            subtraction: (complete: bool, overloaded: bool) = proof_source_primitive_operator_overloaded_with_work(annotations, "Sub", source_work)
-            return (false, mask) if not subtraction.complete
-            mask <- mask | PROOF_SOURCE_OPERATOR_SUBTRACTION_FLAG if subtraction.overloaded
-            multiplication: (complete: bool, overloaded: bool) = proof_source_primitive_operator_overloaded_with_work(annotations, "Mul", source_work)
-            return (false, mask) if not multiplication.complete
-            mask <- mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG if multiplication.overloaded
-            division: (complete: bool, overloaded: bool) = proof_source_primitive_operator_overloaded_with_work(annotations, "Div", source_work)
-            return (false, mask) if not division.complete
-            mask <- mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG if division.overloaded
-            negation: (complete: bool, overloaded: bool) = proof_source_primitive_operator_overloaded_with_work(annotations, "Neg", source_work)
-            return (false, mask) if not negation.complete
-            mask <- mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG if negation.overloaded
+            any_override: (complete: bool, overloaded: bool) = proof_source_primitive_operator_overloaded_with_work(annotations, source_work)
+            return (false, mask) if not any_override.complete
+            if any_override.overloaded:
+                mask <- mask | PROOF_SOURCE_OPERATOR_EQUALITY_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_ORDERING_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_ADDITION_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_SUBTRACTION_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
             return (true, mask)
 
         # Derive both masks from the already-built flat source index in one bounded pass.
-        # The primitive mask admits arithmetic normalization only for primitive overrides;
-        # the broad mask also records user-type implementations for implicit-call guards.
+        # The primitive mask governs built-in arithmetic reasoning and is narrowed to concrete
+        # scalar implementations. The protocol mask is type-erased and remains broad, so custom
+        # operator dispatch is still denied wherever replay cannot establish a receiver type.
         def proof_source_operator_masks_from_index(report: ProofReport&, source_work: mutable usize&) -> (complete: bool, primitive_mask: usize, protocol_mask: usize):
             primitive_mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
             protocol_mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
             return (false, primitive_mask, protocol_mask) if not report.analysis_1.operator_impls.valid
+            primitive_mask <- primitive_mask | report.analysis_1.operator_impls.global_operator_mask
+            protocol_mask <- protocol_mask | report.analysis_1.operator_impls.global_operator_mask
             for implementation in report.analysis_1.operator_impls.rows |implementation, report, primitive_mask, protocol_mask, source_work|:
                 return (false, primitive_mask, protocol_mask) if:
                     not proof_report_source_work_charge(1, source_work)
                     not proof_report_source_work_charge(sview_len(implementation.concrete), source_work)
                     not proof_report_source_work_charge(sview_len(implementation.protocol), source_work)
-                proof_source_operator_protocol_mask_add(&protocol_mask, implementation.protocol)
-                continue if not proof_source_operator_guard_primitive(implementation.concrete)
-                if implementation.protocol == "":
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_EQUALITY_FLAG
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_ORDERING_FLAG
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_ADDITION_FLAG
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_SUBTRACTION_FLAG
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
-                if implementation.protocol == "Eq":
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_EQUALITY_FLAG
-                if implementation.protocol == "Ord":
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_ORDERING_FLAG
-                if implementation.protocol == "Less":
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_ORDERING_FLAG
-                if implementation.protocol == "Add":
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_ADDITION_FLAG
-                if implementation.protocol == "Sub":
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_SUBTRACTION_FLAG
-                if implementation.protocol == "Mul":
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
-                if implementation.protocol == "Div":
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
-                if implementation.protocol == "Neg":
-                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+                protocol_mask <- protocol_mask | implementation.operator_mask
+                primitive_mask <- primitive_mask | implementation.operator_mask if proof_source_operator_guard_primitive(implementation.concrete)
             return (true, primitive_mask, protocol_mask)
 
         # Report-bound analysis has already built and validated this cache from the same
@@ -198,7 +202,7 @@ extend ElisaProof:
                 mask <- mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
 
         # Replay rebuilds this from source annotations instead of trusting the producer's
-        # operator index or the cached report mask. Any recognized scope marker is enough to
+        # operator index or the cached report mask. Any recognized impl_scope marker is enough to
         # reject a matching structural operator; pairing it to a concrete marker would add a
         # quadratic scan here and only make the replay less conservative on malformed metadata.
         def proof_source_operator_protocol_mask_with_work(annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&) -> (complete: bool, mask: usize):
@@ -212,7 +216,7 @@ extend ElisaProof:
                     proof_source_operator_protocol_mask_add(&mask, "")
                 if annotation.owner == "__impl_scope":
                     return (false, mask) if not proof_report_source_work_charge(sview_len(annotation.name), source_work)
-                    proof_source_operator_protocol_mask_add(&mask, annotation.name)
+                    proof_source_operator_protocol_mask_add(&mask, "")
             return (true, mask)
 
         def proof_source_statements_have_overloaded_operator(statements: darray[Ast::Stmt], operator_mask: usize, depth: usize) -> bool:

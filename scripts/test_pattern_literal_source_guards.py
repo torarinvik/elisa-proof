@@ -111,8 +111,19 @@ assert "--function-json" in shadow_regression and "ensure-unproven" in shadow_re
 # Fixed-width range probes stay connected to the executable collision matrix.
 fixed_width_cases = (ROOT / "scripts/pattern_literal_fixed_width_cases.py").read_text(encoding="utf-8")
 collision_matrix = (ROOT / "scripts/test_pattern_literal_collisions.py").read_text(encoding="utf-8")
+local_collision_cases = (ROOT / "scripts/pattern_literal_local_collision_cases.py").read_text(encoding="utf-8")
+collision_matrix += local_collision_cases
 assert "generic_nested_char_type_parameter" in collision_matrix
 assert "PATTERN_COLLISIONS.update(FIXED_WIDTH_PATTERN_COLLISIONS)" in collision_matrix
+for local_collision in (
+    "sview_local_01_vs_1_collision",
+    "cstr_local_hex_vs_decimal_collision",
+    "u64_local_high_bit_literal_collision",
+):
+    assert f"'{local_collision}': '''" in collision_matrix
+assert "value: sview = \"01\"" in collision_matrix
+assert "value: cstr = \"0x1\"" in collision_matrix
+assert "value: u64 = 9223372036854775808u64" in collision_matrix
 for case in (
     "u8_high_bit_range_collision",
     "u16_high_bit_range_collision",
@@ -158,27 +169,29 @@ assert "return null" in typed_condition.split("Ast::Pattern.Range", 1)[1].split(
 
 pattern_check = function_body(replay, "proof_replay_control_pattern_condition")
 preflight = pattern_check.index("proof_replay_control_pattern_repeat_charge(pattern, 3, work)")
-scan_reserve = pattern_check.index("proof_replay_control_pattern_string_scans_reserve(pattern, type_expression, 2, 0, work)")
-typed_guard = pattern_check.index("proof_replay_control_pattern_typed_payload_unambiguous(pattern, type_expression)")
-lowering = pattern_check.index("proof_pattern_condition_typed(pattern, scrutinee, position, type_expression)")
-assert preflight < scan_reserve < typed_guard < lowering
-scan_cost = function_body(replay, "proof_replay_control_pattern_string_scan_reserve")
-assert "length * 4 + 1" in scan_cost
-assert "scan_work > remaining / repetitions" in scan_cost
-scan_walk = function_body(replay, "proof_replay_control_pattern_string_scans_reserve")
-assert "Ast::Pattern.Literal(text)" in scan_walk
-assert "Ast::Pattern.As(_, inner)" in scan_walk and "Ast::Pattern.Or(options)" in scan_walk
-assert "proof_replay_control_pattern_string_scans_reserve(inner[0]" in scan_walk
-assert "proof_replay_control_pattern_string_scans_reserve(option" in scan_walk
-exactness_cost = function_body(replay, "proof_replay_control_pattern_exactness_work_charge")
-assert "proof_replay_control_pattern_string_scan_reserve(text, 2, work)" in exactness_cost
+assert "not report.source.source_operator_masks_valid" in pattern_check
+typed_guard = pattern_check.index("proof_replay_control_pattern_condition_typed_with_work(pattern, scrutinee, position, type_expression, 0, work)")
+lowering = pattern_check.index("proof_replay_control_pattern_condition_typed_with_work(pattern, scrutinee, position, type_expression")
+assert preflight < typed_guard <= lowering
+typed_replay_lowering = function_body(replay, "proof_replay_control_pattern_condition_typed_with_work")
+assert "Ast::Expr.StringLit(text, position)" in typed_replay_lowering
+assert "Ast::Expr.CharLit(string_view_slice(text, 1, sview_len(text) - 1), position)" in typed_replay_lowering
+assert "proof_pattern_condition_typed(" not in typed_replay_lowering
+assert "proof_pattern_unambiguous_string_literal" not in replay
+assert "proof_pattern_unambiguous_char_literal" not in replay
+replay_string_guard = function_body(replay, "proof_replay_control_pattern_unambiguous_string_with_work")
+assert "character < 32 or character > 126 or character == 34 or character == 92" in replay_string_guard
+assert "work <- work + length * 4 + 1" in replay_string_guard
+replay_char_guard = function_body(replay, "proof_replay_control_pattern_unambiguous_char")
+assert "character >= 32 and character <= 126" in replay_char_guard
+assert "escaped == 110 or escaped == 116 or escaped == 114 or escaped == 48" in replay_char_guard
 branch_replay = (ROOT / "src/proof/replay/boundary_branch_fact_sources.elisa").read_text(encoding="utf-8")
-exactness_call = "proof_replay_control_pattern_exactness_work_charge(prior.pattern, pattern_type, 0, work)"
-exact_call = "proof_replay_control_pattern_exact(prior.pattern, pattern_type)"
-assert exactness_call in branch_replay and branch_replay.index(exactness_call) < branch_replay.index(exact_call)
+exact_call = "proof_replay_control_pattern_exact(prior.pattern, pattern_type, work)"
+assert exact_call in branch_replay
 exact_check = function_body(replay, "proof_replay_control_pattern_exact")
-assert "proof_replay_control_pattern_typed_payload_unambiguous(pattern, type_expression)" in exact_check
-assert "proof_pattern_condition_exact_typed(pattern, type_expression)" in exact_check
+assert "proof_replay_control_pattern_exact_typed_with_work(pattern, type_expression, 0, work)" in exact_check
+typed_replay_exactness = function_body(replay, "proof_replay_control_pattern_exact_typed_with_work")
+assert "proof_pattern_condition_exact_typed(" not in typed_replay_exactness
 assert "proof_replay_control_pattern_needs_source_type(pattern)" in exact_check
 typed_pattern_replay = function_body(replay, "proof_replay_control_pattern_condition")
 assert "proof_source_expression_has_overloaded_operator(expression, report.source.source_primitive_operator_mask, 0)" in typed_pattern_replay
@@ -186,16 +199,22 @@ assert "custom literal comparisons cannot enter through a user operator" in type
 overloaded_eq_cases = (ROOT / "scripts/pattern_literal_overloaded_eq_case.py").read_text(encoding="utf-8")
 assert "PATTERN_COLLISIONS.update(STRING_EQ_OVERRIDE_COLLISIONS)" in collision_tests
 assert "STRING_EQ_OVERRIDE_PRELUDE" in collision_tests
-assert "impl Eq for sview" in overloaded_eq_cases and "impl Eq for cstr" in overloaded_eq_cases
+assert "impl Less for sview" in overloaded_eq_cases and "def __eq__(self: sview" in overloaded_eq_cases
+assert "impl Eq for cstr" in overloaded_eq_cases
 assert "impl Eq for i64" in overloaded_eq_cases and "impl Eq for u64" in overloaded_eq_cases
+assert "impl Eq for i8" in overloaded_eq_cases and "impl Eq for u8" in overloaded_eq_cases
 assert "sview_pattern_overloaded_eq_collision" in overloaded_eq_cases
 assert "cstr_pattern_overloaded_eq_collision" in overloaded_eq_cases
 assert "i64_pattern_overloaded_eq_collision" in overloaded_eq_cases
 assert "u64_pattern_overloaded_eq_collision" in overloaded_eq_cases
+assert "i8_pattern_overloaded_eq_collision" in overloaded_eq_cases
+assert "u8_pattern_overloaded_eq_collision" in overloaded_eq_cases
 for fixture_name, type_name in (("sview_pattern_overloaded_eq_collision", "sview"),
                                 ("cstr_pattern_overloaded_eq_collision", "cstr"),
                                 ("i64_pattern_overloaded_eq_collision", "i64"),
-                                ("u64_pattern_overloaded_eq_collision", "u64")):
+                                ("u64_pattern_overloaded_eq_collision", "u64"),
+                                ("i8_pattern_overloaded_eq_collision", "i8"),
+                                ("u8_pattern_overloaded_eq_collision", "u8")):
     fixture_start = overloaded_eq_cases.index(f"    '{fixture_name}': '''")
     fixture_end = overloaded_eq_cases.index("''',", fixture_start)
     fixture = overloaded_eq_cases[fixture_start:fixture_end]

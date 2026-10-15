@@ -53,14 +53,19 @@ assert "index.generics.generic_param_line_index_counts[slot] != 1" in generic_li
 assert "not index.generics.generic_param_line_index_valid" in generic_line_lookup
 
 generic_name = function_body("proof_source_conversion_generic_name")
-assert "proof_source_conversion_generic_owner_lookup(name, active_line" in generic_name
 assert "proof_source_conversion_generic_function_owner_lookup(active_line" in generic_name
+assert "proof_source_generic_owner_param_present_with_work(name, active_line, active_offset" in generic_name
+assert "return (true, 0) if function_owner.found" in generic_name
 assert "return (false, 0) if owner_known" in generic_name
 assert "for generic_index in report.source_types.source_generic_param_lines" not in generic_name
 
 applied = function_body("proof_source_conversion_type_alias_expand_applied")
 assert "actuals.count != index.aliases.alias_generic_formal_counts[row]" in applied
 assert "index.aliases.alias_generic_application_valid[row] == false" in applied
+global_alias_lookup = function_body("proof_source_conversion_alias_target")
+assert "index.aliases.alias_has_formals[alias.row]" in global_alias_lookup
+replay_global_alias_lookup = function_body("proof_replay_call_conversion_alias_target")
+assert "field_conversion_alias_has_formals[alias.row]" in replay_global_alias_lookup
 assert "index.aliases.alias_owners[row]" in applied
 
 alias_validation = function_body("proof_source_conversion_generic_alias_bodies_validate")

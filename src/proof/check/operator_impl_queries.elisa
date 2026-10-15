@@ -1,16 +1,19 @@
 extend ElisaProof:
     private:
-        # Impl metadata is preserved by the compiler parser as paired annotations keyed by the
-        # impl header line. An extension can also define an operator-like member, so it disables
-        # the built-in witness for that concrete type conservatively.
+        # Annotation-only lookup lacks the source AST needed to inspect actual impl members, so
+        # it keeps the broad fail-closed rule. Report-bound lookups use the dunder mask below.
         def proof_builtin_operator_impl_exists(annotations: darray[Ast::EnumAnnotation]&, concrete: sview, protocol: sview) -> bool:
             return false if concrete == "" or protocol == ""
-            for annotation in annotations |concrete, protocol|:
+            for annotation_index in 0..<annotations.count |annotation_index, annotations, concrete, protocol|:
+                annotation: Ast::EnumAnnotation = annotations[annotation_index]
                 if annotation.owner == "__ext_concrete" and annotation.name == concrete:
                     return true
                 if annotation.owner == "__impl_concrete" and annotation.name == concrete:
-                    for scope in annotations |annotation, protocol|:
-                        return true if scope.owner == "__impl_scope" and scope.line == annotation.line and scope.name == protocol
+                    return true if annotation_index == 0
+                    impl_scope: Ast::EnumAnnotation = annotations[annotation_index - 1]
+                    return true if impl_scope.owner != "__impl_scope" or impl_scope.line != annotation.line or impl_scope.name == ""
+                    return true if impl_scope.offset != 0 and annotation.offset != 0 and impl_scope.offset != annotation.offset
+                    return true
             return false
 
         def proof_operator_impl_hash(concrete: sview, protocol: sview) -> u32:
@@ -19,22 +22,25 @@ extend ElisaProof:
             combined: i64 = concrete_hash.i64() * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME + protocol_hash.i64()
             return (combined % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS).u32()
 
-        def proof_operator_impl_pair_exists(report: ProofReport&, concrete: sview, protocol: sview) -> bool:
+        def proof_operator_impl_mask_exists(report: ProofReport&, concrete: sview, protocol: sview) -> bool:
             return true if concrete == ""
+            wanted_mask: usize = proof_source_operator_mask_for_protocol(protocol)
+            return false if wanted_mask == PROOF_SOURCE_OPERATOR_MASK_EMPTY
+            return true if (report.analysis_1.operator_impls.global_operator_mask & wanted_mask) != 0
             count: usize = report.analysis_1.operator_impls.rows.count
             capacity: usize = report.analysis_1.operator_impls.bucket_heads.count
             return true if:
                 count != report.analysis_1.operator_impls.hashes.count or count != report.analysis_1.operator_impls.next_indices.count
                 capacity == 0 and count > 0
             return false if capacity == 0
-            hash: u32 = proof_operator_impl_hash(concrete, protocol)
+            hash: u32 = proof_operator_impl_hash(concrete, "")
             slot: usize = (hash.i64() % capacity.i64()).usize()
             entry: mutable usize = report.analysis_1.operator_impls.bucket_heads[slot]
             return true if entry > count
             visits: mutable usize = 0
-            while entry < count and visits < count |entry, visits, count, hash, concrete, protocol, report|:
+            while entry < count and visits < count |entry, visits, count, hash, concrete, wanted_mask, report|:
                 implementation: ProofOperatorImpl = report.analysis_1.operator_impls.rows[entry]
-                return true if report.analysis_1.operator_impls.hashes[entry] == hash and implementation.concrete == concrete and implementation.protocol == protocol
+                return true if report.analysis_1.operator_impls.hashes[entry] == hash and implementation.concrete == concrete and (implementation.operator_mask & wanted_mask) != 0
                 next_entry: usize = report.analysis_1.operator_impls.next_indices[entry]
                 return true if next_entry != count and next_entry >= entry
                 entry <- next_entry
@@ -45,63 +51,71 @@ extend ElisaProof:
         def proof_report_builtin_operator_impl_exists(report: ProofReport&, concrete: sview, protocol: sview) -> bool:
             return proof_builtin_operator_impl_exists(report.source.source_annotations, concrete, protocol) if not report.analysis_1.operator_impls.valid
             return false if concrete == "" or protocol == ""
-            return true if proof_operator_impl_pair_exists(report, concrete, protocol)
-            return proof_operator_impl_pair_exists(report, concrete, "")
+            proof_operator_impl_mask_exists(report, concrete, protocol)
 
         def proof_report_builtin_operator_impl_exists_with_work(report: ProofReport&, concrete: sview, protocol: sview, source_work: mutable usize&) -> (complete: bool, exists: bool):
             return (false, false) if concrete == "" or protocol == ""
+            return (false, false) if not proof_type_audit_work_charge(sview_len(protocol), source_work)
             if not report.analysis_1.operator_impls.valid:
-                for annotation in report.source.source_annotations |concrete, protocol, source_work|:
+                annotations: darray[Ast::EnumAnnotation]& = report.source.source_annotations
+                for annotation_index in 0..<annotations.count |annotation_index, annotations, concrete, source_work|:
+                    annotation: Ast::EnumAnnotation = annotations[annotation_index]
                     return (false, false) if:
                         not proof_type_audit_work_charge(1, source_work)
                         not proof_type_audit_work_charge(sview_len(concrete), source_work)
-                        not proof_type_audit_work_charge(sview_len(protocol), source_work)
                         not proof_type_audit_work_charge(sview_len(annotation.owner), source_work)
                         not proof_type_audit_work_charge(sview_len(annotation.name), source_work)
                     if annotation.owner == "__ext_concrete" and annotation.name == concrete:
                         return (true, true)
+                    if annotation.owner == "__impl_scope":
+                        return (false, false) if annotation_index + 1 >= annotations.count
+                        paired_concrete: Ast::EnumAnnotation = annotations[annotation_index + 1]
+                        return (false, false) if:
+                            not proof_type_audit_work_charge(sview_len(paired_concrete.owner), source_work)
+                            not proof_type_audit_work_charge(sview_len(paired_concrete.name), source_work)
+                            paired_concrete.owner != "__impl_concrete" or paired_concrete.line != annotation.line or paired_concrete.name == ""
+                            paired_concrete.offset != 0 and annotation.offset != 0 and paired_concrete.offset != annotation.offset
                     if annotation.owner == "__impl_concrete" and annotation.name == concrete:
-                        for scope in report.source.source_annotations |annotation, protocol, source_work|:
-                            return (false, false) if:
-                                not proof_type_audit_work_charge(1, source_work)
-                                not proof_type_audit_work_charge(sview_len(protocol), source_work)
-                                not proof_type_audit_work_charge(sview_len(scope.owner), source_work)
-                                not proof_type_audit_work_charge(sview_len(scope.name), source_work)
-                            return (true, true) if scope.owner == "__impl_scope" and scope.line == annotation.line and scope.name == protocol
+                        return (false, false) if annotation_index == 0
+                        impl_scope: Ast::EnumAnnotation = annotations[annotation_index - 1]
+                        return (false, false) if:
+                            not proof_type_audit_work_charge(sview_len(impl_scope.owner), source_work)
+                            not proof_type_audit_work_charge(sview_len(impl_scope.name), source_work)
+                            impl_scope.owner != "__impl_scope" or impl_scope.line != annotation.line or impl_scope.name == ""
+                            impl_scope.offset != 0 and annotation.offset != 0 and impl_scope.offset != annotation.offset
+                        return (true, true)
                 return (true, false)
+            wanted_mask: usize = proof_source_operator_mask_for_protocol(protocol)
+            return (true, false) if wanted_mask == PROOF_SOURCE_OPERATOR_MASK_EMPTY
+            return (true, true) if (report.analysis_1.operator_impls.global_operator_mask & wanted_mask) != 0
             count: usize = report.analysis_1.operator_impls.rows.count
             capacity: usize = report.analysis_1.operator_impls.bucket_heads.count
             return (false, false) if count != report.analysis_1.operator_impls.hashes.count or count != report.analysis_1.operator_impls.next_indices.count
             return (true, false) if capacity == 0 and count == 0
             return (false, false) if capacity == 0
-            for wanted_protocol in [protocol, ""] |report, concrete, count, capacity, source_work|:
-                return (false, false) if not proof_type_audit_work_charge(sview_len(concrete), source_work) or not proof_type_audit_work_charge(sview_len(wanted_protocol), source_work)
-                hash: u32 = proof_operator_impl_hash(concrete, wanted_protocol)
-                slot: usize = (hash.i64() % capacity.i64()).usize()
-                entry: mutable usize = report.analysis_1.operator_impls.bucket_heads[slot]
-                # `count` is the sole empty-chain sentinel. An out-of-range head must
-                # invalidate the lookup rather than masquerade as an absent override.
-                return (false, false) if entry > count
-                visits: mutable usize = 0
-                while entry < count and visits < count |entry, report, concrete, wanted_protocol, hash, source_work, count, visits|:
-                    return (false, false) if not proof_type_audit_work_charge(1, source_work)
-                    implementation: ProofOperatorImpl = report.analysis_1.operator_impls.rows[entry]
-                    return (false, false) if not proof_type_audit_work_charge(sview_len(implementation.concrete), source_work) or not proof_type_audit_work_charge(sview_len(implementation.protocol), source_work)
-                    return (true, true) if report.analysis_1.operator_impls.hashes[entry] == hash and implementation.concrete == concrete and implementation.protocol == wanted_protocol
-                    next_entry: usize = report.analysis_1.operator_impls.next_indices[entry]
-                    return (false, false) if next_entry != count and next_entry >= entry
-                    entry <- next_entry
-                    visits <- visits + 1
-                return (false, false) if entry < count or visits > count
+            return (false, false) if not proof_type_audit_work_charge(sview_len(concrete), source_work)
+            hash: u32 = proof_operator_impl_hash(concrete, "")
+            slot: usize = (hash.i64() % capacity.i64()).usize()
+            entry: usize = report.analysis_1.operator_impls.bucket_heads[slot]
+            return (false, false) if entry > count
+            visits: mutable usize = 0
+            while entry < count and visits < count |entry, report, concrete, hash, source_work, count, visits|:
+                return (false, false) if not proof_type_audit_work_charge(1, source_work)
+                implementation: ProofOperatorImpl = report.analysis_1.operator_impls.rows[entry]
+                return (false, false) if not proof_type_audit_work_charge(sview_len(implementation.concrete), source_work)
+                return (true, true) if report.analysis_1.operator_impls.hashes[entry] == hash and implementation.concrete == concrete and (implementation.operator_mask & wanted_mask) != 0
+                next_entry: usize = report.analysis_1.operator_impls.next_indices[entry]
+                return (false, false) if next_entry != count and next_entry >= entry
+                entry <- next_entry
+                visits <- visits + 1
+            return (false, false) if entry < count or visits > count
             return (true, false)
 
-        # Structural operator analysis treats `Less` as an ordering implementation.
-        # Kernel admission must use the same mapping so custom Less dispatch cannot
-        # inherit the built-in Ord witness.
+        # The current compiler dispatches every dunder by receiver type without an
+        # operator-protocol filter. The indexed query is therefore type-wide already;
+        # repeating it for the legacy `Less` ordering spelling would only spend work twice.
         def proof_report_kernel_operator_impl_exists_with_work(report: ProofReport&, concrete: sview, protocol: sview, source_work: mutable usize&) -> (complete: bool, exists: bool):
-            exact: (complete: bool, exists: bool) = proof_report_builtin_operator_impl_exists_with_work(report, concrete, protocol, source_work)
-            return exact if not exact.complete or exact.exists or protocol != "Ord"
-            proof_report_builtin_operator_impl_exists_with_work(report, concrete, "Less", source_work)
+            proof_report_builtin_operator_impl_exists_with_work(report, concrete, protocol, source_work)
 
         def proof_add_operator_witness_for_concrete(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, concrete: sview, protocol: sview, position: Ast::Pos) -> void:
             marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position) if proof_report_builtin_operator_impl_exists(report, concrete, protocol) else proof_builtin_operator_marker(root, protocol, position)

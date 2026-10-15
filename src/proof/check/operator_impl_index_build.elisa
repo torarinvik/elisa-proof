@@ -1,33 +1,234 @@
 extend ElisaProof:
     private:
         const PROOF_OPERATOR_IMPL_MAX_BUCKET: usize = 64
+        const PROOF_OPERATOR_SCOPE_MAX_BUCKET: usize = 64
+        const PROOF_OPERATOR_SCOPE_DEPTH_LIMIT: usize = 64
 
-        # Pair parser impl markers and build the lookup cache under the checker's shared
-        # source-work budget. The nested pairing scan is retained to preserve source semantics,
-        # but its work is now capped; long hash buckets fail closed before any witness lookup.
+        def proof_operator_scope_hash(line: u32, offset: u32) -> u32:
+            combined: i64 = line.i64() * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME + offset.i64()
+            (combined % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS).u32()
+
+        def proof_operator_scope_body_mask(body: darray[Ast::Decl], source_work: mutable usize&) -> (complete: bool, mask: usize, self_mask: usize, global_mask: usize, explicit_receiver_type: sview, explicit_receiver_mask: usize):
+            mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
+            self_mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
+            global_mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
+            explicit_receiver_type: mutable sview = ""
+            explicit_receiver_mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
+            for member in body |member, source_work, mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask|:
+                return (false, mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask) if not proof_report_source_work_charge(1, source_work)
+                match member:
+                    Ast::Decl.Func(name, params, _, _, _, _, _):
+                        return (false, mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask) if not proof_report_source_work_charge(sview_len(name), source_work)
+                        operator_mask: usize = proof_source_operator_dunder_mask(name)
+                        mask <- mask | operator_mask
+                        if operator_mask != PROOF_SOURCE_OPERATOR_MASK_EMPTY:
+                            receiver_is_self: mutable bool = false
+                            receiver_type_known: mutable bool = false
+                            if params.count > 0:
+                                return (false, mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask) if not proof_report_source_work_charge(1, source_work)
+                                match params[0].type_expression:
+                                    Ast::Expr.Ident(receiver_type, _):
+                                        return (false, mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask) if not proof_report_source_work_charge(sview_len(receiver_type), source_work)
+                                        receiver_is_self <- receiver_type == "Self"
+                                        receiver_type_known <- true
+                                        if receiver_is_self:
+                                            self_mask <- self_mask | operator_mask
+                                        else:
+                                            if explicit_receiver_type == "":
+                                                explicit_receiver_type <- receiver_type
+                                            if explicit_receiver_type == receiver_type:
+                                                explicit_receiver_mask <- explicit_receiver_mask | operator_mask
+                                            else:
+                                                global_mask <- global_mask | explicit_receiver_mask | operator_mask
+                                    _:
+                                        pass
+                            # Non-ident receivers and missing receivers cannot be tied to the
+                            # concrete annotation, so retain their deny mask globally.
+                            global_mask <- global_mask | operator_mask if not receiver_is_self and not receiver_type_known
+                    Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return (false, mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask) if not proof_report_source_work_charge(sview_len(name), source_work)
+                        # Extern signatures do not retain structured receiver types.
+                        global_mask <- global_mask | proof_source_operator_dunder_mask(name)
+                    _:
+                        pass
+            (true, mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask)
+
+        # Walk parser-owned declarations once. Impl/extension annotations carry the exact
+        # header line and absolute offset; the matching Decl.Scoped row carries that position.
+        def proof_operator_scope_collect(declarations: darray[Ast::Decl], index: mutable ProofOperatorScopeIndex&, source_work: mutable usize&, depth: usize, collect_free_functions: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= PROOF_OPERATOR_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |declaration, index, source_work, depth, collect_free_functions|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Module(name, nested, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        # A module establishes an independent namespace even when nested in a
+                        # static or implementation impl_scope; its functions may still be UFCS
+                        # candidates through unique-owner lookup.
+                        return false if not proof_operator_scope_collect(nested, index, source_work, depth + 1, true)
+                    Ast::Decl.Scoped(nested, position):
+                        body_mask: (complete: bool, mask: usize, self_mask: usize, global_mask: usize, explicit_receiver_type: sview, explicit_receiver_mask: usize) = proof_operator_scope_body_mask(nested, source_work)
+                        return false if not body_mask.complete
+                        return false if not proof_report_source_work_charge(2, source_work)
+                        index.rows.push(ProofOperatorScope{line: position.line, offset: position.offset, operator_mask: body_mask.mask, self_operator_mask: body_mask.self_mask, implementation_scope: false, global_operator_mask: body_mask.global_mask, explicit_receiver_type: body_mask.explicit_receiver_type, explicit_receiver_mask: body_mask.explicit_receiver_mask})
+                        return false if not proof_operator_scope_collect(nested, index, source_work, depth + 1, false)
+                    Ast::Decl.Func(name, _, _, _, _, _, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        index.global_operator_mask <- index.global_operator_mask | proof_source_operator_dunder_mask(name) if collect_free_functions
+                    Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        index.global_operator_mask <- index.global_operator_mask | proof_source_operator_dunder_mask(name) if collect_free_functions
+                    Ast::Decl.Import(_, _):
+                        # Dependency declarations are absent from this retained AST. An
+                        # import may contribute a callable dunder, so keep the bound global.
+                        index.global_operator_mask <- PROOF_SOURCE_OPERATOR_ALL_FLAGS
+                    Ast::Decl.Invalid:
+                        index.global_operator_mask <- PROOF_SOURCE_OPERATOR_ALL_FLAGS
+                    _:
+                        pass
+            true
+
+        def proof_operator_scope_index_build(declarations: darray[Ast::Decl], source_work: mutable usize&) -> (complete: bool, index: ProofOperatorScopeIndex) can[Memory.Allocate, Abort.Panic]:
+            index: mutable ProofOperatorScopeIndex = ProofOperatorScopeIndex{rows: [], hashes: [], bucket_heads: [], next_indices: [], global_operator_mask: 0, valid: false}
+            return (false, index) if not proof_operator_scope_collect(declarations, &index, source_work, 0, true)
+            count: usize = index.rows.count
+            if count == 0:
+                index.valid <- true
+                return (true, index)
+            capacity: usize = proof_name_index_capacity(count)
+            return (false, index) if capacity == 0
+            return (false, index) if:
+                not proof_report_source_work_charge(capacity * 2, source_work)
+                not proof_report_source_work_charge(count * 2, source_work)
+            index.hashes.resize(count)
+            index.bucket_heads.resize(capacity)
+            index.next_indices.resize(count)
+            bucket_sizes: mutable darray[usize] = []
+            bucket_sizes.resize(capacity)
+            for slot in 0..<capacity |slot, capacity, count, index, bucket_sizes, source_work|:
+                return (false, index) if not proof_report_source_work_charge(2, source_work)
+                index.bucket_heads[slot] <- count
+                bucket_sizes[slot] <- 0
+            for row_index in 0..<count |row_index, count, capacity, index, bucket_sizes, source_work|:
+                return (false, index) if not proof_report_source_work_charge(1, source_work)
+                row: ProofOperatorScope = index.rows[row_index]
+                hash: u32 = proof_operator_scope_hash(row.line, row.offset)
+                slot: usize = (hash.i64() % capacity.i64()).usize()
+                bucket_size: usize = bucket_sizes[slot] + 1
+                return (false, index) if bucket_size > PROOF_OPERATOR_SCOPE_MAX_BUCKET
+                return (false, index) if not proof_report_source_work_charge(3, source_work)
+                bucket_sizes[slot] <- bucket_size
+                index.hashes[row_index] <- hash
+                index.next_indices[row_index] <- index.bucket_heads[slot]
+                index.bucket_heads[slot] <- row_index
+            index.valid <- true
+            (true, index)
+
+        # Missing or ambiguous AST ownership is represented by all dunder bits. That preserves
+        # the kernel's deny-only behavior while retaining operator precision for unique rows.
+        def proof_operator_scope_index_mask_at(index: ProofOperatorScopeIndex&, line: u32, offset: u32, source_work: mutable usize&) -> (complete: bool, found: bool, row_index: usize, mask: usize):
+            count: usize = index.rows.count
+            return (false, false, count, PROOF_SOURCE_OPERATOR_ALL_FLAGS) if not index.valid
+            capacity: usize = index.bucket_heads.count
+            return (false, false, count, PROOF_SOURCE_OPERATOR_ALL_FLAGS) if count != index.hashes.count or count != index.next_indices.count
+            return (true, false, count, PROOF_SOURCE_OPERATOR_ALL_FLAGS) if count == 0 and capacity == 0
+            return (false, false, count, PROOF_SOURCE_OPERATOR_ALL_FLAGS) if capacity == 0 or not proof_report_source_work_charge(1, source_work)
+            hash: u32 = proof_operator_scope_hash(line, offset)
+            slot: usize = (hash.i64() % capacity.i64()).usize()
+            entry: usize = index.bucket_heads[slot]
+            return (false, false, count, PROOF_SOURCE_OPERATOR_ALL_FLAGS) if entry > count
+            found: mutable bool = false
+            found_index: mutable usize = count
+            mask: mutable usize = PROOF_SOURCE_OPERATOR_ALL_FLAGS
+            visits: mutable usize = 0
+            while entry < count and visits < count |entry, index, line, offset, hash, source_work, count, visits, found, found_index, mask|:
+                return (false, false, count, PROOF_SOURCE_OPERATOR_ALL_FLAGS) if not proof_report_source_work_charge(1, source_work)
+                row: ProofOperatorScope = index.rows[entry]
+                if index.hashes[entry] == hash and row.line == line and row.offset == offset:
+                    return (true, false, count, PROOF_SOURCE_OPERATOR_ALL_FLAGS) if found
+                    found <- true
+                    found_index <- entry
+                    mask <- row.self_operator_mask
+                next_entry: usize = index.next_indices[entry]
+                return (false, false, count, PROOF_SOURCE_OPERATOR_ALL_FLAGS) if next_entry != count and next_entry >= entry
+                entry <- next_entry
+                visits <- visits + 1
+            return (false, false, count, PROOF_SOURCE_OPERATOR_ALL_FLAGS) if entry < count or visits > count
+            return (true, found, found_index, mask)
+
+        # Parser output places each impl impl_scope immediately before its concrete marker. Pair
+        # those adjacent rows directly instead of rescanning the annotation table by line. This
+        # keeps construction linear and avoids cross-pairing included files that restart lines.
         def proof_build_operator_impl_index(report: mutable ProofReport&, source_work: mutable usize&) -> (complete: bool, reason: sview, observed: usize, limit: usize) can[Memory.Allocate, Abort.Panic]:
             report.analysis_1.operator_impls.rows.clear()
             report.analysis_1.operator_impls.hashes.clear()
             report.analysis_1.operator_impls.bucket_heads.clear()
             report.analysis_1.operator_impls.next_indices.clear()
+            report.analysis_1.operator_impls.global_operator_mask <- 0
             report.analysis_1.operator_impls.valid <- false
             report.source.source_operator_masks_valid <- false
-            for concrete_annotation in report.source.source_annotations |report, source_work|:
+            for annotation_index in 0..<report.source.source_annotations.count |annotation_index, report, source_work|:
+                concrete_annotation: Ast::EnumAnnotation = report.source.source_annotations[annotation_index]
                 return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if:
                     not proof_report_source_work_charge(1, source_work)
                     not proof_report_source_work_charge(sview_len(concrete_annotation.owner), source_work)
                 if concrete_annotation.owner == "__ext_concrete":
                     return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
-                    report.analysis_1.operator_impls.rows.push(ProofOperatorImpl{concrete: concrete_annotation.name, protocol: ""})
+                    return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(concrete_annotation.name), source_work)
+                    return (false, "operator-index-shape", annotation_index, report.source.source_annotations.count) if concrete_annotation.name == ""
+                    return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(2, source_work)
+                    report.analysis_1.operator_impls.rows.push(ProofOperatorImpl{concrete: concrete_annotation.name, protocol: "", operator_mask: PROOF_SOURCE_OPERATOR_MASK_EMPTY, line: concrete_annotation.line, offset: concrete_annotation.offset})
+                if concrete_annotation.owner == "__impl_scope":
+                    return (false, "operator-index-shape", annotation_index, report.source.source_annotations.count) if annotation_index + 1 >= report.source.source_annotations.count
+                    paired_concrete: Ast::EnumAnnotation = report.source.source_annotations[annotation_index + 1]
+                    return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(paired_concrete.owner), source_work) or not proof_report_source_work_charge(sview_len(paired_concrete.name), source_work)
+                    return (false, "operator-index-shape", annotation_index, report.source.source_annotations.count) if paired_concrete.owner != "__impl_concrete" or paired_concrete.line != concrete_annotation.line or paired_concrete.name == ""
+                    return (false, "operator-index-shape", annotation_index, report.source.source_annotations.count) if paired_concrete.offset != 0 and concrete_annotation.offset != 0 and paired_concrete.offset != concrete_annotation.offset
                 if concrete_annotation.owner == "__impl_concrete":
-                    for scope_annotation in report.source.source_annotations |concrete_annotation, report, source_work|:
-                        return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if:
-                            not proof_report_source_work_charge(1, source_work)
-                            not proof_report_source_work_charge(sview_len(scope_annotation.owner), source_work)
-                        continue if scope_annotation.owner != "__impl_scope" or scope_annotation.line != concrete_annotation.line
-                        return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
-                        report.analysis_1.operator_impls.rows.push(ProofOperatorImpl{concrete: concrete_annotation.name, protocol: scope_annotation.name})
+                    return (false, "operator-index-shape", annotation_index, report.source.source_annotations.count) if annotation_index == 0 or concrete_annotation.name == ""
+                    scope_annotation: Ast::EnumAnnotation = report.source.source_annotations[annotation_index - 1]
+                    return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(scope_annotation.owner), source_work) or not proof_report_source_work_charge(sview_len(scope_annotation.name), source_work) or not proof_report_source_work_charge(sview_len(concrete_annotation.name), source_work)
+                    return (false, "operator-index-shape", annotation_index, report.source.source_annotations.count) if scope_annotation.owner != "__impl_scope" or scope_annotation.line != concrete_annotation.line or scope_annotation.name == ""
+                    return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if:
+                        not proof_report_source_work_charge(1, source_work)
+                        not proof_report_source_work_charge(sview_len(scope_annotation.owner), source_work)
+                    return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(2, source_work)
+                    report.analysis_1.operator_impls.rows.push(ProofOperatorImpl{concrete: concrete_annotation.name, protocol: scope_annotation.name, operator_mask: PROOF_SOURCE_OPERATOR_ALL_FLAGS, line: scope_annotation.line, offset: scope_annotation.offset})
             implementation_count: usize = report.analysis_1.operator_impls.rows.count
+            scope_index_status: (complete: bool, index: ProofOperatorScopeIndex) = proof_operator_scope_index_build(report.source.source_declarations, source_work)
+            return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not scope_index_status.complete
+            report.analysis_1.operator_impls.global_operator_mask <- scope_index_status.index.global_operator_mask
+            for implementation_index in 0..<implementation_count |implementation_index, implementation_count, report, scope_index_status, source_work|:
+                implementation: mutable ProofOperatorImpl& = report.analysis_1.operator_impls.rows[implementation_index]
+                return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(implementation.concrete), source_work)
+                scope_mask: (complete: bool, found: bool, row_index: usize, mask: usize) = proof_operator_scope_index_mask_at(scope_index_status.index, implementation.line, implementation.offset, source_work)
+                return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not scope_mask.complete
+                # Both extension and protocol impl rows are narrowed to dunders whose receiver
+                # is the annotated concrete type. Unknown receiver shapes remain in the global
+                # deny mask below.
+                implementation.operator_mask <- scope_mask.mask
+                if not scope_mask.found:
+                    # Missing or repeated AST ownership makes this dunder's receiver type
+                    # unknown, so preserve soundness with a global operator deny mask.
+                    report.analysis_1.operator_impls.global_operator_mask <- PROOF_SOURCE_OPERATOR_ALL_FLAGS
+                if scope_mask.found:
+                    impl_scope: mutable ProofOperatorScope& = scope_index_status.index.rows[scope_mask.row_index]
+                    if impl_scope.implementation_scope:
+                        # Duplicate annotation ownership is malformed and must not narrow the
+                        # fail-closed global mask.
+                        report.analysis_1.operator_impls.global_operator_mask <- PROOF_SOURCE_OPERATOR_ALL_FLAGS
+                    if impl_scope.explicit_receiver_mask != 0 and impl_scope.explicit_receiver_type != implementation.concrete:
+                        report.analysis_1.operator_impls.global_operator_mask <- report.analysis_1.operator_impls.global_operator_mask | impl_scope.explicit_receiver_mask
+                    if impl_scope.explicit_receiver_mask != 0 and impl_scope.explicit_receiver_type == implementation.concrete:
+                        implementation.operator_mask <- implementation.operator_mask | impl_scope.explicit_receiver_mask
+                    impl_scope.implementation_scope <- true
+            for impl_scope in scope_index_status.index.rows |impl_scope, report, source_work|:
+                return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                # Explicit receiver types are resolved against the concrete annotation above.
+                # Unowned scopes cannot use that annotation and remain globally conservative.
+                report.analysis_1.operator_impls.global_operator_mask <- report.analysis_1.operator_impls.global_operator_mask | impl_scope.global_operator_mask
+                report.analysis_1.operator_impls.global_operator_mask <- report.analysis_1.operator_impls.global_operator_mask | impl_scope.explicit_receiver_mask if not impl_scope.implementation_scope
+                report.analysis_1.operator_impls.global_operator_mask <- report.analysis_1.operator_impls.global_operator_mask | impl_scope.operator_mask if not impl_scope.implementation_scope
             if implementation_count == 0:
                 report.analysis_1.operator_impls.valid <- true
                 return (true, "", 0, 0)
@@ -42,7 +243,7 @@ extend ElisaProof:
             bucket_sizes: mutable darray[usize] = []
             bucket_sizes.resize(capacity)
             for slot in 0..<capacity |slot, implementation_count, report, bucket_sizes, source_work|:
-                return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(2, source_work)
                 report.analysis_1.operator_impls.bucket_heads[slot] <- implementation_count
                 bucket_sizes[slot] <- 0
             for index in 0..<implementation_count |index, implementation_count, report, capacity, bucket_sizes, source_work|:
@@ -51,10 +252,15 @@ extend ElisaProof:
                 return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if:
                     not proof_report_source_work_charge(sview_len(implementation.concrete), source_work)
                     not proof_report_source_work_charge(sview_len(implementation.protocol), source_work)
-                hash: u32 = proof_operator_impl_hash(implementation.concrete, implementation.protocol)
+                # Operator shadowing is type-wide because the compiler currently permits
+                # dunder dispatch through any protocol impl. Keep the collision chain keyed by
+                # concrete type alone so repeated witness queries stay bounded.
+                hash: u32 = proof_operator_impl_hash(implementation.concrete, "")
                 slot: usize = (hash.i64() % capacity.i64()).usize()
-                bucket_sizes[slot] <- bucket_sizes[slot] + 1
-                return (false, "operator-index-cluster", bucket_sizes[slot], PROOF_OPERATOR_IMPL_MAX_BUCKET) if bucket_sizes[slot] > PROOF_OPERATOR_IMPL_MAX_BUCKET
+                bucket_size: usize = bucket_sizes[slot] + 1
+                return (false, "operator-index-cluster", bucket_size, PROOF_OPERATOR_IMPL_MAX_BUCKET) if bucket_size > PROOF_OPERATOR_IMPL_MAX_BUCKET
+                return (false, "operator-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(3, source_work)
+                bucket_sizes[slot] <- bucket_size
                 report.analysis_1.operator_impls.hashes[index] <- hash
                 report.analysis_1.operator_impls.next_indices[index] <- report.analysis_1.operator_impls.bucket_heads[slot]
                 report.analysis_1.operator_impls.bucket_heads[slot] <- index

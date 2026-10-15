@@ -3,37 +3,44 @@ extend ElisaProof:
         # Resolve a field type without building a temporary member array. Charge each declaration
         # and each compared name so a single very wide struct is bounded by the same replay work
         # limit as a source file with many declarations.
-        def proof_structural_operator_guard_field_type_walk(declarations: darray[Ast::Decl]&, struct_name: sview, field_name: sview, report: mutable ProofReport&, depth: usize) -> (count: usize, type_expression: Ast::Expr):
-            return (2, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+        def proof_structural_operator_guard_field_type_walk(declarations: darray[Ast::Decl]&, struct_name: sview, field_name: sview, report: mutable ProofReport&, depth: usize) -> (count: usize, field_matches: usize, type_expression: Ast::Expr):
+            return (2, 2, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             count: mutable usize = 0
+            field_matches: mutable usize = 0
             found: mutable Ast::Expr = Ast::Expr.Invalid
-            for declaration in declarations |struct_name, field_name, report, depth, count, found|:
-                return (2, Ast::Expr.Invalid) if not proof_source_index_work_charge(report, 1)
+            for declaration in declarations |struct_name, field_name, report, depth, count, field_matches, found|:
+                return (2, 2, Ast::Expr.Invalid) if not proof_source_index_work_charge(report, 1)
                 match declaration:
                     Ast::Decl.Struct(name, members, _, _, _, _, _):
-                        return (2, Ast::Expr.Invalid) if:
+                        return (2, 2, Ast::Expr.Invalid) if:
                             not proof_source_index_work_charge(report, 1)
                             not proof_source_index_work_charge(report, sview_len(name))
                             not proof_source_index_work_charge(report, sview_len(struct_name))
                         if name == struct_name:
                             count <- count + 1
-                            for member in members |field_name, report, found|:
-                                return (2, Ast::Expr.Invalid) if:
+                            for member in members |field_name, report, field_matches, found|:
+                                return (2, 2, Ast::Expr.Invalid) if:
                                     not proof_source_index_work_charge(report, 1)
                                     not proof_source_index_work_charge(report, sview_len(member.name))
                                     not proof_source_index_work_charge(report, sview_len(field_name))
-                                found <- member.type_expression if member.name == field_name
+                                if member.name == field_name:
+                                    # Duplicate declarations make the projection type ambiguous;
+                                    # the caller then falls back to the conservative operator mask.
+                                    field_matches <- field_matches + 1
+                                    found <- member.type_expression
                     Ast::Decl.Module(_, body, _):
-                        nested: (count: usize, type_expression: Ast::Expr) = proof_structural_operator_guard_field_type_walk(body, struct_name, field_name, report, depth + 1)
+                        nested: (count: usize, field_matches: usize, type_expression: Ast::Expr) = proof_structural_operator_guard_field_type_walk(body, struct_name, field_name, report, depth + 1)
                         count <- count + nested.count
+                        field_matches <- field_matches + nested.field_matches
                         found <- nested.type_expression if nested.count > 0
                     Ast::Decl.Scoped(body, _):
-                        nested: (count: usize, type_expression: Ast::Expr) = proof_structural_operator_guard_field_type_walk(body, struct_name, field_name, report, depth + 1)
+                        nested: (count: usize, field_matches: usize, type_expression: Ast::Expr) = proof_structural_operator_guard_field_type_walk(body, struct_name, field_name, report, depth + 1)
                         count <- count + nested.count
+                        field_matches <- field_matches + nested.field_matches
                         found <- nested.type_expression if nested.count > 0
                     _:
                         pass
-            return (count, found)
+            return (count, field_matches, found)
 
         def proof_structural_operator_guard_binding_lookup(bindings: darray[ProofStructuralOperatorBinding]&, name: sview, report: mutable ProofReport&) -> (found: bool, type_name: sview, type_expression: Ast::Expr):
             index: mutable usize = bindings.count
@@ -82,8 +89,8 @@ extend ElisaProof:
                     return (false, Ast::Expr.Absent) if not base.known
                     head: sview = proof_type_head_name_with_work(base.type_expression, report.source.source_declarations, 0, &report.source_types.source_effect_index.work.implicit_effect_work)
                     return (false, Ast::Expr.Absent) if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or head == ""
-                    field_type: (count: usize, type_expression: Ast::Expr) = proof_structural_operator_guard_field_type_walk(report.source.source_declarations, head, field, report, 0)
-                    return (false, Ast::Expr.Absent) if field_type.count != 1
+                    field_type: (count: usize, field_matches: usize, type_expression: Ast::Expr) = proof_structural_operator_guard_field_type_walk(report.source.source_declarations, head, field, report, 0)
+                    return (false, Ast::Expr.Absent) if field_type.count != 1 or field_type.field_matches != 1
                     return (true, field_type.type_expression)
                 Ast::Expr.Index(object, _, _):
                     base: (known: bool, type_expression: Ast::Expr) = proof_structural_operator_guard_receiver_type(object, parameters, shadowed, report, depth + 1)
