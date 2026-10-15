@@ -84,10 +84,31 @@ def main() -> None:
     assert "proof_kernel_unsigned_width_valid(width_work.value)" in unsigned_marker
     # Keep validated unsigned widths separate from scalar-element path depth in the cache.
     assert "kind: PROOF_KERNEL_REPLAY_WITNESS_UNSIGNED_TYPE, root: marker.name_root, depth: 0, width: marker.width" in fill
-    assert "width <- marker.width if matches" in function_body(
+    assert "name: sview" in (REPLAY / "witness_marker_facts.elisa").read_text(encoding="utf-8")
+    assert "name: nodes[marker.name_root].name" in fill
+    unsigned_width_lookup = function_body(
         REPLAY / "goal_metered_conditional_plans.elisa",
         "proof_kernel_replay_unsigned_width_from_markers_with_goal_work",
     )
+    assert 'if marker.name == "":' in unsigned_width_lookup
+    assert "work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1" in unsigned_width_lookup
+    assert "proof_kernel_replay_goal_search_text_equal(marker.name, name, work_used)" in unsigned_width_lookup
+    for path, function, mismatch, selected_width in (
+        (REPLAY / "goal_metered_conditional_plans.elisa", "proof_kernel_replay_unsigned_width_from_markers_with_goal_work", "marker.width != width", "width <- marker.width if width == 0"),
+        (REPLAY / "goal_metered_linear_disequality.elisa", "proof_kernel_replay_linear_place_marker_width_with_work", "value.value != width", "width <- value.value if width == 0"),
+        (REPLAY / "goal_metered_linear_disequality.elisa", "proof_kernel_replay_linear_element_width_with_work", "marker.width != width", "width <- marker.width if width == 0"),
+    ):
+        width_lookup = function_body(path, function)
+        assert mismatch in width_lookup
+        assert "work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1" in width_lookup
+        assert selected_width in width_lookup
+    # The interval and linear unsigned-name paths now share this collision check
+    # through their marker-snapshot wrappers.
+    for path, function in (
+        (REPLAY / "goal_metered_interval.elisa", "proof_kernel_replay_unsigned_marker_width_for_name_with_goal_work"),
+        (REPLAY / "goal_metered_linear_disequality.elisa", "proof_kernel_replay_linear_unsigned_marker_width_from_markers_with_work"),
+    ):
+        assert "proof_kernel_replay_unsigned_width_from_markers_with_goal_work" in function_body(path, function)
     # Indexed container markers require an indexed path. Element.Ref applies to the
     # exact reference and every single-index read rooted there, including dynamic indexes.
     assert "subscripts.count == 0" in element_apply

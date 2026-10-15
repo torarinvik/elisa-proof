@@ -194,7 +194,7 @@ def summary_trace_kinds() -> set[str]:
 
 
 def typing_kinds() -> set[str]:
-    text = read(PROOF / "kernel_replay" / "type_environment.elisa")
+    text = read(PROOF / "kernel_replay" / "typing_binding_sort_helpers.elisa")
     body = function_body(text, "proof_kernel_replay_typing_binding_valid")
     return set(re.findall(r'(?:el)?if binding\.kind == "([^"]+)":', body))
 
@@ -375,11 +375,11 @@ def main() -> int:
     effect_contains = function_body(effect_replay, "proof_kernel_replay_effect_row_contains_with_work")
     effect_within = function_body(effect_replay, "proof_kernel_replay_effect_row_within_with_work")
     effect_goal = function_body(effect_replay, "proof_kernel_replay_effect_goal")
-    if effect_contains.index("row_root >= nodes.count") > effect_contains.index("nodes[row_root].kind") or "row_root >= nodes.count or nodes[row_root]" in effect_contains:
+    if effect_contains.index("row_root >= nodes.count") > effect_contains.index("row: ElisaProofKernelCore::ProofKernelNode = nodes[row_root]") or "row_root >= nodes.count or nodes[row_root]" in effect_contains:
         failures.append("effect-row membership must validate its root before indexing")
-    if effect_within.index("inner_root >= nodes.count") > effect_within.index("nodes[inner_root].kind") or "inner_root >= nodes.count or nodes[inner_root]" in effect_within:
+    if effect_within.index("inner_root >= nodes.count") > effect_within.index("inner: ElisaProofKernelCore::ProofKernelNode = nodes[inner_root]") or "inner_root >= nodes.count or nodes[inner_root]" in effect_within:
         failures.append("effect-row containment must validate its root before indexing")
-    if effect_goal.index("goal_root >= nodes.count") > effect_goal.index("nodes[goal_root].kind") or effect_goal.index("declared_row >= nodes.count") > effect_goal.index("nodes[declared_row].kind"):
+    if effect_goal.index("goal_root >= nodes.count") > effect_goal.index("root: ElisaProofKernelCore::ProofKernelNode = nodes[goal_root]") or effect_goal.index("declared_row >= nodes.count") > effect_goal.index("declared: ElisaProofKernelCore::ProofKernelNode = nodes[declared_row]"):
         failures.append("effect-goal replay must validate roots before indexing")
     if "member.value >= nodes.count or nodes[member.value]" in effect_contains + effect_within or "entry.value >= nodes.count or nodes[entry.value]" in effect_goal:
         failures.append("effect replay must validate child roots before indexing")
@@ -440,6 +440,7 @@ def main() -> int:
     congruence_seed = function_body(congruence, "proof_kernel_replay_congruence_seed_with_goal_work")
     congruence_driver = read(PROOF / "kernel_replay" / "resource_model_integrated_helpers.elisa")
     congruence_goal = function_body(congruence_driver, "proof_kernel_replay_congruence_goal_with_goal_work")
+    congruence_cached_goal = function_body(congruence_driver, "proof_kernel_replay_congruence_goal_with_cached_markers_goal_work")
     for body, label in ((congruence_collect, "term collection"), (congruence_seed, "equality seeding")):
         if "proof_kernel_replay_primitive_comparison_with_markers_with_work" not in body:
             failures.append(f"congruence {label} does not reject source-marked untrusted comparison operators")
@@ -447,7 +448,9 @@ def main() -> int:
         failures.append("congruence term collection reaches lookup before checking comparison operators")
     if congruence_seed.find("primitive_relation:") < 0 or congruence_seed.find("primitive_relation:") > congruence_seed.find("proof_kernel_replay_congruence_union_with_goal_work"):
         failures.append("congruence equality seeding reaches class union before checking comparison operators")
-    if "proof_kernel_replay_witness_marker_cache_fill_with_work" not in congruence_goal or "proof_kernel_replay_congruence_seed_with_goal_work(nodes, children, markers," not in congruence_goal:
+    if "proof_kernel_replay_congruence_goal_with_cached_markers_goal_work(nodes, children, facts, &markers, &markers_ready, goal_root," not in congruence_goal:
+        failures.append("congruence wrapper does not delegate with its query-local validated marker cache")
+    if "proof_kernel_replay_witness_marker_cache_fill_with_work" not in congruence_cached_goal or "proof_kernel_replay_congruence_collect_with_goal_work(nodes, children, facts, markers, markers_ready," not in congruence_cached_goal or "proof_kernel_replay_congruence_seed_with_goal_work(nodes, children, markers," not in congruence_cached_goal:
         failures.append("congruence does not share validated operator markers across collection and seeding")
     congruence_fixture = read(ROOT / "examples" / "kernel_congruence_runtime.elisa")
     for regression in ("UNTRUSTED_EQUALITY_SEEDED", "UNTRUSTED_EQUALITY_GOAL_ADMITTED"):
@@ -467,11 +470,34 @@ def main() -> int:
 
     proposition_comparisons = read(PROOF / "kernel_replay" / "proposition_comparisons.elisa")
     enum_tag_membership = function_body(proposition_comparisons, "proof_kernel_replay_enum_tag_belongs_to_type")
+    enum_type_identity_rows = function_body(proposition_comparisons, "proof_kernel_replay_type_identity_rows_valid")
     budget_gate = "return false if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET"
-    if "not proof_kernel_replay_type_work_consume(work)" not in enum_tag_membership or "proof_kernel_replay_type_text_equal(binding.name, name, work)" not in enum_tag_membership:
+    if "not proof_kernel_replay_type_work_consume(work)" not in enum_type_identity_rows or "proof_kernel_replay_type_text_equal(binding.name, expected.name, work)" not in enum_type_identity_rows:
         failures.append("enum-tag source identity scans do not charge the shared type-work meter")
-    if budget_gate not in enum_tag_membership or enum_tag_membership.find(budget_gate) > enum_tag_membership.find("type_rows == 1 and tag_rows == 1"):
+    type_identity_budget_guard = "row != identity_count or work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET"
+    if type_identity_budget_guard not in enum_type_identity_rows or enum_type_identity_rows.rfind(type_identity_budget_guard) > enum_type_identity_rows.rfind("return (true, count)"):
+        failures.append("enum-tag type-identity scan can succeed after the type-work budget is exhausted")
+    if "type_identity_binding_rows[row]" not in enum_type_identity_rows or "binding_row >= indexed_count" not in enum_type_identity_rows:
+        failures.append("enum-tag type-identity chain does not map compact offsets back to source rows")
+    if budget_gate not in enum_tag_membership or enum_tag_membership.find(budget_gate) > enum_tag_membership.find("type_rows.count == 1 and tag_rows.count == 1"):
         failures.append("enum-tag uniqueness can succeed after the type-work budget is exhausted")
+    amount_meter = function_body(
+        read(PROOF / "kernel_replay" / "bare_call_owner_validation.elisa"),
+        "proof_kernel_replay_type_work_consume_amount",
+    )
+    if "ensure result == (work <= ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET)" not in amount_meter:
+        failures.append("multi-unit type-work charge contract does not characterize exhaustion")
+    if "return false if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET" not in amount_meter:
+        failures.append("multi-unit type-work charges can continue from an exhausted counter")
+    initial_refusal = amount_meter.find("return false if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET")
+    failed_charge = amount_meter.find("if amount > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET - work:")
+    success_charge = amount_meter.find("work <- work + amount")
+    if initial_refusal < 0 or failed_charge < 0 or initial_refusal >= failed_charge:
+        failures.append("type-work exhaustion is not rejected before remaining-budget subtraction")
+    if failed_charge < 0 or success_charge < 0 or failed_charge >= success_charge:
+        failures.append("multi-unit type-work charges do not fail before incrementing the work counter")
+    elif "work <- ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET + 1" not in amount_meter[failed_charge:success_charge]:
+        failures.append("failed multi-unit type-work charges do not publish the exhaustion sentinel")
 
     if failures:
         for failure in failures:

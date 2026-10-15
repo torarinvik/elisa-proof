@@ -2,22 +2,38 @@ extend ElisaProofKernelReplay:
     private:
         const PROOF_KERNEL_REPLAY_CONDITION_REFUTATION_WORK_LIMIT: usize = 4096
 
-        # The local marker snapshot retains validated unsigned widths so repeated identifier
-        # queries in condition branches do not rescan every source fact.
-        def proof_kernel_replay_unsigned_width_from_markers_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, markers: darray[ProofKernelReplayWitnessMarker], name: sview, work_used: mutable usize&) -> i64:
+        # The local marker snapshot retains validated unsigned widths and binder names so
+        # repeated queries do not reopen marker arena nodes or rescan the snapshot.
+        def proof_kernel_replay_unsigned_width_from_markers_with_goal_work(markers: darray[ProofKernelReplayWitnessMarker], name: sview, work_used: mutable usize&) -> i64:
             return 0 if not proof_kernel_replay_goal_search_charge_amount(work_used, sview_len(name)) or name == ""
             width: mutable i64 = 0
-            for marker in markers |marker, nodes, name, width, work_used|:
+            for marker in markers |marker, name, width, work_used|:
                 return 0 if not proof_kernel_replay_goal_search_charge(work_used)
                 continue if marker.kind != PROOF_KERNEL_REPLAY_WITNESS_UNSIGNED_TYPE
-                marker_name: sview = proof_kernel_replay_scalar_witness_ident_name_with_work(nodes, marker.root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                if marker.name == "":
+                    work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                    return 0
+                matches: bool = proof_kernel_replay_goal_search_text_equal(marker.name, name, work_used)
                 return 0 if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                matches: bool = proof_kernel_replay_goal_search_text_equal(marker_name, name, work_used)
-                return 0 if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                width <- marker.width if matches and (width == 0 or marker.width < width)
+                if matches:
+                    if width != 0 and marker.width != width:
+                        work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                        return 0
+                    width <- marker.width if width == 0
             width
 
-        def proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], markers: darray[ProofKernelReplayWitnessMarker], root: usize, work_used: mutable usize&, depth: usize) -> i64:
+        # Recursive width walkers share one lazy index across all identifier leaves.
+        def proof_kernel_replay_unsigned_width_from_markers_with_cached_index_goal_work(markers: darray[ProofKernelReplayWitnessMarker], name: sview, width_index: mutable ProofKernelReplayLinearUnsignedWidthIndex&, index_ready: mutable bool&, work_used: mutable usize&) -> i64:
+            if not proof_kernel_replay_goal_bool_ref_value(index_ready):
+                indexed: (complete: bool, index: ProofKernelReplayLinearUnsignedWidthIndex) = proof_kernel_replay_linear_unsigned_width_index_build(markers, work_used)
+                if not indexed.complete or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
+                    work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                    return 0
+                width_index <- indexed.index
+                index_ready <- true
+            proof_kernel_replay_linear_unsigned_width_index_lookup(width_index, name, work_used)
+
+        def proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], markers: darray[ProofKernelReplayWitnessMarker], width_index: mutable ProofKernelReplayLinearUnsignedWidthIndex&, index_ready: mutable bool&, root: usize, work_used: mutable usize&, depth: usize) -> i64:
             return 0 if:
                 not proof_kernel_replay_goal_search_charge(work_used)
                 depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or root >= nodes.count
@@ -29,23 +45,25 @@ extend ElisaProofKernelReplay:
                 return literal.width if literal.known and literal.unsigned
                 return 0
             if node.kind == "ident":
-                return proof_kernel_replay_unsigned_width_from_markers_with_goal_work(nodes, markers, node.name, work_used)
+                return proof_kernel_replay_unsigned_width_from_markers_with_cached_index_goal_work(markers, node.name, width_index, index_ready, work_used)
             if node.kind == "field" or node.kind == "index" or node.kind == "index-n":
                 return proof_kernel_replay_peer_unsigned_width_with_work(nodes, children, root, facts, work_used)
             if node.kind == "unary":
-                return proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes, children, facts, markers, node.left, work_used, depth + 1)
+                return 0 if node.operator != "+" and node.operator != "-"
+                return proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes, children, facts, markers, width_index, index_ready, node.left, work_used, depth + 1)
             if node.kind == "binary":
-                left_width: i64 = proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes, children, facts, markers, node.left, work_used, depth + 1)
+                return 0 if not proof_kernel_replay_integer_arithmetic_operator(node.operator)
+                left_width: i64 = proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes, children, facts, markers, width_index, index_ready, node.left, work_used, depth + 1)
                 return 0 if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                right_width: i64 = proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes, children, facts, markers, node.right, work_used, depth + 1)
+                right_width: i64 = proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes, children, facts, markers, width_index, index_ready, node.right, work_used, depth + 1)
                 return 0 if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 return right_width if left_width == 0
                 return left_width if right_width == 0 or left_width < right_width
                 return right_width
             if node.kind == "if":
-                then_width: i64 = proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes, children, facts, markers, node.right, work_used, depth + 1)
+                then_width: i64 = proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes, children, facts, markers, width_index, index_ready, node.right, work_used, depth + 1)
                 return 0 if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                else_width: i64 = proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes, children, facts, markers, node.auxiliary, work_used, depth + 1)
+                else_width: i64 = proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes, children, facts, markers, width_index, index_ready, node.auxiliary, work_used, depth + 1)
                 return 0 if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or then_width == 0 or else_width == 0
                 return then_width if then_width < else_width
                 return else_width
@@ -97,7 +115,9 @@ extend ElisaProofKernelReplay:
                 work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             markers: mutable darray[ProofKernelReplayWitnessMarker] = []
             markers_ready: mutable bool = false
-            for index in 0..<facts.count |index, facts, nodes, children, goal, markers, markers_ready, work_used|:
+            width_index: mutable ProofKernelReplayLinearUnsignedWidthIndex = ProofKernelReplayLinearUnsignedWidthIndex{}
+            index_ready: mutable bool = false
+            for index in 0..<facts.count |index, facts, nodes, children, goal, markers, markers_ready, width_index, index_ready, work_used|:
                 return unknown if not proof_kernel_replay_goal_search_charge(work_used)
                 root: usize = facts[index]
                 continue if root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
@@ -129,9 +149,9 @@ extend ElisaProofKernelReplay:
                 return unknown if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 continue if not safe_difference
                 conditional: ElisaProofKernelCore::ProofKernelNode = nodes[conditional_root]
-                width: i64 = proof_kernel_replay_unsigned_width_from_markers_with_goal_work(nodes, markers, nodes[alias].name, work_used)
+                width: i64 = proof_kernel_replay_unsigned_width_from_markers_with_cached_index_goal_work(markers, nodes[alias].name, &width_index, &index_ready, work_used)
                 return unknown if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                conditional_width: i64 = proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes, children, facts, markers, conditional.right, work_used, 0)
+                conditional_width: i64 = proof_kernel_replay_unsigned_expression_width_from_markers_with_goal_work(nodes, children, facts, markers, &width_index, &index_ready, conditional.right, work_used, 0)
                 return unknown if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 continue if width != conditional_width
                 condition_root: usize = conditional.left
@@ -163,86 +183,87 @@ extend ElisaProofKernelReplay:
                 return (true, index, conditional.left, then_fact, else_fact, then_refuted, else_refuted)
             unknown
 
-        def proof_kernel_replay_unsigned_named_condition_refuted_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, truth: bool, depth: usize, local_work: mutable usize&, markers: mutable darray[ProofKernelReplayWitnessMarker]&, markers_ready: mutable bool&, work_used: mutable usize&) -> bool:
-            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or local_work == 0 or not proof_kernel_replay_goal_search_charge(work_used)
-            local_work <- local_work - 1
-            return false if:
-                root >= nodes.count or not proof_kernel_replay_valid(nodes, root) or not proof_kernel_replay_goal_search_charge_node_text(nodes, root, work_used)
-                work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-            condition: ElisaProofKernelCore::ProofKernelNode = nodes[root]
-            return false if:
-                condition.kind != "binary" or not proof_kernel_replay_arena_shape_valid(condition)
-                condition.left >= nodes.count or condition.right >= nodes.count or not proof_kernel_replay_valid(nodes, condition.left) or not proof_kernel_replay_valid(nodes, condition.right)
-                not proof_kernel_replay_goal_search_charge_node_text(nodes, condition.left, work_used) or not proof_kernel_replay_goal_search_charge_node_text(nodes, condition.right, work_used)
-                work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-            if condition.operator in {"and", "or"}:
-                left: bool = proof_kernel_replay_unsigned_named_condition_refuted_with_goal_work(nodes, children, facts, condition.left, truth, depth + 1, local_work, markers, markers_ready, work_used)
-                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                right: bool = proof_kernel_replay_unsigned_named_condition_refuted_with_goal_work(nodes, children, facts, condition.right, truth, depth + 1, local_work, markers, markers_ready, work_used)
-                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                return ((left or right) if truth else (left and right)) if condition.operator == "and" else ((left and right) if truth else (left or right))
-            if condition.operator in {"==", "!="}:
+        def proof_kernel_replay_unsigned_named_condition_refuted_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, truth: bool, depth: usize, local_work: mutable usize&, markers: mutable darray[ProofKernelReplayWitnessMarker]&, markers_ready: mutable bool&, width_index: mutable ProofKernelReplayLinearUnsignedWidthIndex&, index_ready: mutable bool&, work_used: mutable usize&) -> bool:
+            can Abort.Panic:
+                return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or local_work == 0 or not proof_kernel_replay_goal_search_charge(work_used)
+                local_work <- local_work - 1
+                return false if:
+                    root >= nodes.count or not proof_kernel_replay_valid(nodes, root) or not proof_kernel_replay_goal_search_charge_node_text(nodes, root, work_used)
+                    work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                condition: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+                return false if:
+                    condition.kind != "binary" or not proof_kernel_replay_arena_shape_valid(condition)
+                    condition.left >= nodes.count or condition.right >= nodes.count or not proof_kernel_replay_valid(nodes, condition.left) or not proof_kernel_replay_valid(nodes, condition.right)
+                    not proof_kernel_replay_goal_search_charge_node_text(nodes, condition.left, work_used) or not proof_kernel_replay_goal_search_charge_node_text(nodes, condition.right, work_used)
+                    work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                if condition.operator in {"and", "or"}:
+                    left: bool = proof_kernel_replay_unsigned_named_condition_refuted_with_goal_work(nodes, children, facts, condition.left, truth, depth + 1, local_work, markers, markers_ready, width_index, index_ready, work_used)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    right: bool = proof_kernel_replay_unsigned_named_condition_refuted_with_goal_work(nodes, children, facts, condition.right, truth, depth + 1, local_work, markers, markers_ready, width_index, index_ready, work_used)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    return ((left or right) if truth else (left and right)) if condition.operator == "and" else ((left and right) if truth else (left or right))
+                if condition.operator in {"==", "!="}:
+                    if not proof_kernel_replay_goal_bool_ref_value(markers_ready):
+                        equality_marker_cache_complete: bool = proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, markers, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                        return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not equality_marker_cache_complete
+                        markers_ready <- true
+                    relation_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_markers_and_work(nodes, children, markers, root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    return false if not relation_admission.complete or relation_admission.untrusted or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    primitive: bool = proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, condition.left, condition.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    if primitive:
+                        desired: sview = ("!=" if condition.operator == "==" else "==") if truth else condition.operator
+                        for fact in facts |fact, nodes, children, facts, condition, desired, markers, markers_ready, work_used|:
+                            return false if not proof_kernel_replay_goal_search_charge(work_used)
+                            continue if fact >= nodes.count or not proof_kernel_replay_valid(nodes, fact)
+                            return false if:
+                                not proof_kernel_replay_goal_search_charge_node_text(nodes, fact, work_used)
+                                work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                            f: ElisaProofKernelCore::ProofKernelNode = nodes[fact]
+                            continue if f.kind != "binary" or f.operator != desired or not proof_kernel_replay_arena_shape_valid(f)
+                            fact_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_markers_and_work(nodes, children, markers, fact, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                            return false if not fact_admission.complete or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                            continue if fact_admission.untrusted
+                            fact_primitive: bool = proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, f.left, f.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                            continue if not fact_primitive
+                            same_left: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, f.left, condition.left, work_used)
+                            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                            continue if not same_left
+                            same_right: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, f.right, condition.right, work_used)
+                            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                            return true if same_right
+                return false if:
+                    not proof_kernel_replay_is_order_operator(condition.operator)
+                    not proof_kernel_replay_goal_search_charge(work_used) or not proof_kernel_replay_goal_search_charge(work_used)
+                    work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    nodes[condition.left].kind != "ident" or nodes[condition.right].kind != "ident"
                 if not proof_kernel_replay_goal_bool_ref_value(markers_ready):
-                    equality_marker_cache_complete: bool = proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, markers, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not equality_marker_cache_complete
+                    order_marker_cache_complete: bool = proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, markers, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not order_marker_cache_complete
                     markers_ready <- true
                 relation_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_markers_and_work(nodes, children, markers, root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
                 return false if not relation_admission.complete or relation_admission.untrusted or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                primitive: bool = proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, condition.left, condition.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                if primitive:
-                    desired: sview = ("!=" if condition.operator == "==" else "==") if truth else condition.operator
-                    for fact in facts |fact, nodes, children, facts, condition, desired, markers, markers_ready, work_used|:
-                        return false if not proof_kernel_replay_goal_search_charge(work_used)
-                        continue if fact >= nodes.count or not proof_kernel_replay_valid(nodes, fact)
-                        return false if:
-                            not proof_kernel_replay_goal_search_charge_node_text(nodes, fact, work_used)
-                            work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                        f: ElisaProofKernelCore::ProofKernelNode = nodes[fact]
-                        continue if f.kind != "binary" or f.operator != desired or not proof_kernel_replay_arena_shape_valid(f)
-                        fact_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_markers_and_work(nodes, children, markers, fact, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-                        return false if not fact_admission.complete or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                        continue if fact_admission.untrusted
-                        fact_primitive: bool = proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, f.left, f.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-                        return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                        continue if not fact_primitive
-                        same_left: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, f.left, condition.left, work_used)
-                        return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                        continue if not same_left
-                        same_right: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, f.right, condition.right, work_used)
-                        return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                        return true if same_right
-            return false if:
-                not proof_kernel_replay_is_order_operator(condition.operator)
-                not proof_kernel_replay_goal_search_charge(work_used) or not proof_kernel_replay_goal_search_charge(work_used)
-                work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                nodes[condition.left].kind != "ident" or nodes[condition.right].kind != "ident"
-            if not proof_kernel_replay_goal_bool_ref_value(markers_ready):
-                order_marker_cache_complete: bool = proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, markers, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not order_marker_cache_complete
-                markers_ready <- true
-            relation_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_markers_and_work(nodes, children, markers, root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-            return false if not relation_admission.complete or relation_admission.untrusted or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-            width: i64 = proof_kernel_replay_unsigned_width_from_markers_with_goal_work(nodes, markers, nodes[condition.left].name, work_used)
-            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or (width != 8 and width != 16 and width != 32 and width != 64)
-            right_width: i64 = proof_kernel_replay_unsigned_width_from_markers_with_goal_work(nodes, markers, nodes[condition.right].name, work_used)
-            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or right_width != width
-            primitive_order: bool = proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, condition.left, condition.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not primitive_order
-            complement: sview = "<=" if condition.operator == ">" else "<" if condition.operator == ">=" else ">=" if condition.operator == "<" else ">"
-            desired: sview = complement if truth else condition.operator
-            for fact in facts |fact, nodes, children, facts, condition, desired, markers, markers_ready, work_used|:
-                return false if not proof_kernel_replay_goal_search_charge(work_used)
-                order: (known: bool, left: usize, operator: sview, right: usize) = proof_kernel_replay_readable_order_with_markers_and_work(nodes, children, facts, &markers, &markers_ready, fact, work_used)
-                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                continue if not order.known or order.operator != desired
-                same_left: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, order.left, condition.left, work_used)
-                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                continue if not same_left
-                same_right: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, order.right, condition.right, work_used)
-                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                return true if same_right
-            return false
+                width: i64 = proof_kernel_replay_unsigned_width_from_markers_with_cached_index_goal_work(markers, nodes[condition.left].name, width_index, index_ready, work_used)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or (width != 8 and width != 16 and width != 32 and width != 64)
+                right_width: i64 = proof_kernel_replay_unsigned_width_from_markers_with_cached_index_goal_work(markers, nodes[condition.right].name, width_index, index_ready, work_used)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or right_width != width
+                primitive_order: bool = proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, condition.left, condition.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not primitive_order
+                complement: sview = "<=" if condition.operator == ">" else "<" if condition.operator == ">=" else ">=" if condition.operator == "<" else ">"
+                desired: sview = complement if truth else condition.operator
+                for fact in facts |fact, nodes, children, facts, condition, desired, markers, markers_ready, work_used|:
+                    return false if not proof_kernel_replay_goal_search_charge(work_used)
+                    order: (known: bool, left: usize, operator: sview, right: usize) = proof_kernel_replay_readable_order_with_markers_and_work(nodes, children, facts, markers, markers_ready, fact, work_used)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    continue if not order.known or order.operator != desired
+                    same_left: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, order.left, condition.left, work_used)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    continue if not same_left
+                    same_right: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, order.right, condition.right, work_used)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    return true if same_right
+                return false
 
         def proof_kernel_replay_ident_name_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, work_used: mutable usize&) -> sview:
             return "" if:
@@ -287,6 +308,8 @@ extend ElisaProofKernelReplay:
             left_name: mutable sview = ""
             markers: mutable darray[ProofKernelReplayWitnessMarker] = []
             markers_ready: mutable bool = false
+            width_index: mutable ProofKernelReplayLinearUnsignedWidthIndex = ProofKernelReplayLinearUnsignedWidthIndex{}
+            index_ready: mutable bool = false
             if node.operator in {"==", "!="}:
                 left_name <- proof_kernel_replay_ident_name_with_goal_work(nodes, left_view.stripped, work_used)
                 return unknown if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
@@ -322,9 +345,9 @@ extend ElisaProofKernelReplay:
             else_goal: usize = ElisaProofKernelCore::add_node(nodes, "binary", node.operator, conditional.auxiliary if arm_on_left else other, other if arm_on_left else conditional.auxiliary, 0, 0, 0, 0, "", "")
             return unknown if then_goal >= nodes.count or else_goal >= nodes.count
             then_local_work: mutable usize = PROOF_KERNEL_REPLAY_CONDITION_REFUTATION_WORK_LIMIT
-            then_refuted: bool = proof_kernel_replay_unsigned_named_condition_refuted_with_goal_work(nodes, children, facts, conditional.left, true, 0, &then_local_work, &markers, &markers_ready, work_used)
+            then_refuted: bool = proof_kernel_replay_unsigned_named_condition_refuted_with_goal_work(nodes, children, facts, conditional.left, true, 0, &then_local_work, &markers, &markers_ready, &width_index, &index_ready, work_used)
             return unknown if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             else_local_work: mutable usize = PROOF_KERNEL_REPLAY_CONDITION_REFUTATION_WORK_LIMIT
-            else_refuted: bool = proof_kernel_replay_unsigned_named_condition_refuted_with_goal_work(nodes, children, facts, conditional.left, false, 0, &else_local_work, &markers, &markers_ready, work_used)
+            else_refuted: bool = proof_kernel_replay_unsigned_named_condition_refuted_with_goal_work(nodes, children, facts, conditional.left, false, 0, &else_local_work, &markers, &markers_ready, &width_index, &index_ready, work_used)
             return unknown if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             return (true, conditional.left, then_goal, else_goal, then_refuted, else_refuted)

@@ -1,0 +1,100 @@
+extend ElisaProofKernelReplay:
+    private:
+        # One per-goal map turns repeated unsigned-name lookups into bounded hash probes.
+        # Names and widths are aggregated from the already validated marker snapshot; a
+        # conflicting width stays a hard refusal just as it does in the source-order scan.
+        struct ProofKernelReplayLinearUnsignedWidthIndex:
+            names: mutable darray[sview] = []
+            hashes: mutable darray[u32] = []
+            widths: mutable darray[i64] = []
+            conflicts: mutable darray[bool] = []
+            slots: mutable darray[usize] = []
+            capacity: usize = 0
+
+        def proof_kernel_replay_linear_unsigned_width_index_build(markers: darray[ProofKernelReplayWitnessMarker], work_used: mutable usize&) -> (complete: bool, index: ProofKernelReplayLinearUnsignedWidthIndex):
+            index: mutable ProofKernelReplayLinearUnsignedWidthIndex = ProofKernelReplayLinearUnsignedWidthIndex{}
+            marker_count: mutable usize = 0
+            for marker in markers |marker, marker_count, work_used|:
+                return (false, index) if not proof_kernel_replay_goal_search_charge(work_used)
+                continue if marker.kind != PROOF_KERNEL_REPLAY_WITNESS_UNSIGNED_TYPE
+                return (false, index) if marker.name == "" or not ElisaProofKernelCore::proof_kernel_unsigned_width_valid(marker.width)
+                marker_count <- marker_count + 1
+            return (true, index) if marker_count == 0
+            return (false, index) if marker_count > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET / 2
+            target: usize = marker_count * 2
+            capacity: mutable usize = 1
+            while capacity < target |capacity, target, work_used|:
+                return (false, index) if not proof_kernel_replay_goal_search_charge(work_used)
+                capacity <- capacity * 2
+            return (false, index) if not proof_kernel_replay_goal_search_charge_product(work_used, capacity, 2)
+            index.capacity <- capacity
+            index.hashes.resize(capacity)
+            index.slots.resize(capacity)
+            for slot in 0..<capacity |slot, index, capacity, work_used|:
+                return (false, index) if not proof_kernel_replay_goal_search_charge(work_used)
+                index.slots[slot] <- capacity
+            for marker in markers |marker, index, capacity, work_used|:
+                return (false, index) if not proof_kernel_replay_goal_search_charge(work_used)
+                continue if marker.kind != PROOF_KERNEL_REPLAY_WITNESS_UNSIGNED_TYPE
+                return (false, index) if not proof_kernel_replay_goal_search_charge_amount(work_used, sview_len(marker.name))
+                hash: u32 = proof_kernel_replay_name_hash(marker.name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                inserted: mutable bool = false
+                while probes < capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, slot, hash, marker, index, capacity, work_used, inserted|:
+                    return (false, index) if not proof_kernel_replay_goal_search_charge(work_used)
+                    current: usize = index.slots[slot]
+                    if current == capacity:
+                        row: usize = index.names.count
+                        return (false, index) if row >= capacity or not proof_kernel_replay_goal_search_charge(work_used)
+                        index.names.push(marker.name)
+                        index.hashes[slot] <- hash
+                        index.widths.push(marker.width)
+                        index.conflicts.push(false)
+                        index.slots[slot] <- row
+                        inserted <- true
+                        break
+                    return (false, index) if current >= index.names.count or current >= index.widths.count or current >= index.conflicts.count
+                    if index.hashes[slot] == hash:
+                        return (false, index) if not proof_kernel_replay_goal_search_charge_amount(work_used, sview_len(index.names[current]))
+                        if index.names[current] == marker.name:
+                            index.conflicts[current] <- index.conflicts[current] or index.widths[current] != marker.width
+                            inserted <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                if not inserted:
+                    work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                    return (false, index)
+            return (true, index)
+
+        def proof_kernel_replay_linear_unsigned_width_index_lookup(index: ProofKernelReplayLinearUnsignedWidthIndex&, name: sview, work_used: mutable usize&) -> i64:
+            return 0 if not proof_kernel_replay_goal_search_charge_amount(work_used, sview_len(name)) or name == ""
+            if index.capacity == 0:
+                return 0 if index.slots.count == 0 and index.hashes.count == 0 and index.names.count == 0 and index.widths.count == 0 and index.conflicts.count == 0
+                work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                return 0
+            if index.slots.count != index.capacity or index.hashes.count != index.capacity or index.names.count != index.widths.count or index.names.count != index.conflicts.count:
+                work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                return 0
+            hash: u32 = proof_kernel_replay_name_hash(name)
+            slot: mutable usize = (hash.i64() % index.capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < index.capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, slot, hash, name, index, work_used|:
+                return 0 if not proof_kernel_replay_goal_search_charge(work_used)
+                row: usize = index.slots[slot]
+                return 0 if row == index.capacity
+                if row >= index.names.count or row >= index.widths.count or row >= index.conflicts.count:
+                    work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                    return 0
+                if index.hashes[slot] == hash:
+                    return 0 if not proof_kernel_replay_goal_search_charge_amount(work_used, sview_len(index.names[row]))
+                    if index.names[row] == name:
+                        if index.conflicts[row]:
+                            work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                            return 0
+                        return index.widths[row]
+                slot <- (slot + 1) % index.capacity
+                probes <- probes + 1
+            work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+            return 0

@@ -8,7 +8,6 @@ extend ElisaProofKernelReplay:
                 return (false, false) if not proof_kernel_replay_resource_charge_work_used(work_used, 1)
                 return (true, true) if value == target
             return (true, false)
-
         # Producer resource-event nodes are appended in trace order, so their root IDs are
         # usually sorted. Use logarithmic membership when that invariant has been tracked, while
         # keeping the linear fallback for externally supplied traces with arbitrary node order.
@@ -26,16 +25,16 @@ extend ElisaProofKernelReplay:
             return (true, false) if low >= values.count
             return (false, false) if not proof_kernel_replay_resource_charge_work_used(work_used, 1)
             return (true, values[low] == target)
-
         # Appending to an ID history keeps its sorted fast path only while nondecreasing order
         # is preserved. Existing callers account for the event itself; this charges the extra
         # comparison needed to maintain the index invariant.
         def proof_kernel_replay_resource_record_sorted_id(values: mutable darray[usize]&, sorted: mutable bool&, value: usize, work_used: mutable usize&) -> bool:
-            if sorted and values.count > 0:
-                return false if not proof_kernel_replay_resource_charge_work_used(work_used, 1)
-                sorted <- false if value < values[values.count - 1]
-            values.push(value)
-            true
+            can Abort.Panic:
+                if proof_kernel_replay_goal_bool_ref_value(sorted) and values.count > 0:
+                    return false if not proof_kernel_replay_resource_charge_work_used(work_used, 1)
+                    sorted <- false if value < values[values.count - 1]
+                values.push(value)
+                true
 
         def proof_kernel_replay_resource_record_call_event(state: mutable ProofKernelReplayResourceState&, root: usize) -> bool:
             return false if not proof_kernel_replay_resource_charge_work(state, 3)
@@ -62,7 +61,6 @@ extend ElisaProofKernelReplay:
             equal: bool = proof_kernel_replay_expr_equal_with_work(nodes, children, left_root, right_root, 0, remaining, &comparison_work)
             return false if not proof_kernel_replay_resource_charge_work_used(work_used, comparison_work)
             equal
-
         # A lexical resource scope may introduce and discharge its own region, but it cannot
         # destroy or otherwise invalidate a region inherited from its parent. The child state is
         # intentionally discarded after replay, so compare inherited liveness before accepting
@@ -154,7 +152,6 @@ extend ElisaProofKernelReplay:
                 return state.bindings.binding_names.count if not proof_kernel_replay_resource_charge_text_pair_used(&state.scope.resource_work_used, state.bindings.binding_names[index], name)
                 found <- index if state.bindings.binding_names[index] == name
             return found
-
         # Resource read/write transitions carry the source bind-event root selected by the
         # producer. Requiring that exact active slot identity prevents same-spelled bindings in
         # synthetic or forged scopes from redirecting a source-authenticated identifier.
@@ -191,7 +188,6 @@ extend ElisaProofKernelReplay:
                 pending: bool = state.scope.pending_join_moves[index]
                 return true if pending
             return false
-
         # A whole binding may be written only when its serialized resource capability is
         # writable. Mutable references are intrinsically writable; ordinary bindings require
         # the explicit writable bit. Field/index writes remain governed by their path-level
@@ -211,7 +207,6 @@ extend ElisaProofKernelReplay:
                 return false if not proof_kernel_replay_resource_charge_text_pair_used(&state.scope.resource_work_used, state.regions.active_regions[index], region)
                 found <- true if state.regions.active_regions[index] == region
             return found
-
         # Allocation operands are source expressions, not resource-transition roots. A region
         # value copied into a fresh allocation would otherwise smuggle a shorter lifetime into the
         # destination region. Keep this check independent of the AST producer: every identifier
@@ -418,20 +413,28 @@ extend ElisaProofKernelReplay:
                 return true if index != except_slot and index < state.borrows.borrow_present.count and state.borrows.borrow_present[index] and index < state.borrows.borrow_mutable.count and state.borrows.borrow_mutable[index] and proof_kernel_replay_resource_places_overlap(state, nodes, state.borrows.borrow_target_places[index], target)
             return false
 
-        def proof_kernel_replay_resource_origin_for(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, state: ProofKernelReplayResourceState&, slot: usize) -> (known: bool, place: ProofKernelReplayResourcePlace):
+        def proof_kernel_replay_resource_origin_for(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, state: ProofKernelReplayResourceState&, slot: usize) -> (complete: bool, known: bool, place: ProofKernelReplayResourcePlace):
             empty: ProofKernelReplayResourcePlace = proof_kernel_replay_resource_empty_place()
-            return (false, empty) if slot >= state.bindings.binding_origin_places.count
+            return (false, false, empty) if slot >= state.bindings.binding_origin_places.count
             origin: ProofKernelReplayResourcePlace = state.bindings.binding_origin_places[slot]
-            return (proof_kernel_replay_resource_place_root_valid(nodes, origin), origin)
+            if not origin.has_root:
+                canonical_empty: bool = origin.root_node == 0 and origin.path_root == 0 and origin.depth == 0 and not origin.whole
+                return (true, false, empty) if canonical_empty
+                return (false, false, empty)
+            return (false, false, empty) if not proof_kernel_replay_resource_place_root_valid(nodes, origin)
+            return (true, true, origin)
 
-        def proof_kernel_replay_resource_resolve_origin(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, state: mutable ProofKernelReplayResourceState&, decoded: ProofKernelReplayResourcePlace, binding_name: sview) -> (known: bool, place: ProofKernelReplayResourcePlace):
+        def proof_kernel_replay_resource_resolve_origin(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, state: mutable ProofKernelReplayResourceState&, decoded: ProofKernelReplayResourcePlace, binding_name: sview) -> (complete: bool, known: bool, place: ProofKernelReplayResourcePlace):
             empty: ProofKernelReplayResourcePlace = proof_kernel_replay_resource_empty_place()
-            return (false, empty) if not proof_kernel_replay_resource_place_root_matches(state, nodes, decoded, binding_name)
+            return (false, false, empty) if not proof_kernel_replay_resource_place_root_matches(state, nodes, decoded, binding_name)
             slot: usize = proof_kernel_replay_resource_lookup(state, binding_name)
-            return (false, empty) if slot >= state.bindings.binding_names.count
-            origin: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_origin_for(nodes, state, slot)
-            return (false, empty) if not origin.known
-            return proof_kernel_replay_resource_place_append(state, nodes, origin.place, decoded)
+            return (false, false, empty) if slot >= state.bindings.binding_names.count
+            origin: (complete: bool, known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_origin_for(nodes, state, slot)
+            return (false, false, empty) if not origin.complete
+            return (true, false, empty) if not origin.known
+            composed: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place_append(state, nodes, origin.place, decoded)
+            return (false, false, empty) if not composed.known
+            return (true, true, composed.place)
 
         # Replay the ownership transition language without consulting the AST checker. A scope
         # node receives a copy of its parent's resource state. Ordinary lexical scopes discard
@@ -440,8 +443,9 @@ extend ElisaProofKernelReplay:
         # flat and replayable without aliasing the nested state object.
         def proof_kernel_replay_resource_parameters(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, state: mutable ProofKernelReplayResourceState&, names: mutable darray[sview]&, references: mutable darray[bool]&, mutable_references: mutable darray[bool]&, regions: mutable darray[sview]&) -> bool:
             return false if root >= nodes.count
-            return false if nodes[root].kind != "resource-safety"
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return false if not proof_kernel_replay_resource_charge_node_text(state, node)
+            return false if node.kind != "resource-safety"
             return false if:
                 node.auxiliary > node.children_count
                 not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
@@ -522,6 +526,7 @@ extend ElisaProofKernelReplay:
                 return (false, empty, state.bindings.binding_names.count, false, false) if:
                     allocation_root >= nodes.count
                     not proof_kernel_replay_resource_charge_text_pair(state, nodes[allocation_root].secondary_name, nodes[argument_root].secondary_name)
+                    not proof_kernel_replay_resource_charge_work(state, sview_len(nodes[allocation_root].kind))
                     nodes[allocation_root].kind != "resource-region-call-alloc" or nodes[allocation_root].secondary_name != nodes[argument_root].secondary_name
                 allocation_recorded: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_sorted_membership(state.scope.resource_call_allocations, state.scope.resource_call_allocations_are_sorted, allocation_root, &state.scope.resource_work_used)
                 return (false, empty, state.bindings.binding_names.count, false, false) if:
@@ -563,7 +568,8 @@ extend ElisaProofKernelReplay:
                     not proof_kernel_replay_resource_binding_region_lifetime_valid(state, slot)
                 if slot < state.borrows.borrow_present.count and state.borrows.borrow_present[slot] and slot < state.borrows.borrow_target_places.count and proof_kernel_replay_resource_place_root_valid(nodes, state.borrows.borrow_target_places[slot]):
                     return (true, state.borrows.borrow_target_places[slot], slot, true, slot < state.bindings.binding_mutable_reference.count and state.bindings.binding_mutable_reference[slot])
-                origin: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_origin_for(nodes, state, slot)
+                origin: (complete: bool, known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_origin_for(nodes, state, slot)
+                return (false, empty, state.bindings.binding_names.count, false, false) if not origin.complete
                 # A direct region allocation has no older origin; the binding itself is still a
                 # valid resource place. Borrow aliases do carry an origin and retain that exact
                 # provenance for effect composition.
@@ -575,7 +581,8 @@ extend ElisaProofKernelReplay:
                 slot >= state.bindings.binding_moved.count or state.bindings.binding_moved[slot]
                 not proof_kernel_replay_resource_binding_region_lifetime_valid(state, slot)
             if slot < state.bindings.binding_reference.count and state.bindings.binding_reference[slot]:
-                origin: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_origin_for(nodes, state, slot)
+                origin: (complete: bool, known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_origin_for(nodes, state, slot)
+                return (false, empty, state.bindings.binding_names.count, false, false) if not origin.complete
                 return (false, empty, state.bindings.binding_names.count, false, false) if not origin.known
                 composed: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place_append(state, nodes, origin.place, decoded.place)
                 return (false, empty, state.bindings.binding_names.count, false, false) if not composed.known

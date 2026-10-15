@@ -73,7 +73,9 @@ An API that promises constructive evidence must use a separate rule set and repr
 Arithmetic conclusions are admitted only through the active, metered replay paths. Those paths
 check primitive scalar witnesses, signedness and widths where needed, range/overflow conditions,
 and exact fact membership before applying interval, difference, linear, congruence, or other
-specialized rules. Linear certificates are untrusted: replay checks that each premise is present,
+specialized rules. Recursive width inference propagates through integer-preserving operators and
+unary `+`/`-` only; comparisons, Boolean connectives, and logical `not` do not lend their operand's
+integer width to a result. Linear certificates are untrusted: replay checks that each premise is present,
 that multipliers satisfy the rule's sign and magnitude restrictions, that checked arithmetic
 normalization succeeds, and that variable coefficients cancel with a positive residual constant.
 The unsigned strict-progress rule also admits the complete goal comparison against untrusted

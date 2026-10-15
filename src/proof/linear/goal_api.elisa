@@ -22,7 +22,7 @@ extend ElisaProof:
             if amount > (PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT - work) / multiplier:
                 work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
                 return false
-            return proof_goal_tactic_preflight_charge(&work, amount * multiplier)
+            return proof_goal_tactic_preflight_charge(work, amount * multiplier)
 
         # Find potential literal-width probes in one bottom-up walk. The previous detector
         # rescanned each nested comparison's subtrees and queried literal annotations before
@@ -58,69 +58,72 @@ extend ElisaProof:
         # fragment as the float Boolean solver. Otherwise an opaque call nested in `A and B`
         # could be projected into a separately evaluated goal.
         def proof_float_goal_with_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            goal_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(goal, budget, exhausted)
-            return false if not goal_cost.complete or exhausted
-            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, goal_cost.cost, 6) or exhausted
-            return false if not proof_float_boolean_formula(goal, operator_mask, 0)
-            for fact in facts |fact, goal, budget, exhausted|:
-                fact_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
-                return false if not fact_cost.complete or exhausted
-                return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, fact_cost.cost, 6) or exhausted
-                continue if not proof_float_boolean_formula(fact, operator_mask, 0)
-                contains: (complete: bool, contains: bool) = proof_linear_fact_contains_with_work(fact, goal, 0, budget, exhausted)
-                if not contains.complete:
-                    budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
-                    exhausted <- true
-                    return false
-                return true if contains.contains
-            return false
+            can Abort.Panic:
+                goal_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(goal, budget, exhausted)
+                return false if not goal_cost.complete or proof_goal_bool_ref_value(exhausted)
+                return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, goal_cost.cost, 6) or proof_goal_bool_ref_value(exhausted)
+                return false if not proof_float_boolean_formula(goal, operator_mask, 0)
+                for fact in facts |fact, goal, budget, exhausted|:
+                    fact_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                    return false if not fact_cost.complete or proof_goal_bool_ref_value(exhausted)
+                    return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, fact_cost.cost, 6) or proof_goal_bool_ref_value(exhausted)
+                    continue if not proof_float_boolean_formula(fact, operator_mask, 0)
+                    contains: (complete: bool, contains: bool) = proof_linear_fact_contains_with_work(fact, goal, 0, budget, exhausted)
+                    if not contains.complete:
+                        budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                        exhausted <- true
+                        return false
+                    return true if contains.contains
+                return false
 
         def proof_goal_with_operator_mask_and_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, literals_preflighted: bool, literal_width_required: bool, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            if (proof_float_mode can Global.Read):
-                return true if proof_float_goal_with_work(facts, goal, operator_mask, budget, exhausted)
-                return false if exhausted
-                return (proof_float_propositional_goal_with_shared_work(facts, goal, operator_mask, &budget, PROOF_LINEAR_SAFETY_WORK_LIMIT) can Global.Read)
-            if literals_preflighted:
-                return false if literal_width_required and not proof_state_literals_fit(facts, goal, annotations)
-            else:
-                return false if not proof_goal_literals_fit_with_work(facts, goal, annotations, budget, exhausted)
-                return false if exhausted
-            return (proof_goal_depth(facts, goal, annotations, operator_mask, 0, budget, 0, exhausted) can Global{Read,Write})
+            can Abort.Panic:
+                if (proof_float_mode can Global.Read):
+                    return true if proof_float_goal_with_work(facts, goal, operator_mask, budget, exhausted)
+                    return false if proof_goal_bool_ref_value(exhausted)
+                    return (proof_float_propositional_goal_with_shared_work(facts, goal, operator_mask, budget, PROOF_LINEAR_SAFETY_WORK_LIMIT) can Global.Read)
+                if literals_preflighted:
+                    return false if literal_width_required and not proof_state_literals_fit(facts, goal, annotations)
+                else:
+                    return false if not proof_goal_literals_fit_with_work(facts, goal, annotations, budget, exhausted)
+                    return false if proof_goal_bool_ref_value(exhausted)
+                return (proof_goal_depth(facts, goal, annotations, operator_mask, 0, budget, 0, exhausted) can Global{Read,Write})
 
         def proof_goal_literals_fit_with_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            goal_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(goal, budget, exhausted)
-            return false if not goal_cost.complete or exhausted
-            total_cost: mutable usize = goal_cost.cost
-            for fact in facts |fact, total_cost, budget, exhausted|:
-                fact_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
-                return false if not fact_cost.complete or exhausted or fact_cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - total_cost
-                total_cost <- total_cost + fact_cost.cost
-            for annotation in annotations |annotation, total_cost, budget, exhausted|:
-                owner_cost: usize = sview_len(annotation.owner)
-                annotation_name_cost: usize = sview_len(annotation.name)
-                return false if total_cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT or owner_cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT - total_cost
-                remaining: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - total_cost - owner_cost
-                return false if annotation_name_cost >= remaining
-                name_cost: usize = owner_cost + annotation_name_cost + 1
-                return false if not proof_linear_safety_work_charge(budget, exhausted, name_cost)
-                total_cost <- total_cost + name_cost
-            # This single-pass probe determines whether any literal can require a type-width
-            # check. Its work is charged independently from shape measurement above.
-            return false if not proof_linear_safety_work_charge(budget, exhausted, total_cost)
-            goal_probe: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(goal, 0)
-            required: mutable bool = goal_probe.required
-            for fact in facts |fact, required|:
-                probe: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(fact, 0)
-                required <- required or probe.required
-            return true if not required
-            # The legacy literal validator may revisit subtrees and rescan all marker facts
-            # for each arithmetic node. Reserve the product before invoking it.
-            return false if not proof_linear_safety_work_charge_product4_with_work(budget, exhausted, total_cost, total_cost, total_cost, 1, 1)
-            proof_state_literals_fit(facts, goal, annotations)
+            can Abort.Panic:
+                goal_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(goal, budget, exhausted)
+                return false if not goal_cost.complete or proof_goal_bool_ref_value(exhausted)
+                total_cost: mutable usize = goal_cost.cost
+                for fact in facts |fact, total_cost, budget, exhausted|:
+                    fact_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                    return false if not fact_cost.complete or proof_goal_bool_ref_value(exhausted) or fact_cost.cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - total_cost
+                    total_cost <- total_cost + fact_cost.cost
+                for annotation in annotations |annotation, total_cost, budget, exhausted|:
+                    owner_cost: usize = sview_len(annotation.owner)
+                    annotation_name_cost: usize = sview_len(annotation.name)
+                    return false if total_cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT or owner_cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT - total_cost
+                    remaining: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - total_cost - owner_cost
+                    return false if annotation_name_cost >= remaining
+                    name_cost: usize = owner_cost + annotation_name_cost + 1
+                    return false if not proof_linear_safety_work_charge(budget, exhausted, name_cost)
+                    total_cost <- total_cost + name_cost
+                # This single-pass probe determines whether any literal can require a type-width
+                # check. Its work is charged independently from shape measurement above.
+                return false if not proof_linear_safety_work_charge(budget, exhausted, total_cost)
+                goal_probe: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(goal, 0)
+                required: mutable bool = goal_probe.required
+                for fact in facts |fact, required|:
+                    probe: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(fact, 0)
+                    required <- required or probe.required
+                return true if not required
+                # The legacy literal validator may revisit subtrees and rescan all marker facts
+                # for each arithmetic node. Reserve the product before invoking it.
+                return false if not proof_linear_safety_work_charge_product4_with_work(budget, exhausted, total_cost, total_cost, total_cost, 1, 1)
+                proof_state_literals_fit(facts, goal, annotations)
 
         def proof_goal_with_operator_mask(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, exhausted: mutable bool&) -> bool:
             budget: mutable usize = 0
-            return (proof_goal_with_operator_mask_and_work(facts, goal, annotations, operator_mask, false, false, &budget, &exhausted) can Global{Read,Write})
+            return (proof_goal_with_operator_mask_and_work(facts, goal, annotations, operator_mask, false, false, &budget, exhausted) can Global{Read,Write})
 
         def proof_goal_fact_is_disjunction_with_work(fact: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, is_disjunction: bool):
             stripped: (complete: bool, expression: Ast::Expr) = proof_linear_strip_parens_with_work(fact, budget, exhausted)
@@ -155,21 +158,21 @@ extend ElisaProof:
             exhausted: mutable bool = false
             goal_cost: mutable usize = 0
             return false if not proof_replay_summary_expr_cost_with_limit(goal, &goal_cost, 0, PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS)
-            return false if not proof_goal_tactic_preflight_charge_scaled(&preflight_work, goal_cost, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+            return false if not proof_goal_tactic_preflight_charge_scaled(preflight_work, goal_cost, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
             shape_cost: mutable usize = goal_cost
             for fact in facts |fact, preflight_work, shape_cost|:
                 fact_cost: mutable usize = 0
                 return false if not proof_replay_summary_expr_cost_with_limit(fact, &fact_cost, 0, PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS)
-                return false if not proof_goal_tactic_preflight_charge_scaled(&preflight_work, fact_cost, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+                return false if not proof_goal_tactic_preflight_charge_scaled(preflight_work, fact_cost, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
                 return false if fact_cost > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT - shape_cost
                 shape_cost <- shape_cost + fact_cost
             for annotation in annotations |annotation, shape_cost, preflight_work|:
-                return false if not proof_goal_tactic_preflight_charge(&preflight_work, 1)
+                return false if not proof_goal_tactic_preflight_charge(preflight_work, 1)
                 owner_cost: usize = sview_len(annotation.owner)
                 name_cost: usize = sview_len(annotation.name)
                 return false if:
-                    not proof_goal_tactic_preflight_charge(&preflight_work, owner_cost)
-                    not proof_goal_tactic_preflight_charge(&preflight_work, name_cost)
+                    not proof_goal_tactic_preflight_charge(preflight_work, owner_cost)
+                    not proof_goal_tactic_preflight_charge(preflight_work, name_cost)
                 if shape_cost >= PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT:
                     preflight_work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
                     return false
@@ -189,8 +192,8 @@ extend ElisaProof:
                 # (F+G)^2 = S^2; each equality reserves six shape passes. Input sizing, formula
                 # checks, and recursion-node charges add at most 16*S. The factor 8 leaves
                 # margin without reserving 16 passes for every candidate pair.
-                return false if not proof_goal_tactic_preflight_charge_scaled(&preflight_work, float_square_cost, 8)
-                return false if not proof_goal_tactic_preflight_charge_scaled(&preflight_work, shape_cost, 16)
+                return false if not proof_goal_tactic_preflight_charge_scaled(preflight_work, float_square_cost, 8)
+                return false if not proof_goal_tactic_preflight_charge_scaled(preflight_work, shape_cost, 16)
                 float_work: mutable usize = 0
                 float_exhausted: mutable bool = false
                 float_contained: bool = proof_float_goal_with_work(facts, goal, operator_mask, &float_work, &float_exhausted)
@@ -198,7 +201,7 @@ extend ElisaProof:
                 # The full exact-scan worst case is already reserved above. If its local cap
                 # declines the shortcut, let the independently guarded propositional solver use
                 # whatever aggregate allowance remains; its own exhaustion still fails closed.
-                return (proof_float_propositional_goal_with_shared_work(facts, goal, operator_mask, &preflight_work, PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT) can Global.Read)
+                return (proof_float_propositional_goal_with_shared_work(facts, goal, operator_mask, preflight_work, PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT) can Global.Read)
             goal_width_probe: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(goal, 0)
             width_probe_required: mutable bool = goal_width_probe.required
             for fact in facts |fact, width_probe_required|:
@@ -215,17 +218,17 @@ extend ElisaProof:
                     preflight_work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
                     return false
                 cubic_cost: usize = square_cost * shape_cost
-                return false if not proof_goal_tactic_preflight_charge_scaled(&preflight_work, cubic_cost, 2)
+                return false if not proof_goal_tactic_preflight_charge_scaled(preflight_work, cubic_cost, 2)
             plain: mutable darray[Ast::Expr] = []
             for fact in facts |plain, budget, exhausted|:
-                disjunction: (complete: bool, is_disjunction: bool) = proof_goal_fact_is_disjunction_with_work(fact, &budget, &exhausted)
+                disjunction: (complete: bool, is_disjunction: bool) = proof_goal_fact_is_disjunction_with_work(fact, budget, &exhausted)
                 return false if not disjunction.complete or exhausted
                 plain.push(fact) if not disjunction.is_disjunction
             if plain.count < facts.count:
-                plain_proven: bool = (proof_goal_with_operator_mask_and_work(plain, goal, annotations, operator_mask, true, width_probe_required, &budget, &exhausted) can Global{Read,Write})
+                plain_proven: bool = (proof_goal_with_operator_mask_and_work(plain, goal, annotations, operator_mask, true, width_probe_required, budget, &exhausted) can Global{Read,Write})
                 return true if plain_proven
                 return false if exhausted or budget >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS
-            return (proof_goal_with_operator_mask_and_work(facts, goal, annotations, operator_mask, true, width_probe_required, &budget, &exhausted) can Global{Read,Write})
+            return (proof_goal_with_operator_mask_and_work(facts, goal, annotations, operator_mask, true, width_probe_required, budget, &exhausted) can Global{Read,Write})
 
         def proof_goal_with_precomputed_operator_mask(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize) -> bool can[Global{Read,Write}]:
             # Dropping hypotheses only weakens them, so facts without a disjunction are tried

@@ -37,6 +37,26 @@ for function in (
     assert "proof_kernel_unsigned_width_valid" in body(producer, function), function
 
 kernel = ROOT / "src/proof/kernel_replay"
+facade = (ROOT / "src/proof/kernel_replay.elisa").read_text(encoding="utf-8")
+assert facade.index('include "./kernel_replay/linear_unsigned_width_index.elisa"') < facade.index('include "./kernel_replay/goal_metered_linear_disequality.elisa"')
+assert facade.index('include "./kernel_replay/goal_metered_linear_disequality.elisa"') < facade.index('include "./kernel_replay/goal_metered_linear_unsigned_width.elisa"') < facade.index('include "./kernel_replay/goal_metered_linear_certificates.elisa"')
+width_index_path = kernel / "linear_unsigned_width_index.elisa"
+width_index_build = body(width_index_path, "proof_kernel_replay_linear_unsigned_width_index_build")
+assert "marker.kind != PROOF_KERNEL_REPLAY_WITNESS_UNSIGNED_TYPE" in width_index_build
+assert "marker.width)" in width_index_build
+assert "index.conflicts[current] <- index.conflicts[current] or index.widths[current] != marker.width" in width_index_build
+assert "PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER" in width_index_build
+width_index_lookup = body(width_index_path, "proof_kernel_replay_linear_unsigned_width_index_lookup")
+assert "index.slots.count != index.capacity" in width_index_lookup
+assert 'index.conflicts[row]' in width_index_lookup
+assert "PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1" in width_index_lookup
+width_query = body(kernel / "goal_metered_linear_unsigned_width.elisa", "proof_kernel_replay_linear_unsigned_width_query_with_work")
+assert "if not proof_kernel_replay_goal_bool_ref_value(index_ready):" in width_query
+assert "proof_kernel_replay_linear_unsigned_width_index_build(markers, work_used)" in width_query
+assert "proof_kernel_replay_linear_unsigned_width_index_lookup(width_index, node.name, work_used)" in width_query
+width_wrapper = body(kernel / "goal_metered_linear_disequality.elisa", "proof_kernel_replay_linear_unsigned_width_with_work")
+assert "index_ready: mutable bool = false" in width_wrapper
+assert "proof_kernel_replay_linear_unsigned_width_query_with_work(nodes, children, root, facts, markers, &index, &index_ready" in width_wrapper
 for path, function in (
     (kernel / "goal_metered_interval.elisa", "proof_kernel_replay_unsigned_marker_info_with_goal_work"),
     (kernel / "goal_metered_linear_disequality.elisa", "proof_kernel_replay_element_marker_with_goal_work"),
@@ -52,11 +72,11 @@ assert "proof_kernel_replay_primitive_comparison_with_markers_with_work" in dise
 linear_marker = body(kernel / "goal_metered_linear_disequality.elisa", "proof_kernel_replay_linear_marker_with_work")
 assert linear_marker.index("return false if root >= nodes.count") < linear_marker.index("nodes[root].kind")
 assert "root >= nodes.count or nodes[root]" not in linear_marker
-linear_labels = body(kernel / "goal_metered_linear_disequality.elisa", "proof_kernel_replay_linear_call_argument_labels_with_work")
-assert linear_labels.index("return false if root >= nodes.count") < linear_labels.index("nodes[root].kind")
-assert linear_labels.index("return false if node.left >= nodes.count") < linear_labels.index("nodes[node.left].kind")
-assert "return false if not argument.known or argument.value >= nodes.count" in linear_labels
-assert "continue if not argument.known or argument.value >= nodes.count or nodes[argument.value]" not in linear_labels
+linear_argument = body(kernel / "goal_metered_linear_certificates.elisa", "proof_kernel_replay_linear_argument_with_goal_work")
+assert "not proof_kernel_replay_child_range_valid(call.children_start, call.children_count, children.count) or offset >= call.children_count" in linear_argument
+assert linear_argument.index("not slot.known or slot.value >= nodes.count") < linear_argument.index("nodes[slot.value]")
+assert "argument.kind != \"call_arg\" or argument.name != \"\" or argument.secondary_name != \"\"" in linear_argument
+assert "argument.left >= nodes.count or not proof_kernel_replay_valid(nodes, argument.left)" in linear_argument
 
 pruning = body(kernel / "goal_metered_linear_pruning.elisa", "proof_kernel_replay_linear_prune_with_goal_work")
 assert "proof_kernel_replay_comparison_root_untrusted_with_markers_and_work" in pruning
@@ -76,7 +96,7 @@ assert "ElisaProofKernelCore::proof_kernel_unsigned_width_valid(width.value)" in
 
 refutation = kernel / "arithmetic_refutation.elisa"
 inconsistent = body(refutation, "proof_kernel_replay_facts_arithmetically_inconsistent_with_work")
-assert inconsistent.count("proof_kernel_replay_witness_marker_cache_fill_with_work") == 1
+assert inconsistent.count("proof_kernel_replay_witness_marker_cache_fill_with_work") == 2
 assert "proof_kernel_replay_comparison_root_untrusted_with_markers_and_work" in inconsistent
 assert "proof_kernel_replay_primitive_comparison_with_markers_with_work" in inconsistent
 complementary = body(refutation, "proof_kernel_replay_facts_order_complementary_with_work")
@@ -101,7 +121,7 @@ fact_inconsistency = kernel / "goal_metered_fact_inconsistency.elisa"
 inconsistent_node = body(fact_inconsistency, "proof_kernel_replay_fact_inconsistent_node_with_goal_work")
 assert "markers: mutable darray[ProofKernelReplayWitnessMarker]&" in inconsistent_node
 assert "markers_ready: mutable bool&" in inconsistent_node
-assert "if not markers_ready:" in inconsistent_node
+assert "if not proof_kernel_replay_goal_bool_ref_value(markers_ready):" in inconsistent_node
 assert "proof_kernel_replay_comparison_root_untrusted_with_markers_and_work" in inconsistent_node
 assert "proof_kernel_replay_witness_marker_cache_fill_with_work" in inconsistent_node
 assert "not admission.complete or admission.untrusted" in inconsistent_node

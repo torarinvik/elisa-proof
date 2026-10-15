@@ -8,17 +8,23 @@ extend ElisaProofKernelReplay:
             inner: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
             inner.kind == "index" or inner.kind == "index-n"
 
-        # Arena admission has its own conservative ceiling for general replay. When a report
-        # adapter already carries a goal workspace, debit measured arena work to its separate
-        # cumulative arena meter. Repeated goal-root validation remains bounded without making
-        # per-query workspace initialization consume logical-search work.
-        def proof_kernel_replay_arena_valid_with_goal_work_and_workspace(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize, exhausted: mutable bool&, workspace: mutable ProofKernelReplayValidationWorkspace&) -> bool:
+        # Arena admission keeps its own ceiling for a reused workspace and also debits the
+        # measured walk to the caller's cumulative report meter. Bound the arena walk by both
+        # remaining budgets so `with_budget` cannot hide validation work from its caller.
+        def proof_kernel_replay_arena_valid_with_goal_work_and_workspace(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize, exhausted: mutable bool&, work_used: mutable usize&, workspace: mutable ProofKernelReplayValidationWorkspace&) -> bool:
             if workspace.kernel_goal_arena_work_used > PROOF_KERNEL_REPLAY_ARENA_WORK_BUDGET:
                 workspace.kernel_goal_arena_work_used <- PROOF_KERNEL_REPLAY_ARENA_WORK_BUDGET
                 exhausted <- true
                 return false
+            if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
+                exhausted <- true
+                return false
             remaining: usize = PROOF_KERNEL_REPLAY_ARENA_WORK_BUDGET - workspace.kernel_goal_arena_work_used
-            arena_limit: usize = remaining
+            report_remaining: usize = PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT - work_used
+            arena_limit: usize = remaining if remaining < report_remaining else report_remaining
+            if arena_limit == 0:
+                exhausted <- true
+                return false
             valid: bool = (proof_kernel_replay_arena_valid_with_workspace_limit(nodes, children, facts, goal_root, workspace, arena_limit, false) can Global{Read,Write})
             arena_work: usize = workspace.work_used
             if arena_work > PROOF_KERNEL_REPLAY_ARENA_WORK_BUDGET - workspace.kernel_goal_arena_work_used:
@@ -26,6 +32,9 @@ extend ElisaProofKernelReplay:
                 exhausted <- true
                 return false
             workspace.kernel_goal_arena_work_used <- workspace.kernel_goal_arena_work_used + arena_work
+            if not proof_kernel_replay_goal_search_charge_amount(work_used, arena_work):
+                exhausted <- true
+                return false
             if not valid and arena_work >= arena_limit:
                 exhausted <- true
                 return false
@@ -246,7 +255,7 @@ extend ElisaProofKernelReplay:
                 # A declined specialized rule is a refusal for this shape, not a cue to
                 # retry it through structural equality over potentially effectful reads.
                 rejected_goal: ElisaProofKernelCore::ProofKernelNode = nodes[goal_root]
-                rejected_index_equality: bool = false
+                rejected_index_equality: mutable bool = false
                 if rejected_goal.kind == "binary" and rejected_goal.operator == "==" and rejected_goal.left < nodes.count and rejected_goal.right < nodes.count:
                     return false if not proof_kernel_replay_goal_search_charge_amount(goal_work_used, 2) or goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     rejected_index_equality <- proof_kernel_replay_index_read_fallback_operand(nodes, rejected_goal.left) and proof_kernel_replay_index_read_fallback_operand(nodes, rejected_goal.right)
@@ -269,12 +278,12 @@ extend ElisaProofKernelReplay:
                     goal_root >= nodes.count
                     goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 exhausted: mutable bool = false
-                return false if not (proof_kernel_replay_arena_valid_with_goal_work_and_workspace(nodes, children, facts, goal_root, &exhausted, &validation_workspace) can Global{Read,Write})
-                typing_index: (known: bool, index: ProofKernelReplayTypingIndex) = proof_kernel_replay_build_typing_index(environment, &type_work_used)
+                return false if not (proof_kernel_replay_arena_valid_with_goal_work_and_workspace(nodes, children, facts, goal_root, &exhausted, goal_work_used, validation_workspace) can Global{Read,Write})
+                typing_index: (known: bool, index: ProofKernelReplayTypingIndex) = proof_kernel_replay_build_typing_index(environment, type_work_used)
                 return false if not typing_index.known or type_work_used > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
-                return false if not proof_kernel_replay_typed_proposition_state_valid_with_index(nodes, children, environment, typing_index.index, facts, goal_root, &type_work_used)
+                return false if not proof_kernel_replay_typed_proposition_state_valid_with_index(nodes, children, environment, typing_index.index, facts, goal_root, type_work_used)
                 return false if type_work_used > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
-                proof_kernel_replay_typed_index_read_equality_with_work(nodes, children, environment, typing_index.index, facts, goal_root, &type_work_used, &goal_work_used)
+                proof_kernel_replay_typed_index_read_equality_with_work(nodes, children, environment, typing_index.index, facts, goal_root, type_work_used, goal_work_used)
 
             # Source adapter variant reuses an independently admitted global declaration
             # snapshot while rebuilding owner-local indexes under the kernel work meter. It
@@ -287,7 +296,7 @@ extend ElisaProofKernelReplay:
                     goal_root >= nodes.count
                     goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 exhausted: mutable bool = false
-                return false if not (proof_kernel_replay_arena_valid_with_goal_work_and_workspace(nodes, children, facts, goal_root, &exhausted, &validation_workspace) can Global{Read,Write})
+                return false if not (proof_kernel_replay_arena_valid_with_goal_work_and_workspace(nodes, children, facts, goal_root, &exhausted, goal_work_used, validation_workspace) can Global{Read,Write})
                 return false if not proof_kernel_replay_typed_index_read_with_cached_globals(nodes, children, local_bindings, facts, goal_root, typing_workspace, type_work_used, goal_work_used)
                 return type_work_used <= ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET and goal_work_used <= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
 
@@ -366,7 +375,7 @@ extend ElisaProofKernelReplay:
                 goal: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
                 return false if:
                     not goal.known or goal.node.kind != "binary" or goal.node.operator != "=="
-                    not (proof_kernel_replay_arena_valid_with_goal_work_and_workspace(nodes, children, facts, goal_root, exhausted, workspace) can Global{Read,Write})
+                    not (proof_kernel_replay_arena_valid_with_goal_work_and_workspace(nodes, children, facts, goal_root, exhausted, work_used, workspace) can Global{Read,Write})
                 # Proposition shape and literal safety also walk attacker supplied DAGs. Keep
                 # them on the same report budget as the later width checks and closure search.
                 proposition_valid: bool = proof_kernel_replay_proposition_state_valid_with_goal_work(nodes, children, facts, goal_root, work_used)
@@ -569,31 +578,3 @@ extend ElisaProofKernelReplay:
                 # and transition checks while avoiding a second whole-arena scan.
                 step_work: mutable usize = 0
                 return proof_kernel_replay_tactic_branch_report_with_work(nodes, children, action, parent_facts, parent_goal, left_facts, left_goal, right_facts, right_goal, &step_work)
-
-            # A checked-index certificate proves the memory-safety boundary supplied by Elisa's
-            # `get collection[index] else fallback` operator. It is separate from arithmetic
-            # goal replay: the selected element remains opaque, while replay validates only the
-            # guarded load/fallback shape.
-            def proof_kernel_replay_checked_index_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
-                return (proof_kernel_replay_checked_index_report_impl(nodes, children, facts, goal_root, false) can Global{Read,Write})
-
-            def proof_kernel_replay_checked_index_report_checked_arena[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
-                return false if facts.count != 0 or not (proof_kernel_replay_checked_arena_inputs_valid(nodes, children, facts, goal_root) can Global{Read,Write})
-                return (proof_kernel_replay_checked_index_report_impl(nodes, children, facts, goal_root, true) can Global{Read,Write})
-
-            # A checked-get certificate proves the memory-safety boundary of
-            # `get collection[index] else <control recovery>`. The recovery's termination and
-            # state isolation are checked separately by the source-level control-flow pass.
-            def proof_kernel_replay_checked_get_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
-                return (proof_kernel_replay_checked_get_report_impl(nodes, children, facts, goal_root, false) can Global{Read,Write})
-
-            def proof_kernel_replay_checked_get_report_checked_arena[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
-                return false if facts.count != 0 or not (proof_kernel_replay_checked_arena_inputs_valid(nodes, children, facts, goal_root) can Global{Read,Write})
-                return (proof_kernel_replay_checked_get_report_impl(nodes, children, facts, goal_root, true) can Global{Read,Write})
-
-            def proof_kernel_replay_quantifier_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, kind: sview, facts: darray[usize], goal_root: usize) -> bool:
-                return (proof_kernel_replay_quantifier_report_impl(nodes, children, kind, facts, goal_root, false) can Global{Read,Write})
-
-            def proof_kernel_replay_quantifier_report_checked_arena[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, kind: sview, facts: darray[usize], goal_root: usize) -> bool:
-                return false if not (proof_kernel_replay_checked_arena_inputs_valid(nodes, children, facts, goal_root) can Global{Read,Write})
-                return (proof_kernel_replay_quantifier_report_impl(nodes, children, kind, facts, goal_root, true) can Global{Read,Write})

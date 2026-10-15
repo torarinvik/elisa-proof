@@ -7,6 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 declarations = (ROOT / "src/proof/kernel_replay/type_declaration_index.elisa").read_text(encoding="utf-8")
 variants = (ROOT / "src/proof/kernel_replay/enum_variant_typing.elisa").read_text(encoding="utf-8")
 fixtures = (ROOT / "examples/kernel_proposition_identity_tests.elisa").read_text(encoding="utf-8")
+type_work_helpers = (ROOT / "src/proof/kernel_replay/bare_call_owner_validation.elisa").read_text(encoding="utf-8")
+type_text_helpers = (ROOT / "src/proof/kernel_replay/type_environment.elisa").read_text(encoding="utf-8")
+function_group_index = (ROOT / "src/proof/kernel_replay/function_group_index.elisa").read_text(encoding="utf-8")
+comparison_helpers = (ROOT / "src/proof/kernel_replay/proposition_comparisons.elisa").read_text(encoding="utf-8")
 
 typed_hash = declarations.split("def proof_kernel_replay_typed_enum_member_hash(", 1)[1].split(
     "def proof_kernel_replay_build_declaration_binding_index(", 1
@@ -28,6 +32,24 @@ bare_lookup = variants.split("def proof_kernel_replay_enum_member_sort(", 1)[1].
 )[0]
 scoped_lookup = variants.split("def proof_kernel_replay_enum_type_path(", 1)[1].split(
     "def proof_kernel_replay_enum_member_sort(", 1
+)[0]
+type_work_consume_amount = type_work_helpers.split("def proof_kernel_replay_type_work_consume_amount(", 1)[1].split(
+    "def proof_kernel_replay_bare_owner_index_slot(", 1
+)[0]
+type_text_equal = type_text_helpers.split("def proof_kernel_replay_type_text_equal(", 1)[1].split(
+    "# Private cache of the immutable, validated declaration environment.", 1
+)[0]
+function_group_text_charge = function_group_index.split("def proof_kernel_replay_function_group_charge_text(", 1)[1].split(
+    "def proof_kernel_replay_function_group_index_build(", 1
+)[0]
+type_identity_lookup = comparison_helpers.split("def proof_kernel_replay_type_identity_rows_valid(", 1)[1].split(
+    "def proof_kernel_replay_enum_tag_rows_for_type(", 1
+)[0]
+enum_tag_lookup = comparison_helpers.split("def proof_kernel_replay_enum_tag_rows_for_type(", 1)[1].split(
+    "def proof_kernel_replay_enum_tag_belongs_to_type(", 1
+)[0]
+enum_tag_owner = comparison_helpers.split("def proof_kernel_replay_enum_tag_belongs_to_type(", 1)[1].split(
+    "def proof_kernel_replay_enum_tag_test_valid(", 1
 )[0]
 
 assert 'proof_kernel_replay_name_hash("enum-member-typed")' in typed_hash
@@ -68,9 +90,37 @@ assert "sview_len(binding.owner)" in builder
 assert "proof_kernel_replay_find_typed_enum_member_binding" in typed_call
 assert 'proof_kernel_replay_find_typing_binding(environment, typing_index, "enum-member"' in bare_lookup
 assert '"enum-member", "Some", "Other"' in fixtures
+assert '"type", "OptionAlias", "", "aggregate", "tuple"' in fixtures
+assert "alias_collision_alias_added" in fixtures and "return 80 if proof_kernel_replay_proposition_formation_report" in fixtures
 assert "valid_other_qualified_member" in fixtures
 assert '"binary", "==", other_value_root, other_some_member' in fixtures
 assert "scoped_other_quantifier" in fixtures
 assert '"quantifier", "forall", scoped_other_set, scoped_other_equality' in fixtures
+assert "ensure result == (work <= ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET)" in type_work_consume_amount
+assert "if amount > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET - work:" in type_work_consume_amount
+assert "work <- ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET + 1" in type_work_consume_amount
+assert "ensure result == (work <= ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET and left == right)" in type_text_equal
+assert "work <- ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET + 1" in type_text_equal
+assert "proof_kernel_replay_type_work_consume_amount(sview_len(name), work)" in function_group_text_charge
 
-print("typed enum-member resolution uses the bounded owner-aware index")
+# Tag membership must count every type row sharing the identity and every matching tag row;
+# the index may accelerate those checks but must not weaken duplicate rejection.
+assert 'type_identity_relevant <- type_identity_relevant + 1 if binding.kind == "type"' in builder
+assert "type_identity_rows.resize(type_identity_relevant)" in builder
+assert "type_identity_rows[type_identity_offset] <- row" in builder
+assert "type_identity_next[type_identity_offset] <- type_identity_heads[identity_slot]" in builder
+assert "type_identity_heads[identity_slot] <- type_identity_offset" in builder
+assert "return type_identity_offset == type_identity_relevant" in builder
+assert "typing_index.type_identity_binding_rows[row]" in type_identity_lookup
+assert 'binding.kind == "type" and binding.type_identity == expected.type_identity' in type_identity_lookup
+assert "not proof_kernel_replay_type_text_equal(binding.name, expected.name, work)" in type_identity_lookup
+assert "binding.sort != \"named\"" in type_identity_lookup
+assert 'binding.kind == "enum-tag" and binding.type_identity == expected.type_identity and binding.owner_type_identity == expected.type_identity' in enum_tag_lookup
+assert "proof_kernel_replay_type_text_equal(binding.name, name, work)" in enum_tag_lookup
+assert "proof_kernel_replay_type_text_equal(binding.owner, expected.name, work)" in enum_tag_lookup
+assert "row != indexed_count or work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET" in enum_tag_lookup
+assert "type_rows.count == 1 and tag_rows.count == 1" in enum_tag_owner
+assert "type_identity_binding_rows.count == result.index.type_identity_binding_next.count" in type_text_helpers
+assert "scratch.type_identity_binding_rows.clear()" in type_text_helpers
+
+print("typed enum resolution and shared type-work exhaustion are bounded")

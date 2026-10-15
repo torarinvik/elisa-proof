@@ -13,6 +13,7 @@ python3 "$ROOT_DIR/scripts/test_generic_alias_application_dispatch.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_ast_kernel_mirror_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_index_read_work_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_primitive_witness_marker_work.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_unsigned_marker_conflict_refusal.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_operator_impl_index_guards.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_array_scalar_operator_marker_validation.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_bound_work_budget.py" || exit 1
@@ -20,13 +21,19 @@ python3 "$ROOT_DIR/scripts/test_kernel_difference_closure_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_bounded_model_width_safety.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_kernel_workspace_cache_boundary.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_resource_summary_root_cache.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_resource_event_source_boundary_static.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_index_read_operator_parity.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_global_mutable_array_owner_identity.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_global_constant_owner_identity.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_requires_call_owner_identity.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_report_call_requires_source_resolution.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_report_call_requires_census.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_report_default_call_requires_admission.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_source_owner_offset.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_source_admission_inventory_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_source_admission_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_recursive_call_admission_static.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_source_runtime_alias_index.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_report_output_loop_layout.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_source_return_work_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_quantified_call_work_budget.py" || exit 1
@@ -36,9 +43,11 @@ python3 "$ROOT_DIR/scripts/test_linear_certificate_search_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_postcondition_context_index.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_goal_fact_index_broad_candidates.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_type_bound_local_work_budget.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_type_bound_local_shadow_source.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_drop_type_generic_owner.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_summary_call_assignment_source_guard.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_typed_enum_member_index.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_effect_containment_source_work_budget.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_threaded_summary_exact_generic_owner.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_pop_snapshot_exact_parameter_owner.py" || exit 1
 python3 "$ROOT_DIR/scripts/test_replay_parameter_shadow_owner.py" || exit 1
@@ -92,3 +101,4 @@ if ! ELISA_PROOF_BIN="${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" \
     printf 'proof test matrix failed: literal helper summary coverage regressed\n' >&2
     exit 1
 fi
+"$ROOT_DIR/scripts/test_portable_file_reader_posix.sh"

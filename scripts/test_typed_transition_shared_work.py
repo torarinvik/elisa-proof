@@ -9,6 +9,7 @@ formation = ROOT / "src/proof/kernel_replay/proposition_formation.elisa"
 tactic_json = ROOT / "src/proof/tactic_json.elisa"
 tactic_replay = ROOT / "src/proof/kernel_replay/tactic_replay.elisa"
 branch_report = ROOT / "src/proof/kernel_replay/tactic_branch_report.elisa"
+tactic_transition_work = ROOT / "src/proof/kernel_replay/tactic_transition_work.elisa"
 
 
 def body(path: Path, name: str) -> str:
@@ -47,6 +48,15 @@ assert "proof_kernel_replay_goal_search_charge_product(step_work, sview_len(acti
 transition_step = body(tactic_replay, "proof_kernel_replay_tactic_step_body")
 assert "proof_kernel_replay_goal_search_charge_product(step_work, sview_len(action), 64)" in transition_step
 assert "proof_kernel_replay_goal_search_charge_product(step_work, sview_len(detail), 4)" in transition_step
+
+equality_adapter = body(tactic_transition_work, "proof_kernel_replay_tactic_expr_equal_with_work")
+assert "remaining: usize = PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT - step_work" in equality_adapter
+assert "proof_kernel_replay_expr_equal_with_work(nodes, children, left, right, 0, remaining, &equality_work)" in equality_adapter
+failed_at_limit = "if not equal and equality_work >= remaining:"
+assert failed_at_limit in equality_adapter
+assert "step_work <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1" in equality_adapter
+assert equality_adapter.index(failed_at_limit) < equality_adapter.index("return false if equality_work > remaining")
+assert equality_adapter.index("return false if equality_work > remaining") < equality_adapter.index("step_work <- step_work + equality_work")
 
 branch = body(api, "proof_kernel_replay_tactic_branch_typed")
 assert "proof_kernel_replay_build_typing_index(environment, &typing_work_used)" in branch
