@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 validation_path = ROOT / "src/proof/kernel_replay/tactic_arena_validation.elisa"
 api_path = ROOT / "src/proof/kernel_replay/api.elisa"
 tactic_path = ROOT / "src/proof/kernel_replay/tactic_replay.elisa"
+workspace_path = ROOT / "src/proof/kernel_replay/validation_workspace.elisa"
 
 
 def body(path: Path, name: str) -> str:
@@ -32,6 +33,32 @@ assert "proof_kernel_replay_arena_valid_with_workspace_limit(nodes, children, fa
 assert "one unchanged arena reference" in trace_validator
 all_kernel = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "src/proof/kernel_replay").rglob("*.elisa"))
 assert all_kernel.count("workspace, work_limit, true)") == 1
+
+# Report validation accounts for arena traversal cumulatively, separately from logical search.
+# The per-call validator's `work_used` is scratch accounting and must be charged before the next
+# root query can obtain another allowance from the shared workspace.
+workspace_source = workspace_path.read_text(encoding="utf-8")
+assert "kernel_goal_arena_work_used: mutable usize" in workspace_source
+workspace_constructor = body(workspace_path, "proof_kernel_replay_validation_workspace_new")
+assert "kernel_goal_arena_work_used: 0" in workspace_constructor
+
+goal_arena_validator = body(api_path, "proof_kernel_replay_arena_valid_with_goal_work_and_workspace")
+for required in (
+    "workspace.kernel_goal_arena_work_used > PROOF_KERNEL_REPLAY_ARENA_WORK_BUDGET",
+    "PROOF_KERNEL_REPLAY_ARENA_WORK_BUDGET - workspace.kernel_goal_arena_work_used",
+    "workspace, arena_limit, false)",
+    "arena_work: usize = workspace.work_used",
+    "workspace.kernel_goal_arena_work_used <- PROOF_KERNEL_REPLAY_ARENA_WORK_BUDGET",
+    "workspace.kernel_goal_arena_work_used <- workspace.kernel_goal_arena_work_used + arena_work",
+):
+    assert required in goal_arena_validator, required
+assert "proof_kernel_replay_goal_search_charge_amount" not in goal_arena_validator
+assert goal_arena_validator.index("workspace.kernel_goal_arena_work_used > PROOF_KERNEL_REPLAY_ARENA_WORK_BUDGET") < goal_arena_validator.index("PROOF_KERNEL_REPLAY_ARENA_WORK_BUDGET - workspace.kernel_goal_arena_work_used")
+assert goal_arena_validator.index("valid: bool =") < goal_arena_validator.index("arena_work: usize = workspace.work_used")
+assert goal_arena_validator.index("workspace.kernel_goal_arena_work_used <- workspace.kernel_goal_arena_work_used + arena_work") < goal_arena_validator.index("if not valid and arena_work >= arena_limit")
+
+per_call_validator = body(validation_path, "proof_kernel_replay_arena_valid_with_workspace_limit")
+assert per_call_validator.index("workspace.work_used <- 0") < per_call_validator.index("initialize_cache:")
 
 # Every API endpoint accepting a validation workspace either validates in its own body
 # or delegates to an endpoint that does. Discover these signatures instead of keeping a

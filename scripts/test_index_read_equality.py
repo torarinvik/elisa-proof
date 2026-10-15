@@ -27,7 +27,8 @@ for fixture, expected in (("index_read_equality.elisa", "failed"),
     assert not report["trust"]["trusted_assumptions"]
     if expected == "proved":
         assert report["summary"]["proven"] == report["summary"]["obligations"] > 0
-        targets = ("typed_read_equal_at_direct_index", "typed_read_equal_at_transitive_index")
+        targets = ("typed_read_equal_at_direct_index", "typed_read_equal_at_transitive_index",
+                   "typed_field_read_equal_at_index")
         for target in targets:
             assert any(d.get("name") == target and d.get("verified")
                        for d in report["declaration_details"]), (target, report["declaration_details"])

@@ -150,6 +150,11 @@ goal attempt, bound every fact to a trace and re-matched the AST against the are
 | `effect-containment` | `proof_kernel_replay_effect_report_with_workspace` | trace certificate |
 <!-- /inventory:certificate-rules -->
 
+Resource-call source inventory rejects unresolved field or dynamic dispatch. It now shares the
+replay-built conversion, alias, generic, and type indexes used by deterministic call validation,
+keyed to the exact caller declaration identity, so field conversions are admitted only when
+replay positively classifies them as intrinsic.
+
 ## Certificate construction entry points
 
 These functions append `ProofGoalCertificate` values to the report. The inventory checker finds
@@ -225,6 +230,22 @@ report.
 | `branch-join` | `check/call_and_branch_state.elisa` | premises traced, step re-proved |
 <!-- /inventory:derived-trace-kinds -->
 
+## Typed indexed-read congruence
+
+`proof_kernel_replay_typed_index_read_equality_with_work` is a typed-API replay rule, not an
+axiom or source boundary fact. It accepts equality between two built-in indexed reads only when
+the receiver paths are structurally identical identifier/field projections, the receiver sorts
+are known containers or strings, both index expressions have the same known integral
+sort, and the result sorts match in the primitive integer, boolean, or character families. The
+conclusion and every equality edge must use primitive builtin equality; index expressions with
+calls or untrusted overloaded operators are rejected. Non-structural index equality is established
+by an iterative graph walk over replayed primitive equality premises whose endpoint sorts exactly
+match the goal index sort. When this specialized rule declines a top-level equality between direct
+or checked indexed-read encodings, the typed goal API refuses the goal instead of retrying it
+through general structural search; that fallback would not preserve the rule's purity and overload
+checks. The untyped kernel API keeps indexed-read congruence disabled because arena shape alone
+does not authenticate receiver sorts.
+
 Summary kinds import another declaration's proven contract. They need the exact theorem
 instance, with each substituted `requires` tied to a replayed certificate. They also need
 `proof_replay_dependency_is_checked`, which tracks the SCC stack with a depth limit of 16 so that
@@ -268,6 +289,12 @@ Same-name shadowing, including formal shadowing, is accepted only when each oper
 the active declaration and its bind-event root matches the kernel slot. Match patterns, non-range
 loop captures, and other unsupported binder forms remain fail-closed.
 
+Proof and lemma purity admission recognizes `assert` as the assertion builtin only when the
+callable is not shadowed by a visible local. A local `assert` name is rejected as an assertion
+callee, and the lexical lookup is charged to the callable-scope work budget. This check does not
+change general runtime name resolution; it closes the erased-proof admission path where spelling
+alone could otherwise classify a local call as an assertion.
+
 Nested scope replay uses metered stack-length marks and truncation for lexical binder state, while
 carrying event-use history forward. A scope wrapper has no source-scope identity, but replay
 requires inherited bindings and region state to be preserved at its exit; the only inherited
@@ -281,8 +308,11 @@ patterns, non-range loop captures, and unsupported binder forms remain fail-clos
 
 Call events, pending call allocations, and return witnesses are available after alternatives only
 when every arm produces them; allocation, call-result, and return-witness consumption is merged
-across arms so no path can reuse a one-shot event. Sequential scopes append their child history after validating the
-inherited prefix. The work meter charges these comparisons and merges.
+across arms so no path can reuse a one-shot event. A call-allocation event root may be recorded
+only once. Every child-local call allocation must be consumed within that child before an
+alternative join or scope exit, and top-level allocations must all be consumed before replay
+succeeds. Sequential scopes append their child history after validating the inherited prefix.
+The work meter charges these comparisons, memberships, and merges.
 
 <!-- inventory:resource-fact-free-leaves -->
 | Kind |
@@ -417,11 +447,13 @@ stripping and expression-name mentions in replay-local, depth-bounded helpers. T
 checks now use source indexes rebuilt in a replay-owned scratch report. Each function-generic row
 must match one exact identity annotation, and marker/row cardinality rejects omitted function rows.
 Threaded-summary replay independently derives reference markers through explicit wrappers and
-unambiguous root-scope alias targets, then compares them with the shared marker result. Generic
-alias exclusion still relies on parser alias-owner annotations, and reference-free/storage-alias
-classification still shares source-analysis helpers. Independent semantic re-derivation and source
-mutations with alias/lifetime controls remain required; these dependencies are not a verification
-claim.
+uses a bounded replay-local scope walk for nominal reference and storage fields, then compares the
+result with shared marker output. Globally unique root nominals keep an indexed fast path; nested
+and duplicate nominal names use nearest-visible-scope selection and same-scope duplicates fail
+closed. Alias expansion and generic-alias exclusion still rely on shared indexes and parser
+alias-owner annotations, while other reference-free/storage-alias classification still shares
+source-analysis helpers. Independent semantic re-derivation and source mutations with alias/lifetime
+controls remain required; these dependencies are not a verification claim.
 
 2. **Caller-supplied typing contexts are not source-authenticated by the typed kernel API.**
    `proof_kernel_replay_goal_report_typed` checks proposition formation against the supplied
@@ -435,23 +467,24 @@ claim.
    the environment has no effect or purity metadata. It walks each index and edge subterm against
    parser-origin untrusted operator markers as well, since overloaded arithmetic is represented by
    ordinary binary nodes. Both walks validate node shapes, charge the shared goal-work budget, and
-   fail closed on malformed or unsupported terms. The equality-edge prepass also charges the
-   dynamic `kind` and binary `operator` lengths before dispatch. The API validates environment
-   structure, not source provenance. The indexed-read rule itself rejects calls and source-marked
-   overloaded operators in positions it uses; however, `proof_kernel_replay_goal_report_typed`
+   fail closed on malformed or unsupported terms. Receivers may be stable identifier/field paths;
+   source parentheses are stripped by arena encoding. Calls and computed receiver forms are refused. The equality-edge
+   prepass also charges the dynamic `kind` and binary `operator` lengths before dispatch. The API
+   validates environment structure, not source provenance. The indexed-read rule itself rejects
+   calls and source-marked overloaded operators in positions it uses; however,
+   `proof_kernel_replay_goal_report_typed`
    can fall back to general goal replay after that rule declines. Source adapters must authenticate
    the environment and apply their call- and operator-purity policies to any result that can rely
    on that fallback. The proof source adapter uses the dedicated indexed-read entry point, which
    returns only the indexed-read rule's result and does not take the general fallback. Direct
    callers remain responsible for provenance.
 
-3. **General arena admission shares the goal-search work ceiling.** The checked goal replay API
-   debits full arena validation (including per-node workspace initialization) to the same
-   262,144-unit budget used by goal search. Since workspace setup alone costs eight units per
-   node, large arenas can be rejected before their graph is traversed, even though the arena
-   validator has a larger standalone work ceiling. This is an intentional combined-work bound;
-   raising arena capacity safely requires preserving an aggregate limit across repeated goal and
-   arena work, rather than simply increasing the per-call arena limit.
+3. **Goal search and arena admission use separate cumulative ceilings.** A checked goal replay
+   workspace tracks logical deductions against the 262,144-unit goal-search meter and arena
+   validation against `PROOF_KERNEL_REPLAY_ARENA_WORK_BUDGET`. This lets the linear per-node
+   workspace setup use the arena's larger bound without consuming logical search capacity;
+   repeated root validations still draw from the same cumulative arena allowance for that
+   workspace. Each independent invocation remains bounded by both meters.
 
 4. **Some source operator checks remain type-erased.** The shared AST walk cannot authenticate an
    operator receiver's sort, so any indexed implementation contributes its operator bits to the

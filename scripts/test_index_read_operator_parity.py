@@ -48,7 +48,26 @@ assert 'kind_is_binary and candidate.operator == "=="' in typed_rule
 assert "proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, candidate.left, candidate.right" in typed_rule
 assert "edge_primitive_states.push(1 if primitive else 2)" in typed_rule
 assert "continue if edge_primitive_states[fact_index] != 1" in typed_rule
-assert 'nodes[left.left].kind != "ident" or nodes[right.left].kind != "ident"' in typed_rule
+assert "proof_kernel_replay_disjunction_stable_receivers_equal_with_work(nodes, left.left, right.left" in typed_rule
+assert "proof_kernel_replay_goal_search_expr_equal(nodes, children, left.left, right.left" not in typed_rule
+source_candidate = function_body(ROOT / "src/proof/replay/typed_postcondition_replay.elisa", "proof_replay_typed_index_read_goal_shape_candidate")
+assert 'left_receiver.kind in {"ident", "field"}' in source_candidate
+assert 'right_receiver.kind in {"ident", "field"}' in source_candidate
+stable_receiver = function_body(ROOT / "src/proof/kernel_replay/disjunction_call_guard.elisa", "proof_kernel_replay_disjunction_stable_receivers_equal_with_work")
+assert 'left.kind == "ident"' in stable_receiver
+assert "left.kind != right.kind" in stable_receiver
+assert 'left.name != "" and left.name == right.name' in stable_receiver
+assert 'left.kind != "field" or left.name != right.name' in stable_receiver
+assert 'left.kind == "paren"' not in stable_receiver
+assert "not proof_kernel_replay_goal_search_charge(work_used)" in stable_receiver
+assert "not proof_kernel_replay_valid(nodes, left_root) or not proof_kernel_replay_valid(nodes, right_root)" in stable_receiver
+assert "not proof_kernel_replay_goal_search_charge_node_text(nodes, left_root, work_used)" in stable_receiver
+assert "not proof_kernel_replay_goal_search_charge_node_text(nodes, right_root, work_used)" in stable_receiver
+assert "not proof_kernel_replay_arena_shape_valid(nodes[left_root])" in stable_receiver
+assert "not proof_kernel_replay_arena_shape_valid(nodes[right_root])" in stable_receiver
+assert "depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT" in stable_receiver
+assert "work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT" in stable_receiver
+assert "proof_kernel_replay_disjunction_stable_receivers_equal_with_work(nodes, left.left, right.left" in stable_receiver
 assert "proof_kernel_replay_disjunction_term_has_call_with_work(nodes, children, left.right" in typed_rule
 assert "proof_kernel_replay_disjunction_term_has_call_with_work(nodes, children, right.right" in typed_rule
 assert "proof_kernel_replay_disjunction_term_has_call_with_work(nodes, children, candidate.left" in typed_rule
@@ -99,6 +118,8 @@ assert "requires rows[cursor] != 64\n    ensure rows[3] != 64" in positive
 assert "def indexed_disequality_from_negated_equality" in positive
 assert "def indexed_read_at_transitively_equal_index" in positive
 assert "requires first == middle\n    requires middle == last\n    ensure rows[first] == rows[last]" in typed_positive
+assert "def typed_field_read_equal_at_index(store: TypedIndexReadStore&, cursor: i64)" in typed_positive
+assert "ensure store.rows[cursor] == store.rows[3]" in typed_positive
 assert "requires not (rows[cursor] == 64)\n    ensure rows[3] != 64" in positive
 assert "def rejected_disequality_different_index" in negative
 assert "def rejected_index_read_through_cross_sort_edges" in negative
@@ -120,6 +141,7 @@ assert "requires rows[cursor] != 64\n    ensure rows[3] != 64" in negative
 runtime = (ROOT / "scripts/test_index_read_equality.py").read_text(encoding="utf-8")
 assert '"index_read_equality.elisa", "failed"' in runtime
 assert '"typed_index_read_congruence.elisa", "proved"' in runtime
+assert '"typed_field_read_equal_at_index"' in runtime
 assert '"open_indexed_prefix_reasoning.elisa", "failed"' in runtime
 assert '"open_index_window_disjunctions.elisa", "failed"' in runtime
 assert '"rejected_index_read_equality.elisa", "failed"' in runtime
