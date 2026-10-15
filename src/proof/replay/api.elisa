@@ -3,9 +3,9 @@ extend ElisaProof:
     public:
         def proof_replay_note_trace_lookup_budget(report: mutable ProofReport&) -> void:
             proof_kernel_budget_note(report, "replay-trace-lookup") if report.analysis_1.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET
-        # This audit validates one trace entry. Do not leave the all-facts origin cache
-        # behind: only the selected trace is validated below, so other rows must not become
-        # newly presentable through snapshots the audit just rebuilt.
+        # This validates one report-local trace for diagnostics; it cannot authenticate the
+        # report's source snapshot and is not a proof verdict. Do not leave the all-facts origin
+        # cache behind: only the selected trace is validated below.
         def proof_replay_fact_trace_entry[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool can[Global{Read, Write}]:
             valid: bool = (proof_replay_fact_trace_entry_with_cache(report, trace_index) can Global{Read,Write})
             report.analysis_1.traces.origin_indices.clear()
@@ -13,9 +13,11 @@ extend ElisaProof:
             return valid
 
     private:
-        # Standalone provenance entry point for auditors and adversarial harnesses. Require both
-        # independently implemented views so this audit API detects drift between source-level
-        # reconstruction and the authoritative source-neutral kernel trace.
+        # Report-local provenance audit for diagnostics and adversarial harnesses. It checks
+        # agreement between source reconstruction from the report and the source-neutral kernel
+        # trace, but the mutable report is not an authenticated source capability. A true result
+        # must not be used as a source-authorized proof verdict; callers need a ProofCheckedView
+        # bound to the issued ProofSourceAnalysis and replay receipt for that decision.
         def proof_replay_fact_trace_entry_with_cache[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool can[Global{Read, Write}]:
             # This entry has no active certificate context. Ignore caller-retained report
             # context and rebuild every cache it uses from the current mutable report.
@@ -39,10 +41,10 @@ extend ElisaProof:
             structural_cache: mutable ProofReplayStructuralValidationCache = ProofReplayStructuralValidationCache{}
             node_count: usize = report.analysis_1.kernel.nodes.count
             child_count: usize = report.analysis_1.kernel.children.count
-            source_valid: bool = (proof_replay_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
+            source_valid: bool = (proof_replay_fact_trace_is_valid_with_stack(report, trace, trace_index, trace.name, 0, dependency_stack, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
             proof_replay_note_trace_lookup_budget(report)
             return false if report.analysis_1.kernel.budget_exhausted
-            kernel_valid: mutable bool = (proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack, true, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
+            kernel_valid: mutable bool = (proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, trace_index, trace.name, 0, dependency_stack, true, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
             if node_count != report.analysis_1.kernel.nodes.count or child_count != report.analysis_1.kernel.children.count:
                 report.analysis_1.kernel.arena_validated <- (ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children) can Global{Read,Write})
                 kernel_valid <- false if not report.analysis_1.kernel.arena_validated
@@ -51,7 +53,7 @@ extend ElisaProof:
             return source_valid and kernel_valid
 
     public:
-        def proof_replay_fact_origin[@r](report: mutable ProofReport& @r, fact: Ast::Expr, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) can[Global.Read, Global.Write]:
+        def proof_replay_fact_origin[@r](report: mutable ProofReport& @r, fact: Ast::Expr, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) can[Global{Read,Write}]:
             index: usize = proof_replay_fact_trace_index(report, fact, owner)
             return (false, "", 0, "", "", 0) if:
                 index >= report.analysis_1.traces.records.count
@@ -248,6 +250,8 @@ extend ElisaProof:
             source_work <- source_work + report.analysis_1.certificates.count
             for certificate in report.analysis_1.certificates:
                 return false if not certificate.replayed
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or report.results.goal_attempts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + report.results.goal_attempts.count
             for index in 0..<report.results.goal_attempts.count |index, report, replayed|:
                 return false if report.results.goal_attempts[index].producer_proven and not replayed[index]
             true
@@ -314,7 +318,7 @@ extend ElisaProof:
                 certificate.replayed <- false
             report.analysis_2.replay_gaps <- PROOF_REPLAY_INCOMPLETE_SENTINEL_GAPS if report.analysis_1.certificates.count == 0
 
-        def proof_replay_certificates_mutating[@r](report: mutable ProofReport& @r) -> void can[Global.Read, Global.Write]:
+        def proof_replay_certificates_mutating[@r](report: mutable ProofReport& @r) -> void can[Global{Read,Write}]:
             # Replay is a query over the current immutable certificate set. Reset presentation
             # counters and per-certificate flags so repeated API calls cannot accumulate stale
             # results from an earlier replay pass.
@@ -403,12 +407,12 @@ extend ElisaProof:
         # Standalone compatibility API: the returned receipt is a replay-status snapshot only.
         # Its explicitly named kernel diagnostic accessors are not source-authorized. Use the
         # combined checked view below for proof status or any claim about the source program.
-        def proof_replay_certificates[@r](report: mutable ProofReport& @r) -> ProofReplayReceipt[r] can[Memory.Allocate, Global.Read, Global.Write]:
+        def proof_replay_certificates[@r](report: mutable ProofReport& @r) -> ProofReplayReceipt[r] can[Memory.Allocate, Global{Read,Write}]:
             (proof_replay_certificates_mutating(report) can Global{Read,Write})
             return proof_replay_receipt_from_report(report, false)
 
     public:
-        def proof_check_and_replay_with_source[@r](source_arena: mutable Arena& @r, diagnostics: mutable darray[Semantic::Diagnostic]& @r, source: ProofSourceAnalysis[r], focus_function: sview, linear_hints: darray[i64]&) -> ProofCheckedView[r] can[Memory.Allocate, Global.Read, Global.Write]:
+        def proof_check_and_replay_with_source[@r](source_arena: mutable Arena& @r, diagnostics: mutable darray[Semantic::Diagnostic]& @r, source: ProofSourceAnalysis[r], focus_function: sview, linear_hints: darray[i64]&) -> ProofCheckedView[r] can[Memory.Allocate, Global{Read,Write}]:
             in source_arena:
                 report: mutable ProofReport& @r = new[r] proof_empty_report()
                 diagnostics.clear()
@@ -502,7 +506,7 @@ extend ElisaProof:
                     source_claims_admissible: mutable bool = source_goal_snapshot.claims_admissible
                     receipt.source_goal_statuses <- source_goal_snapshot.statuses if source_goal_statuses_complete else []
                     receipt.source_goal_statuses_complete <- source_goal_statuses_complete
-                    attempt_fact_snapshot: (statuses: darray[bool], complete: bool, claims_admissible: bool) = proof_replay_attempt_fact_source_status_snapshot(report, receipt.source_goal_statuses, receipt.source_goal_statuses_complete, &source_work)
+                    attempt_fact_snapshot: (statuses: darray[bool], complete: bool, claims_admissible: bool) = (proof_replay_attempt_fact_source_status_snapshot(report, receipt.source_goal_statuses, receipt.source_goal_statuses_complete, &source_work) can[Global{Read,Write}])
                     receipt.source_attempt_fact_statuses <- attempt_fact_snapshot.statuses if attempt_fact_snapshot.complete else []
                     receipt.source_attempt_fact_statuses_complete <- attempt_fact_snapshot.complete
                     source_claims_admissible <- false if not attempt_fact_snapshot.claims_admissible

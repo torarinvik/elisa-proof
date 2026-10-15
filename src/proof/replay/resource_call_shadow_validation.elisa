@@ -1,0 +1,202 @@
+extend ElisaProof:
+    private:
+        # Omission classification is name-based, so first rule out lexical bindings that could
+        # shadow the global declaration. This intentionally rejects an omission when a matching
+        # local appears anywhere in the owner (even in a disjoint branch); false negatives are
+        # preferable to treating a local function value as a pure global call.
+        def proof_replay_resource_call_shadow_name_in_expr(expression: Ast::Expr, wanted: sview, source_work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Block(statements, value, _, _):
+                    return true if proof_replay_resource_call_shadow_name_in_statements(statements, wanted, source_work, depth + 1)
+                    proof_replay_resource_call_shadow_name_in_expr(value, wanted, source_work, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    match callee:
+                        Ast::Expr.Ident(_, _):
+                            pass
+                        Ast::Expr.Scope(_, scoped_name, _):
+                            # A same-named scoped call needs namespace resolution beyond a leaf-name proof.
+                            return true if not proof_replay_owner_work_charge(sview_len(scoped_name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work) or scoped_name == wanted
+                        Ast::Expr.Field(_, method, _):
+                            return true if not proof_replay_owner_work_charge(sview_len(method), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work) or method == wanted
+                        _:
+                            # A dynamic callee has no name-only purity proof.
+                            return true
+                    return true if proof_replay_resource_call_shadow_name_in_expr(callee, wanted, source_work, depth + 1)
+                    for argument in arguments |wanted, source_work, depth|:
+                        return true if proof_replay_resource_call_shadow_name_in_expr(argument, wanted, source_work, depth + 1)
+                    false
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _) | Ast::Expr.RegionNew(_, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Comprehension(_, _, _, _, _) | Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _):
+                    true
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _) | Ast::Expr.Move(inner, _):
+                    proof_replay_resource_call_shadow_name_in_expr(inner, wanted, source_work, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return true if proof_replay_resource_call_shadow_name_in_expr(base, wanted, source_work, depth + 1)
+                    proof_replay_resource_call_shadow_name_in_expr(predicate, wanted, source_work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return true if proof_replay_resource_call_shadow_name_in_expr(left, wanted, source_work, depth + 1)
+                    proof_replay_resource_call_shadow_name_in_expr(right, wanted, source_work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_replay_resource_call_shadow_name_in_expr(object, wanted, source_work, depth + 1)
+                    for argument in arguments |wanted, source_work, depth|:
+                        return true if proof_replay_resource_call_shadow_name_in_expr(argument, wanted, source_work, depth + 1)
+                    false
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |wanted, source_work, depth|:
+                        return true if proof_replay_resource_call_shadow_name_in_expr(element, wanted, source_work, depth + 1)
+                    false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |wanted, source_work, depth|:
+                        return true if proof_replay_resource_call_shadow_name_in_expr(entry.key, wanted, source_work, depth + 1)
+                        return true if proof_replay_resource_call_shadow_name_in_expr(entry.value, wanted, source_work, depth + 1)
+                    false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |wanted, source_work, depth|:
+                        return true if proof_replay_resource_call_shadow_name_in_expr(field.value, wanted, source_work, depth + 1)
+                    false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_replay_resource_call_shadow_name_in_expr(base, wanted, source_work, depth + 1)
+                    for field in fields |wanted, source_work, depth|:
+                        return true if proof_replay_resource_call_shadow_name_in_expr(field.value, wanted, source_work, depth + 1)
+                    false
+                Ast::Expr.If(condition, yes, no, _):
+                    return true if proof_replay_resource_call_shadow_name_in_expr(condition, wanted, source_work, depth + 1)
+                    return true if proof_replay_resource_call_shadow_name_in_expr(yes, wanted, source_work, depth + 1)
+                    proof_replay_resource_call_shadow_name_in_expr(no, wanted, source_work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return true if proof_replay_resource_call_shadow_name_in_expr(object, wanted, source_work, depth + 1)
+                    return true if proof_replay_resource_call_shadow_name_in_expr(low, wanted, source_work, depth + 1)
+                    proof_replay_resource_call_shadow_name_in_expr(high, wanted, source_work, depth + 1)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    false
+                _:
+                    true
+
+        def proof_replay_resource_call_shadow_name_in_statements(body: darray[Ast::Stmt]&, wanted: sview, source_work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            for statement in body |wanted, source_work, depth|:
+                return true if not proof_replay_owner_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.VarDecl(name, type_expression, initializer, _):
+                        return true if not proof_replay_owner_work_charge(sview_len(name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work) or name == wanted
+                        return true if proof_replay_resource_call_shadow_name_in_expr(type_expression, wanted, source_work, depth + 1)
+                        return true if proof_replay_resource_call_shadow_name_in_expr(initializer, wanted, source_work, depth + 1)
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_replay_resource_call_shadow_name_in_expr(expression, wanted, source_work, depth + 1)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        match target:
+                            Ast::Expr.Ident(target_name, _):
+                                return true if not proof_replay_owner_work_charge(sview_len(target_name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work) or target_name == wanted
+                            _:
+                                return true
+                        return true if proof_replay_resource_call_shadow_name_in_expr(value, wanted, source_work, depth + 1)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        return true if proof_replay_resource_call_shadow_name_in_expr(condition, wanted, source_work, depth + 1)
+                        return true if proof_replay_resource_call_shadow_name_in_statements(yes, wanted, source_work, depth + 1)
+                        return true if proof_replay_resource_call_shadow_name_in_statements(no, wanted, source_work, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        return true if proof_replay_resource_call_shadow_name_in_expr(condition, wanted, source_work, depth + 1)
+                        return true if proof_replay_resource_call_shadow_name_in_statements(nested, wanted, source_work, depth + 1)
+                    Ast::Stmt.For(_, variables, iterable, nested, _):
+                        for variable in variables |variable, wanted, source_work|:
+                            return true if not proof_replay_owner_work_charge(sview_len(variable), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work) or variable == wanted
+                        return true if proof_replay_resource_call_shadow_name_in_expr(iterable, wanted, source_work, depth + 1)
+                        return true if proof_replay_resource_call_shadow_name_in_statements(nested, wanted, source_work, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        return true if proof_replay_resource_call_shadow_name_in_statements(nested, wanted, source_work, depth + 1)
+                    Ast::Stmt.Match(_, _, _) | Ast::Stmt.Invalid:
+                        return true
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return true
+            false
+
+        # The deterministic declaration index contains callable declarations only. Make sure a
+        # same-spelled constant, type, module, or law cannot win source name resolution instead.
+        def proof_replay_resource_call_nonfunction_name_present(declarations: darray[Ast::Decl]&, wanted: sview, source_work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(declarations.count, source_work)
+            for declaration in declarations |wanted, source_work, depth|:
+                return true if not proof_replay_owner_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, _):
+                        return true if not proof_replay_owner_work_charge(sview_len(name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work)
+                    Ast::Decl.Module(name, nested, _):
+                        return true if not proof_replay_owner_work_charge(sview_len(name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work) or name == wanted
+                        return true if proof_replay_resource_call_nonfunction_name_present(nested, wanted, source_work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return true if proof_replay_resource_call_nonfunction_name_present(nested, wanted, source_work, depth + 1)
+                    Ast::Decl.Const(name, _, _, _, _) | Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _) | Ast::Decl.Alias(name, _, _) | Ast::Decl.Law(name, _, _):
+                        return true if not proof_replay_owner_work_charge(sview_len(name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work) or name == wanted
+                    Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Invalid:
+                        return true
+                    _:
+                        return true
+            false
+
+        def proof_replay_resource_call_name_is_irrelevant_with_work(report: ProofReport&, index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, source_work: mutable usize&, omission_sources_clear: bool, owner_parameters: darray[Ast::ParamDecl]&, owner_body: darray[Ast::Stmt]&) -> bool:
+            return false if not omission_sources_clear
+            return false if proof_replay_resource_call_nonfunction_name_present(report.source.source_declarations, wanted, source_work, 0)
+            for parameter in owner_parameters |parameter, wanted, source_work|:
+                return false if not proof_replay_owner_work_charge(sview_len(parameter.name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work) or parameter.name == wanted
+                return false if parameter.has_default and proof_replay_resource_call_shadow_name_in_expr(parameter.default_value, wanted, source_work, 0)
+            return false if proof_replay_resource_call_shadow_name_in_statements(owner_body, wanted, source_work, 0)
+            group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(index, wanted, source_work)
+            return false if not group.complete or group.count == 0
+            row: mutable usize = group.head
+            for _ in 0..<group.count |group, index, wanted, row, report, source_work|:
+                return false if row >= index.entries.count
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
+                return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(entry.name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work)
+                return false if entry.name != wanted or not entry.is_function or entry.is_lemma
+                parameters: darray[Ast::ParamDecl] = []
+                body: darray[Ast::Stmt] = []
+                return_type: mutable Ast::Expr? = None
+                declaration_line: mutable u32 = 0
+                declaration_offset: mutable u32 = 0
+                match entry.declaration:
+                    Ast::Decl.Func(_, declared_parameters, declared_return_type, declared_body, _, _, position):
+                        parameters <- declared_parameters
+                        body <- declared_body
+                        return_type <- declared_return_type
+                        declaration_line <- position.line
+                        declaration_offset <- position.offset
+                    _:
+                        return false
+                # Region annotations are line-only metadata. If a candidate shares a line with
+                # such an annotation, conservatively retain the resource transition.
+                for annotation in report.source.source_local_region_annotations |annotation, declaration_line, source_work|:
+                    return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(annotation.name), source_work)
+                    if annotation.line == declaration_line and annotation.name in {"__region_param", "__region_return"}:
+                        return false
+                owner_path: (complete: bool, path: darray[sview]) = proof_replay_resource_owner_module_path_at_offset_with_work(report, declaration_line, declaration_offset.usize(), source_work)
+                return false if not owner_path.complete
+                for parameter in parameters |parameter, report, declaration_line, declaration_offset, owner_path, source_work|:
+                    return false if parameter.has_default and not proof_replay_resource_default_is_literal_with_work(parameter.default_value, source_work)
+                    scalar_parameter: (complete: bool, scalar: bool) = proof_replay_resource_scalar_type_with_work(parameter.type_expression, report, source_work, 0)
+                    return false if not scalar_parameter.complete or not scalar_parameter.scalar
+                    markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(parameter.type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, declaration_line, declaration_offset, report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work)
+                    return false if not markers.complete or markers.reference or markers.mutable_reference or markers.is_mutable
+                    syntax: (complete: bool, has_reference: bool) = proof_replay_thread_type_has_reference_syntax(parameter.type_expression, report, owner_path.path, &source_work, 0)
+                    return false if not syntax.complete or syntax.has_reference
+                    sview_parameter: (complete: bool, sview_type: bool) = proof_replay_resource_sview_type_with_work(parameter.type_expression, report, owner_path.path, source_work, 0)
+                    return false if not sview_parameter.complete or sview_parameter.sview_type
+                # An omitted annotation does not prove that the inferred result is resource-free.
+                # Keep the call transition unless replay can inspect an explicit scalar result.
+                return false if return_type is not declared_return_type
+                if return_type is declared_return_type:
+                    scalar_return: (complete: bool, scalar: bool) = proof_replay_resource_scalar_type_with_work(declared_return_type, report, source_work, 0)
+                    return false if not scalar_return.complete or not scalar_return.scalar
+                    return_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(declared_return_type, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, declaration_line, declaration_offset, report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work)
+                    return false if not return_markers.complete or return_markers.reference or return_markers.mutable_reference or return_markers.is_mutable
+                    return_syntax: (complete: bool, has_reference: bool) = proof_replay_thread_type_has_reference_syntax(declared_return_type, report, owner_path.path, &source_work, 0)
+                    return false if not return_syntax.complete or return_syntax.has_reference
+                    sview_return: (complete: bool, sview_type: bool) = proof_replay_resource_sview_type_with_work(declared_return_type, report, owner_path.path, source_work, 0)
+                    return false if not sview_return.complete or sview_return.sview_type
+                # The signature alone cannot justify omitting a transition: a scalar
+                # function could still write mutable globals or make an effectful call.
+                # Admit omissions only for a replay-checked, single-return pure scalar body.
+                return false if not proof_replay_resource_call_pure_function(report, index, entry, source_work, 0)
+                row <- entry.next_index
+                return false if row > index.entries.count
+            row == index.entries.count

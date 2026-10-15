@@ -1,0 +1,181 @@
+extend ElisaProof:
+    private:
+        def proof_replay_resource_return_collection_type_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Mutable, inner, _):
+                    return proof_replay_resource_return_collection_type_with_work(inner, declarations, source_work, depth + 1)
+                Ast::Expr.Index(head, element, _):
+                    head_name: sview = proof_ident_name(head)
+                    element_name: sview = proof_ident_name(element)
+                    return false if not proof_replay_owner_work_charge(sview_len(head_name), source_work) or not proof_replay_owner_work_charge(sview_len(element_name), source_work)
+                    return false if head_name != "darray" or element_name not in {"i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "bool", "char"}
+                    # The source spelling is only a builtin when the declaration tree
+                    # contains no shadow and no import that could add an unqualified type.
+                    # The audit is conservative across scopes and fails closed on imports.
+                    return false if not proof_replay_scalar_copy_type_unshadowed(declarations, head_name, 0, source_work)
+                    # Element spelling is equally security-sensitive: treating an aliased
+                    # aggregate as a primitive would grant the builtin scalar-collection
+                    # return policy to a different source type.
+                    return false if not proof_replay_scalar_copy_type_unshadowed(declarations, element_name, 0, source_work)
+                    true
+                _:
+                    false
+
+        def proof_replay_resource_return_expression_find_with_work(body: darray[Ast::Stmt]&, offset: usize, matches: mutable usize&, returned: mutable Ast::Expr&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for statement in body |matches, returned, source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.Return(expression, position):
+                        if position.offset == offset.u32():
+                            return false if matches != 0
+                            returned <- expression
+                            matches <- matches + 1
+                    Ast::Stmt.If(_, yes, no, _):
+                        return false if not proof_replay_resource_return_expression_find_with_work(yes, offset, matches, returned, source_work, depth + 1)
+                        return false if not proof_replay_resource_return_expression_find_with_work(no, offset, matches, returned, source_work, depth + 1)
+                    Ast::Stmt.While(_, nested, _) | Ast::Stmt.For(_, _, _, nested, _) | Ast::Stmt.Block(_, _, _, nested, _):
+                        return false if not proof_replay_resource_return_expression_find_with_work(nested, offset, matches, returned, source_work, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |matches, returned, source_work, depth|:
+                            return false if not proof_replay_owner_work_charge(1, source_work)
+                            return false if not proof_replay_resource_return_expression_find_with_work(arm.body, offset, matches, returned, source_work, depth + 1)
+                    _:
+                        pass
+            true
+
+        def proof_replay_resource_return_witness_matches_source_with_work(report: ProofReport&, marker: ElisaProofKernelCore::ProofKernelNode, body: darray[Ast::Stmt]&, source_work: mutable usize&) -> bool:
+            return false if marker.value <= 0 or marker.value > 4294967295
+            matches: mutable usize = 0
+            returned: mutable Ast::Expr = Ast::Expr.Invalid
+            return false if not proof_replay_resource_return_expression_find_with_work(body, marker.value.usize(), matches, returned, source_work, 0)
+            return false if matches != 1 or marker.left >= report.analysis_1.kernel.nodes.count
+            stripped: (complete: bool, expression: Ast::Expr) = proof_replay_resource_write_strip_parens_with_work(returned, source_work, 0)
+            return false if not stripped.complete
+            match stripped.expression:
+                Ast::Expr.Ident(name, position):
+                    witness: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[marker.left]
+                    return false if witness.kind != "resource-use" or witness.value != position.offset.i64() or witness.name != name
+                    proof_replay_ast_matches_kernel_with_work(report, stripped.expression, witness.left, source_work, 0)
+                Ast::Expr.RegionNew(operand, region, _):
+                    witness: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[marker.left]
+                    return false if witness.kind != "resource-region-return-alloc" or witness.value != marker.value or witness.secondary_name != region or marker.name != region
+                    proof_replay_ast_matches_kernel_with_work(report, operand, witness.left, source_work, 0)
+                _:
+                    root: (complete: bool, name: sview, position: Ast::Pos) = proof_replay_resource_return_place_root_with_work(stripped.expression, source_work, 0)
+                    return false if not root.complete or root.position.offset == 0 or root.position.offset > 4294967295
+                    witness: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[marker.left]
+                    return false if witness.kind != "resource-use" or witness.value != root.position.offset.i64() or witness.name != root.name
+                    root_expression: Ast::Expr = Ast::Expr.Ident(root.name, root.position)
+                    proof_replay_ast_matches_kernel_with_work(report, root_expression, witness.left, source_work, 0)
+
+        def proof_replay_resource_return_alloc_reference_count_at_with_work(report: ProofReport&, event_index: usize, witness_index: usize, source_work: mutable usize&, depth: usize) -> (complete: bool, count: usize):
+            return (false, 0) if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work) or event_index >= report.analysis_1.kernel.nodes.count
+            event: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[event_index]
+            return (true, 1 if event.kind == "resource-region-return" and event.left == witness_index else 0) if event.kind not in {"resource-safety", "resource-scope", "resource-alternatives"}
+            return (false, 0) if event.children_start > report.analysis_1.kernel.children.count or event.children_count > report.analysis_1.kernel.children.count - event.children_start
+            count: mutable usize = 0
+            for index in 0..<event.children_count |index, report, event, witness_index, source_work, depth, count|:
+                return (false, 0) if not proof_replay_owner_work_charge(1, source_work)
+                child: usize = report.analysis_1.kernel.children[event.children_start + index]
+                nested: (complete: bool, count: usize) = proof_replay_resource_return_alloc_reference_count_at_with_work(report, child, witness_index, source_work, depth + 1)
+                return (false, 0) if not nested.complete or nested.count > 1 or count > 1 - nested.count
+                count <- count + nested.count
+            (true, count)
+
+        def proof_replay_resource_return_alloc_source_valid_with_work(report: ProofReport&, resource_root: usize, event_index: usize, owner: sview, owner_line: u32, owner_offset: usize, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if event_index >= report.analysis_1.kernel.nodes.count or resource_root >= report.analysis_1.kernel.nodes.count or owner == "" or owner_line == 0 or owner_offset > 4294967295
+            allocation: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[event_index]
+            return false if allocation.kind != "resource-region-return-alloc"
+            references: (complete: bool, count: usize) = proof_replay_resource_return_alloc_reference_count_at_with_work(report, resource_root, event_index, source_work, 0)
+            return false if not references.complete or references.count > 1
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            located: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
+            return false if not located.complete or located.matches != 1 or located.row >= cache.deterministic_calls.declaration_index.entries.count
+            body: darray[Ast::Stmt] = []
+            return_type: mutable Ast::Expr? = None
+            match cache.deterministic_calls.declaration_index.entries[located.row].declaration:
+                Ast::Decl.Func(_, _, declared_return_type, declared_body, _, _, _):
+                    body <- declared_body
+                    return_type <- declared_return_type
+                _:
+                    return false
+            return false if allocation.value <= 0 or allocation.value > 4294967295
+            return_matches: mutable usize = 0
+            returned: mutable Ast::Expr = Ast::Expr.Invalid
+            return false if not proof_replay_resource_return_expression_find_with_work(body, allocation.value.usize(), return_matches, returned, source_work, 0)
+            return false if return_matches != 1
+            allocation_match: (complete: bool, count: usize) = proof_replay_resource_return_alloc_matches_expression_with_work(report, allocation, returned, source_work, 0)
+            return false if not allocation_match.complete or allocation_match.count != 1
+            external_region: (complete: bool, external_region: bool) = proof_replay_resource_return_region_is_external_with_work(report, owner_line, allocation.secondary_name, source_work)
+            return false if not external_region.complete or not external_region.external_region
+            scalar_return: mutable (complete: bool, scalar: bool) = (true, false)
+            if return_type is declared_type:
+                scalar_return <- proof_replay_resource_scalar_type_with_work(declared_type, report, source_work, 0)
+            return false if not scalar_return.complete
+            return false if references.count != (0 if scalar_return.scalar else 1)
+            source_allocations: (complete: bool, count: usize) = proof_replay_resource_return_alloc_source_count_with_work(report, allocation, body, source_work, 0)
+            source_allocations.complete and source_allocations.count == 1
+
+        def proof_replay_resource_return_marker_matches_owner_with_work(report: ProofReport&, marker: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if marker.kind != "resource-region-return" or owner == "" or owner_line == 0 or owner_offset > 4294967295
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            located: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
+            return false if not located.complete or located.matches != 1 or located.row >= cache.deterministic_calls.declaration_index.entries.count
+            entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[located.row]
+            parameters: darray[Ast::ParamDecl] = []
+            body: darray[Ast::Stmt] = []
+            return_type: mutable Ast::Expr = Ast::Expr.Absent
+            match entry.declaration:
+                Ast::Decl.Func(_, declared_parameters, declared_return_type, declared_body, _, _, _):
+                    parameters <- declared_parameters
+                    return_type <- declared_return_type
+                    body <- declared_body
+                _:
+                    return false
+            return_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(return_type, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, owner_line, owner_offset.u32(), report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work)
+            return false if not return_markers.complete
+            return false if not proof_replay_resource_return_witness_matches_source_with_work(report, marker, body, source_work)
+            view_marker: bool = marker.operator == "sview" or marker.operator == "sview-call"
+            sview_return: mutable (complete: bool, sview_type: bool) = (true, false)
+            if view_marker:
+                owner_path: (complete: bool, path: darray[sview]) = proof_replay_resource_owner_module_path_with_work(report, owner, owner_line, owner_offset, source_work)
+                return false if not owner_path.complete
+                sview_return <- proof_replay_resource_sview_type_with_work(return_type, report, owner_path.path, source_work, 0)
+            return false if not sview_return.complete
+            is_sview_return: bool = sview_return.sview_type
+            is_collection_return: mutable bool = false
+            if marker.operator == "value-param":
+                return false if proof_replay_summary_has_unresolved_import(report.source.source_annotations, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                is_collection_return <- proof_replay_resource_return_collection_type_with_work(return_type, report.source.source_declarations, source_work, 0)
+            formal_name: mutable sview = marker.secondary_name
+            if marker.operator == "param":
+                return false if marker.secondary_name != "" or marker.left >= report.analysis_1.kernel.nodes.count
+                witness: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[marker.left]
+                return false if witness.kind != "resource-use"
+                formal_name <- witness.name
+            reference_marker: bool = marker.operator == "param" or marker.operator == "param-call"
+            return false if reference_marker and (not return_markers.reference or marker.auxiliary != (1 if return_markers.mutable_reference else 0))
+            return false if view_marker and (not is_sview_return or marker.auxiliary != ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG)
+            return false if marker.operator == "value-param" and (not is_collection_return or marker.auxiliary != 0)
+            return false if not reference_marker and not view_marker and marker.operator != "value-param"
+            return false if marker.operator == "param-call" and formal_name == ""
+            formal_found: mutable bool = false
+            for parameter in parameters |parameter, formal_name, formal_found, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(parameter.name), source_work) or not proof_replay_owner_work_charge(sview_len(formal_name), source_work)
+                formal_found <- true if formal_name != "" and parameter.name == formal_name
+            return false if (marker.operator == "param" or marker.operator == "param-call" or marker.operator == "sview-call") and not formal_found
+            return false if (marker.operator == "sview" or marker.operator == "sview-call" or marker.operator == "value-param") and marker.name == ""
+            return_region_annotations: mutable usize = 0
+            for annotation in report.source.source_local_region_annotations |annotation, owner_line, marker, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(annotation.name), source_work)
+                continue if annotation.line != owner_line or annotation.name != "__region_return"
+                return false if not proof_replay_owner_work_charge(sview_len(annotation.region), source_work) or not proof_replay_owner_work_charge(sview_len(marker.name), source_work)
+                return_region_annotations <- return_region_annotations + 1
+                return false if marker.name != "" and annotation.region != marker.name
+            if marker.name == "":
+                return false if return_region_annotations != 0
+            else:
+                return false if return_region_annotations != 1
+            true

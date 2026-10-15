@@ -49,7 +49,7 @@ extend ElisaProof:
         # Reconstruct an executable postcondition from the verified source contract and the exact
         # call bindings. This keeps ordinary calls at the source-semantics boundary while removing
         # the producer's ability to attach an arbitrary fact to a merely verified function name.
-        def proof_replay_function_summary_is_valid[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, dependency_stack: darray[sview]&, dependency_depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global.Read, Global.Write]:
+        def proof_replay_function_summary_is_valid[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, dependency_stack: darray[sview]&, dependency_depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global{Read,Write}]:
             return false if:
                 dependency_depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
                 trace.summary_bindings_start > report.analysis_1.traces.summary_names.count or trace.summary_bindings_count > report.analysis_1.traces.summary_names.count - trace.summary_bindings_start
@@ -233,12 +233,70 @@ extend ElisaProof:
                     not (proof_replay_certificate_with_stack(report, report.analysis_1.certificates[attempt.certificate_index], attempt.certificate_index, dependency_stack, dependency_depth + 1, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
             return true
 
-        def proof_replay_kernel_fact_trace_is_valid_with_stack[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, owner: sview, depth: usize, dependency_stack: darray[sview]&, revalidate_arena: bool, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global.Read, Global.Write]:
+        # Trace names alone do not identify a declaration: modules can contain same-named
+        # functions. While replaying a certificate or open attempt, bind every in-function trace
+        # to the exact parser-owned declaration selected for that consumer. Global declaration
+        # facts have their own validators, which re-check applicability at the active owner offset.
+        def proof_replay_trace_owner_position_cached_with_work(report: ProofReport&, trace: ProofFactTrace, trace_index: usize, source_work: mutable usize&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> Ast::Pos:
+            empty: Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            return empty if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return proof_replay_trace_owner_source_position_for_trace_with_work(report, trace, source_work) if trace_index >= report.analysis_1.traces.records.count
+            if not structural_cache.trace_owner_cache_initialized:
+                count: usize = report.analysis_1.traces.records.count
+                return empty if count > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / 2
+                source_work <- source_work + count * 2
+                structural_cache.trace_owner_cache_positions.resize(count)
+                structural_cache.trace_owner_cache_checked.resize(count)
+                zero: Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+                for index in 0..<count |index, structural_cache, zero|:
+                    structural_cache.trace_owner_cache_positions[index] <- zero
+                    structural_cache.trace_owner_cache_checked[index] <- false
+                structural_cache.trace_owner_cache_count <- count
+                structural_cache.trace_owner_cache_initialized <- true
+            return empty if:
+                structural_cache.trace_owner_cache_count != report.analysis_1.traces.records.count
+                structural_cache.trace_owner_cache_positions.count != structural_cache.trace_owner_cache_count
+                structural_cache.trace_owner_cache_checked.count != structural_cache.trace_owner_cache_count
+            if not structural_cache.trace_owner_cache_checked[trace_index]:
+                structural_cache.trace_owner_cache_positions[trace_index] <- proof_replay_trace_owner_source_position_for_trace_with_work(report, trace, source_work)
+                structural_cache.trace_owner_cache_checked[trace_index] <- true
+            structural_cache.trace_owner_cache_positions[trace_index]
+
+        def proof_replay_trace_owner_matches_consumer_with_work(report: ProofReport&, trace: ProofFactTrace, trace_index: usize, owner: sview, source_work: mutable usize&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            consumer_name: mutable sview = ""
+            if report.analysis_2.trace_consumer_certificate_index != 0:
+                certificate_index: usize = report.analysis_2.trace_consumer_certificate_index - 1
+                return false if certificate_index >= report.analysis_1.certificates.count
+                consumer_name <- report.analysis_1.certificates[certificate_index].name
+            elif report.analysis_2.trace_consumer_attempt_index != 0:
+                attempt_index: usize = report.analysis_2.trace_consumer_attempt_index - 1
+                return false if attempt_index >= report.results.goal_attempts.count
+                consumer_name <- report.results.goal_attempts[attempt_index].name
+            else:
+                return true
+            # A nested resource-call trace has only the callee name; the call node carries no
+            # authenticated caller source position or edge. A unique callee declaration does not
+            # prove that the caller made this call, so nested callee facts fail closed until the
+            # resource trace binds each call event to its exact source call site.
+            if owner != consumer_name:
+                return false
+            return false if:
+                not report.analysis_2.replay_owner_offset_valid
+                report.analysis_2.replay_owner_line == 0 or report.analysis_2.replay_owner_line == 4294967295
+            if trace.owner_line != 0 and trace.kind in {"global-constant", "global-constant-qualified", "global-mutable-array-type", "global-mutable-array-index-bound"}:
+                return true
+            if trace.owner_line != 0 and trace.kind == "type-bound":
+                return true
+            trace_owner: Ast::Pos = proof_replay_trace_owner_position_cached_with_work(report, trace, trace_index, source_work, structural_cache)
+            return trace_owner.line == report.analysis_2.replay_owner_line and trace_owner.offset.usize() == report.analysis_2.replay_owner_offset
+
+        def proof_replay_kernel_fact_trace_is_valid_with_stack[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, trace_index: usize, owner: sview, depth: usize, dependency_stack: darray[sview]&, revalidate_arena: bool, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global{Read,Write}]:
             return false if:
                 trace.name != owner or not proof_replay_kernel_trace_range_valid(report, trace)
                 not proof_replay_ast_matches_kernel_with_work(report, trace.expression, trace.kernel_expression, validation_workspace.source_scan_work_used, 0)
                 trace.premises_count != trace.kernel_premises_count
                 trace.premises_start > report.analysis_1.traces.premises.count or trace.premises_count > report.analysis_1.traces.premises.count - trace.premises_start
+                not proof_replay_trace_owner_matches_consumer_with_work(report, trace, trace_index, owner, validation_workspace.source_scan_work_used, structural_cache)
             kernel_premises: mutable darray[usize] = []
             for index in 0..<trace.premises_count |index, report, trace, kernel_premises|:
                 kernel_premise: usize = report.analysis_1.kernel.fact_trace_premises[trace.kernel_premises_start + index]
@@ -251,7 +309,7 @@ extend ElisaProof:
             # may admit its arena once for the duration of that pass, but callers can retain a
             # mutable report and alter its serialized nodes afterwards. Never let that cached
             # bit turn a post-mutation fact trace into trusted evidence.
-            return false if (revalidate_arena or not report.analysis_1.kernel.arena_validated) and not ElisaProofKernelReplay::proof_kernel_replay_arena_report_with_workspace(&report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, kernel_premises, trace.kernel_expression, validation_workspace)
+            return false if (revalidate_arena or not report.analysis_1.kernel.arena_validated) and not (ElisaProofKernelReplay::proof_kernel_replay_arena_report_with_workspace(&report.analysis_1.kernel.nodes, &report.analysis_1.kernel.children, kernel_premises, trace.kernel_expression, validation_workspace) can[Global{Read,Write}])
             trace_kind_work: usize = sview_len(trace.kind)
             if validation_workspace.source_scan_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or trace_kind_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used:
                 validation_workspace.source_scan_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
@@ -310,7 +368,7 @@ extend ElisaProof:
                 not proof_replay_trace_lookup_charge_amount(report, sview_len(right.operator))
             return (true, left.kind == right.kind and left.operator == right.operator)
 
-        def proof_replay_kernel_fact_root_is_traced_with_stack[@r](report: mutable ProofReport& @r, fact: usize, owner: sview, dependency_stack: darray[sview]&, revalidate_arena: bool, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global.Read, Global.Write]:
+        def proof_replay_kernel_fact_root_is_traced_with_stack[@r](report: mutable ProofReport& @r, fact: usize, owner: sview, dependency_stack: darray[sview]&, revalidate_arena: bool, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global{Read,Write}]:
             return false if fact >= report.analysis_1.kernel.nodes.count
             trace_index: mutable usize = proof_replay_fact_trace_head(report, owner)
             while trace_index < report.analysis_1.traces.records.count |trace_index, report, fact, owner, dependency_stack, revalidate_arena, active_certificates, validation_workspace|:
@@ -333,37 +391,107 @@ extend ElisaProof:
                 trace_index <- proof_replay_trace_chain_next(report, trace_index)
             return false
 
+        def proof_replay_resource_owner_prefix_event_valid_with_work(report: ProofReport&, resource_root: usize, event_index: usize, prefix_end: usize, source_work: mutable usize&) -> bool:
+            return false if resource_root >= report.analysis_1.kernel.nodes.count or event_index >= report.analysis_1.kernel.nodes.count
+            root: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[resource_root]
+            return false if root.kind != "resource-safety" or prefix_end > root.children_count or root.children_start > report.analysis_1.kernel.children.count or root.children_count > report.analysis_1.kernel.children.count - root.children_start
+            total: mutable usize = 0
+            prefix: mutable usize = 0
+            for index in 0..<root.children_count |index, root, report, event_index, prefix_end, total, prefix, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                child: usize = report.analysis_1.kernel.children[root.children_start + index]
+                if child == event_index:
+                    total <- total + 1
+                    prefix <- prefix + 1 if index < prefix_end
+            return false if total != 1 or prefix != 1
+            # The root preflight checks all prefix nodes' unique incoming edges in one graph
+            # walk, before dispatch reaches an individual bind.
+            true
+
         # Resource-disjoint transitions carry their own logical premises inside the resource
         # trace because the resource certificate has no ordinary top-level proposition. Those
         # premise roots are still required to correspond to facts explicitly introduced by the
-        # source checker. This closes the provenance gap that would otherwise let a structurally
-        # replayable resource event smuggle in a fabricated inequality.
-        def proof_replay_resource_event_facts_with_owner[@r](report: mutable ProofReport& @r, root: usize, owner: sview, dependency_stack: darray[sview]&, depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global.Read, Global.Write]:
+        # source checker. Meter every node and edge as well: recursion depth bounds stack use but
+        # a flat serialized list still needs a caller-wide work bound.
+        def proof_replay_resource_event_facts_with_owner[@r](report: mutable ProofReport& @r, root: usize, resource_root: usize, resource_prefix_end: usize, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, dependency_stack: darray[sview]&, depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global{Read,Write}]:
+            return false if not proof_replay_owner_work_charge(1, validation_workspace.source_scan_work_used)
             return false if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count
             node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
             active_owner: mutable sview = owner
+            active_owner_line: mutable u32 = owner_line
+            active_owner_offset: mutable usize = owner_offset
+            active_owner_module: mutable sview = owner_module
             active_owner <- node.name if node.kind == "resource-safety" and node.name != ""
+            active_resource_prefix_end: mutable usize = resource_prefix_end
+            if node.kind == "resource-safety":
+                return false if not proof_replay_resource_event_offsets_ordered_for_owner_with_work(report, root, node.name, node.right.u32(), node.value.usize(), node.secondary_name, validation_workspace.source_scan_work_used, structural_cache)
+                return false if not proof_replay_resource_safety_owner_valid_with_work(report, root, node, &active_resource_prefix_end, validation_workspace.source_scan_work_used, structural_cache)
+                active_owner_line <- node.right.u32()
+                active_owner_offset <- node.value.usize()
+                active_owner_module <- node.secondary_name
+                return false if not proof_replay_resource_call_coverage_for_owner_with_work(report, root, active_owner, active_owner_line, active_owner_offset, active_owner_module, validation_workspace.source_scan_work_used, structural_cache)
             if node.kind == "resource-disjoint":
                 return false if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
                 for index in 0..<node.children_count |index, node, report, active_owner, dependency_stack, active_certificates, validation_workspace|:
+                    return false if not proof_replay_owner_work_charge(1, validation_workspace.source_scan_work_used)
                     fact: usize = report.analysis_1.kernel.children[node.children_start + index]
                     return false if not (proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, active_owner, dependency_stack, false, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
                 return true
             if node.kind in {"resource-safety", "resource-scope", "resource-alternatives"}:
                 return false if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
                 for index in 0..<node.children_count |index, node, report, active_owner, dependency_stack, depth, active_certificates, validation_workspace|:
+                    return false if not proof_replay_owner_work_charge(1, validation_workspace.source_scan_work_used)
                     child: usize = report.analysis_1.kernel.children[node.children_start + index]
-                    return false if not (proof_replay_resource_event_facts_with_owner(report, child, active_owner, dependency_stack, depth + 1, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
+                    return false if not (proof_replay_resource_event_facts_with_owner(report, child, resource_root, active_resource_prefix_end, active_owner, active_owner_line, active_owner_offset, active_owner_module, dependency_stack, depth + 1, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
                 return true
             if node.kind == "resource-call":
-                return (proof_replay_resource_event_facts_with_owner(report, node.left, node.name, dependency_stack, depth + 1, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
+                return false if not proof_replay_resource_call_site_matches_owner_with_work(report, resource_root, node, active_owner, active_owner_line, active_owner_offset, active_owner_module, validation_workspace.source_scan_work_used, structural_cache)
+                return false if node.left >= report.analysis_1.kernel.nodes.count or node.left == resource_root
+                callee_root: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[node.left]
+                return false if callee_root.kind != "resource-safety"
+                return false if not proof_replay_owner_work_charge(sview_len(node.name), validation_workspace.source_scan_work_used) or not proof_replay_owner_work_charge(sview_len(callee_root.name), validation_workspace.source_scan_work_used) or node.name != callee_root.name
+                return false if not proof_replay_owner_work_charge(sview_len(node.secondary_name), validation_workspace.source_scan_work_used) or not proof_replay_owner_work_charge(sview_len(callee_root.secondary_name), validation_workspace.source_scan_work_used) or node.secondary_name != callee_root.secondary_name
+                return false if not proof_replay_owner_work_charge(sview_len(callee_root.operator), validation_workspace.source_scan_work_used) or callee_root.operator != "resource-v2"
+                # Kernel replay executes the linked callee summary in a fresh resource state.
+                # Authenticate that entire summary against its own source owner before allowing
+                # its effects to contribute to the caller's transition.
+                return (proof_replay_resource_event_facts_with_owner(report, node.left, node.left, 0, callee_root.name, callee_root.right.u32(), callee_root.value.usize(), callee_root.secondary_name, dependency_stack, depth + 1, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
             # This helper is a provenance boundary, not merely a traversal convenience. The
             # resource kernel may know more node kinds in a future format revision, but an older
             # replay implementation must not silently bless one as fact-free. Every supported
             # leaf is listed explicitly; unknown or newly introduced nodes fail closed until this
             # checker has been taught their embedded-fact semantics.
-            if node.kind in {"resource-region-open", "resource-region-close", "resource-region-alloc", "resource-region-bind", "resource-sview-param", "resource-region-alloc-discard", "resource-region-return-alloc", "resource-region-call-alloc", "resource-region-rebind-alloc", "resource-region-assign", "resource-region-return", "resource-region-param", "resource-write", "resource-move", "resource-use", "resource-join-move", "resource-call-arg", "resource-call-formal", "resource-call-region", "resource-call-result", "resource-call-lend", "resource-bind"}:
-                return true
+            if node.kind == "resource-call-lend":
+                return proof_replay_resource_call_site_matches_owner_with_work(report, resource_root, node, active_owner, active_owner_line, active_owner_offset, active_owner_module, validation_workspace.source_scan_work_used, structural_cache)
+            if node.kind == "resource-write":
+                return proof_replay_resource_write_source_valid_with_work(report, node, active_owner, active_owner_line, active_owner_offset, active_owner_module, validation_workspace.source_scan_work_used, structural_cache)
+            if node.kind == "resource-use" or node.kind == "resource-move":
+                return proof_replay_resource_use_or_move_source_valid_with_work(report, node, active_owner, active_owner_line, active_owner_offset, active_owner_module, validation_workspace.source_scan_work_used, structural_cache)
+            if node.kind in {"resource-region-open", "resource-region-close"}:
+                return proof_replay_resource_region_scope_event_source_valid_with_work(report, root, resource_root, node, active_owner, active_owner_line, active_owner_offset, active_owner_module, validation_workspace.source_scan_work_used, structural_cache)
+            if node.kind == "resource-region-return":
+                return proof_replay_resource_return_marker_matches_owner_with_work(report, node, active_owner, active_owner_line, active_owner_offset, validation_workspace.source_scan_work_used, structural_cache)
+            if node.kind == "resource-region-return-alloc":
+                return proof_replay_resource_return_alloc_source_valid_with_work(report, resource_root, root, active_owner, active_owner_line, active_owner_offset, validation_workspace.source_scan_work_used, structural_cache)
+            if node.kind == "resource-region-alloc-discard":
+                return proof_replay_resource_discard_allocation_source_valid_with_work(report, resource_root, node, active_owner, active_owner_line, active_owner_offset, active_owner_module, validation_workspace.source_scan_work_used, structural_cache)
+            # Parameter setup is independently reconstructed from the exact owner declaration
+            # before the event walk reaches this root. Body-local value binds have a separate
+            # declaration-position bridge; local references and region capabilities remain
+            # closed until their source mappings are reconstructed too.
+            if node.kind == "resource-bind":
+                if node.value == 0:
+                    return proof_replay_resource_owner_prefix_event_valid_with_work(report, resource_root, root, active_resource_prefix_end, validation_workspace.source_scan_work_used)
+                return proof_replay_resource_local_value_bind_source_valid_with_work(report, resource_root, node, active_owner, active_owner_line, active_owner_offset, active_owner_module, validation_workspace.source_scan_work_used, structural_cache)
+            if node.kind in {"resource-region-param", "resource-sview-param"}:
+                return proof_replay_resource_owner_prefix_event_valid_with_work(report, resource_root, root, active_resource_prefix_end, validation_workspace.source_scan_work_used)
+            # These events change replay's resource state, but are not yet tied to their exact
+            # owner AST transition. Arena shape validation cannot authenticate their capability
+            # or region payloads, so reject them until that source bridge exists.
+            if node.kind in { "resource-region-alloc", "resource-region-call-alloc", "resource-region-rebind-alloc", "resource-region-bind", "resource-region-assign", "resource-join-move", "resource-call-result"}:
+                return false
+            # Call payload nodes are meaningful only under a parent call transition. Until that
+            # parent has bidirectional source coverage, reject detached metadata leaves here too.
             return false
 
         # A certificate may only replay facts that the source checker explicitly introduced.
@@ -371,8 +499,10 @@ extend ElisaProof:
         # traced and the independent logical kernel must re-prove the step from those premises.
         # The trace payload is deliberately checked with this module's structural equality, not
         # the main checker helper, so replay does not inherit its implementation by reference.
-        def proof_replay_fact_trace_is_valid_with_stack(report: mutable ProofReport&, trace: ProofFactTrace, owner: sview, depth: usize, dependency_stack: darray[sview]&, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global.Read, Global.Write]:
-            return false if trace.name != owner or not proof_replay_trace_range_valid(report, trace)
+        def proof_replay_fact_trace_is_valid_with_stack(report: mutable ProofReport&, trace: ProofFactTrace, trace_index: usize, owner: sview, depth: usize, dependency_stack: darray[sview]&, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global{Read,Write}]:
+            return false if:
+                trace.name != owner or not proof_replay_trace_range_valid(report, trace)
+                not proof_replay_trace_owner_matches_consumer_with_work(report, trace, trace_index, owner, validation_workspace.source_scan_work_used, structural_cache)
             trace_kind_work: usize = sview_len(trace.kind)
             if validation_workspace.source_scan_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or trace_kind_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used:
                 validation_workspace.source_scan_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT

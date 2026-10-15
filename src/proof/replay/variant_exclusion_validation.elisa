@@ -4,7 +4,6 @@ extend ElisaProof:
     private:
         const PROOF_REPLAY_VARIANT_DEPTH_LIMIT: usize = 32
         const PROOF_REPLAY_ENUM_HIERARCHY_PARENT_TAG: u32 = 3900000008
-
         def proof_replay_variant_source_tree_charge(declarations: darray[Ast::Decl]&, work: mutable usize&, depth: usize) -> bool:
             if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
                 return false
@@ -96,32 +95,49 @@ extend ElisaProof:
                     return (true, true) if annotation.owner == enum_name
             return (true, false)
 
-        def proof_replay_variant_builtin_operator_impl_exists_with_work(report: ProofReport&, concrete: sview, protocol: sview, source_work: mutable usize&) -> (complete: bool, exists: bool):
-            return (true, false) if concrete == "" or protocol == ""
-            # Replay derives operator ownership from retained parser annotations. The checker's
-            # hash table is only an acceleration cache and must not hide an override if stale,
-            # partial, or corrupted.
-            for annotation in report.source.source_annotations |concrete, protocol, source_work|:
-                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
-                    return (false, false)
-                source_work <- source_work + 1
-                return (false, false) if not proof_replay_variant_text_compare_charge_with_work(annotation.owner, "__ext_concrete", source_work)
-                if annotation.owner == "__ext_concrete":
-                    return (false, false) if not proof_replay_variant_text_compare_charge_with_work(annotation.name, concrete, source_work)
-                    return (true, true) if annotation.name == concrete
-                return (false, false) if not proof_replay_variant_text_compare_charge_with_work(annotation.owner, "__impl_concrete", source_work)
-                if annotation.owner == "__impl_concrete":
-                    return (false, false) if not proof_replay_variant_text_compare_charge_with_work(annotation.name, concrete, source_work)
-                    if annotation.name == concrete:
-                        for scope in report.source.source_annotations |annotation, protocol, source_work|:
-                            if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
-                                return (false, false)
-                            source_work <- source_work + 1
-                            return (false, false) if not proof_replay_variant_text_compare_charge_with_work(scope.owner, "__impl_scope", source_work)
-                            if scope.owner == "__impl_scope" and scope.line == annotation.line:
-                                return (false, false) if not proof_replay_variant_text_compare_charge_with_work(scope.name, protocol, source_work)
-                                return (true, true) if scope.name == protocol
+        def proof_replay_variant_scoped_operator_exists_with_index(report: ProofReport&, index: ProofReplayVariantScopePositionIndex&, concrete: sview, wanted_mask: usize, source_work: mutable usize&) -> (complete: bool, exists: bool):
+            # Replay derives direct `Self` and same-receiver dunders from its AST-built index.
+            # The free mask above already accounts for global and mismatched receiver masks.
+            count: usize = index.rows.count
+            return (false, false) if not index.valid or count != index.hashes.count or count != index.next_indices.count
+            chain_count: usize = index.concrete_row_indices.count
+            return (false, false) if chain_count != index.concrete_hashes.count or chain_count != index.concrete_next_indices.count
+            return (true, false) if index.concrete_bucket_heads.count == 0 and chain_count == 0
+            capacity: usize = index.concrete_bucket_heads.count
+            return (false, false) if capacity == 0 or chain_count == 0
+            return (false, false) if not proof_replay_source_work_charge_or_exhaust(sview_len(concrete), source_work)
+            hash: u32 = proof_name_hash(concrete)
+            entry: usize = index.concrete_bucket_heads[(hash.i64() % capacity.i64()).usize()]
+            return (false, false) if entry > chain_count
+            visits: mutable usize = 0
+            while entry < chain_count and visits < PROOF_REPLAY_VARIANT_SCOPE_MAX_BUCKET |entry, index, count, chain_count, hash, concrete, wanted_mask, source_work, visits|:
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                row_index: usize = index.concrete_row_indices[entry]
+                return (false, false) if row_index >= count
+                path_scope: ProofReplayVariantScopePosition = index.rows[row_index]
+                if index.concrete_hashes[entry] == hash and path_scope.annotation_marker_count == 1:
+                    return (false, false) if not proof_replay_variant_text_compare_charge_with_work(path_scope.annotation_concrete, concrete, source_work)
+                    if path_scope.annotation_concrete == concrete:
+                        return (false, false) if not proof_replay_variant_text_compare_charge_with_work(path_scope.annotation_owner, "__ext_concrete", source_work)
+                        if path_scope.annotation_owner != "__ext_concrete":
+                            return (false, false) if not proof_replay_variant_text_compare_charge_with_work(path_scope.annotation_owner, "__impl_scope", source_work)
+                            return (false, false) if path_scope.annotation_owner != "__impl_scope"
+                        receiver_mask: usize = path_scope.self_operator_mask
+                        receiver_mask <- receiver_mask | path_scope.explicit_receiver_mask if path_scope.explicit_receiver_type == concrete
+                        return (true, true) if (receiver_mask & wanted_mask) != 0
+                next_entry: usize = index.concrete_next_indices[entry]
+                return (false, false) if next_entry != chain_count and next_entry >= entry
+                entry <- next_entry
+                visits <- visits + 1
+            return (false, false) if entry < chain_count or visits > chain_count
             return (true, false)
+
+        def proof_replay_variant_operator_protocol_mask_with_work(protocols: darray[sview], source_work: mutable usize&) -> (complete: bool, mask: usize):
+            mask: mutable usize = PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY
+            for protocol in protocols |protocol, source_work, mask|:
+                return (false, mask) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(protocol), source_work)
+                mask <- mask | proof_replay_variant_operator_mask_for_protocol(protocol)
+            (true, mask)
 
         def proof_replay_variant_type_alias_with_work(declarations: darray[Ast::Decl]&, name: sview, target: mutable Ast::Expr&, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
             if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT:
@@ -191,6 +207,7 @@ extend ElisaProof:
             match expression:
                 Ast::Expr.Ident(name, _):
                     return false if not proof_replay_variant_text_compare_charge_with_work(name, name, source_work)
+                    return false if not proof_replay_source_work_charge_or_exhaust(2, source_work)
                     names.push(name)
                     alias_target: mutable Ast::Expr = Ast::Expr.Absent
                     alias_count: mutable usize = 0
@@ -200,6 +217,7 @@ extend ElisaProof:
                     return proof_replay_variant_type_operator_names_with_work(alias_target, declarations, names, source_work, depth + 1) if alias_count == 1
                 Ast::Expr.Scope(_, name, _):
                     return false if not proof_replay_variant_text_compare_charge_with_work(name, name, source_work)
+                    return false if not proof_replay_source_work_charge_or_exhaust(2, source_work)
                     names.push(name)
                     alias_target: mutable Ast::Expr = Ast::Expr.Absent
                     alias_count: mutable usize = 0
@@ -218,15 +236,80 @@ extend ElisaProof:
         def proof_replay_variant_type_operator_impl_exists_with_work(expression: Ast::Expr, protocol: sview, report: ProofReport&, source_work: mutable usize&) -> (complete: bool, exists: bool):
             names: mutable darray[sview] = []
             return (false, false) if not proof_replay_variant_type_operator_names_with_work(expression, report.source.source_declarations, &names, source_work, 0)
+            return (false, false) if names.count == 0
+            wanted_mask: usize = proof_replay_variant_operator_mask_for_protocol(protocol)
+            return (true, false) if wanted_mask == PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY
+            scope_index_status: (complete: bool, index: ProofReplayVariantScopePositionIndex) = proof_replay_variant_scope_positions_build(report, source_work)
+            return (false, false) if not scope_index_status.complete
+            free_mask: (complete: bool, mask: usize) = proof_replay_variant_free_operator_mask_with_work(report, scope_index_status.index, report.source.source_declarations, source_work, 0)
+            return (false, false) if not free_mask.complete
+            return (true, true) if (free_mask.mask & wanted_mask) != 0
             for name in names |report, protocol, source_work|:
-                implementation: (complete: bool, exists: bool) = proof_replay_variant_builtin_operator_impl_exists_with_work(report, name, protocol, source_work)
+                implementation: (complete: bool, exists: bool) = proof_replay_variant_scoped_operator_exists_with_index(report, scope_index_status.index, name, wanted_mask, source_work)
                 return (false, false) if not implementation.complete
                 return (true, true) if implementation.exists
-                if protocol == "Ord":
-                    less: (complete: bool, exists: bool) = proof_replay_variant_builtin_operator_impl_exists_with_work(report, name, "Less", source_work)
-                    return (false, false) if not less.complete
-                    return (true, true) if less.exists
             return (true, false)
+
+        def proof_replay_variant_operator_scope_snapshot_with_work(report: ProofReport&, source_work: mutable usize&) -> (complete: bool, index: ProofReplayVariantScopePositionIndex, free_mask: usize):
+            scope_index_status: (complete: bool, index: ProofReplayVariantScopePositionIndex) = proof_replay_variant_scope_positions_build(report, source_work)
+            return (false, scope_index_status.index, PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY) if not scope_index_status.complete
+            free_mask: (complete: bool, mask: usize) = proof_replay_variant_free_operator_mask_with_work(report, scope_index_status.index, report.source.source_declarations, source_work, 0)
+            return (false, scope_index_status.index, PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY) if not free_mask.complete
+            (true, scope_index_status.index, free_mask.mask)
+
+        # Batch the common source-operator admission check: a typed scalar witness asks
+        # about several protocols on the same expression. Union their masks and query each
+        # candidate type once against the bounded source index.
+        def proof_replay_variant_type_operator_protocols_absent_with_work(expression: Ast::Expr, protocols: darray[sview], report: ProofReport&, source_work: mutable usize&) -> (complete: bool, absent: bool):
+            wanted: (complete: bool, mask: usize) = proof_replay_variant_operator_protocol_mask_with_work(protocols, source_work)
+            return (false, false) if not wanted.complete
+            return (true, true) if wanted.mask == PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY
+            names: mutable darray[sview] = []
+            return (false, false) if not proof_replay_variant_type_operator_names_with_work(expression, report.source.source_declarations, &names, source_work, 0)
+            return (false, false) if names.count == 0
+            snapshot: (complete: bool, index: ProofReplayVariantScopePositionIndex, free_mask: usize) = proof_replay_variant_operator_scope_snapshot_with_work(report, source_work)
+            return (false, false) if not snapshot.complete
+            return (true, false) if (snapshot.free_mask & wanted.mask) != 0
+            for name in names |report, wanted, snapshot, source_work|:
+                implementation: (complete: bool, exists: bool) = proof_replay_variant_scoped_operator_exists_with_index(report, snapshot.index, name, wanted.mask, source_work)
+                return (false, false) if not implementation.complete
+                return (true, false) if implementation.exists
+            return (true, true)
+
+        # A const-enum check needs both alias-resolved type names and its source-spelled
+        # concrete owner. Share one declaration snapshot and free-operator scan between them.
+        def proof_replay_variant_type_and_named_operator_protocols_absent_with_work(expression: Ast::Expr, concrete: sview, protocols: darray[sview], report: ProofReport&, source_work: mutable usize&) -> (complete: bool, absent: bool):
+            wanted: (complete: bool, mask: usize) = proof_replay_variant_operator_protocol_mask_with_work(protocols, source_work)
+            return (false, false) if not wanted.complete
+            return (true, true) if wanted.mask == PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY
+            names: mutable darray[sview] = []
+            return (false, false) if not proof_replay_variant_type_operator_names_with_work(expression, report.source.source_declarations, &names, source_work, 0)
+            return (false, false) if names.count == 0
+            snapshot: (complete: bool, index: ProofReplayVariantScopePositionIndex, free_mask: usize) = proof_replay_variant_operator_scope_snapshot_with_work(report, source_work)
+            return (false, false) if not snapshot.complete
+            return (true, false) if (snapshot.free_mask & wanted.mask) != 0
+            for name in names |report, wanted, snapshot, source_work|:
+                implementation: (complete: bool, exists: bool) = proof_replay_variant_scoped_operator_exists_with_index(report, snapshot.index, name, wanted.mask, source_work)
+                return (false, false) if not implementation.complete
+                return (true, false) if implementation.exists
+            if concrete != "":
+                implementation: (complete: bool, exists: bool) = proof_replay_variant_scoped_operator_exists_with_index(report, snapshot.index, concrete, wanted.mask, source_work)
+                return (false, false) if not implementation.complete
+                return (true, false) if implementation.exists
+            return (true, true)
+
+        def proof_replay_variant_named_operator_protocols_absent_with_work(concrete: sview, protocols: darray[sview], report: ProofReport&, source_work: mutable usize&) -> (complete: bool, absent: bool):
+            return (true, true) if concrete == ""
+            wanted: (complete: bool, mask: usize) = proof_replay_variant_operator_protocol_mask_with_work(protocols, source_work)
+            return (false, false) if not wanted.complete
+            return (true, true) if wanted.mask == PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY
+            snapshot: (complete: bool, index: ProofReplayVariantScopePositionIndex, free_mask: usize) = proof_replay_variant_operator_scope_snapshot_with_work(report, source_work)
+            return (false, false) if not snapshot.complete
+            return (true, false) if (snapshot.free_mask & wanted.mask) != 0
+            implementation: (complete: bool, exists: bool) = proof_replay_variant_scoped_operator_exists_with_index(report, snapshot.index, concrete, wanted.mask, source_work)
+            return (false, false) if not implementation.complete
+            return (true, false) if implementation.exists
+            return (true, true)
 
         def proof_replay_variant_source_work_charge(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&, extra_scans: usize, pairwise_cases: bool) -> bool:
             return false if not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)

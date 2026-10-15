@@ -12,39 +12,23 @@
 #   - every contract mentions a threaded parameter only as `p[0]` or `old(p[0])`.
 extend ElisaProof:
     private:
-        const PROOF_REPLAY_THREAD_DEPTH_LIMIT: usize = 96
-
-        struct ProofReplayThreading:
-            valid: mutable bool
-            parameters: mutable darray[sview]
-            slots: mutable darray[usize]
-            symbols: mutable darray[sview]
-
-        def proof_replay_threading_none(valid: bool) -> ProofReplayThreading:
-            return ProofReplayThreading{valid: valid, parameters: [], slots: [], symbols: []}
-
-        def proof_replay_thread_name_compare_work_charge(left: sview, right: sview, work: mutable usize&) -> bool:
-            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            work <- work + 1
-            return false if sview_len(left) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            work <- work + sview_len(left)
-            return false if sview_len(right) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            work <- work + sview_len(right)
-            return true
-
         # The unique source declaration of the callee and whether it may thread.
-        def proof_replay_thread_callee_find_with_work(declarations: darray[Ast::Decl]&, source_report: mutable ProofReport&, name: sview, line: u32, found: mutable usize&, safe: mutable bool&, mutable_slots: mutable darray[usize]&, work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_thread_callee_find_with_work(declarations: darray[Ast::Decl]&, source_report: mutable ProofReport&, name: sview, line: u32, found: mutable usize&, safe: mutable bool&, mutable_slots: mutable darray[usize]&, current_path: darray[sview]&, found_path: mutable darray[sview]&, work: mutable usize&, depth: usize) -> bool:
             if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT or work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
                 found <- 2
                 return false
             work <- work + declarations.count
-            for declaration in declarations |name, line, found, safe, mutable_slots, work, depth, source_report|:
+            for declaration in declarations |name, line, found, safe, mutable_slots, current_path, found_path, work, depth, source_report|:
                 match declaration:
                     Ast::Decl.Func(candidate, parameters, return_type, _, effects, _, position):
                         return false if sview_len(candidate) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
                         work <- work + sview_len(candidate)
                         if candidate == name and position.line == line:
                             found <- found + 1
+                            found_path.clear()
+                            for segment in current_path |segment, found_path, work|:
+                                return false if not proof_replay_generic_param_work_add(work, sview_len(segment))
+                                found_path.push(segment)
                             mutable_slots.clear()
                             safe <- true
                             return false if effects.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
@@ -55,11 +39,12 @@ extend ElisaProof:
                                 safe <- false if sview_starts_with(effect, "Unsafe")
                             if return_type is declared:
                                 return_has_generic: bool = proof_replay_thread_type_mentions_owner_generic_with_work(declared, position.line, position.offset.usize(), true, source_report, work, 0)
-                                return_reference_free: bool = proof_type_is_reference_free_with_work(declared, source_report.source.source_declarations, source_report.source.source_annotations, 0, work)
+                                return_reference_syntax: (complete: bool, has_reference: bool) = proof_replay_thread_type_has_reference_syntax(declared, source_report, found_path, work, 0)
                                 return_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(declared, source_report.source.source_declarations, source_report.source_types.source_generic_param_lines, source_report.source_types.source_generic_param_names, position.line, position.offset, source_report.source_types.source_generic_owner_params_valid, source_report.source_types.source_effect_index, source_report.source_types.source_generic_params_valid and source_report.source_types.source_generic_param_lines.count == source_report.source_types.source_generic_param_names.count, work)
-                                return_borrows_storage: bool = proof_type_contains_borrowed_view_with_work(declared, source_report.source.source_declarations, 0, work)
+                                direct_return_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_replay_thread_direct_type_markers(declared, source_report, found_path, work, 0)
+                                return_borrowed_storage: (complete: bool, borrowed: bool) = proof_replay_thread_type_contains_borrowed_storage(declared, source_report, found_path, work, 0)
                                 return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                                safe <- false if return_has_generic or not return_reference_free or return_markers.reference or not return_markers.complete or return_borrows_storage
+                                safe <- false if return_has_generic or not return_reference_syntax.complete or return_reference_syntax.has_reference or not return_borrowed_storage.complete or return_borrowed_storage.borrowed or return_markers.reference or not proof_replay_thread_markers_cover_direct_syntax(return_markers, direct_return_markers)
                             return false if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
                             work <- work + parameters.count
                             for index in 0..<parameters.count |index, parameters, safe, mutable_slots, work, source_report|:
@@ -67,17 +52,22 @@ extend ElisaProof:
                                 work <- work + sview_len(parameters[index].name)
                                 parameter_has_generic: bool = proof_replay_thread_type_mentions_owner_generic_with_work(parameters[index].type_expression, position.line, position.offset.usize(), true, source_report, work, 0)
                                 parameter_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(parameters[index].type_expression, source_report.source.source_declarations, source_report.source_types.source_generic_param_lines, source_report.source_types.source_generic_param_names, position.line, position.offset, source_report.source_types.source_generic_owner_params_valid, source_report.source_types.source_effect_index, source_report.source_types.source_generic_params_valid and source_report.source_types.source_generic_param_lines.count == source_report.source_types.source_generic_param_names.count, work)
-                                parameter_storage_type: Ast::Expr = proof_type_strip_reference(parameters[index].type_expression, 0)
-                                parameter_storage_reference_free: bool = proof_type_is_reference_free_with_work(parameter_storage_type, source_report.source.source_declarations, source_report.source.source_annotations, 0, work)
-                                parameter_borrows_storage: bool = proof_type_contains_borrowed_view_with_work(parameter_storage_type, source_report.source.source_declarations, 0, work)
+                                direct_parameter_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_replay_thread_direct_type_markers(parameters[index].type_expression, source_report, found_path, work, 0)
+                                parameter_storage_type: Ast::Expr = proof_replay_thread_parameter_storage_type(parameters[index].type_expression, 0)
+                                parameter_reference_syntax: (complete: bool, has_reference: bool) = proof_replay_thread_type_has_reference_syntax(parameter_storage_type, source_report, found_path, work, 0)
+                                parameter_borrowed_storage: (complete: bool, borrowed: bool) = proof_replay_thread_type_contains_borrowed_storage(parameter_storage_type, source_report, found_path, work, 0)
                                 return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                                 safe <- false if parameter_has_generic
-                                safe <- false if not parameter_storage_reference_free or parameter_borrows_storage
+                                safe <- false if not parameter_reference_syntax.complete or parameter_reference_syntax.has_reference or not parameter_borrowed_storage.complete or parameter_borrowed_storage.borrowed
                                 continue if not parameter_markers.reference
-                                safe <- false if not parameter_markers.complete or not parameter_markers.mutable_reference
+                                safe <- false if not proof_replay_thread_markers_cover_direct_syntax(parameter_markers, direct_parameter_markers) or not parameter_markers.mutable_reference
                                 mutable_slots.push(index)
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_thread_callee_find_with_work(nested, source_report, name, line, found, safe, mutable_slots, work, depth + 1)
+                    Ast::Decl.Module(module_name, nested, _):
+                        nested_path: (complete: bool, scope: darray[sview]) = proof_replay_global_constant_scope_with_module_and_work(current_path, module_name, work)
+                        return false if not nested_path.complete
+                        return false if not proof_replay_thread_callee_find_with_work(nested, source_report, name, line, found, safe, mutable_slots, nested_path.scope, found_path, work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_thread_callee_find_with_work(nested, source_report, name, line, found, safe, mutable_slots, current_path, found_path, work, depth + 1)
                     Ast::Decl.Invalid:
                         found <- 2
                         return false
@@ -254,9 +244,14 @@ extend ElisaProof:
                                 _:
                                     type_has_generic: bool = proof_replay_thread_type_mentions_owner_generic_with_work(type_expression, source_report.analysis_2.replay_owner_line, source_report.analysis_2.replay_owner_offset, source_report.analysis_2.replay_owner_offset_valid, source_report, source_work, 0)
                                     markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(type_expression, source_report.source.source_declarations, source_report.source_types.source_generic_param_lines, source_report.source_types.source_generic_param_names, source_report.analysis_2.replay_owner_line, source_report.analysis_2.replay_owner_offset.u32(), source_report.analysis_2.replay_owner_offset_valid and source_report.source_types.source_generic_owner_params_valid, source_report.source_types.source_effect_index, source_report.source_types.source_generic_params_valid and source_report.source_types.source_generic_param_lines.count == source_report.source_types.source_generic_param_names.count, source_work)
-                                    type_reference_free: bool = proof_type_is_reference_free_with_work(type_expression, source_report.source.source_declarations, source_report.source.source_annotations, 0, source_work)
-                                    type_borrows_storage: bool = proof_type_contains_borrowed_view_with_work(type_expression, source_report.source.source_declarations, 0, source_work)
-                                    reference <- true if type_has_generic or not type_reference_free or markers.reference or not markers.complete or type_borrows_storage
+                                    owner_path: (complete: bool, path: darray[sview]) = proof_replay_thread_active_owner_path(source_report, source_work)
+                                    if not owner_path.complete:
+                                        count <- 2
+                                        reference <- true
+                                        return
+                                    type_reference_syntax: (complete: bool, has_reference: bool) = proof_replay_thread_type_has_reference_syntax(type_expression, source_report, owner_path.path, source_work, 0)
+                                    type_borrowed_storage: (complete: bool, borrowed: bool) = proof_replay_thread_type_contains_borrowed_storage(type_expression, source_report, owner_path.path, source_work, 0)
+                                    reference <- true if type_has_generic or not type_reference_syntax.complete or type_reference_syntax.has_reference or markers.reference or not markers.complete or not type_borrowed_storage.complete or type_borrowed_storage.borrowed
                             if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                                 count <- 2
                                 reference <- true
@@ -391,8 +386,10 @@ extend ElisaProof:
             found: mutable usize = 0
             safe: mutable bool = false
             mutable_slots: mutable darray[usize] = []
+            callee_path: mutable darray[sview] = []
+            root_path: darray[sview] = []
             return invalid if:
-                not proof_replay_thread_callee_find_with_work(source_report.source.source_declarations, source_report, summary.name, summary.line, &found, &safe, &mutable_slots, source_work, 0)
+                not proof_replay_thread_callee_find_with_work(source_report.source.source_declarations, source_report, summary.name, summary.line, &found, &safe, &mutable_slots, root_path, &callee_path, source_work, 0)
                 found != 1 or not safe or mutable_slots.count != count
                 any region_line in source_report.source_contracts.source_region_param_lines where region_line == summary.line
             arguments: mutable darray[Ast::Expr] = []

@@ -1,11 +1,9 @@
-# Independent executable-call coverage. This walk does not consult producer call
-# indexes. Unsupported dispatch fails closed; success is not a purity summary.
+        # Independent executable-call coverage; no producer indexes, unsupported dispatch fails closed.
 extend ElisaProof:
     private:
 
-        # Keep `calls` in first-seen order while using a bounded open-addressed
-        # index for membership. Hashes choose a probe path only; exact names decide
-        # equality, and an overlong collision cluster fails closed.
+        # Keep first-seen order with bounded open-addressed membership; hashes choose probes,
+        # exact names decide equality, and overlong collision clusters fail closed.
         def proof_replay_call_name_index_place(calls: darray[sview]&, index: mutable ProofReplayCallNameIndex&, wanted: sview, wanted_hash: u32, value_index: usize, work: mutable usize&) -> (complete: bool, inserted: bool):
             capacity: usize = index.slots.count
             return (false, false) if capacity == 0
@@ -53,8 +51,11 @@ extend ElisaProof:
                 return false if not proof_replay_call_work_add(work, 2)
                 index.hashes.push(proof_name_hash(name))
             return proof_replay_call_name_index_rebuild(calls, index, capacity, work)
-
-        def proof_replay_call_name_index_add(calls: mutable darray[sview]&, index: mutable ProofReplayCallNameIndex&, wanted: sview, work: mutable usize&) -> bool:
+        def proof_replay_call_name_index_add(calls: mutable darray[sview]&, index: mutable ProofReplayCallNameIndex&, wanted: sview, work: mutable usize&, preserve_occurrences: bool = false) -> bool:
+            if preserve_occurrences:
+                return false if not proof_replay_call_work_add(work, sview_len(wanted)) or not proof_replay_call_work_add(work, 1)
+                calls.push(wanted)
+                return true
             next_count: usize = calls.count + 1
             if index.slots.count == 0 or next_count > index.slots.count / 2:
                 capacity: usize = proof_name_index_capacity(next_count)
@@ -68,7 +69,6 @@ extend ElisaProof:
                 calls.push(wanted)
                 index.hashes.push(wanted_hash)
             return true
-
         def proof_replay_call_arms(arms: darray[Ast::MatchArm]&, bindings: mutable darray[sview]&, calls: mutable darray[sview]&, call_index: mutable ProofReplayCallNameIndex&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 96
             for arm in arms |bindings, calls, call_index, call_target, work, depth|:
@@ -91,7 +91,6 @@ extend ElisaProof:
                     not proof_replay_call_body(&arm.body, bindings, calls, call_index, call_target, work, depth + 1)
                 bindings.resize(mark)
             return true
-
         def proof_replay_call_expression_with_index(expression: Ast::Expr, bindings: mutable darray[sview]&, calls: mutable darray[sview]&, call_index: mutable ProofReplayCallNameIndex&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 96 or not proof_replay_call_work_add(work, 1)
             match expression:
@@ -112,12 +111,10 @@ extend ElisaProof:
                 Ast::Expr.ShorthandMember(_, _):
                     pass
                 Ast::Expr.Call(callee, arguments, argument_names, position):
-                    # Unqualified direct dispatch contributes a call-graph edge. A scoped
-                    # callee is admitted below only for the exact replay target, whose owner
-                    # is checked independently. Non-target scoped calls are traversed for
-                    # nested calls but do not contribute an edge here. Field callees do not
-                    # identify a named source edge. Structural graph callers also record them as
-                    # unresolved dispatch, then walk the receiver and arguments for nested calls.
+                    # Direct unqualified calls add graph edges. Scoped calls are admitted only
+                    # for the exact replay target; other scoped calls and field callees do not
+                    # identify edges, though nested calls are traversed and unresolved dispatch
+                    # is recorded by structural graph callers.
                     match callee:
                         Ast::Expr.Ident(name, _):
                             if proof_builtin_scalar_type_name(name):
@@ -142,7 +139,7 @@ extend ElisaProof:
                                 else:
                                     return false if:
                                         not proof_replay_call_site_match(name, position, call_target, work)
-                                        not proof_replay_call_name_index_add(calls, call_index, name, work)
+                                        not proof_replay_call_name_index_add(calls, call_index, name, work, call_target.capture.preserve_call_occurrences)
                                         not proof_replay_call_capture_callee_path(callee, call_target, work)
                         Ast::Expr.Scope(base, name, _):
                             if call_target.capture.capture_all_call_sites and call_target.selection.enabled:
@@ -164,7 +161,7 @@ extend ElisaProof:
                                     call_target.selection.unresolved_dispatch_found <- true
                                 else:
                                     return false if:
-                                        not proof_replay_call_name_index_add(calls, call_index, name, work)
+                                        not proof_replay_call_name_index_add(calls, call_index, name, work, call_target.capture.preserve_call_occurrences)
                                         not proof_replay_call_capture_callee_path(callee, call_target, work)
                                 return false if not proof_replay_call_expression_with_index(base, bindings, calls, call_index, call_target, work, depth + 1)
                             elif call_target.selection.ignore_unmatched_scoped_edges or (call_target.selection.enabled and position.offset.usize() != call_target.selection.offset):
@@ -178,7 +175,7 @@ extend ElisaProof:
                                 return false if:
                                     shadowed
                                     not proof_replay_call_site_match(name, position, call_target, work)
-                                    not proof_replay_call_name_index_add(calls, call_index, name, work)
+                                    not proof_replay_call_name_index_add(calls, call_index, name, work, call_target.capture.preserve_call_occurrences)
                                     not proof_replay_call_capture_callee_path(callee, call_target, work)
                                     not proof_replay_call_expression_with_index(base, bindings, calls, call_index, call_target, work, depth + 1)
                         Ast::Expr.Field(_, method, _):
@@ -194,8 +191,8 @@ extend ElisaProof:
                     for argument in arguments |bindings, calls, call_index, call_target, work, depth|:
                         return false if not proof_replay_call_expression_with_index(argument, bindings, calls, call_index, call_target, work, depth + 1)
                 Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
-                    # Match the producer's backend lowering for the only statically
-                    # unambiguous case. Ambiguous handler candidates are opaque to the graph.
+                    # Match backend lowering only for its statically unambiguous case; ambiguous
+                    # handler candidates remain opaque.
                     if candidates.count != 1:
                         return false if not call_target.selection.track_unresolved_dispatch
                         call_target.selection.unresolved_dispatch_found <- true
@@ -203,8 +200,7 @@ extend ElisaProof:
                             return false if not proof_replay_call_expression_with_index(argument, bindings, calls, call_index, call_target, work, depth + 1)
                         return true
                     candidate: Ast::StaticEffectCandidate = candidates[0]
-                    # Account for each lowering loop and both destination-array pushes
-                    # before the ordinary-call walk charges each resulting expression.
+                    # Charge each lowering loop and destination push before walking each result.
                     for _ in 0..<3 |candidate, arguments, work|:
                         return false if:
                             not proof_replay_call_work_add(work, candidate.captures.count)
@@ -224,8 +220,8 @@ extend ElisaProof:
                 Ast::Expr.RegionNew(inner, _, _):
                     return proof_replay_call_expression_with_index(inner, bindings, calls, call_index, call_target, work, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
-                    # The right side of a category/type test is pattern data, not a runtime
-                    # expression. Its names matter only when a caller establishes true-branch scope.
+                    # A category/type test's right side is pattern data; its names matter only in
+                    # true-branch scope.
                     return proof_replay_call_expression_with_index(left, bindings, calls, call_index, call_target, work, depth + 1) if operator == TokenKind.Is or operator == TokenKind.As
                     return proof_replay_call_condition_expression(expression, bindings, calls, call_index, call_target, work, depth + 1) if operator == TokenKind.And or operator == TokenKind.Or
                     return proof_replay_call_expression_with_index(left, bindings, calls, call_index, call_target, work, depth + 1) and proof_replay_call_expression_with_index(right, bindings, calls, call_index, call_target, work, depth + 1)
@@ -333,18 +329,15 @@ extend ElisaProof:
                         return true
                     return false
             return true
-
         def proof_replay_call_body(body: darray[Ast::Stmt]&, bindings: mutable darray[sview]&, calls: mutable darray[sview]&, call_index: mutable ProofReplayCallNameIndex&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> bool:
             mark: usize = bindings.count
             valid: bool = proof_replay_call_statements(body, bindings, calls, call_index, call_target, work, depth)
             bindings.resize(mark)
             return valid
 
-        # Captured statement loops have a parser Block wrapper with an Invalid
-        # value sentinel, not an evaluated result. Admit that sentinel only at
-        # statement position and only for declarations followed by one loop.
-        # Every initializer, loop condition and body still gets an independent
-        # call walk. Invalid values elsewhere continue to fail closed.
+        # Captured statement loops wrap declarations and one loop in a Block with an Invalid
+        # sentinel. Admit it only there; walk initializers, conditions and bodies independently.
+        # Invalid values elsewhere fail closed.
         def proof_replay_call_statement_expression(expression: Ast::Expr, bindings: mutable darray[sview]&, calls: mutable darray[sview]&, call_index: mutable ProofReplayCallNameIndex&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 96 or not proof_replay_call_work_add(work, 1)
             match expression:
@@ -537,64 +530,4 @@ extend ElisaProof:
                             return true
                         return false
             return true
-
-        def proof_replay_source_calls(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, annotations: darray[Ast::EnumAnnotation]&, calls: mutable darray[sview]&) -> bool:
-            work: mutable usize = 0
-            return proof_replay_source_calls_with_work(parameters, body, annotations, calls, &work)
-
-        def proof_replay_source_calls_with_work(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, annotations: darray[Ast::EnumAnnotation]&, calls: mutable darray[sview]&, work: mutable usize&) -> bool:
-            target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{selection: ProofReplayCallSiteTargetSelection{enabled: false, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: false, offset: 0, line: 0, name: "", calls_at_offset: 0, matched_calls: 0, track_unresolved_dispatch: false, unresolved_dispatch_found: false, source_annotations: []}, conversions: ProofReplayCallSiteTargetConversions{field_conversion_parameters: [], field_conversion_names: [], field_conversion_index_valid: false, field_conversion_index_hashes: [], field_conversion_index_values: [], field_conversion_index_counts: [], field_conversion_custom_cast_present: false}, aliases: ProofReplayCallSiteTargetAliases{field_conversion_alias_names: [], field_conversion_alias_targets: [], field_conversion_alias_lines: [], field_conversion_bare_alias_root_fallback_valid: false, field_conversion_alias_owners: [], field_conversion_alias_has_formals: [],
-                        field_conversion_alias_generic_formal_names: [],
-                        field_conversion_alias_generic_formal_starts: [],
-                        field_conversion_alias_generic_formal_counts: [],
-                        field_conversion_alias_generic_application_valid: [], field_conversion_alias_scope_index_valid: false, field_conversion_alias_scope_index_hashes: [], field_conversion_alias_scope_index_values: [], field_conversion_alias_scope_index_counts: [], field_conversion_alias_index_valid: false, field_conversion_alias_index_hashes: [], field_conversion_alias_index_values: [], field_conversion_alias_index_counts: []}, generics: ProofReplayCallSiteTargetGenerics{field_conversion_generic_params_valid: false, field_conversion_generic_param_lines: [], field_conversion_generic_param_names: [], field_conversion_generic_param_owner_offsets: [], field_conversion_generic_param_line: 0, field_conversion_generic_param_owner: "", field_conversion_generic_param_owner_known: false, field_conversion_generic_param_owner_offset: 0, field_conversion_generic_param_owner_offset_valid: false, field_conversion_generic_param_index_valid: false, field_conversion_generic_param_index_hashes: [], field_conversion_generic_param_index_values: [], field_conversion_generic_param_index_counts: [], field_conversion_generic_owner_index_valid: false, field_conversion_generic_owner_index_hashes: [], field_conversion_generic_owner_index_values: [], field_conversion_generic_owner_index_counts: [], field_conversion_generic_owner_index_entries: 0, field_conversion_generic_function_index_valid: false, field_conversion_generic_function_index_hashes: [], field_conversion_generic_function_index_values: [], field_conversion_generic_function_index_counts: [], field_conversion_generic_function_index_entries: 0}, types: ProofReplayCallSiteTargetTypes{field_conversion_declared_types: [], field_conversion_declared_type_owners: [], field_conversion_declared_type_scope_index_valid: false, field_conversion_declared_type_scope_index_hashes: [], field_conversion_declared_type_scope_index_values: [], field_conversion_declared_type_scope_index_counts: [], field_conversion_declared_type_index_valid: false, field_conversion_declared_type_index_hashes: [], field_conversion_declared_type_index_values: [], field_conversion_declared_type_index_counts: []}}
-            return proof_replay_source_calls_with_target_work(parameters, body, annotations, calls, target, work)
-
-        def proof_replay_source_calls_with_target_work(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, annotations: darray[Ast::EnumAnnotation]&, calls: mutable darray[sview]&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&) -> bool:
-            calls.clear()
-            call_target.selection.calls_at_offset <- 0
-            call_target.selection.matched_calls <- 0
-            call_target.selection.unresolved_dispatch_found <- false
-            call_target.selection.unresolved_scope_at_target <- false
-            if call_target.capture.capture_all_call_sites:
-                call_target.capture.captured_call_offsets.clear()
-                call_target.capture.captured_call_lines.clear()
-                call_target.capture.captured_call_names.clear()
-                call_target.capture.captured_callee_paths.clear()
-                call_target.capture.captured_callee_path_hashes.clear()
-                call_target.capture.captured_callee_path_slots.clear()
-                call_target.capture.captured_scope_offsets.clear()
-            elif call_target.capture.capture_callee_paths:
-                call_target.capture.captured_callee_paths.clear()
-                call_target.capture.captured_callee_path_hashes.clear()
-                call_target.capture.captured_callee_path_slots.clear()
-            call_target.selection.source_annotations <- annotations
-            bindings: mutable darray[sview] = []
-            call_index: mutable ProofReplayCallNameIndex = ProofReplayCallNameIndex{}
-            return false if not proof_replay_call_work_add(work, parameters.count)
-            # Defaults are executable at omitted-argument calls; preserve their edges
-            # rather than assuming a call-site always supplies every argument.
-            for parameter in parameters |bindings, work|:
-                return false if not proof_replay_call_work_add(work, sview_len(parameter.name)) or not proof_replay_call_work_add(work, 2)
-                bindings.push(parameter.name)
-            return false if not proof_replay_call_work_add(work, parameters.count)
-            for parameter in parameters |bindings, calls, work|:
-                return false if not proof_replay_call_work_add(work, 1)
-                if parameter.has_default:
-                    body_target_enabled: bool = call_target.selection.enabled
-                    call_target.selection.enabled <- false
-                    if not proof_replay_call_expression_with_index(parameter.default_value, &bindings, calls, call_index, call_target, work, 0):
-                        calls.clear()
-                        return false
-                    call_target.selection.enabled <- body_target_enabled
-            if not proof_replay_call_body(body, &bindings, calls, call_index, call_target, work, 0):
-                calls.clear()
-                return false
-            return true
-
-        # Signature contract expressions live outside the declaration body. The structural
-        # call graph must include them because the producer's SCC table includes their direct
-        # calls. The caller supplies one source expression at a time and shares the graph's
-        # cumulative source-work meter.
-
 include "./source_call_expression_coverage.elisa"

@@ -1,0 +1,511 @@
+extend ElisaProof:
+    private:
+        def proof_replay_resource_source_borrow_operand_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (known: bool, operand: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            return (false, Ast::Expr.Invalid) if not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_resource_source_borrow_operand_with_work(inner, source_work, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    return (true, operand) if operator == TokenKind.Ampersand
+                _:
+                    pass
+            return (false, Ast::Expr.Invalid)
+
+        # A summary-free lend is valid only if the resolved callee cannot return a capability
+        # retained by its declared result type. Recompute that premise in replay from the AST,
+        # rather than trusting the producer's return_reference_free table entry.
+        def proof_replay_resource_lend_return_is_confined(report: mutable ProofReport&, return_type: Ast::Expr?, callee_line: u32, callee_offset: u32, source_work: mutable usize&) -> bool:
+            if return_type is declared_return_type:
+                return false if proof_replay_thread_type_mentions_owner_generic_with_work(declared_return_type, callee_line, callee_offset.usize(), true, report, source_work, 0)
+                markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(declared_return_type, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, callee_line, callee_offset, report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work)
+                return false if not markers.complete or markers.reference
+                syntax: (complete: bool, has_reference: bool) = proof_replay_thread_type_has_reference_syntax(declared_return_type, report, source_work, 0)
+                return false if not syntax.complete or syntax.has_reference
+                owner_path: (complete: bool, path: darray[sview]) = proof_replay_resource_owner_module_path_at_offset_with_work(report, callee_line, callee_offset.usize(), source_work)
+                return false if not owner_path.complete
+                sview_return: (complete: bool, sview_type: bool) = proof_replay_resource_sview_type_with_work(declared_return_type, report, owner_path.path, source_work, 0)
+                return false if not sview_return.complete or sview_return.sview_type
+            return_region_matches: mutable usize = 0
+            for annotation in report.source.source_local_region_annotations |annotation, callee_line, return_region_matches, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                return false if not proof_replay_owner_work_charge(sview_len(annotation.name), source_work)
+                if annotation.line == callee_line and annotation.name == "__region_return":
+                    return false if not proof_replay_owner_work_charge(sview_len(annotation.region), source_work)
+                    return_region_matches <- return_region_matches + 1
+                    return false if annotation.region != "" or return_region_matches > 1
+            true
+
+        def proof_replay_resource_call_arguments_match_with_work(report: ProofReport&, event: ElisaProofKernelCore::ProofKernelNode, source_call: Ast::Expr, parameters: darray[Ast::ParamDecl]&, callee_line: u32, callee_offset: u32, source_work: mutable usize&) -> bool:
+            match source_call:
+                Ast::Expr.Call(_, arguments, argument_names, _):
+                    argument_count: usize = event.auxiliary
+                    return false if:
+                        arguments.count != argument_count or parameters.count != argument_count or (argument_names.count != 0 and argument_names.count != arguments.count)
+                    return false if event.children_start > report.analysis_1.kernel.children.count
+                    return false if event.children_count > report.analysis_1.kernel.children.count - event.children_start
+                    return false if argument_count > event.children_count
+                    return false if event.kind == "resource-call-lend" and event.children_count - argument_count < parameters.count
+                    parameter_markers_by_index: mutable darray[(reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool)] = []
+                    for label in argument_names |label, source_work|:
+                        return false if not proof_replay_owner_work_charge(1, source_work)
+                    for label_index in 0..<argument_names.count |label_index, argument_names, source_work|:
+                        label: sview = argument_names[label_index]
+                        if label != "":
+                            for prior_index in 0..<label_index |prior_index, argument_names, label, source_work|:
+                                prior_label: sview = argument_names[prior_index]
+                                return false if:
+                                    not proof_replay_owner_work_charge(sview_len(label), source_work)
+                                    not proof_replay_owner_work_charge(sview_len(prior_label), source_work)
+                                    prior_label == label
+                    for argument_index in 0..<argument_count |argument_index, event, arguments, argument_names, report, source_work|:
+                        child_index: usize = event.children_start + argument_index
+                        return false if child_index >= report.analysis_1.kernel.children.count
+                        argument_root: usize = report.analysis_1.kernel.children[child_index]
+                        return false if argument_root >= report.analysis_1.kernel.nodes.count
+                        argument: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[argument_root]
+                        return false if argument.kind != "resource-call-arg"
+                        return false if not proof_replay_owner_work_charge(sview_len(argument.operator), source_work) or not proof_replay_owner_work_charge(sview_len(argument.secondary_name), source_work)
+                        parameter_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(parameters[argument_index].type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, callee_line, callee_offset, report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work)
+                        return false if not parameter_markers.complete
+                        parameter_markers_by_index.push(parameter_markers) if event.kind == "resource-call-lend"
+                        return false if argument.operator in {"borrow", "reference", "region-new"} and not parameter_markers.reference
+                        return false if argument.operator == "value" and parameter_markers.mutable_reference
+                        return false if:
+                            not proof_replay_owner_work_charge(sview_len(argument.name), source_work)
+                            not proof_replay_owner_work_charge(sview_len(parameters[argument_index].name), source_work)
+                            argument.name != parameters[argument_index].name
+                        # Formal labels must be one-to-one too; otherwise two serialized
+                        # arguments could both authenticate against the same named source arg.
+                        for prior_index in 0..<argument_index |prior_index, event, argument, report, source_work|:
+                            prior_child_index: usize = event.children_start + prior_index
+                            return false if prior_child_index >= report.analysis_1.kernel.children.count
+                            prior_root: usize = report.analysis_1.kernel.children[prior_child_index]
+                            return false if prior_root >= report.analysis_1.kernel.nodes.count
+                            prior_argument: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[prior_root]
+                            return false if prior_argument.kind != "resource-call-arg"
+                            return false if:
+                                not proof_replay_owner_work_charge(sview_len(prior_argument.name), source_work)
+                                not proof_replay_owner_work_charge(sview_len(argument.name), source_work)
+                                prior_argument.name == argument.name
+                        source_index: mutable usize = arguments.count
+                        label: sview = ""
+                        if argument_names.count == arguments.count:
+                            label <- argument_names[argument_index]
+                        if label != "":
+                            for candidate in 0..<arguments.count |candidate, argument_names, argument, source_index, source_work|:
+                                return false if:
+                                    not proof_replay_owner_work_charge(1, source_work)
+                                    not proof_replay_owner_work_charge(sview_len(argument.name), source_work)
+                                    not proof_replay_owner_work_charge(sview_len(argument_names[candidate]), source_work)
+                                source_index <- candidate if argument_names[candidate] == argument.name
+                        else:
+                            source_index <- argument_index
+                        return false if source_index >= arguments.count or argument.left >= report.analysis_1.kernel.nodes.count
+                        source_argument: Ast::Expr = arguments[source_index]
+                        if argument.operator != "borrow":
+                            explicit_borrow: (known: bool, operand: Ast::Expr) = proof_replay_resource_source_borrow_operand_with_work(source_argument, source_work, 0)
+                            return false if explicit_borrow.known
+                        matched: mutable bool = false
+                        if argument.operator == "region-new":
+                            match source_argument:
+                                Ast::Expr.RegionNew(operand, region, _):
+                                    allocation: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[argument.left]
+                                    return false if:
+                                        not proof_replay_owner_work_charge(sview_len(allocation.secondary_name), source_work)
+                                        allocation.kind != "resource-region-call-alloc" or allocation.secondary_name != region or allocation.left >= report.analysis_1.kernel.nodes.count
+                                    matched <- proof_replay_ast_matches_kernel_with_work(report, operand, allocation.left, source_work, 0)
+                                _:
+                                    return false
+                        elif argument.operator == "borrow":
+                            operand: (known: bool, expression: Ast::Expr) = proof_replay_resource_source_borrow_operand_with_work(source_argument, source_work, 0)
+                            return false if not operand.known
+                            matched <- proof_replay_ast_matches_kernel_with_work(report, operand.expression, argument.left, source_work, 0)
+                        else:
+                            return false if argument.operator != "value" and argument.operator != "reference"
+                            matched <- proof_replay_ast_matches_kernel_with_work(report, source_argument, argument.left, source_work, 0)
+                        return false if not matched
+                    if event.kind == "resource-call-lend":
+                        # Lend replay derives the call's effect solely from these serialized
+                        # formal modes. Bind every mode and lifetime back to the resolved
+                        # callee declaration, or a forged shared mode could erase a mutable
+                        # formal's required write.
+                        for parameter_index in 0..<parameters.count |parameter_index, event, report, parameters, callee_line, callee_offset, source_work|:
+                            formal_child_index: usize = event.children_start + argument_count + parameter_index
+                            return false if formal_child_index >= report.analysis_1.kernel.children.count
+                            formal_root: usize = report.analysis_1.kernel.children[formal_child_index]
+                            return false if formal_root >= report.analysis_1.kernel.nodes.count
+                            formal: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[formal_root]
+                            parameter: Ast::ParamDecl = parameters[parameter_index]
+                            markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = parameter_markers_by_index[parameter_index]
+                            expected_mode: sview = "value"
+                            if markers.reference:
+                                expected_mode <- "external-shared" if not markers.mutable_reference
+                                expected_mode <- "external-mutable" if markers.mutable_reference
+                            parameter_region: mutable sview = ""
+                            region_matches: mutable usize = 0
+                            for annotation in report.source.source_local_region_annotations |annotation, parameter, callee_line, parameter_region, region_matches, source_work|:
+                                return false if not proof_replay_owner_work_charge(1, source_work)
+                                return false if not proof_replay_owner_work_charge(sview_len(annotation.name), source_work)
+                                if annotation.line == callee_line and annotation.name == parameter.name:
+                                    return false if not proof_replay_owner_work_charge(sview_len(annotation.region), source_work)
+                                    region_matches <- region_matches + 1
+                                    parameter_region <- annotation.region
+                            return false if region_matches > 1
+                            return false if:
+                                formal.kind != "resource-call-formal"
+                                not proof_replay_owner_work_charge(sview_len(formal.name), source_work)
+                                not proof_replay_owner_work_charge(sview_len(parameter.name), source_work)
+                                not proof_replay_owner_work_charge(sview_len(formal.operator), source_work)
+                                not proof_replay_owner_work_charge(sview_len(expected_mode), source_work)
+                                not proof_replay_owner_work_charge(sview_len(formal.secondary_name), source_work)
+                                not proof_replay_owner_work_charge(sview_len(parameter_region), source_work)
+                                formal.name != parameter.name or formal.operator != expected_mode or formal.secondary_name != parameter_region
+                    # Region bindings are consumed by replay to place allocations through the
+                    # callee's formal lifetimes. Authenticate the ordered formal side against
+                    # parser-owned annotations for both event layouts. The kernel separately
+                    # checks that each actual region is active and that formal names are unique.
+                    formal_child_count: usize = parameters.count if event.kind == "resource-call-lend" else 0
+                    return false if formal_child_count > event.children_count - argument_count
+                    return false if event.right > event.children_count - argument_count - formal_child_count
+                    region_index: mutable usize = 0
+                    for annotation in report.source.source_local_region_annotations |annotation, event, report, callee_line, argument_count, formal_child_count, region_index, source_work|:
+                        return false if not proof_replay_owner_work_charge(1, source_work)
+                        return false if not proof_replay_owner_work_charge(sview_len(annotation.name), source_work)
+                        continue if annotation.line != callee_line or annotation.name != "__region_param"
+                        return false if not proof_replay_owner_work_charge(sview_len(annotation.region), source_work)
+                        return false if annotation.region == ""
+                        return false if region_index >= event.right
+                        region_child_index: usize = event.children_start + argument_count + formal_child_count + region_index
+                        return false if region_child_index >= report.analysis_1.kernel.children.count
+                        region_root: usize = report.analysis_1.kernel.children[region_child_index]
+                        return false if region_root >= report.analysis_1.kernel.nodes.count
+                        region: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[region_root]
+                        return false if:
+                            region.kind != "resource-call-region" or region.operator != "param"
+                            not proof_replay_owner_work_charge(sview_len(region.name), source_work)
+                            not proof_replay_owner_work_charge(sview_len(annotation.region), source_work)
+                            not proof_replay_owner_work_charge(sview_len(region.secondary_name), source_work)
+                            region.name != annotation.region or region.secondary_name == ""
+                        region_index <- region_index + 1
+                    return false if region_index != event.right
+                    true
+                _:
+                    false
+
+        # Check prefix-node aliasing once per owner. The previous per-bind check walked every
+        # arena edge, multiplying the full graph scan by the number of formals.
+        def proof_replay_resource_prefix_edges_unique_with_work(report: ProofReport&, root_index: usize, root: ElisaProofKernelCore::ProofKernelNode, prefix_end: usize, source_work: mutable usize&) -> bool:
+            node_count: usize = report.analysis_1.kernel.nodes.count
+            return false if root_index >= node_count or prefix_end > root.children_count or root.children_start > report.analysis_1.kernel.children.count or root.children_count > report.analysis_1.kernel.children.count - root.children_start
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            remaining_work: mutable usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            # Reserve enough budget for array initialization, the node pass, and prefix checks
+            # before allocating two arrays proportional to the untrusted arena size.
+            return false if node_count > remaining_work / 3
+            remaining_work <- remaining_work - node_count * 3
+            return false if prefix_end > remaining_work / 2
+            remaining_work <- remaining_work - prefix_end * 2
+            return false if report.analysis_1.kernel.children.count > remaining_work
+            prefix_nodes: mutable darray[bool] = []
+            incoming_counts: mutable darray[usize] = []
+            prefix_nodes.resize(node_count)
+            incoming_counts.resize(node_count)
+            for node_index in 0..<node_count |node_index, prefix_nodes, incoming_counts, source_work|:
+                return false if not proof_replay_owner_work_charge(2, source_work)
+                prefix_nodes[node_index] <- false
+                incoming_counts[node_index] <- 0
+            for prefix_index in 0..<prefix_end |prefix_index, report, root, prefix_nodes, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                child: usize = report.analysis_1.kernel.children[root.children_start + prefix_index]
+                return false if child >= node_count
+                prefix_nodes[child] <- true
+            authorized_start: usize = root.children_start
+            authorized_end: usize = authorized_start + prefix_end
+            for parent_index in 0..<node_count |parent_index, report, root_index, prefix_nodes, incoming_counts, authorized_start, authorized_end, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                parent: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[parent_index]
+                return false if parent.children_start > report.analysis_1.kernel.children.count or parent.children_count > report.analysis_1.kernel.children.count - parent.children_start
+                for child_offset in 0..<parent.children_count |child_offset, report, parent, parent_index, root_index, prefix_nodes, incoming_counts, authorized_start, authorized_end, source_work|:
+                    return false if not proof_replay_owner_work_charge(1, source_work)
+                    edge_index: usize = parent.children_start + child_offset
+                    child: usize = report.analysis_1.kernel.children[edge_index]
+                    return false if child >= node_count
+                    if prefix_nodes[child]:
+                        return false if parent_index != root_index or edge_index < authorized_start or edge_index >= authorized_end
+                        incoming_counts[child] <- incoming_counts[child] + 1
+                        return false if incoming_counts[child] > 1
+            for prefix_index in 0..<prefix_end |prefix_index, report, root, incoming_counts, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                child: usize = report.analysis_1.kernel.children[root.children_start + prefix_index]
+                return false if child >= node_count or incoming_counts[child] != 1
+            true
+
+        def proof_replay_resource_safety_owner_valid_with_work(report: ProofReport&, root_index: usize, root: ElisaProofKernelCore::ProofKernelNode, prefix_end: mutable usize&, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if root.kind != "resource-safety" or root.value < 0 or root.value > 4294967295 or root.right == 0 or root.right > 4294967295
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            owner: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, root.name, root.right.u32(), root.value.usize(), source_work)
+            return false if not owner.complete or owner.matches != 1 or owner.row >= cache.deterministic_calls.declaration_index.entries.count
+            entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[owner.row]
+            return false if entry.owner != root.secondary_name
+            owner_path: (complete: bool, path: darray[sview]) = proof_replay_resource_owner_module_path_with_work(report, root.name, root.right.u32(), root.value.usize(), source_work)
+            return false if not owner_path.complete
+            match entry.declaration:
+                Ast::Decl.Func(_, parameters, return_type, body, _, _, _):
+                    return false if parameters.count != root.auxiliary or root.children_start > report.analysis_1.kernel.children.count or root.children_count > report.analysis_1.kernel.children.count - root.children_start
+                    scan: mutable usize = 0
+                    # Region parameters are emitted before value parameters. Match their ordered
+                    # prefix to the parser-owned side table before replay treats them as external
+                    # lifetime capabilities.
+                    for annotation in report.source.source_local_region_annotations |annotation, root, report, scan, source_work|:
+                        return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(annotation.name), source_work)
+                        continue if annotation.line != root.right.u32() or annotation.name != "__region_param"
+                        return false if not proof_replay_owner_work_charge(sview_len(annotation.region), source_work)
+                        return false if scan >= root.children_count
+                        region_root: usize = report.analysis_1.kernel.children[root.children_start + scan]
+                        return false if region_root >= report.analysis_1.kernel.nodes.count
+                        region_node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[region_root]
+                        return false if region_node.kind != "resource-region-param" or region_node.name != annotation.region
+                        scan <- scan + 1
+                    for parameter in parameters |parameter, report, root, scan, source_work|:
+                        return false if not proof_replay_owner_work_charge(1, source_work)
+                        return false if scan >= root.children_count
+                        child: usize = report.analysis_1.kernel.children[root.children_start + scan]
+                        return false if child >= report.analysis_1.kernel.nodes.count
+                        bind: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[child]
+                        return false if bind.kind != "resource-bind" or bind.value != 0
+                        markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(parameter.type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, root.right.u32(), root.value.u32(), report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work)
+                        return false if not markers.complete
+                        parameter_region: mutable sview = ""
+                        for annotation in report.source.source_local_region_annotations |annotation, parameter, root, parameter_region, source_work|:
+                            return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(annotation.name), source_work)
+                            if annotation.line == root.right.u32() and annotation.name == parameter.name:
+                                return false if not proof_replay_owner_work_charge(sview_len(annotation.name), source_work) or not proof_replay_owner_work_charge(sview_len(annotation.region), source_work)
+                                parameter_region <- annotation.region
+                        expected_operator: sview = "value"
+                        if markers.reference:
+                            expected_operator <- "external-mutable" if markers.mutable_reference
+                            expected_operator <- "external-shared" if not markers.mutable_reference
+                        expected_writable: bool = parameter.is_mutable or markers.is_mutable or markers.mutable_reference
+                        expected_bind_region: sview = parameter_region if markers.reference else ""
+                        return false if not proof_replay_owner_work_charge(sview_len(bind.name), source_work) or not proof_replay_owner_work_charge(sview_len(parameter.name), source_work) or not proof_replay_owner_work_charge(sview_len(bind.secondary_name), source_work) or not proof_replay_owner_work_charge(sview_len(expected_bind_region), source_work)
+                        return false if bind.name != parameter.name or bind.operator != expected_operator or bind.secondary_name != expected_bind_region or ((bind.auxiliary & ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_WRITABLE_FLAG) != 0) != expected_writable
+                        # The checker marks non-scalar value parameters borrowable. Keep this
+                        # capability tied to the parsed type as well as the declared name/mode.
+                        scalar_type: (complete: bool, scalar: bool) = proof_replay_resource_scalar_type_with_work(parameter.type_expression, report, source_work, 0)
+                        return false if not scalar_type.complete
+                        expected_borrowable: bool = not markers.reference and not scalar_type.scalar
+                        return false if ((bind.auxiliary & ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_BORROWABLE_FLAG) != 0) != expected_borrowable
+                        scan <- scan + 1
+                        sview_type: (complete: bool, value: bool) = proof_replay_resource_sview_type_with_work(parameter.type_expression, report, owner_path.path, source_work, 0)
+                        return false if not sview_type.complete
+                        expects_sview_marker: bool = parameter_region != "" and sview_type.value
+                        if scan < root.children_count:
+                            return false if not proof_replay_owner_work_charge(1, source_work)
+                            marker_root: usize = report.analysis_1.kernel.children[root.children_start + scan]
+                            return false if marker_root >= report.analysis_1.kernel.nodes.count
+                            marker: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[marker_root]
+                            return false if (marker.kind == "resource-sview-param") != expects_sview_marker
+                            if expects_sview_marker:
+                                return false if not proof_replay_owner_work_charge(sview_len(marker.name), source_work) or not proof_replay_owner_work_charge(sview_len(parameter.name), source_work) or not proof_replay_owner_work_charge(sview_len(marker.secondary_name), source_work) or not proof_replay_owner_work_charge(sview_len(parameter_region), source_work)
+                                return false if marker.name != parameter.name or marker.secondary_name != parameter_region
+                                scan <- scan + 1
+                        else:
+                            return false if expects_sview_marker
+                    # Require every assignment rooted at a formal to have a resource-write
+                    # event. The event validator below checks the reverse direction. Together
+                    # these checks prevent a certificate from silently omitting a tracked
+                    # parameter mutation. Ambiguous/unsupported target roots refuse admission.
+                    for parameter in parameters |parameter, report, root, body, source_work|:
+                        return false if not proof_replay_resource_parameter_writes_covered_with_work(report, root, body, parameters, parameter.name, cache.deterministic_calls.declaration_index, source_work, 0)
+                    # Run the syntax coverage walk even for zero-parameter owners: local
+                    # binders, region creation, and unaccounted calls must not disappear merely
+                    # because no formal root was available to seed the per-parameter pass.
+                    return false if not proof_replay_resource_parameter_writes_covered_with_work(report, root, body, parameters, "", cache.deterministic_calls.declaration_index, source_work, 0)
+                    return false if not proof_replay_resource_moves_covered_with_work(report, root, body, source_work)
+                    return false if not proof_replay_resource_discard_allocations_covered_with_work(report, root, body, source_work)
+                    return false if not proof_replay_resource_unbridged_storage_allocations_absent(body, source_work, 0)
+                    return false if not proof_replay_resource_binding_identities_source_valid_with_work(report, root, parameters, body, source_work)
+                    return_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(return_type, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, root.right.u32(), root.value.u32(), report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work)
+                    return false if not return_markers.complete
+                    return_scalar: mutable (complete: bool, scalar: bool) = (true, false)
+                    if return_type is declared_return_type:
+                        return_scalar <- proof_replay_resource_scalar_type_with_work(declared_return_type, report, source_work, 0)
+                    return false if not return_scalar.complete
+                    return false if not proof_replay_resource_return_markers_covered_with_work(report, root, body, parameters, root.right.u32(), return_markers.reference, return_markers.mutable_reference, return_scalar.scalar, source_work, 0)
+                    return false if not proof_replay_resource_local_borrows_absent_in_root_with_work(report, root, scan, source_work)
+                    prefix_end <- scan
+                    return false if not proof_replay_resource_prefix_edges_unique_with_work(report, root_index, root, prefix_end, source_work)
+                    true
+                _:
+                    false
+
+        def proof_replay_resource_call_position_count_with_work(report: ProofReport&, root: usize, offset: usize, source_work: mutable usize&, depth: usize) -> (complete: bool, count: usize):
+            return (false, 0) if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
+            node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
+            return (false, 0) if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
+            return (true, 0) if node.kind == "resource-disjoint"
+            if node.kind not in {"resource-safety", "resource-scope", "resource-alternatives"}:
+                return (false, 0) if node.kind != "resource-call" and node.kind != "resource-call-lend" and (node.children_start != 0 or node.children_count != 0)
+                return (true, 1 if (node.kind == "resource-call" or node.kind == "resource-call-lend") and node.value == offset.i64() else 0)
+            count: mutable usize = 0
+            for index in 0..<node.children_count |index, report, node, offset, source_work, depth, count|:
+                return (false, 0) if not proof_replay_owner_work_charge(1, source_work)
+                child: usize = report.analysis_1.kernel.children[node.children_start + index]
+                nested: (complete: bool, count: usize) = proof_replay_resource_call_position_count_with_work(report, child, offset, source_work, depth + 1)
+                return (false, 0) if not nested.complete or count > report.analysis_1.kernel.nodes.count or nested.count > report.analysis_1.kernel.nodes.count - count
+                count <- count + nested.count
+            (true, count)
+
+        # Default arguments execute at the call site, outside the callee body. The
+        # omitted-transition shortcut may therefore accept only defaults whose syntax
+        # cannot call code, read a place, allocate, or dispatch an overloaded operator.
+        # Restrict this proof to scalar literal defaults; anything richer keeps the call
+        # transition visible to resource replay.
+        def proof_replay_resource_default_is_literal_with_work(expression: Ast::Expr, source_work: mutable usize&) -> bool:
+            return false if not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _):
+                    true
+                Ast::Expr.FloatLit(text, _) | Ast::Expr.CharLit(text, _):
+                    proof_replay_owner_work_charge(sview_len(text), source_work)
+                _:
+                    false
+
+        # Name-only omission classification cannot safely cross unresolved imports or externs:
+        # either can be called transitively by a candidate body and evade the pure source walk.
+        def proof_replay_resource_call_has_opaque_target_with_work(declarations: darray[Ast::Decl]&, source_work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(declarations.count, source_work)
+            for declaration in declarations |source_work, depth|:
+                return true if not proof_replay_owner_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Invalid:
+                        return true
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return true if proof_replay_resource_call_has_opaque_target_with_work(nested, source_work, depth + 1)
+                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    _:
+                        return true
+            false
+
+        # A source call is definitely resource-irrelevant only when every same-name candidate
+        # has value-only, non-region parameters and a value-only, non-region result. Any
+        # ambiguity or incomplete metadata keeps the call relevant and therefore requires a
+        # serialized transition.
+        def proof_replay_resource_call_names_at_with_work(report: ProofReport&, root: usize, names: mutable darray[sview]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
+            node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
+            return false if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
+            return true if node.kind == "resource-disjoint"
+            if node.kind == "resource-call" or node.kind == "resource-call-lend":
+                return false if not proof_replay_owner_work_charge(sview_len(node.name), source_work)
+                names.push(node.name)
+                return true
+            if node.kind not in {"resource-safety", "resource-scope", "resource-alternatives"}:
+                return false if node.children_start != 0 or node.children_count != 0
+                return true
+            for index in 0..<node.children_count |index, report, node, names, source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                child: usize = report.analysis_1.kernel.children[node.children_start + index]
+                return false if not proof_replay_resource_call_names_at_with_work(report, child, names, source_work, depth + 1)
+            true
+
+        def proof_replay_resource_call_site_matches_owner_with_work(report: mutable ProofReport&, resource_root: usize, event: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if event.value < 0 or event.value > 4294967295 or owner == "" or owner_line == 0 or owner_offset > 4294967295 or event.name == ""
+            return false if event.kind != "resource-call" and event.kind != "resource-call-lend"
+            positioned: (complete: bool, count: usize) = proof_replay_resource_call_position_count_with_work(report, resource_root, event.value.usize(), source_work, 0)
+            return false if not positioned.complete or positioned.count != 1
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            caller_owner: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
+            return false if not caller_owner.complete or caller_owner.matches != 1 or caller_owner.row >= cache.deterministic_calls.declaration_index.entries.count
+            caller_entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[caller_owner.row]
+            return false if not proof_replay_owner_work_charge(sview_len(caller_entry.owner), source_work) or not proof_replay_owner_work_charge(sview_len(owner_module), source_work)
+            return false if caller_entry.owner != owner_module
+            parameters: darray[Ast::ParamDecl] = []
+            body: darray[Ast::Stmt] = []
+            match caller_entry.declaration:
+                Ast::Decl.Func(_, declared_parameters, _, declared_body, _, _, _):
+                    parameters <- declared_parameters
+                    body <- declared_body
+                _:
+                    return false
+            calls: mutable darray[sview] = []
+            return false if not proof_replay_source_calls_with_work(parameters, body, report.source.source_annotations, &calls, source_work, event.value.usize(), event.name, true)
+            call_position: Ast::Pos = Ast::Pos{line: 0, column: 0, offset: event.value.usize().u32(), end_line: 0, end_column: 0, end_offset: 0}
+            frame_work: mutable usize = 0
+            selected: (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) = ElisaProofFrameSource::source_call_at_owner_with_work(report.source.source_declarations, report.source.source_annotations, owner, owner_line, owner_offset.u32(), call_position, &frame_work)
+            # Charge the attempted source lookup even when it fails to resolve. Otherwise a
+            # forged event can force repeated whole-owner scans without consuming the caller's
+            # source-work budget.
+            frame_work_charged: bool = proof_replay_owner_work_charge(frame_work, source_work)
+            return false if not frame_work_charged or not selected.known
+            return false if not proof_replay_owner_work_charge(sview_len(selected.callee), source_work) or not proof_replay_owner_work_charge(sview_len(event.name), source_work)
+            return false if selected.callee != event.name
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            callee_owner: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, selected.callee, selected.callee_line, selected.callee_offset.usize(), source_work)
+            return false if not callee_owner.complete or callee_owner.matches != 1 or callee_owner.row >= cache.deterministic_calls.declaration_index.entries.count
+            callee_owner_module: sview = cache.deterministic_calls.declaration_index.entries[callee_owner.row].owner
+            return false if not proof_replay_owner_work_charge(sview_len(callee_owner_module), source_work) or not proof_replay_owner_work_charge(sview_len(event.secondary_name), source_work)
+            return false if callee_owner_module != event.secondary_name
+            # This emitted event is already bound to the exact source call and callee summary.
+            # The name-wide pure-call classifier is only needed to justify omitted events.
+            callee_entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[callee_owner.row]
+            match callee_entry.declaration:
+                Ast::Decl.Func(_, parameters, return_type, _, _, _, position):
+                    if event.kind == "resource-call":
+                        # A name/module match is insufficient when overloads share a spelling:
+                        # the linked resource trace must be the exact declaration selected at
+                        # this source call site. Otherwise a valid but unrelated overload trace
+                        # could supply the caller's resource effects.
+                        return false if event.left >= report.analysis_1.kernel.nodes.count
+                        linked_summary: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[event.left]
+                        return false if:
+                            linked_summary.right != position.line.i64()
+                            linked_summary.value != position.offset.i64()
+                            not proof_replay_owner_work_charge(sview_len(linked_summary.kind), source_work)
+                            not proof_replay_owner_work_charge(sview_len(linked_summary.operator), source_work)
+                            not proof_replay_owner_work_charge(sview_len(linked_summary.name), source_work)
+                            not proof_replay_owner_work_charge(sview_len(callee_entry.name), source_work)
+                            not proof_replay_owner_work_charge(sview_len(linked_summary.secondary_name), source_work)
+                            not proof_replay_owner_work_charge(sview_len(callee_entry.owner), source_work)
+                            linked_summary.kind != "resource-safety"
+                            linked_summary.operator != "resource-v2"
+                            linked_summary.name != callee_entry.name
+                            linked_summary.secondary_name != callee_entry.owner
+                    return false if event.kind == "resource-call-lend" and not proof_replay_resource_lend_return_is_confined(report, return_type, position.line, position.offset, source_work)
+                    return proof_replay_resource_call_arguments_match_with_work(report, event, selected.expression, parameters, position.line, position.offset, source_work)
+                _:
+                    false
+
+        # Source call count must agree with resource-relevant call transitions. Same-name calls
+        # without events are accepted only when every declared candidate is definitely value-only
+        # and region-free. Per-event checking binds each emitted transition to a unique source
+        # position and a capability-bearing callee.
+        def proof_replay_resource_call_coverage_for_owner_with_work(report: mutable ProofReport&, root: usize, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if root >= report.analysis_1.kernel.nodes.count or owner == "" or owner_line == 0 or owner_offset > 4294967295
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            located: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
+            return false if not located.complete or located.matches != 1 or located.row >= cache.deterministic_calls.declaration_index.entries.count
+            entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[located.row]
+            return false if entry.owner != owner_module
+            parameters: darray[Ast::ParamDecl] = []
+            body: darray[Ast::Stmt] = []
+            match entry.declaration:
+                Ast::Decl.Func(_, declared_parameters, _, declared_body, _, _, _):
+                    parameters <- declared_parameters
+                    body <- declared_body
+                _:
+                    return false
+            source_calls: mutable darray[sview] = []
+            return false if not proof_replay_source_calls_with_work(parameters, body, report.source.source_annotations, &source_calls, source_work, 0, "", false, true)
+            event_names: mutable darray[sview] = []
+            return false if not proof_replay_resource_call_names_at_with_work(report, root, event_names, source_work, 0)
+            return false if source_calls.count > report.analysis_1.kernel.nodes.count or event_names.count > source_calls.count
+            return false if not proof_replay_resource_call_name_counts_match(source_calls, event_names, report, cache.deterministic_calls.declaration_index, parameters, body, source_work)
+            resource_root: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
+            ordinary: (complete: bool, count: usize) = proof_replay_resource_event_kind_count_in_root_with_work(report, resource_root, "resource-call", source_work)
+            return false if not ordinary.complete or ordinary.count > report.analysis_1.kernel.nodes.count
+            lends: (complete: bool, count: usize) = proof_replay_resource_event_kind_count_in_root_with_work(report, resource_root, "resource-call-lend", source_work)
+            return false if not lends.complete or lends.count > report.analysis_1.kernel.nodes.count - ordinary.count
+            event_names.count == ordinary.count + lends.count

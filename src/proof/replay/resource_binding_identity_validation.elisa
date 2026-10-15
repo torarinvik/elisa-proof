@@ -1,0 +1,371 @@
+extend ElisaProof:
+    private:
+        struct ProofReplayResourceBindingPositionIndex:
+            offsets: mutable darray[usize] = []
+            kinds: mutable darray[sview] = []
+            names: mutable darray[sview] = []
+            event_roots: mutable darray[usize] = []
+
+        def proof_replay_resource_binding_position_swap(positions: mutable ProofReplayResourceBindingPositionIndex&, left: usize, right: usize, source_work: mutable usize&) -> bool:
+            return false if left >= positions.offsets.count or right >= positions.offsets.count
+            return false if positions.offsets.count != positions.kinds.count or positions.offsets.count != positions.names.count or positions.offsets.count != positions.event_roots.count
+            return false if not proof_replay_owner_work_charge(1, source_work)
+            offset: usize = positions.offsets[left]
+            positions.offsets[left] <- positions.offsets[right]
+            positions.offsets[right] <- offset
+            kind: sview = positions.kinds[left]
+            positions.kinds[left] <- positions.kinds[right]
+            positions.kinds[right] <- kind
+            name: sview = positions.names[left]
+            positions.names[left] <- positions.names[right]
+            positions.names[right] <- name
+            event_root: usize = positions.event_roots[left]
+            positions.event_roots[left] <- positions.event_roots[right]
+            positions.event_roots[right] <- event_root
+            true
+
+        # Sort event positions in-place so source identity lookups use binary search without
+        # making admission quadratic in the number of resource operations.
+        def proof_replay_resource_binding_position_sift_down(positions: mutable ProofReplayResourceBindingPositionIndex&, start: usize, end: usize, source_work: mutable usize&) -> bool:
+            requires end > 0 and start < end
+            root: mutable usize = start
+            while root < end |root, end, positions, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                break if root > (end - 1) / 2
+                child: mutable usize = root * 2 + 1
+                break if child >= end
+                right: usize = child + 1
+                if right < end:
+                    return false if not proof_replay_owner_work_charge(1, source_work)
+                    child <- right if positions.offsets[right] > positions.offsets[child]
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                break if positions.offsets[root] >= positions.offsets[child]
+                return false if not proof_replay_resource_binding_position_swap(&positions, root, child, source_work)
+                root <- child
+            true
+
+        def proof_replay_resource_binding_positions_sort(positions: mutable ProofReplayResourceBindingPositionIndex&, source_work: mutable usize&) -> bool:
+            count: usize = positions.offsets.count
+            return false if count != positions.kinds.count or count != positions.names.count or count != positions.event_roots.count
+            return true if count < 2
+            start: mutable usize = count / 2
+            while start > 0 |start, positions, source_work|:
+                start <- start - 1
+                return false if not proof_replay_resource_binding_position_sift_down(&positions, start, count, source_work)
+            end: mutable usize = count
+            while end > 1 |end, positions, source_work|:
+                end <- end - 1
+                return false if not proof_replay_resource_binding_position_swap(&positions, 0, end, source_work)
+                return false if not proof_replay_resource_binding_position_sift_down(&positions, 0, end, source_work)
+            true
+
+        # Resource wrappers carry the owner trace. Calls and disjointness facts are separate
+        # subproofs; only source-local use/write/move/bind leaves belong in this index.
+        def proof_replay_resource_binding_positions_at_with_work(report: ProofReport&, root: usize, positions: mutable ProofReplayResourceBindingPositionIndex&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
+            event: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
+            return false if not proof_replay_owner_work_charge(sview_len(event.kind), source_work)
+            if event.kind in {"resource-safety", "resource-scope", "resource-alternatives"}:
+                return false if event.children_start > report.analysis_1.kernel.children.count or event.children_count > report.analysis_1.kernel.children.count - event.children_start
+                for index in 0..<event.children_count |index, event, report, positions, source_work, depth|:
+                    return false if not proof_replay_owner_work_charge(1, source_work)
+                    child: usize = report.analysis_1.kernel.children[event.children_start + index]
+                    return false if not proof_replay_resource_binding_positions_at_with_work(report, child, positions, source_work, depth + 1)
+                return true
+            return true if event.kind == "resource-disjoint"
+            if event.kind not in {"resource-use", "resource-write", "resource-move", "resource-bind"}:
+                return true if event.kind in {"resource-region-open", "resource-region-close", "resource-region-alloc", "resource-region-bind", "resource-sview-param", "resource-region-alloc-discard", "resource-region-return-alloc", "resource-region-call-alloc", "resource-region-rebind-alloc", "resource-region-assign", "resource-region-return", "resource-region-param", "resource-call", "resource-call-lend", "resource-call-arg", "resource-call-formal", "resource-call-region", "resource-call-result", "resource-join-move"}
+                return false
+            return false if event.value < 0 or event.value > 4294967295 or event.name == ""
+            return false if event.kind in {"resource-use", "resource-write", "resource-move"} and event.value == 0
+            return false if not proof_replay_owner_work_charge(sview_len(event.name), source_work)
+            offset: usize = event.value.usize()
+            return false if positions.offsets.count != positions.kinds.count or positions.offsets.count != positions.names.count or positions.offsets.count != positions.event_roots.count
+            positions.offsets.push(offset)
+            positions.kinds.push(event.kind)
+            positions.names.push(event.name)
+            positions.event_roots.push(root)
+            true
+
+        def proof_replay_resource_binding_position_index_build_with_work(report: ProofReport&, root: ElisaProofKernelCore::ProofKernelNode, source_work: mutable usize&) -> (complete: bool, index: ProofReplayResourceBindingPositionIndex):
+            index: mutable ProofReplayResourceBindingPositionIndex = ProofReplayResourceBindingPositionIndex{}
+            return (false, index) if root.kind != "resource-safety" or root.children_start > report.analysis_1.kernel.children.count or root.children_count > report.analysis_1.kernel.children.count - root.children_start
+            for child_index in 0..<root.children_count |child_index, root, report, index, source_work|:
+                return (false, index) if not proof_replay_owner_work_charge(1, source_work)
+                child: usize = report.analysis_1.kernel.children[root.children_start + child_index]
+                return (false, index) if not proof_replay_resource_binding_positions_at_with_work(report, child, &index, source_work, 0)
+            return (false, index) if not proof_replay_resource_binding_positions_sort(&index, source_work)
+            (true, index)
+
+        def proof_replay_resource_binding_position_find_with_work(report: ProofReport&, index: ProofReplayResourceBindingPositionIndex&, kind: sview, offset: usize, name: sview, source_work: mutable usize&) -> (complete: bool, found: bool, identity: usize):
+            return (false, false, 0) if index.offsets.count != index.kinds.count or index.offsets.count != index.names.count or index.offsets.count != index.event_roots.count
+            return (false, false, 0) if not proof_replay_owner_work_charge(sview_len(kind), source_work) or not proof_replay_owner_work_charge(sview_len(name), source_work)
+            low: mutable usize = 0
+            high: mutable usize = index.offsets.count
+            while low < high |low, high, index, offset, source_work|:
+                return (false, false, 0) if not proof_replay_owner_work_charge(1, source_work)
+                middle: usize = low + (high - low) / 2
+                return (false, false, 0) if middle >= index.offsets.count
+                if index.offsets[middle] < offset:
+                    low <- middle + 1
+                else:
+                    high <- middle
+            count: mutable usize = 0
+            selected: mutable usize = 0
+            current: mutable usize = low
+            while current < index.offsets.count |current, index, offset, kind, name, count, selected, source_work|:
+                break if index.offsets[current] != offset
+                return (false, false, 0) if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(index.kinds[current]), source_work) or not proof_replay_owner_work_charge(sview_len(index.names[current]), source_work)
+                if index.kinds[current] == kind and index.names[current] == name:
+                    count <- count + 1
+                    selected <- index.event_roots[current]
+                    return (true, false, 0) if count > 1
+                current <- current + 1
+            return (false, false, 0) if count != 1 or selected >= report.analysis_1.kernel.nodes.count or selected >= ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+            (true, true, selected + 1)
+
+        def proof_replay_resource_binding_event_annotate_with_work(report: mutable ProofReport&, index: ProofReplayResourceBindingPositionIndex&, kind: sview, offset: usize, name: sview, identity: usize, source_work: mutable usize&) -> bool:
+            found: (complete: bool, found: bool, identity: usize) = proof_replay_resource_binding_position_find_with_work(report, index, kind, offset, name, source_work)
+            return false if not found.complete or not found.found or identity == 0 or identity > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+            event_root: usize = found.identity - 1
+            return false if event_root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
+            report.analysis_1.kernel.nodes[event_root].auxiliary <- identity
+            true
+
+        def proof_replay_resource_binding_for_name_with_work(names: darray[sview]&, binders: darray[usize]&, name: sview, source_work: mutable usize&) -> (complete: bool, bound: bool, identity: usize):
+            return (false, false, 0) if names.count != binders.count
+            index: mutable usize = names.count
+            while index > 0 |index, names, binders, name, source_work|:
+                index <- index - 1
+                return (false, false, 0) if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(names[index]), source_work) or not proof_replay_owner_work_charge(sview_len(name), source_work)
+                if names[index] == name:
+                    return (true, true, binders[index])
+            (true, false, 0)
+
+        def proof_replay_resource_binding_scope_mark_with_work(names: darray[sview]&, binders: darray[usize]&, source_work: mutable usize&) -> (complete: bool, mark: usize):
+            return (false, 0) if names.count != binders.count or not proof_replay_owner_work_charge(1, source_work)
+            (true, names.count)
+
+        def proof_replay_resource_binding_scope_restore_with_work(names: mutable darray[sview]&, binders: mutable darray[usize]&, mark: usize, source_work: mutable usize&) -> bool:
+            return false if names.count != binders.count or mark > names.count or not proof_replay_owner_work_charge(1, source_work)
+            names <- names.truncate(mark)
+            binders <- binders.truncate(mark)
+            true
+
+        def proof_replay_resource_binding_range_shape_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_replay_resource_binding_range_shape_with_work(inner, source_work, depth + 1)
+                Ast::Expr.Binary(_, operator, _, _):
+                    operator in {TokenKind.RangeLt, TokenKind.RangeLe, TokenKind.RangeGt}
+                _:
+                    false
+
+        def proof_replay_resource_binding_root_for_expression_with_work(names: darray[sview]&, binders: darray[usize]&, expression: Ast::Expr, source_work: mutable usize&) -> (complete: bool, bound: bool, identity: usize, name: sview):
+            root: (complete: bool, name: sview) = proof_replay_resource_write_source_root_with_work(expression, source_work, 0)
+            return (false, false, 0, "") if not root.complete
+            binder: (complete: bool, bound: bool, identity: usize) = proof_replay_resource_binding_for_name_with_work(names, binders, root.name, source_work)
+            (binder.complete, binder.bound, binder.identity, root.name)
+
+        def proof_replay_resource_binding_use_covered_with_work(report: mutable ProofReport&, index: ProofReplayResourceBindingPositionIndex&, names: darray[sview]&, binders: darray[usize]&, name: sview, position: Ast::Pos, source_work: mutable usize&) -> bool:
+            binder: (complete: bool, bound: bool, identity: usize) = proof_replay_resource_binding_for_name_with_work(names, binders, name, source_work)
+            return false if not binder.complete
+            return true if not binder.bound
+            return false if position.offset == 0 or position.offset > 4294967295
+            proof_replay_resource_binding_event_annotate_with_work(report, index, "resource-use", position.offset.usize(), name, binder.identity, source_work)
+
+        def proof_replay_resource_binding_builtin_write_covered_with_work(report: mutable ProofReport&, index: ProofReplayResourceBindingPositionIndex&, names: darray[sview]&, binders: darray[usize]&, callee: Ast::Expr, position: Ast::Pos, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            stripped: mutable Ast::Expr = callee
+            strip_depth: mutable usize = 0
+            while strip_depth < PROOF_REPLAY_AST_DEPTH_LIMIT |stripped, strip_depth, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                match stripped:
+                    Ast::Expr.Paren(inner, _):
+                        stripped <- inner
+                        strip_depth <- strip_depth + 1
+                    _:
+                        break
+            match stripped:
+                Ast::Expr.Field(receiver, method, _):
+                    return true if method not in {"push", "extend", "clear", "resize", "pop", "truncate"}
+                    receiver_root: (complete: bool, name: sview) = proof_replay_resource_write_source_root_with_work(receiver, source_work, 0)
+                    return false if not receiver_root.complete
+                    binder: (complete: bool, bound: bool, identity: usize) = proof_replay_resource_binding_for_name_with_work(names, binders, receiver_root.name, source_work)
+                    return false if not binder.complete
+                    return true if not binder.bound
+                    return false if position.offset == 0 or position.offset > 4294967295
+                    proof_replay_resource_binding_event_annotate_with_work(report, index, "resource-write", position.offset.usize(), receiver_root.name, binder.identity, source_work)
+                _:
+                    true
+
+        def proof_replay_resource_binding_expression_uses_covered_with_work(report: mutable ProofReport&, index: ProofReplayResourceBindingPositionIndex&, names: mutable darray[sview]&, binders: mutable darray[usize]&, expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Ident(name, position):
+                    return proof_replay_resource_binding_use_covered_with_work(report, index, names, binders, name, position, source_work)
+                Ast::Expr.Call(callee, arguments, _, position):
+                    return false if not proof_replay_resource_binding_builtin_write_covered_with_work(report, index, names, binders, callee, position, source_work, depth + 1)
+                    return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, callee, source_work, depth + 1)
+                    for argument in arguments |report, index, names, binders, source_work, depth|:
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, argument, source_work, depth + 1)
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    return false if candidates.count != 1
+                    for capture in candidates[0].captures |report, index, names, binders, source_work, depth|:
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, capture, source_work, depth + 1)
+                    for argument in arguments |report, index, names, binders, source_work, depth|:
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, argument, source_work, depth + 1)
+                Ast::Expr.Move(operand, position):
+                    binding: (complete: bool, bound: bool, identity: usize, name: sview) = proof_replay_resource_binding_root_for_expression_with_work(names, binders, operand, source_work)
+                    return false if not binding.complete
+                    if binding.bound:
+                        return false if position.offset == 0 or position.offset > 4294967295
+                        return false if not proof_replay_resource_binding_event_annotate_with_work(report, index, "resource-move", position.offset.usize(), binding.name, binding.identity, source_work)
+                    return proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, operand, source_work, depth + 1)
+                Ast::Expr.Paren(operand, _) | Ast::Expr.Unary(_, operand, _) | Ast::Expr.Field(operand, _, _) | Ast::Expr.Scope(operand, _, _):
+                    return proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, operand, source_work, depth + 1)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, operand, source_work, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, base, source_work, depth + 1)
+                    return proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, predicate, source_work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, left, source_work, depth + 1)
+                    return proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, right, source_work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, object, source_work, depth + 1)
+                    for argument in arguments |report, index, names, binders, source_work, depth|:
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, argument, source_work, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |report, index, names, binders, source_work, depth|:
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, element, source_work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, object, source_work, depth + 1)
+                    return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, low, source_work, depth + 1)
+                    return proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, high, source_work, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |report, index, names, binders, source_work, depth|:
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, entry.key, source_work, depth + 1)
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, entry.value, source_work, depth + 1)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |report, index, names, binders, source_work, depth|:
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, field.value, source_work, depth + 1)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, base, source_work, depth + 1)
+                    for field in fields |report, index, names, binders, source_work, depth|:
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, field.value, source_work, depth + 1)
+                Ast::Expr.If(condition, yes, no, _):
+                    return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, condition, source_work, depth + 1)
+                    return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, yes, source_work, depth + 1)
+                    return proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, no, source_work, depth + 1)
+                Ast::Expr.Block(statements, value, _, _):
+                    binding_scope: (complete: bool, mark: usize) = proof_replay_resource_binding_scope_mark_with_work(names, binders, source_work)
+                    return false if not binding_scope.complete
+                    return false if not proof_replay_resource_binding_statements_covered_with_work(report, index, names, binders, statements, source_work, depth + 1)
+                    return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, value, source_work, depth + 1)
+                    return false if not proof_replay_resource_binding_scope_restore_with_work(&names, &binders, binding_scope.mark, source_work)
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                _:
+                    return false
+            true
+
+        def proof_replay_resource_binding_statements_covered_with_work(report: mutable ProofReport&, index: ProofReplayResourceBindingPositionIndex&, names: mutable darray[sview]&, binders: mutable darray[usize]&, body: darray[Ast::Stmt]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            for statement in body |report, index, names, binders, source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.VarDecl(name, _, initializer, position):
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, initializer, source_work, depth + 1)
+                        return false if position.end_offset == 0 or position.end_offset > 4294967295
+                        identity: (complete: bool, found: bool, identity: usize) = proof_replay_resource_binding_position_find_with_work(report, index, "resource-bind", position.end_offset.usize(), name, source_work)
+                        return false if not identity.complete or not identity.found
+                        names.push(name)
+                        binders.push(identity.identity)
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _):
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, expression, source_work, depth + 1)
+                    Ast::Stmt.Contract(kind, expression, _):
+                        if kind in {"assert", "requires"} or proof_is_ensure_kind(kind):
+                            return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, expression, source_work, depth + 1)
+                    Ast::Stmt.Assign(target, _, value, position):
+                        binding: (complete: bool, bound: bool, identity: usize, name: sview) = proof_replay_resource_binding_root_for_expression_with_work(names, binders, target, source_work)
+                        return false if not binding.complete
+                        if binding.bound:
+                            return false if position.offset == 0 or position.offset > 4294967295
+                            return false if not proof_replay_resource_binding_event_annotate_with_work(report, index, "resource-write", position.offset.usize(), binding.name, binding.identity, source_work)
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, target, source_work, depth + 1)
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, value, source_work, depth + 1)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, condition, source_work, depth + 1)
+                        branch_scope: (complete: bool, mark: usize) = proof_replay_resource_binding_scope_mark_with_work(names, binders, source_work)
+                        return false if not branch_scope.complete
+                        return false if not proof_replay_resource_binding_statements_covered_with_work(report, index, names, binders, yes, source_work, depth + 1)
+                        return false if not proof_replay_resource_binding_scope_restore_with_work(&names, &binders, branch_scope.mark, source_work)
+                        return false if not proof_replay_resource_binding_statements_covered_with_work(report, index, names, binders, no, source_work, depth + 1)
+                        return false if not proof_replay_resource_binding_scope_restore_with_work(&names, &binders, branch_scope.mark, source_work)
+                    Ast::Stmt.While(condition, nested, _):
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, condition, source_work, depth + 1)
+                        nested_scope: (complete: bool, mark: usize) = proof_replay_resource_binding_scope_mark_with_work(names, binders, source_work)
+                        return false if not nested_scope.complete
+                        return false if not proof_replay_resource_binding_statements_covered_with_work(report, index, names, binders, nested, source_work, depth + 1)
+                        return false if not proof_replay_resource_binding_scope_restore_with_work(&names, &binders, nested_scope.mark, source_work)
+                    Ast::Stmt.For(_, variables, iterable, nested, _):
+                        return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, iterable, source_work, depth + 1)
+                        return false if variables.count > 0 and not proof_replay_resource_binding_range_shape_with_work(iterable, source_work, 0)
+                        iterable_position: Ast::Pos = Ast::expr_pos(iterable)
+                        return false if iterable_position.end_offset == 0 or iterable_position.end_offset > 4294967295
+                        nested_scope: (complete: bool, mark: usize) = proof_replay_resource_binding_scope_mark_with_work(names, binders, source_work)
+                        return false if not nested_scope.complete
+                        for variable in variables |variable, index, report, iterable_position, names, binders, source_work|:
+                            continue if variable == ""
+                            return false if not proof_replay_owner_work_charge(sview_len(variable), source_work)
+                            identity: (complete: bool, found: bool, identity: usize) = proof_replay_resource_binding_position_find_with_work(report, index, "resource-bind", iterable_position.end_offset.usize(), variable, source_work)
+                            return false if not identity.complete or not identity.found
+                            names.push(variable)
+                            binders.push(identity.identity)
+                        return false if not proof_replay_resource_binding_statements_covered_with_work(report, index, names, binders, nested, source_work, depth + 1)
+                        return false if not proof_replay_resource_binding_scope_restore_with_work(&names, &binders, nested_scope.mark, source_work)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        nested_scope: (complete: bool, mark: usize) = proof_replay_resource_binding_scope_mark_with_work(names, binders, source_work)
+                        return false if not nested_scope.complete
+                        return false if not proof_replay_resource_binding_statements_covered_with_work(report, index, names, binders, nested, source_work, depth + 1)
+                        return false if not proof_replay_resource_binding_scope_restore_with_work(&names, &binders, nested_scope.mark, source_work)
+                    # Pattern bind events still lack source positions that identify their
+                    # declarations. Refuse these until pattern projection/source binding replay
+                    # carries those identities; guessing by name would reintroduce shadowing.
+                    Ast::Stmt.Match(_, _, _) | Ast::Stmt.Invalid:
+                        return false
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return false
+            true
+
+        def proof_replay_resource_binding_identities_source_valid_with_work(report: mutable ProofReport&, root: ElisaProofKernelCore::ProofKernelNode, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, source_work: mutable usize&) -> bool:
+            built: (complete: bool, index: ProofReplayResourceBindingPositionIndex) = proof_replay_resource_binding_position_index_build_with_work(report, root, source_work)
+            return false if not built.complete or built.index.kinds.count != built.index.event_roots.count
+            index: ProofReplayResourceBindingPositionIndex = built.index
+            # Discard producer IDs and derive them from the authenticated source walk. This makes
+            # an unmatched forged event fail closed even if its attacker-chosen ID names a live slot.
+            for entry in 0..<index.event_roots.count |entry, index, report, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                if index.kinds[entry] in {"resource-use", "resource-write", "resource-move"}:
+                    event_root: usize = index.event_roots[entry]
+                    return false if event_root >= report.analysis_1.kernel.nodes.count
+                    report.analysis_1.kernel.nodes[event_root].auxiliary <- 0
+            names: mutable darray[sview] = []
+            binders: mutable darray[usize] = []
+            for parameter in parameters |parameter, names, binders, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(parameter.name), source_work)
+                identity: (complete: bool, found: bool, identity: usize) = proof_replay_resource_binding_position_find_with_work(report, index, "resource-bind", 0, parameter.name, source_work)
+                return false if not identity.complete or not identity.found
+                names.push(parameter.name)
+                binders.push(identity.identity)
+            return false if not proof_replay_resource_binding_statements_covered_with_work(report, index, names, binders, body, source_work, 0)
+            for entry in 0..<index.event_roots.count |entry, index, report, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                if index.kinds[entry] in {"resource-use", "resource-write", "resource-move"}:
+                    event_root: usize = index.event_roots[entry]
+                    return false if event_root >= report.analysis_1.kernel.nodes.count or report.analysis_1.kernel.nodes[event_root].auxiliary == 0
+            true

@@ -28,24 +28,187 @@ extend ElisaProof:
                 return report.analysis_1.traces.records.count if:
                     not proof_replay_trace_expression_equality_work(report, fact)
                     not proof_replay_trace_expression_equality_work(report, trace.expression)
-                return trace_index if proof_replay_expr_equal_depth(trace.expression, fact, 0)
+                if proof_replay_expr_equal_depth(trace.expression, fact, 0):
+                    positions_match: bool = proof_replay_trace_expression_positions_equal_for_report(report, fact, trace.expression, 0)
+                    return report.analysis_1.traces.records.count if report.analysis_1.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET
+                    return trace_index if positions_match
                 trace_index <- proof_replay_trace_expression_chain_next(report, trace_index, owner, expression_hash)
                 probes <- probes + 1
             return report.analysis_1.traces.records.count
 
     private:
+        def proof_replay_position_work_charge(work: mutable usize&, amount: usize, work_limit: usize) -> bool:
+            if work > work_limit:
+                work <- work_limit + 1
+                return false
+            if amount > work_limit - work:
+                work <- work_limit + 1
+                return false
+            work <- work + amount
+            return true
+
+        # Structural trace equality ignores spans. Recheck every supported expression-node span
+        # so source annotations on nested literals and binders cannot be redirected to another
+        # occurrence while retaining the same kernel term. The caller supplies the shared meter.
+        def proof_replay_trace_expression_positions_equal_with_work(left: Ast::Expr, right: Ast::Expr, depth: usize, work: mutable usize&, work_limit: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_position_work_charge(&work, 1, work_limit)
+            match left:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_trace_expression_positions_equal_with_work(inner, right, depth + 1, &work, work_limit)
+                _:
+                    pass
+            match right:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_trace_expression_positions_equal_with_work(left, inner, depth + 1, &work, work_limit)
+                _:
+                    pass
+            return false if not proof_replay_position_work_charge(&work, 6, work_limit) or not proof_replay_source_position_equal(Ast::expr_pos(left), Ast::expr_pos(right))
+            match left:
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.StringLit(_, _):
+                    return proof_replay_expr_equal_depth(left, right, depth)
+                Ast::Expr.Unary(_, operand, _) | Ast::Expr.Move(operand, _):
+                    match right:
+                        Ast::Expr.Unary(_, other, _) | Ast::Expr.Move(other, _):
+                            return proof_replay_trace_expression_positions_equal_with_work(operand, other, depth + 1, &work, work_limit)
+                        _:
+                            return false
+                Ast::Expr.Binary(left_operand, _, right_operand, _):
+                    match right:
+                        Ast::Expr.Binary(other_left, _, other_right, _):
+                            return proof_replay_trace_expression_positions_equal_with_work(left_operand, other_left, depth + 1, &work, work_limit) and proof_replay_trace_expression_positions_equal_with_work(right_operand, other_right, depth + 1, &work, work_limit)
+                        _:
+                            return false
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    match right:
+                        Ast::Expr.If(other_condition, other_then, other_else, _):
+                            return proof_replay_trace_expression_positions_equal_with_work(condition, other_condition, depth + 1, &work, work_limit) and proof_replay_trace_expression_positions_equal_with_work(then_expression, other_then, depth + 1, &work, work_limit) and proof_replay_trace_expression_positions_equal_with_work(else_expression, other_else, depth + 1, &work, work_limit)
+                        _:
+                            return false
+                Ast::Expr.Call(callee, arguments, _, _):
+                    match right:
+                        Ast::Expr.Call(other_callee, other_arguments, _, _):
+                            return false if arguments.count != other_arguments.count or not proof_replay_trace_expression_positions_equal_with_work(callee, other_callee, depth + 1, &work, work_limit)
+                            for index in 0..<arguments.count |index, arguments, other_arguments, work, work_limit|:
+                                return false if not proof_replay_trace_expression_positions_equal_with_work(arguments[index], other_arguments[index], depth + 1, &work, work_limit)
+                            return true
+                        _:
+                            return false
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    match right:
+                        Ast::Expr.Field(other, _, _) | Ast::Expr.Scope(other, _, _):
+                            return proof_replay_trace_expression_positions_equal_with_work(object, other, depth + 1, &work, work_limit)
+                        _:
+                            return false
+                Ast::Expr.Index(object, index, _):
+                    match right:
+                        Ast::Expr.Index(other_object, other_index, _):
+                            return proof_replay_trace_expression_positions_equal_with_work(object, other_object, depth + 1, &work, work_limit) and proof_replay_trace_expression_positions_equal_with_work(index, other_index, depth + 1, &work, work_limit)
+                        _:
+                            return false
+                Ast::Expr.Slice(object, low, high, _):
+                    match right:
+                        Ast::Expr.Slice(other_object, other_low, other_high, _):
+                            return proof_replay_trace_expression_positions_equal_with_work(object, other_object, depth + 1, &work, work_limit) and proof_replay_trace_expression_positions_equal_with_work(low, other_low, depth + 1, &work, work_limit) and proof_replay_trace_expression_positions_equal_with_work(high, other_high, depth + 1, &work, work_limit)
+                        _:
+                            return false
+                Ast::Expr.IndexN(object, arguments, _):
+                    match right:
+                        Ast::Expr.IndexN(other_object, other_arguments, _):
+                            return false if arguments.count != other_arguments.count or not proof_replay_trace_expression_positions_equal_with_work(object, other_object, depth + 1, &work, work_limit)
+                            for index in 0..<arguments.count |index, arguments, other_arguments, work, work_limit, depth|:
+                                return false if not proof_replay_trace_expression_positions_equal_with_work(arguments[index], other_arguments[index], depth + 1, &work, work_limit)
+                            return true
+                        _:
+                            return false
+                Ast::Expr.Construct(type_expression, fields, _):
+                    match right:
+                        Ast::Expr.Construct(other_type, other_fields, _):
+                            return false if fields.count != other_fields.count or not proof_replay_trace_expression_positions_equal_with_work(type_expression, other_type, depth + 1, &work, work_limit)
+                            for index in 0..<fields.count |index, fields, other_fields, work, work_limit|:
+                                return false if not proof_replay_trace_expression_positions_equal_with_work(fields[index].value, other_fields[index].value, depth + 1, &work, work_limit)
+                            return true
+                        _:
+                            return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    match right:
+                        Ast::Expr.RecordUpdate(other_base, other_fields, _):
+                            return false if fields.count != other_fields.count or not proof_replay_trace_expression_positions_equal_with_work(base, other_base, depth + 1, &work, work_limit)
+                            for index in 0..<fields.count |index, fields, other_fields, work, work_limit|:
+                                return false if not proof_replay_trace_expression_positions_equal_with_work(fields[index].value, other_fields[index].value, depth + 1, &work, work_limit)
+                            return true
+                        _:
+                            return false
+                Ast::Expr.Tuple(elements, _) | Ast::Expr.Array(elements, _):
+                    match right:
+                        Ast::Expr.Tuple(other, _) | Ast::Expr.Array(other, _):
+                            return false if elements.count != other.count
+                            for index in 0..<elements.count |index, elements, other, work, work_limit|:
+                                return false if not proof_replay_trace_expression_positions_equal_with_work(elements[index], other[index], depth + 1, &work, work_limit)
+                            return true
+                        _:
+                            return false
+                Ast::Expr.SetLit(elements, _):
+                    match right:
+                        Ast::Expr.SetLit(other, _):
+                            return false if elements.count != other.count
+                            for index in 0..<elements.count |index, elements, other, work, work_limit|:
+                                return false if not proof_replay_trace_expression_positions_equal_with_work(elements[index], other[index], depth + 1, &work, work_limit)
+                            return true
+                        _:
+                            return false
+                Ast::Expr.DictLit(entries, _):
+                    match right:
+                        Ast::Expr.DictLit(other, _):
+                            return false if entries.count != other.count
+                            for index in 0..<entries.count |index, entries, other, work, work_limit, depth|:
+                                return false if not proof_replay_trace_expression_positions_equal_with_work(entries[index].key, other[index].key, depth + 1, &work, work_limit) or not proof_replay_trace_expression_positions_equal_with_work(entries[index].value, other[index].value, depth + 1, &work, work_limit)
+                            return true
+                        _:
+                            return false
+                Ast::Expr.Block(statements, body, _, _):
+                    match right:
+                        Ast::Expr.Block(other_statements, other_body, _, _):
+                            return false if statements.count != other_statements.count
+                            for index in 0..<statements.count |index, statements, other_statements, work, work_limit|:
+                                match statements[index]:
+                                    Ast::Stmt.VarDecl(_, type_expression, initializer, position):
+                                        match other_statements[index]:
+                                            Ast::Stmt.VarDecl(_, other_type, other_initializer, other_position):
+                                                return false if not proof_replay_position_work_charge(&work, 6, work_limit) or not proof_replay_source_position_equal(position, other_position)
+                                                return false if not proof_replay_trace_expression_positions_equal_with_work(type_expression, other_type, depth + 1, &work, work_limit) or not proof_replay_trace_expression_positions_equal_with_work(initializer, other_initializer, depth + 1, &work, work_limit)
+                                            _:
+                                                return false
+                                    _:
+                                        return false
+                            return proof_replay_trace_expression_positions_equal_with_work(body, other_body, depth + 1, &work, work_limit)
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_replay_trace_expression_positions_equal_for_report(report: mutable ProofReport&, left: Ast::Expr, right: Ast::Expr, depth: usize) -> bool:
+            work: mutable usize = report.analysis_1.traces.lookup_work_used
+            matched: bool = proof_replay_trace_expression_positions_equal_with_work(left, right, depth, &work, PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET)
+            report.analysis_1.traces.lookup_work_used <- work
+            matched
+
         # Every tactic attempt needs strict source-trace admission for all of its hypotheses,
         # including attempts with a replayed certificate. Certificate replay may omit an
         # unsupported premise and still prove the goal from the remaining facts; that is not
         # enough to authorize the full fact slice for source-bound tactic use.
-        def proof_replay_attempt_fact_context_source_valid_with_work(report: mutable ProofReport&, attempt_index: usize, source_work: mutable usize&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global.Read, Global.Write]:
+        def proof_replay_attempt_fact_context_source_valid_with_work(report: mutable ProofReport&, attempt_index: usize, source_work: mutable usize&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global{Read,Write}]:
             return false if attempt_index >= report.results.goal_attempts.count
             attempt: ProofGoalAttempt = report.results.goal_attempts[attempt_index]
             consumer_certificate: mutable usize = 0
             if attempt.producer_proven:
                 return false if not attempt.has_certificate or attempt.certificate_index >= report.analysis_1.certificates.count
                 certificate: ProofGoalCertificate = report.analysis_1.certificates[attempt.certificate_index]
-                return false if not proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, attempt.certificate_index, &source_work)
+                certificate_matches: bool = proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, attempt.certificate_index, &source_work)
+                # Certificate matching charges the caller's meter directly. Synchronize before
+                # any early return so the outer status snapshot cannot restore a stale workspace
+                # counter and erase work spent on zero-fact or malformed attempts.
+                validation_workspace.source_scan_work_used <- source_work
+                return false if not certificate_matches
                 consumer_certificate <- attempt.certificate_index + 1
             else:
                 return false if attempt.has_certificate
@@ -92,7 +255,7 @@ extend ElisaProof:
                 if origin.kind == "local-binding" and not proof_replay_local_binding_fact_live_with_cache(report, origin, validation_workspace.source_scan_work_used, &structural_cache.deterministic_calls):
                     valid <- false
                     break
-                if not (proof_replay_fact_trace_is_valid_with_stack(report, origin, attempt.name, 0, dependency_stack, active_certificates, validation_workspace, structural_cache) can Global{Read,Write}):
+                if not (proof_replay_fact_trace_is_valid_with_stack(report, origin, origin_index, attempt.name, 0, dependency_stack, active_certificates, validation_workspace, structural_cache) can Global{Read,Write}):
                     valid <- false
                     break
                 if not (proof_replay_kernel_fact_root_is_traced_with_stack(report, fact_root, attempt.name, dependency_stack, false, active_certificates, validation_workspace, structural_cache) can Global{Read,Write}):
@@ -107,7 +270,7 @@ extend ElisaProof:
             report.analysis_2.trace_consumer_attempt_index <- saved_consumer_attempt
             valid and report.analysis_1.traces.lookup_work_used <= PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET
 
-        def proof_replay_attempt_fact_source_status_snapshot(report: mutable ProofReport&, goal_source_statuses: darray[bool]&, goal_source_complete: bool, source_work: mutable usize&) -> (statuses: darray[bool], complete: bool, claims_admissible: bool) can[Memory.Allocate, Global.Read, Global.Write]:
+        def proof_replay_attempt_fact_source_status_snapshot(report: mutable ProofReport&, goal_source_statuses: darray[bool]&, goal_source_complete: bool, source_work: mutable usize&) -> (statuses: darray[bool], complete: bool, claims_admissible: bool) can[Memory.Allocate, Global{Read,Write}]:
             statuses: mutable darray[bool] = []
             return (statuses, false, false) if not goal_source_complete or goal_source_statuses.count != report.results.goal_attempts.count
             if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or report.results.goal_attempts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:

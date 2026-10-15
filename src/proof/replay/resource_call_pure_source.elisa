@@ -1,0 +1,110 @@
+# Parser-owned, bounded purity check for resource-call omission candidates.
+extend ElisaProof:
+    private:
+        def proof_replay_resource_call_scalar_type_with_work(expression: Ast::Expr, source_work: mutable usize&) -> bool:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return false if not proof_replay_owner_work_charge(sview_len(name), source_work)
+                    proof_replay_control_match_guard_scalar_type(expression)
+                _:
+                    false
+
+        def proof_replay_resource_call_pure_expr(report: mutable ProofReport&, index: ProofReplayDeterministicDeclarationIndex&, owner_entry: ProofReplayDeterministicDeclarationEntry, owner_line: u32, owner_offset: usize, expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.FloatLit(text, _) | Ast::Expr.StringLit(text, _) | Ast::Expr.CharLit(text, _):
+                    return proof_replay_owner_work_charge(sview_len(text), source_work)
+                Ast::Expr.Ident(name, _):
+                    matches: mutable usize = 0
+                    for parameter in parameters |name, matches, source_work|:
+                        return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(parameter.name), source_work) or not proof_replay_owner_work_charge(sview_len(name), source_work)
+                        matches <- matches + 1 if parameter.name == name
+                    return matches == 1
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_resource_call_pure_expr(report, index, owner_entry, owner_line, owner_offset, inner, parameters, source_work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return false if operator != TokenKind.Not and operator != TokenKind.Minus
+                    protocol: sview = proof_builtin_unary_operator_protocol(operator)
+                    return false if protocol != "" and proof_source_primitive_operator_mask_has(report.source.source_primitive_operator_mask, protocol)
+                    return proof_replay_resource_call_pure_expr(report, index, owner_entry, owner_line, owner_offset, inner, parameters, source_work, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent and operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq and operator != TokenKind.And and operator != TokenKind.Or
+                    protocol: sview = proof_builtin_operator_protocol(operator)
+                    return false if protocol != "" and proof_source_primitive_operator_mask_has(report.source.source_primitive_operator_mask, protocol)
+                    return false if not proof_replay_resource_call_pure_expr(report, index, owner_entry, owner_line, owner_offset, left, parameters, source_work, depth + 1)
+                    return proof_replay_resource_call_pure_expr(report, index, owner_entry, owner_line, owner_offset, right, parameters, source_work, depth + 1)
+                Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, labels, position):
+                    return false if callee == "" or not proof_replay_owner_work_charge(sview_len(callee), source_work) or labels.count != 0 or depth + 1 >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT
+                    for parameter in parameters |callee, source_work|:
+                        return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(parameter.name), source_work) or not proof_replay_owner_work_charge(sview_len(callee), source_work)
+                        return false if parameter.name == callee
+                    call_position: Ast::Pos = position
+                    return false if owner_offset > 4294967295
+                    frame_work: mutable usize = 0
+                    selected: (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) = ElisaProofFrameSource::source_call_at_owner_with_work(report.source.source_declarations, report.source.source_annotations, owner_entry.name, owner_line, owner_offset.u32(), call_position, &frame_work)
+                    return false if not proof_replay_owner_work_charge(frame_work, source_work) or not selected.known or selected.callee != callee
+                    resolved: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(index, selected.callee, selected.callee_line, selected.callee_offset.usize(), source_work)
+                    return false if not resolved.complete or resolved.matches != 1 or resolved.row >= index.entries.count
+                    helper: ProofReplayDeterministicDeclarationEntry = index.entries[resolved.row]
+                    helper_parameter_count: mutable usize = 0
+                    match helper.declaration:
+                        Ast::Decl.Func(_, helper_parameters, _, _, _, _, _):
+                            helper_parameter_count <- helper_parameters.count
+                        _:
+                            return false
+                    return false if arguments.count != helper_parameter_count
+                    return false if not helper.is_function or helper.is_lemma or not proof_replay_resource_call_pure_function(report, index, helper, source_work, depth + 1)
+                    for argument in arguments |report, index, owner_entry, owner_line, owner_offset, parameters, source_work, depth|:
+                        return false if not proof_replay_resource_call_pure_expr(report, index, owner_entry, owner_line, owner_offset, argument, parameters, source_work, depth + 1)
+                    return true
+                _:
+                    false
+
+        def proof_replay_resource_call_pure_function(report: mutable ProofReport&, index: ProofReplayDeterministicDeclarationIndex&, entry: ProofReplayDeterministicDeclarationEntry, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            parameters: darray[Ast::ParamDecl] = []
+            return_type: mutable Ast::Expr? = None
+            body: darray[Ast::Stmt] = []
+            declaration_line: mutable u32 = 0
+            declaration_offset: mutable usize = 0
+            match entry.declaration:
+                Ast::Decl.Func(name, declared_parameters, declared_return, declared_body, effects, _, position):
+                    return false if not proof_replay_owner_work_charge(sview_len(name), source_work) or name != entry.name or effects.count != 0 or declared_body.count != 1 or declared_parameters.count > 64
+                    parameters <- declared_parameters
+                    return_type <- declared_return
+                    body <- declared_body
+                    declaration_line <- position.line
+                    declaration_offset <- position.offset.usize()
+                _:
+                    return false
+            if return_type is declared_return_type:
+                return false if not proof_replay_resource_call_scalar_type_with_work(declared_return_type, source_work)
+            else:
+                return false
+            for annotation in report.source.source_local_region_annotations |annotation, declaration_line, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(annotation.name), source_work)
+                return false if annotation.line == declaration_line and annotation.name in {"__region_param", "__region_return"}
+            for parameter_index in 0..<parameters.count |parameter_index, parameters, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                parameter: Ast::ParamDecl = parameters[parameter_index]
+                return false if parameter.name == "" or not proof_replay_owner_work_charge(sview_len(parameter.name), source_work) or parameter.has_default or parameter.is_mutable or not proof_replay_resource_call_scalar_type_with_work(parameter.type_expression, source_work)
+                for previous in 0..<parameter_index |previous, parameter_index, parameters, source_work|:
+                    return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(parameters[previous].name), source_work) or not proof_replay_owner_work_charge(sview_len(parameter.name), source_work)
+                    return false if parameters[previous].name == parameter.name
+            match body[0]:
+                Ast::Stmt.Return(value, _):
+                    if value is returned:
+                        return false if not proof_replay_resource_call_pure_expr(report, index, entry, declaration_line, declaration_offset, returned, parameters, source_work, depth + 1)
+                    else:
+                        return false
+                _:
+                    return false
+            effect_work_before: usize = report.source_types.source_effect_index.work.implicit_effect_work
+            overloaded_operator: bool = proof_structural_typed_operator_statements_have_overload(body, parameters, declaration_line, report, 0, entry.owner, true)
+            effect_work_after: usize = report.source_types.source_effect_index.work.implicit_effect_work
+            return false if effect_work_after < effect_work_before or effect_work_after > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            effect_work_used: usize = effect_work_after - effect_work_before
+            return false if not proof_replay_owner_work_charge(effect_work_used, source_work) or overloaded_operator
+            return true

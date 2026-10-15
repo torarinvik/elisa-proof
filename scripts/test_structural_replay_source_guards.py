@@ -4,16 +4,26 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 api = (ROOT / "src/proof/replay/api.elisa").read_text(encoding="utf-8")
+replay_entry = (ROOT / "src/proof/replay.elisa").read_text(encoding="utf-8")
 replay = (ROOT / "src/proof/replay/structural_source_cache_validation.elisa").read_text(encoding="utf-8")
 source_graph = (ROOT / "src/proof/replay/structural_source_validation.elisa").read_text(encoding="utf-8")
 call_sites = (ROOT / "src/proof/replay/structural_call_site_index.elisa").read_text(encoding="utf-8")
 call_coverage = (ROOT / "src/proof/replay/source_call_coverage.elisa").read_text(encoding="utf-8")
 trace_validation = (ROOT / "src/proof/replay/fact_trace_validation.elisa").read_text(encoding="utf-8")
 generic_lookup = (ROOT / "src/proof/check/source_conversion_name_lookups.elisa").read_text(encoding="utf-8")
+replay_generic_lookup = (ROOT / "src/proof/replay/source_generic_parameter_index.elisa").read_text(encoding="utf-8")
 implicit_effect = (ROOT / "src/proof/check/implicit_effect_guard.elisa").read_text(encoding="utf-8")
 operator_guard = (ROOT / "src/proof/check/structural_operator_guard.elisa").read_text(encoding="utf-8")
 purity_index = (ROOT / "src/proof/check/purity_and_function_index.elisa").read_text(encoding="utf-8")
 extern_effect = (ROOT / "src/proof/check/extern_contract_effect_index.elisa").read_text(encoding="utf-8")
+
+# Threaded-summary marker types and depth bounds are factored into a helper module; its
+# declaration must precede both syntax reconstruction and the summary checker that use it.
+assert replay_entry.index('include "./replay/threaded_summary_type_markers.elisa"') < replay_entry.index('include "./replay/threaded_type_markers.elisa"')
+assert replay_entry.index('include "./replay/threaded_type_markers.elisa"') < replay_entry.index('include "./replay/threaded_summaries.elisa"')
+threaded_marker_types = (ROOT / "src/proof/replay/threaded_summary_type_markers.elisa").read_text(encoding="utf-8")
+assert "struct ProofReplayThreading:" in threaded_marker_types
+assert "const PROOF_REPLAY_THREAD_DEPTH_LIMIT: usize = 96" in threaded_marker_types
 
 # Generic owner checks use exact declaration identity whenever the caller owns the
 # declaration. Their line-only compatibility path is available only to ownerless callers.
@@ -24,6 +34,11 @@ assert "report.context.current_goal_owner_offset.usize()" in generic_owner_looku
 assert "return (false, 0) if owner_known" in generic_owner_lookup
 assert "proof_source_conversion_generic_name(name, declaration_line, report, caller_owner_known)" in implicit_effect
 assert "proof_source_conversion_generic_name(concrete.name, declaration_line, report, caller_owner_known)" in operator_guard
+generic_replay_owner_lookup = replay_generic_lookup.split("def proof_replay_call_generic_param_name(", 1)[1].split(
+    "def ", 1
+)[0]
+assert "field_conversion_generic_param_owner_known and not call_target.generics.field_conversion_generic_param_owner_offset_valid" in generic_replay_owner_lookup
+assert "generic_owner_line != call_target.generics.field_conversion_generic_param_line" in generic_replay_owner_lookup
 assert "report.context.current_goal_owner_offset <- functions.lookup.offsets[function_index]" in purity_index
 assert "report.context.current_goal_owner_offset <- functions.lookup.offsets[function_index]" in extern_effect
 
@@ -49,7 +64,8 @@ assert certificate_set_check < memo_write
 assert "source_validated: false" in (ROOT / "src/proof/replay/structural_certificate_index.elisa").read_text(encoding="utf-8")
 assert "proof_replay_structural_certificate_source_valid_with_work(report, certificate" in trace_validation
 assert 'if certificate.rule == "structural-safety":' in trace_validation
-assert "return ElisaProofKernelReplay::proof_kernel_validate_structural_witness_shape_with_workspace" in trace_validation
+assert "return (ElisaProofKernelReplay::proof_kernel_validate_structural_witness_shape_with_workspace" in trace_validation
+assert "can[Global{Read,Write}])" in trace_validation
 
 # The source-validation cache contains a `source_validated` memo. Keep its
 # authority within one synchronous replay of the unchanged report.

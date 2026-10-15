@@ -16,7 +16,7 @@ extend ElisaProofFrameSource:
     public:
         # Reserve a conservative bounded upper limit before changing either
         # arena. Refused source/budgets leave both existing prefixes untouched.
-        def lower_direct_events(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, node_limit: usize, child_limit: usize) -> (known: bool, roots: darray[usize]) can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
+        def lower_direct_events(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, node_limit: usize, child_limit: usize) -> (known: bool, roots: darray[usize]) can[Memory.Allocate, Abort.Panic, Global{Read,Write}]:
             work: mutable usize = 0
             return (lower_direct_events_with_work(declarations, [], name, line, tokens, source, source_length, nodes, children, node_limit, child_limit, &work) can Global{Read,Write})
 
@@ -41,14 +41,24 @@ extend ElisaProofFrameSource:
             return (false, []) if:
                 not policy.known
                 node_limit > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET or child_limit > ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET
-            # Source limits bound clauses to 128 and events to 4096; these sums
-            # and products cannot overflow usize before the subtraction guards.
-            places: usize = events.count + policy.clauses.count
-            node_addition: usize = places * 4 + events.count
-            child_addition: usize = places * 3 + events.count * policy.clauses.count
-            return (false, []) if:
-                nodes.count > node_limit or node_addition > node_limit - nodes.count
-                children.count > child_limit or child_addition > child_limit - children.count
+            # Compute the reservation against remaining capacity using division before
+            # multiplication. Source caps currently keep these products small, but this
+            # boundary must remain safe if those caps or its callers change.
+            return (false, []) if nodes.count > node_limit or children.count > child_limit
+            remaining_nodes: usize = node_limit - nodes.count
+            remaining_children: usize = child_limit - children.count
+            return (false, []) if events.count > remaining_nodes / 5
+            event_node_cost: usize = events.count * 5
+            return (false, []) if policy.clauses.count > (remaining_nodes - event_node_cost) / 4
+            clause_node_cost: usize = policy.clauses.count * 4
+            node_addition: usize = event_node_cost + clause_node_cost
+            return (false, []) if policy.clauses.count > remaining_children / 3
+            clause_child_cost: usize = policy.clauses.count * 3
+            remaining_event_children: usize = remaining_children - clause_child_cost
+            children_per_event: usize = policy.clauses.count + 3
+            return (false, []) if events.count > remaining_event_children / children_per_event
+            event_child_cost: usize = events.count * children_per_event
+            child_addition: usize = clause_child_cost + event_child_cost
             # Debit every later arena traversal before mutating either arena, so a
             # budget refusal preserves the caller's existing arena prefixes.
             return (false, []) if not replay_work_charge(policy.clauses.count, work)

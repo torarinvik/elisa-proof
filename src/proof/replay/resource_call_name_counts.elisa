@@ -1,0 +1,73 @@
+# Bounded source/event occurrence counts for resource-call admission.
+struct ProofReplayResourceCallNameCounts:
+    names: darray[sview]
+    hashes: darray[u32]
+    source_counts: darray[usize]
+    event_counts: darray[usize]
+    slots: darray[usize]
+
+extend ElisaProof:
+    private:
+        def proof_replay_resource_call_name_count_add(index: mutable ProofReplayResourceCallNameCounts&, name: sview, is_event: bool, capacity: usize, source_work: mutable usize&) -> bool:
+            return false if name == "" or capacity == 0
+            return false if not proof_replay_owner_work_charge(sview_len(name), source_work)
+            hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |index, name, is_event, capacity, source_work, hash, slot, probes|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                encoded: usize = index.slots[slot]
+                if encoded == 0:
+                    row: usize = index.names.count
+                    return false if row >= capacity
+                    index.names.push(name)
+                    index.hashes.push(hash)
+                    index.source_counts.push(0)
+                    index.event_counts.push(0)
+                    index.slots[slot] <- row + 1
+                    index.event_counts[row] <- 1 if is_event
+                    index.source_counts[row] <- 1 if not is_event
+                    return true
+                row: usize = encoded - 1
+                return false if row >= index.names.count or row >= index.hashes.count or row >= index.source_counts.count or row >= index.event_counts.count
+                if index.hashes[row] == hash:
+                    return false if not proof_replay_owner_work_charge(sview_len(index.names[row]), source_work)
+                    if index.names[row] == name:
+                        index.event_counts[row] <- index.event_counts[row] + 1 if is_event
+                        index.source_counts[row] <- index.source_counts[row] + 1 if not is_event
+                        return true
+                slot <- slot + 1 if slot + 1 < capacity else 0
+                probes <- probes + 1
+            return false
+
+        def proof_replay_resource_call_name_counts_match(source_calls: darray[sview]&, event_names: darray[sview]&, report: mutable ProofReport&, declarations: ProofReplayDeterministicDeclarationIndex&, owner_parameters: darray[Ast::ParamDecl]&, owner_body: darray[Ast::Stmt]&, source_work: mutable usize&) -> bool:
+            return false if source_calls.count > 18446744073709551615 - event_names.count
+            total: usize = source_calls.count + event_names.count
+            return true if total == 0
+            capacity: usize = proof_name_index_capacity(total)
+            return false if capacity == 0 or total > (18446744073709551615 - capacity) / 4
+            return false if not proof_replay_owner_work_charge(capacity + total * 4, source_work)
+            index: mutable ProofReplayResourceCallNameCounts = ProofReplayResourceCallNameCounts{names: [], hashes: [], source_counts: [], event_counts: [], slots: []}
+            index.slots.resize(capacity)
+            for slot in 0..<capacity |slot, index|:
+                index.slots[slot] <- 0
+            for name in source_calls |index, capacity, source_work|:
+                return false if not proof_replay_resource_call_name_count_add(&index, name, false, capacity, source_work)
+            for name in event_names |index, capacity, source_work|:
+                return false if not proof_replay_resource_call_name_count_add(&index, name, true, capacity, source_work)
+            has_omissions: bool = false
+            for row in 0..<index.names.count |row, index, has_omissions, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                has_omissions <- true if index.source_counts[row] > index.event_counts[row]
+            omission_sources_clear: mutable bool = true
+            if has_omissions:
+                omission_sources_clear <- not proof_replay_resource_call_has_opaque_target_with_work(report.source.source_declarations, source_work, 0)
+                if omission_sources_clear:
+                    import_work: mutable usize = 0
+                    annotation_import: bool = proof_replay_summary_has_unresolved_import(report.source.source_annotations, &import_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return false if not proof_replay_owner_work_charge(import_work, source_work)
+                    omission_sources_clear <- false if annotation_import
+            for row in 0..<index.names.count |row, index, report, declarations, source_work|:
+                return false if index.source_counts[row] < index.event_counts[row]
+                return false if index.source_counts[row] > index.event_counts[row] and not proof_replay_resource_call_name_is_irrelevant_with_work(report, declarations, index.names[row], source_work, omission_sources_clear, owner_parameters, owner_body)
+            return true

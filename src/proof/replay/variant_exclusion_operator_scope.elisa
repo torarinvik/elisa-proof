@@ -1,0 +1,291 @@
+# Independent replay scan for operator dunders in parser scopes.
+extend ElisaProof:
+    private:
+        const PROOF_REPLAY_VARIANT_SCOPE_MAX_BUCKET: usize = 64
+
+        struct ProofReplayVariantScopePosition:
+            line: u32
+            offset: u32
+            operator_mask: usize
+            self_operator_mask: usize
+            global_operator_mask: usize
+            explicit_receiver_type: sview
+            explicit_receiver_mask: usize
+            annotation_marker_count: usize = 0
+            annotation_owner: sview = ""
+            annotation_concrete: sview = ""
+
+        struct ProofReplayVariantScopePositionIndex:
+            rows: mutable darray[ProofReplayVariantScopePosition] = []
+            hashes: mutable darray[u32] = []
+            bucket_heads: mutable darray[usize] = []
+            next_indices: mutable darray[usize] = []
+            concrete_row_indices: mutable darray[usize] = []
+            concrete_hashes: mutable darray[u32] = []
+            concrete_bucket_heads: mutable darray[usize] = []
+            concrete_next_indices: mutable darray[usize] = []
+            valid: mutable bool = false
+
+        def proof_replay_variant_scope_position_hash(line: u32, offset: u32) -> u32:
+            combined: i64 = line.i64() * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME + offset.i64()
+            (combined % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS).u32()
+
+        def proof_replay_variant_scope_body_operator_masks(body: darray[Ast::Decl], source_work: mutable usize&) -> (complete: bool, operator_mask: usize, self_mask: usize, global_mask: usize, explicit_receiver_type: sview, explicit_receiver_mask: usize):
+            operator_mask: mutable usize = PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY
+            self_mask: mutable usize = PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY
+            global_mask: mutable usize = PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY
+            explicit_receiver_type: mutable sview = ""
+            explicit_receiver_mask: mutable usize = PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY
+            for member in body |member, source_work, operator_mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask|:
+                return (false, operator_mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                match member:
+                    Ast::Decl.Func(name, params, _, _, _, _, _):
+                        return (false, operator_mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask) if not proof_replay_source_work_charge_or_exhaust(sview_len(name), source_work)
+                        dunder_mask: usize = proof_replay_variant_operator_dunder_mask(name)
+                        operator_mask <- operator_mask | dunder_mask
+                        if dunder_mask != PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY:
+                            receiver_known: mutable bool = false
+                            if params.count > 0:
+                                return (false, operator_mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                                match params[0].type_expression:
+                                    Ast::Expr.Ident(receiver_type, _):
+                                        return (false, operator_mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask) if not proof_replay_source_work_charge_or_exhaust(sview_len(receiver_type), source_work)
+                                        receiver_known <- true
+                                        if receiver_type == "Self":
+                                            self_mask <- self_mask | dunder_mask
+                                        else:
+                                            if explicit_receiver_type == "":
+                                                explicit_receiver_type <- receiver_type
+                                            if explicit_receiver_type == receiver_type:
+                                                explicit_receiver_mask <- explicit_receiver_mask | dunder_mask
+                                            else:
+                                                global_mask <- global_mask | explicit_receiver_mask | dunder_mask
+                                    _:
+                                        pass
+                            # Missing or structured receiver types cannot be tied to the
+                            # enclosing impl annotation and therefore stay globally denied.
+                            global_mask <- global_mask | dunder_mask if not receiver_known
+                    Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return (false, operator_mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask) if not proof_replay_source_work_charge_or_exhaust(sview_len(name), source_work)
+                        global_mask <- global_mask | proof_replay_variant_operator_dunder_mask(name)
+                    Ast::Decl.Import(_, _) | Ast::Decl.Invalid:
+                        global_mask <- PROOF_REPLAY_VARIANT_OPERATOR_ALL_FLAGS
+                    _:
+                        pass
+            (true, operator_mask, self_mask, global_mask, explicit_receiver_type, explicit_receiver_mask)
+
+        def proof_replay_variant_scope_positions_collect(declarations: darray[Ast::Decl], index: mutable ProofReplayVariantScopePositionIndex&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= PROOF_REPLAY_VARIANT_DEPTH_LIMIT
+            for declaration in declarations |index, source_work, depth|:
+                return false if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                match declaration:
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_variant_scope_positions_collect(nested, &index, source_work, depth + 1)
+                    _:
+                        pass
+                if declaration is Ast::Decl.Scoped(body, position):
+                    body_masks: (complete: bool, operator_mask: usize, self_mask: usize, global_mask: usize, explicit_receiver_type: sview, explicit_receiver_mask: usize) = proof_replay_variant_scope_body_operator_masks(body, source_work)
+                    return false if not body_masks.complete
+                    return false if not proof_replay_source_work_charge_or_exhaust(2, source_work)
+                    index.rows.push(ProofReplayVariantScopePosition{line: position.line, offset: position.offset, operator_mask: body_masks.operator_mask, self_operator_mask: body_masks.self_mask, global_operator_mask: body_masks.global_mask, explicit_receiver_type: body_masks.explicit_receiver_type, explicit_receiver_mask: body_masks.explicit_receiver_mask})
+            return true
+
+        def proof_replay_variant_scope_positions_build(report: ProofReport&, source_work: mutable usize&) -> (complete: bool, index: ProofReplayVariantScopePositionIndex) can[Memory.Allocate, Abort.Panic]:
+            index: mutable ProofReplayVariantScopePositionIndex = ProofReplayVariantScopePositionIndex{rows: [], hashes: [], bucket_heads: [], next_indices: [], concrete_row_indices: [], concrete_hashes: [], concrete_bucket_heads: [], concrete_next_indices: [], valid: false}
+            return (false, index) if not proof_replay_variant_scope_positions_collect(report.source.source_declarations, &index, source_work, 0)
+            count: usize = index.rows.count
+            if count == 0:
+                index.valid <- true
+            else:
+                capacity: usize = proof_name_index_capacity(count)
+                return (false, index) if capacity == 0
+                return (false, index) if not proof_replay_source_work_charge_or_exhaust(capacity * 2 + count * 2, source_work)
+                index.hashes.resize(count)
+                index.bucket_heads.resize(capacity)
+                index.next_indices.resize(count)
+                bucket_sizes: mutable darray[usize] = []
+                bucket_sizes.resize(capacity)
+                for slot in 0..<capacity |slot, index, bucket_sizes, count, source_work|:
+                    return (false, index) if not proof_replay_source_work_charge_or_exhaust(2, source_work)
+                    index.bucket_heads[slot] <- count
+                    bucket_sizes[slot] <- 0
+                for row_index in 0..<count |row_index, index, bucket_sizes, count, capacity, source_work|:
+                    return (false, index) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                    row: ProofReplayVariantScopePosition = index.rows[row_index]
+                    hash: u32 = proof_replay_variant_scope_position_hash(row.line, row.offset)
+                    slot: usize = (hash.i64() % capacity.i64()).usize()
+                    bucket_size: usize = bucket_sizes[slot] + 1
+                    return (false, index) if bucket_size > PROOF_REPLAY_VARIANT_SCOPE_MAX_BUCKET
+                    return (false, index) if not proof_replay_source_work_charge_or_exhaust(3, source_work)
+                    bucket_sizes[slot] <- bucket_size
+                    index.hashes[row_index] <- hash
+                    index.next_indices[row_index] <- index.bucket_heads[slot]
+                    index.bucket_heads[slot] <- row_index
+                index.valid <- true
+            for annotation_index in 0..<report.source.source_annotations.count |annotation_index, report, index, source_work|:
+                annotation: Ast::EnumAnnotation = report.source.source_annotations[annotation_index]
+                return (false, index) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                impl_owner_complete: bool = proof_replay_variant_text_compare_charge_with_work(annotation.owner, "__impl_scope", source_work)
+                return (false, index) if not impl_owner_complete
+                extension_owner_complete: bool = proof_replay_variant_text_compare_charge_with_work(annotation.owner, "__ext_concrete", source_work)
+                return (false, index) if not extension_owner_complete
+                concrete_owner_complete: bool = proof_replay_variant_text_compare_charge_with_work(annotation.owner, "__impl_concrete", source_work)
+                return (false, index) if not concrete_owner_complete
+                is_impl_scope: bool = annotation.owner == "__impl_scope"
+                is_extension: bool = annotation.owner == "__ext_concrete"
+                is_impl_concrete: bool = annotation.owner == "__impl_concrete"
+                if is_impl_concrete:
+                    return (false, index) if annotation_index == 0 or annotation.name == ""
+                    scope_annotation: Ast::EnumAnnotation = report.source.source_annotations[annotation_index - 1]
+                    scope_owner_complete: bool = proof_replay_variant_text_compare_charge_with_work(scope_annotation.owner, "__impl_scope", source_work)
+                    return (false, index) if not scope_owner_complete
+                    return (false, index) if scope_annotation.owner != "__impl_scope" or scope_annotation.line != annotation.line or scope_annotation.name == ""
+                    return (false, index) if annotation.offset != 0 and scope_annotation.offset != 0 and annotation.offset != scope_annotation.offset
+                continue if not is_impl_scope and not is_extension
+                concrete: sview = annotation.name
+                if is_impl_scope:
+                    return (false, index) if annotation.name == ""
+                    return (false, index) if annotation_index + 1 >= report.source.source_annotations.count
+                    paired: Ast::EnumAnnotation = report.source.source_annotations[annotation_index + 1]
+                    return (false, index) if not proof_replay_variant_text_compare_charge_with_work(paired.owner, "__impl_concrete", source_work)
+                    return (false, index) if paired.owner != "__impl_concrete" or paired.line != annotation.line or paired.name == ""
+                    return (false, index) if paired.offset != 0 and annotation.offset != 0 and paired.offset != annotation.offset
+                    concrete <- paired.name
+                if is_extension:
+                    return (false, index) if annotation.name == ""
+                return (false, index) if not proof_replay_source_work_charge_or_exhaust(sview_len(concrete), source_work)
+                scope_row: (complete: bool, found: bool, row_index: usize) = proof_replay_variant_scope_position_at_with_work(index, annotation.line, annotation.offset, source_work)
+                return (false, index) if not scope_row.complete or not scope_row.found
+                row: mutable ProofReplayVariantScopePosition& = index.rows[scope_row.row_index]
+                return (false, index) if row.annotation_marker_count != 0
+                row.annotation_marker_count <- 1
+                row.annotation_owner <- annotation.owner
+                row.annotation_concrete <- concrete
+            concrete_count: mutable usize = 0
+            for row in index.rows |row, source_work, concrete_count|:
+                return (false, index) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                concrete_count <- concrete_count + 1 if row.annotation_marker_count == 1
+            if concrete_count > 0:
+                concrete_capacity: usize = proof_name_index_capacity(concrete_count)
+                return (false, index) if concrete_capacity == 0
+                # Keep the secondary index dense: most scopes need no operator annotation.
+                return (false, index) if not proof_replay_source_work_charge_or_exhaust(concrete_capacity * 2 + concrete_count * 3, source_work)
+                index.concrete_row_indices.resize(concrete_count)
+                index.concrete_hashes.resize(concrete_count)
+                index.concrete_bucket_heads.resize(concrete_capacity)
+                index.concrete_next_indices.resize(concrete_count)
+                concrete_bucket_sizes: mutable darray[usize] = []
+                concrete_bucket_sizes.resize(concrete_capacity)
+                for slot in 0..<concrete_capacity |slot, index, concrete_bucket_sizes, count, source_work|:
+                    return (false, index) if not proof_replay_source_work_charge_or_exhaust(2, source_work)
+                    index.concrete_bucket_heads[slot] <- concrete_count
+                    concrete_bucket_sizes[slot] <- 0
+                concrete_row_index: mutable usize = 0
+                for row_index in 0..<count |row_index, index, concrete_bucket_sizes, count, concrete_capacity, source_work, concrete_row_index|:
+                    return (false, index) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                    row: ProofReplayVariantScopePosition = index.rows[row_index]
+                    continue if row.annotation_marker_count != 1
+                    return (false, index) if not proof_replay_source_work_charge_or_exhaust(sview_len(row.annotation_concrete), source_work)
+                    hash: u32 = proof_name_hash(row.annotation_concrete)
+                    slot: usize = (hash.i64() % concrete_capacity.i64()).usize()
+                    bucket_size: usize = concrete_bucket_sizes[slot] + 1
+                    return (false, index) if bucket_size > PROOF_REPLAY_VARIANT_SCOPE_MAX_BUCKET
+                    return (false, index) if concrete_row_index >= concrete_count
+                    return (false, index) if not proof_replay_source_work_charge_or_exhaust(5, source_work)
+                    concrete_bucket_sizes[slot] <- bucket_size
+                    index.concrete_row_indices[concrete_row_index] <- row_index
+                    index.concrete_hashes[concrete_row_index] <- hash
+                    index.concrete_next_indices[concrete_row_index] <- index.concrete_bucket_heads[slot]
+                    index.concrete_bucket_heads[slot] <- concrete_row_index
+                    concrete_row_index <- concrete_row_index + 1
+                return (false, index) if concrete_row_index != concrete_count
+            (true, index)
+
+        def proof_replay_variant_scope_position_at_with_work(index: ProofReplayVariantScopePositionIndex&, line: u32, offset: u32, source_work: mutable usize&) -> (complete: bool, found: bool, row_index: usize):
+            row_count: usize = index.rows.count
+            return (false, false, row_count) if not index.valid or row_count != index.hashes.count or row_count != index.next_indices.count
+            capacity: usize = index.bucket_heads.count
+            return (true, false, row_count) if row_count == 0 and capacity == 0
+            return (false, false, row_count) if capacity == 0 or not proof_replay_source_work_charge_or_exhaust(1, source_work)
+            hash: u32 = proof_replay_variant_scope_position_hash(line, offset)
+            entry: usize = index.bucket_heads[(hash.i64() % capacity.i64()).usize()]
+            return (false, false, row_count) if entry > row_count
+            found: mutable bool = false
+            found_index: mutable usize = row_count
+            visits: mutable usize = 0
+            while entry < row_count and visits < PROOF_REPLAY_VARIANT_SCOPE_MAX_BUCKET |entry, index, row_count, hash, line, offset, source_work, found, found_index, visits|:
+                return (false, false, row_count) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                row: ProofReplayVariantScopePosition = index.rows[entry]
+                if index.hashes[entry] == hash and row.line == line and row.offset == offset:
+                    return (true, false, row_count) if found
+                    found <- true
+                    found_index <- entry
+                next_entry: usize = index.next_indices[entry]
+                return (false, false, row_count) if next_entry != row_count and next_entry >= entry
+                entry <- next_entry
+                visits <- visits + 1
+            return (false, false, row_count) if entry < row_count or visits > row_count
+            (true, found, found_index)
+
+        def proof_replay_variant_scope_is_impl_with_work(index: ProofReplayVariantScopePositionIndex&, position: Ast::Pos, source_work: mutable usize&) -> (complete: bool, is_impl: bool):
+            scope_row: (complete: bool, found: bool, row_index: usize) = proof_replay_variant_scope_position_at_with_work(index, position.line, position.offset, source_work)
+            return (false, false) if not scope_row.complete
+            return (true, false) if not scope_row.found
+            row: ProofReplayVariantScopePosition = index.rows[scope_row.row_index]
+            (true, row.annotation_marker_count == 1)
+
+        # The backend can lower a struct operator to ordinary UFCS and select a free dunder
+        # function by receiver type. Replay therefore scans free functions independently of
+        # the impl annotation index; an unrecognized or over-budget walk declines the fact.
+        def proof_replay_variant_free_operator_mask_with_work(report: ProofReport&, index: ProofReplayVariantScopePositionIndex&, declarations: darray[Ast::Decl], source_work: mutable usize&, depth: usize) -> (complete: bool, mask: usize):
+            mask: mutable usize = PROOF_REPLAY_VARIANT_OPERATOR_MASK_EMPTY
+            return (false, mask) if depth >= PROOF_REPLAY_VARIANT_DEPTH_LIMIT
+            for declaration in declarations |declaration, source_work, depth, mask|:
+                return (false, mask) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                match declaration:
+                    Ast::Decl.Module(module_name, nested, _):
+                        return (false, mask) if not proof_replay_source_work_charge_or_exhaust(sview_len(module_name), source_work)
+                        nested_mask: (complete: bool, mask: usize) = proof_replay_variant_free_operator_mask_with_work(report, index, nested, source_work, depth + 1)
+                        return (false, mask) if not nested_mask.complete
+                        mask <- mask | nested_mask.mask
+                    Ast::Decl.Func(name, _, _, _, _, _, _):
+                        return (false, mask) if not proof_replay_source_work_charge_or_exhaust(sview_len(name), source_work)
+                        mask <- mask | proof_replay_variant_operator_dunder_mask(name)
+                    Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return (false, mask) if not proof_replay_source_work_charge_or_exhaust(sview_len(name), source_work)
+                        mask <- mask | proof_replay_variant_operator_dunder_mask(name)
+                    Ast::Decl.Import(_, _):
+                        # Dependency declarations are absent from this retained AST.
+                        mask <- PROOF_REPLAY_VARIANT_OPERATOR_ALL_FLAGS
+                    Ast::Decl.Invalid:
+                        return (false, mask)
+                    Ast::Decl.Scoped(nested, position):
+                        # Inspect ordinary scopes for free dunders. Impl methods are
+                        # handled by the independent annotation scan below.
+                        scope_kind: (complete: bool, is_impl: bool) = proof_replay_variant_scope_is_impl_with_work(report, index, position, source_work)
+                        return (false, mask) if not scope_kind.complete
+                        if scope_kind.is_impl:
+                            scope_row: (complete: bool, found: bool, row_index: usize) = proof_replay_variant_scope_position_at_with_work(index, position.line, position.offset, source_work)
+                            return (false, mask) if not scope_row.complete or not scope_row.found
+                            path_scope: ProofReplayVariantScopePosition = index.rows[scope_row.row_index]
+                            mask <- mask | path_scope.global_operator_mask
+                            if path_scope.explicit_receiver_mask != 0 and path_scope.explicit_receiver_type != path_scope.annotation_concrete:
+                                mask <- mask | path_scope.explicit_receiver_mask
+                            for member in nested |member, report, index, source_work, depth, mask|:
+                                return (false, mask) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                                match member:
+                                    Ast::Decl.Module(_, module_declarations, _) | Ast::Decl.Scoped(module_declarations, _):
+                                        nested_free: (complete: bool, mask: usize) = proof_replay_variant_free_operator_mask_with_work(report, index, module_declarations, source_work, depth + 1)
+                                        return (false, mask) if not nested_free.complete
+                                        mask <- mask | nested_free.mask
+                                    _:
+                                        pass
+                            continue
+                        nested_mask: (complete: bool, mask: usize) = proof_replay_variant_free_operator_mask_with_work(report, index, nested, source_work, depth + 1)
+                        return (false, mask) if not nested_mask.complete
+                        mask <- mask | nested_mask.mask
+                    Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    _:
+                        return (false, mask)
+            return (true, mask)

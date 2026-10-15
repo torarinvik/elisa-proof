@@ -1,0 +1,264 @@
+extend ElisaProof:
+    private:
+        # Find a source assignment through statement control-flow bodies. Expression-contained
+        # writes are not assignments and remain unsupported by this bridge.
+        def proof_replay_resource_write_find_assignment_with_work(body: darray[Ast::Stmt]&, offset: usize, matches: mutable usize&, source_target: mutable Ast::Expr&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            for statement in body |matches, source_target, source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.Assign(target, operator, _, position):
+                        if position.offset == offset.u32():
+                            return false if operator not in {TokenKind.LArrow, TokenKind.PlusEq, TokenKind.MinusEq, TokenKind.StarEq, TokenKind.SlashEq, TokenKind.PercentEq, TokenKind.CaretEq, TokenKind.PipeEq, TokenKind.AmpEq, TokenKind.LShiftEq, TokenKind.RShiftEq, TokenKind.QAssign} or matches != 0
+                            source_target <- target
+                            matches <- matches + 1
+                    Ast::Stmt.If(_, yes, no, _):
+                        return false if not proof_replay_resource_write_find_assignment_with_work(yes, offset, matches, source_target, source_work, depth + 1)
+                        return false if not proof_replay_resource_write_find_assignment_with_work(no, offset, matches, source_target, source_work, depth + 1)
+                    Ast::Stmt.While(_, nested, _):
+                        return false if not proof_replay_resource_write_find_assignment_with_work(nested, offset, matches, source_target, source_work, depth + 1)
+                    Ast::Stmt.For(_, _, _, nested, _) | Ast::Stmt.Block(_, _, _, nested, _):
+                        return false if not proof_replay_resource_write_find_assignment_with_work(nested, offset, matches, source_target, source_work, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |matches, source_target, source_work, depth|:
+                            return false if not proof_replay_owner_work_charge(1, source_work)
+                            return false if not proof_replay_resource_write_find_assignment_with_work(arm.body, offset, matches, source_target, source_work, depth + 1)
+                    _:
+                        pass
+            true
+
+        def proof_replay_resource_region_block_find_with_work(body: darray[Ast::Stmt]&, offset: usize, matches: mutable usize&, block_kind: mutable sview&, first_clause: mutable sview&, clause_count: mutable usize&, binding: mutable sview&, block_body_count: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or body.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + body.count
+            for statement in body |offset, matches, block_kind, first_clause, clause_count, binding, block_body_count, source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.Block(kind, clause, block_binding, nested, position):
+                        if position.offset.usize() == offset:
+                            matches <- matches + 1
+                            block_kind <- kind
+                            binding <- block_binding
+                            clause_count <- clause.count
+                            first_clause <- clause[0] if clause.count > 0 else ""
+                            block_body_count <- nested.count
+                        return false if not proof_replay_resource_region_block_find_with_work(nested, offset, matches, block_kind, first_clause, clause_count, binding, block_body_count, source_work, depth + 1)
+                    Ast::Stmt.If(_, yes, no, _) | Ast::Stmt.Match(_, _, _) | Ast::Stmt.While(_, _, _) | Ast::Stmt.For(_, _, _, _, _):
+                        match statement:
+                            Ast::Stmt.If(_, yes, no, _):
+                                return false if not proof_replay_resource_region_block_find_with_work(yes, offset, matches, block_kind, first_clause, clause_count, binding, block_body_count, source_work, depth + 1)
+                                return false if not proof_replay_resource_region_block_find_with_work(no, offset, matches, block_kind, first_clause, clause_count, binding, block_body_count, source_work, depth + 1)
+                            Ast::Stmt.Match(_, arms, _):
+                                for arm in arms |offset, matches, block_kind, first_clause, clause_count, binding, block_body_count, source_work, depth|:
+                                    return false if not proof_replay_owner_work_charge(1, source_work)
+                                    return false if not proof_replay_resource_region_block_find_with_work(arm.body, offset, matches, block_kind, first_clause, clause_count, binding, block_body_count, source_work, depth + 1)
+                            Ast::Stmt.While(_, nested, _) | Ast::Stmt.For(_, _, _, nested, _):
+                                return false if not proof_replay_resource_region_block_find_with_work(nested, offset, matches, block_kind, first_clause, clause_count, binding, block_body_count, source_work, depth + 1)
+                            _:
+                                pass
+                    _:
+                        pass
+            true
+
+        def proof_replay_resource_region_declaration_present_with_work(body: darray[Ast::Stmt]&, wanted: sview, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or body.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + body.count
+            for statement in body |wanted, source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.Block(kind, clause, binding, nested, _):
+                        binding_match: mutable bool = false
+                        if binding != "":
+                            return false if not proof_replay_owner_work_charge(sview_len(binding), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work)
+                            binding_match <- binding == wanted
+                        clause_match: mutable bool = false
+                        if binding == "" and clause.count > 0:
+                            return false if not proof_replay_owner_work_charge(sview_len(clause[0]), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work)
+                            clause_match <- clause[0] == wanted
+                        if kind == "region" and (binding_match or clause_match):
+                            return true
+                        return true if proof_replay_resource_region_declaration_present_with_work(nested, wanted, source_work, depth + 1)
+                    Ast::Stmt.If(_, yes, no, _):
+                        return true if proof_replay_resource_region_declaration_present_with_work(yes, wanted, source_work, depth + 1)
+                        return true if proof_replay_resource_region_declaration_present_with_work(no, wanted, source_work, depth + 1)
+                    Ast::Stmt.While(_, nested, _) | Ast::Stmt.For(_, _, _, nested, _):
+                        return true if proof_replay_resource_region_declaration_present_with_work(nested, wanted, source_work, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |wanted, source_work, depth|:
+                            return false if not proof_replay_owner_work_charge(1, source_work)
+                            return true if proof_replay_resource_region_declaration_present_with_work(arm.body, wanted, source_work, depth + 1)
+                    _:
+                        pass
+            false
+
+        def proof_replay_resource_implicit_region_close_is_final_with_work(report: ProofReport&, event_index: usize, resource_root: usize, source_work: mutable usize&) -> bool:
+            return false if resource_root >= report.analysis_1.kernel.nodes.count or event_index >= report.analysis_1.kernel.nodes.count
+            root: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[resource_root]
+            return false if root.kind != "resource-safety" or root.children_start > report.analysis_1.kernel.children.count or root.children_count > report.analysis_1.kernel.children.count - root.children_start
+            found: mutable bool = false
+            in_suffix: mutable bool = true
+            index: mutable usize = root.children_count
+            while index > 0 |index, root, report, event_index, source_work, found, in_suffix|:
+                index <- index - 1
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                child: usize = report.analysis_1.kernel.children[root.children_start + index]
+                return false if child >= report.analysis_1.kernel.nodes.count
+                candidate: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[child]
+                if candidate.kind == "resource-region-close" and candidate.value == 0 and candidate.auxiliary == 0:
+                    found <- true if child == event_index
+                else:
+                    in_suffix <- false
+                    return false if child == event_index
+            found and in_suffix
+
+        def proof_replay_resource_region_scope_event_source_valid_with_work(report: ProofReport&, event_index: usize, resource_root: usize, event: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if event.kind != "resource-region-open" and event.kind != "resource-region-close"
+            return false if event.value < 0 or event.value > 4294967295 or event.name == "" or owner == "" or owner_line == 0 or owner_offset > 4294967295
+            return false if:
+                not proof_replay_owner_work_charge(sview_len(event.name), source_work)
+                not proof_replay_owner_work_charge(sview_len(event.operator), source_work)
+                not proof_replay_owner_work_charge(sview_len(event.secondary_name), source_work)
+                event.left != 0 or event.operator != "" or event.secondary_name != ""
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            caller: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
+            return false if not caller.complete or caller.matches != 1 or caller.row >= cache.deterministic_calls.declaration_index.entries.count
+            caller_entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[caller.row]
+            return false if caller_entry.owner != owner_module
+            match caller_entry.declaration:
+                Ast::Decl.Func(_, _, _, body, _, _, _):
+                    if event.kind == "resource-region-close" and event.value == 0 and event.auxiliary == 0:
+                        return false if not proof_replay_resource_implicit_region_close_is_final_with_work(report, event_index, resource_root, source_work)
+                        return proof_replay_resource_region_declaration_present_with_work(body, event.name, source_work, 0)
+                    return false if event.value == 0
+                    matches: mutable usize = 0
+                    block_kind: mutable sview = ""
+                    first_clause: mutable sview = ""
+                    clause_count: mutable usize = 0
+                    binding: mutable sview = ""
+                    block_body_count: mutable usize = 0
+                    return false if not proof_replay_resource_region_block_find_with_work(body, event.value.usize(), matches, block_kind, first_clause, clause_count, binding, block_body_count, source_work, 0)
+                    return false if matches != 1
+                    if event.kind == "resource-region-open":
+                        return false if event.auxiliary != 0 or block_kind != "region"
+                        return false if binding != "" and (clause_count == 0 or binding != event.name or block_body_count != 0)
+                        return false if binding == "" and (clause_count == 0 or first_clause != event.name)
+                        return true
+                    if event.auxiliary == PROOF_RESOURCE_EXPLICIT_REGION_DESTROY:
+                        return block_kind == "destroy" and ((clause_count > 0 and first_clause == event.name) or binding == event.name)
+                    return event.auxiliary == 0 and block_kind == "region" and binding == "" and clause_count > 0 and first_clause == event.name
+                _:
+                    false
+
+        def proof_replay_resource_write_strip_parens_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, expression: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_replay_resource_write_strip_parens_with_work(inner, source_work, depth + 1)
+                _:
+                    (true, expression)
+
+        # Mirror the builtin producer's narrow transfer and region exclusions using source data
+        # only. Unknown expression forms are treated as possibly region-bearing.
+        def proof_replay_resource_write_argument_may_carry_region_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.RegionNew(_, _, _):
+                    true
+                # Without reconstructing the current resource binding state, an identifier may
+                # carry a region acquired by an earlier allocation even when it has no parser
+                # lifetime annotation. Treat it as tainted rather than trusting annotation
+                # absence as evidence of an ordinary value.
+                Ast::Expr.Ident(_, _):
+                    true
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _):
+                    proof_replay_resource_write_argument_may_carry_region_with_work(inner, source_work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    proof_replay_resource_write_argument_may_carry_region_with_work(left, source_work, depth + 1) or proof_replay_resource_write_argument_may_carry_region_with_work(right, source_work, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_replay_resource_write_argument_may_carry_region_with_work(callee, source_work, depth + 1)
+                    for argument in arguments |source_work, depth|:
+                        return true if proof_replay_resource_write_argument_may_carry_region_with_work(argument, source_work, depth + 1)
+                    false
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |source_work, depth|:
+                        return true if proof_replay_resource_write_argument_may_carry_region_with_work(element, source_work, depth + 1)
+                    false
+                Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _):
+                    false
+                _:
+                    true
+
+        def proof_replay_resource_write_builtin_arguments_valid_with_work(arguments: darray[Ast::Expr]&, source_work: mutable usize&) -> bool:
+            for argument in arguments |source_work|:
+                stripped: (complete: bool, expression: Ast::Expr) = proof_replay_resource_write_strip_parens_with_work(argument, source_work, 0)
+                return false if not stripped.complete
+                match stripped.expression:
+                    Ast::Expr.Move(_, _):
+                        return false
+                    _:
+                        pass
+                return false if proof_replay_resource_write_argument_may_carry_region_with_work(argument, source_work, 0)
+            true
+
+        # The checker models only the receiver mutation for these built-in collection methods.
+        # Resolve the exact parser call and require that no source declaration can shadow the
+        # builtin name before accepting its receiver as the write target.
+        def proof_replay_resource_write_builtin_receiver_valid_with_work(report: ProofReport&, event: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if event.value < 0 or event.value > 4294967295 or owner == "" or owner_line == 0 or owner_offset > 4294967295
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            caller_owner: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
+            return false if not caller_owner.complete or caller_owner.matches != 1 or caller_owner.row >= cache.deterministic_calls.declaration_index.entries.count
+            caller_entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[caller_owner.row]
+            return false if caller_entry.owner != owner_module
+            call_position: Ast::Pos = Ast::Pos{line: 0, column: 0, offset: event.value.usize().u32(), end_line: 0, end_column: 0, end_offset: 0}
+            frame_work: mutable usize = 0
+            selected: (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32, callee_offset: u32) = ElisaProofFrameSource::source_call_at_owner_with_work(report.source.source_declarations, report.source.source_annotations, owner, owner_line, owner_offset.u32(), call_position, &frame_work)
+            # Failed lookups still consumed source work and must debit the owner budget.
+            frame_work_charged: bool = proof_replay_owner_work_charge(frame_work, source_work)
+            return false if not frame_work_charged or not selected.known
+            match selected.expression:
+                Ast::Expr.Call(callee, arguments, _, position):
+                    return false if position.offset != event.value.u32()
+                    stripped: (complete: bool, expression: Ast::Expr) = proof_replay_resource_write_strip_parens_with_work(callee, source_work, 0)
+                    return false if not stripped.complete
+                    receiver: mutable Ast::Expr = Ast::Expr.Invalid
+                    method: mutable sview = ""
+                    match stripped.expression:
+                        Ast::Expr.Field(source_receiver, source_method, _):
+                            receiver <- source_receiver
+                            method <- source_method
+                        _:
+                            return false
+                    return false if method not in {"push", "extend", "clear", "resize", "pop", "truncate"}
+                    return false if not proof_replay_owner_work_charge(sview_len(method), source_work)
+                    shadow_count: mutable usize = 0
+                    for declaration in cache.deterministic_calls.declaration_index.entries |declaration, method, shadow_count, source_work|:
+                        return false if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(declaration.name), source_work) or not proof_replay_owner_work_charge(sview_len(method), source_work)
+                        shadow_count <- shadow_count + 1 if declaration.name == method
+                    return false if shadow_count != 0
+                    return false if not proof_replay_resource_write_builtin_arguments_valid_with_work(arguments, source_work)
+                    return false if not proof_replay_ast_matches_kernel_with_work(report, receiver, event.left, source_work, 0)
+                    true
+                _:
+                    false
+
+        # Resource writes are accepted only when the exact owner contains one parser assignment
+        # at the persisted source offset and its full place term matches the kernel witness.
+        def proof_replay_resource_write_source_valid_with_work(report: ProofReport&, event: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if event.kind != "resource-write" or event.value < 0 or event.value > 4294967295 or event.auxiliary == 0 or owner == "" or owner_line == 0 or owner_offset > 4294967295
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
+            caller: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
+            return false if not caller.complete or caller.matches != 1 or caller.row >= cache.deterministic_calls.declaration_index.entries.count
+            caller_entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[caller.row]
+            return false if caller_entry.owner != owner_module
+            match caller_entry.declaration:
+                Ast::Decl.Func(_, _, _, body, _, _, _):
+                    matches: mutable usize = 0
+                    source_target: mutable Ast::Expr = Ast::Expr.Invalid
+                    return false if not proof_replay_resource_write_find_assignment_with_work(body, event.value.usize(), matches, source_target, source_work, 0)
+                    if matches == 1:
+                        return false if source_target is Ast::Expr.Invalid
+                        return proof_replay_ast_matches_kernel_with_work(report, source_target, event.left, source_work, 0)
+                    return false if matches != 0
+                    proof_replay_resource_write_builtin_receiver_valid_with_work(report, event, owner, owner_line, owner_offset, owner_module, source_work, cache)
+                _:
+                    false

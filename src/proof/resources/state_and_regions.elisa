@@ -41,6 +41,9 @@ extend ElisaProof:
 
         struct ProofResourceBindings:
             binding_names: mutable darray[sview]
+            # Arena root of the source-authenticated bind event for each slot. Uses carry this
+            # identity so replay cannot redirect a same-spelled identifier to another scope.
+            binding_event_roots: mutable darray[usize]
             # Locals from inferred first bindings; a later non-writable `=` shadows one.
             inferred_names: mutable darray[sview]
             binding_reference: mutable darray[bool]
@@ -80,6 +83,7 @@ extend ElisaProof:
         def proof_resource_bindings_empty() -> ProofResourceBindings:
             return ProofResourceBindings{
                 binding_names: [],
+                binding_event_roots: [],
                 inferred_names: [],
                 binding_reference: [],
                 binding_mutable_reference: [],
@@ -197,6 +201,15 @@ extend ElisaProof:
                 return
             state.evidence.trace_events.push(event)
 
+        def proof_resource_record_event_at_position[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, kind: sview, operator: sview, left: usize, name: sview, secondary_name: sview, auxiliary: usize, position: Ast::Pos) -> void:
+            event_count: usize = state.evidence.trace_events.count
+            proof_resource_record_event(state, report, kind, operator, left, name, secondary_name, auxiliary)
+            return if state.evidence.trace_events.count != event_count + 1
+            event: usize = state.evidence.trace_events[event_count]
+            return if event >= report.analysis_1.kernel.nodes.count
+            report.analysis_1.kernel.nodes[event].value <- -1 if position.offset > 4294967295
+            report.analysis_1.kernel.nodes[event].value <- position.offset.i64() if position.offset <= 4294967295
+
         def proof_resource_close_child[@parent, @child, @r](parent: mutable ProofResourceState& @parent, child: ProofResourceState& @child, report: mutable ProofReport& @r, join_moves: bool) -> void:
             return if report.analysis_1.kernel.budget_exhausted
             if parent.bindings.binding_names.count != parent.bindings.binding_moved.count or child.bindings.binding_names.count != child.bindings.binding_moved.count or child.bindings.binding_moved.count < parent.bindings.binding_moved.count:
@@ -249,6 +262,7 @@ extend ElisaProof:
 
         def proof_resource_add_binding_traced[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, is_reference: bool, is_mutable_reference: bool, is_writable: bool, target_slot: usize, borrow_is_mutable: bool, source_name: sview, source_place: ProofResourcePlace, source_place_root: usize) -> void:
             proof_resource_add_binding(state, name, is_reference, is_mutable_reference, is_writable, target_slot, borrow_is_mutable, source_place)
+            event_count: usize = state.evidence.trace_events.count
             operator: mutable sview = "value"
             if is_reference:
                 operator <- "mutable" if borrow_is_mutable and source_name != ""
@@ -256,6 +270,21 @@ extend ElisaProof:
                 operator <- "external-mutable" if is_mutable_reference and source_name == ""
                 operator <- "external-shared" if not is_mutable_reference and source_name == ""
             proof_resource_record_event(state, report, "resource-bind", operator, source_place_root if operator in {"shared", "mutable"} else 0, name, source_name, 1 if is_writable else 0)
+            if state.evidence.trace_events.count == event_count + 1 and state.bindings.binding_event_roots.count == state.bindings.binding_names.count:
+                slot: usize = state.bindings.binding_names.count - 1
+                state.bindings.binding_event_roots[slot] <- state.evidence.trace_events[event_count]
+
+        # A source binding enters resource state after its initializer or iterable is checked.
+        # Record that expression's end offset so replay cannot place the bind before a move/use
+        # performed while evaluating it. Local declarations pass their statement end position.
+        def proof_resource_add_binding_traced_at_position[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, is_reference: bool, is_mutable_reference: bool, is_writable: bool, target_slot: usize, borrow_is_mutable: bool, source_name: sview, source_place: ProofResourcePlace, source_place_root: usize, position: Ast::Pos) -> void:
+            event_count: usize = state.evidence.trace_events.count
+            proof_resource_add_binding_traced(state, report, name, is_reference, is_mutable_reference, is_writable, target_slot, borrow_is_mutable, source_name, source_place, source_place_root)
+            return if state.evidence.trace_events.count != event_count + 1
+            event: usize = state.evidence.trace_events[event_count]
+            return if event >= report.analysis_1.kernel.nodes.count
+            report.analysis_1.kernel.nodes[event].value <- -1 if position.end_offset > 4294967295
+            report.analysis_1.kernel.nodes[event].value <- position.end_offset.i64() if position.end_offset <= 4294967295
 
         # Region-owned values use their own transition forms. Treating `new[r] x` as an
         # external reference would let a certificate forget which lexical lifetime owns the
@@ -366,7 +395,7 @@ extend ElisaProof:
             if valid:
                 state.regions.active_regions <- state.regions.active_regions.truncate(state.regions.active_regions.count - 1)
                 proof_resource_invalidate_region_bindings(state, report, region)
-                proof_resource_record_event(state, report, "resource-region-close", "", 0, region, "", PROOF_RESOURCE_EXPLICIT_REGION_DESTROY)
+                proof_resource_record_event_at_position(state, report, "resource-region-close", "", 0, region, "", PROOF_RESOURCE_EXPLICIT_REGION_DESTROY, position)
 
         def proof_resource_add_region_allocation[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, type_expression: Ast::Expr, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
             marker_summary: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, state.context.generic_declaration_line, state.context.generic_declaration_owner_offset, report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
@@ -386,7 +415,12 @@ extend ElisaProof:
             state.bindings.binding_region[state.bindings.binding_region.count - 1] <- region
             state.bindings.binding_region_live[state.bindings.binding_region_live.count - 1] <- valid
             state.bindings.binding_region_owner[state.bindings.binding_region_owner.count - 1] <- valid
-            proof_resource_record_event(state, report, "resource-region-alloc", "", encoded, name, region, (PROOF_RESOURCE_WRITABLE_FLAG if writable else 0) + (PROOF_RESOURCE_REFERENCE_FLAG if is_reference else 0) + (PROOF_RESOURCE_MUTABLE_REFERENCE_FLAG if is_mutable_reference else 0)) if valid
+            if valid:
+                event_count: usize = state.evidence.trace_events.count
+                proof_resource_record_event(state, report, "resource-region-alloc", "", encoded, name, region, (PROOF_RESOURCE_WRITABLE_FLAG if writable else 0) + (PROOF_RESOURCE_REFERENCE_FLAG if is_reference else 0) + (PROOF_RESOURCE_MUTABLE_REFERENCE_FLAG if is_mutable_reference else 0))
+                if state.evidence.trace_events.count == event_count + 1 and state.bindings.binding_event_roots.count == state.bindings.binding_names.count:
+                    slot: usize = state.bindings.binding_names.count - 1
+                    state.bindings.binding_event_roots[slot] <- state.evidence.trace_events[event_count]
 
         # A discarded `new[r] value` still performs a real allocation into @r. Keep it in the
         # trace without inventing a user-visible binding: the replay kernel validates the
@@ -402,7 +436,7 @@ extend ElisaProof:
             valid <- report.analysis_1.kernel.nodes[encoded].kind != "unsupported" if valid
             proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "region allocation operand contains a value whose lifetime is not summarized") if operand_has_region
             proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "region allocation requires an active lexical region and a kernel-replayable operand") if not valid and not operand_has_region
-            proof_resource_record_event(state, report, "resource-region-alloc-discard", "", encoded, "", region, 0) if valid
+            proof_resource_record_event_at_position(state, report, "resource-region-alloc-discard", "", encoded, "", region, 0, position) if valid
 
         def proof_resource_add_region_return_alloc[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> usize:
             encoded_value: (known: bool, root: usize) = proof_resource_encode_value(operand, state, report)
@@ -415,13 +449,13 @@ extend ElisaProof:
             proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "a returned region allocation operand contains a value whose lifetime is not summarized") if operand_has_region
             proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "a returned region allocation requires an active lifetime and a kernel-replayable operand") if not valid and not operand_has_region
             if valid:
-                proof_resource_record_event(state, report, "resource-region-return-alloc", "", encoded, "", region, 0)
+                proof_resource_record_event_at_position(state, report, "resource-region-return-alloc", "", encoded, "", region, 0, position)
                 event_root: usize = state.evidence.trace_events[state.evidence.trace_events.count - 1]
                 return event_root
             node_count: usize = report.analysis_1.kernel.nodes.count
             return node_count
 
-        def proof_resource_rebind_region_allocation[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, target: Ast::Expr, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void can[Global.Read, Global.Write]:
+        def proof_resource_rebind_region_allocation[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, target: Ast::Expr, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void can[Global{Read,Write}]:
             target_name: sview = proof_resource_direct_binding_name(target, report)
             target_binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, target_name, report)
             target_slot: usize = target_binding.slot
@@ -453,7 +487,7 @@ extend ElisaProof:
                 state.bindings.binding_region_owner[target_slot] <- true
                 proof_resource_record_event(state, report, "resource-region-rebind-alloc", "", encoded, target_name, region, 0)
 
-        def proof_resource_add_region_binding[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, type_expression: Ast::Expr, source: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview, functions: ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
+        def proof_resource_add_region_binding[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, type_expression: Ast::Expr, source: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview, functions: ProofFunctionTable&) -> void can[Global{Read,Write}]:
             marker_summary: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, state.context.generic_declaration_line, state.context.generic_declaration_owner_offset, report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &report.source_types.source_effect_index.work.implicit_effect_work)
             is_reference: bool = marker_summary.reference
             is_mutable_reference: bool = marker_summary.mutable_reference
@@ -513,8 +547,12 @@ extend ElisaProof:
             proof_resource_mark_binding_moved(state, source_slot) if valid and source_region_owner and not is_borrowed_sview
             event_flags: usize = (PROOF_RESOURCE_WRITABLE_FLAG if writable else 0) + (PROOF_RESOURCE_REFERENCE_FLAG if is_reference else 0) + (PROOF_RESOURCE_MUTABLE_REFERENCE_FLAG if is_mutable_reference else 0)
             if valid:
+                event_count: usize = state.evidence.trace_events.count
                 proof_resource_record_sview_binding(state, report, encoded, view_type_root, name, region, event_flags) if is_borrowed_sview
                 proof_resource_record_event(state, report, "resource-region-bind", "", encoded, name, region, event_flags) if not is_borrowed_sview
+                if state.evidence.trace_events.count == event_count + 1 and state.bindings.binding_event_roots.count == state.bindings.binding_names.count:
+                    slot: usize = state.bindings.binding_names.count - 1
+                    state.bindings.binding_event_roots[slot] <- state.evidence.trace_events[event_count]
 
         def proof_resource_finish[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, line: u32, failed_before: u32, parameter_count: usize, functions: mutable ProofFunctionTable&, function_index: usize) -> void:
             return if report.results.failed != failed_before
@@ -536,6 +574,7 @@ extend ElisaProof:
                 proof_kernel_budget_note(report, function_name)
                 return
             start: usize = report.analysis_1.kernel.children.count
+            return if function_index >= functions.lookup.offsets.count or function_index >= functions.lookup.lines.count
             for event in state.evidence.trace_events |event, report|:
                 if event >= report.analysis_1.kernel.nodes.count:
                     proof_kernel_budget_note(report, function_name)
@@ -545,7 +584,7 @@ extend ElisaProof:
             # The parameter count is part of the certificate header. The replay kernel uses it
             # to distinguish formal external capabilities from body-local bindings when a caller
             # composes this trace into a resource-call transition.
-            root: usize = proof_kernel_add_node(&report.analysis_1.kernel.nodes, "resource-safety", "resource-v2", 0, 0, parameter_count, start, state.evidence.trace_events.count, 0, function_name, proof_resource_function_owner(functions, function_index))
+            root: usize = proof_kernel_add_node(&report.analysis_1.kernel.nodes, "resource-safety", "resource-v2", 0, functions.lookup.lines[function_index].usize(), parameter_count, start, state.evidence.trace_events.count, functions.lookup.offsets[function_index].i64(), function_name, proof_resource_function_owner(functions, function_index))
             if root >= report.analysis_1.kernel.nodes.count:
                 report.analysis_1.kernel.children <- report.analysis_1.kernel.children.truncate(start)
                 proof_kernel_budget_note(report, function_name)

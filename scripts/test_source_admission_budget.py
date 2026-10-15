@@ -141,7 +141,7 @@ assert "any verified_name in report.analysis_1.structural.verified_names" not in
 assert "continue if semantic_visibility_snapshot.complete and not semantic_visibility[diagnostic_index]" in output_helpers
 assert "semantic_diagnostics_complete\\\":true" in output_helpers and "semantic_diagnostics_complete\\\":false" in output_helpers
 full_json_output = output_helpers.split("def proof_push_json_report_with_replay[@view", 1)[1]
-assert "semantic_visibility_snapshot.complete" in full_json_output.split("status_snapshot_complete: bool =", 1)[1].split("\n", 1)[0]
+assert "semantic_visibility_snapshot.complete" in full_json_output.split("\n    status_snapshot_complete: bool =", 1)[1].split("\n", 1)[0]
 assert "continue if semantic_visibility_snapshot.complete and not semantic_visibility[diagnostic_index]" in cli_source
 assert "unknown (visibility work limit)" in cli_source
 assert "text_status_snapshot_complete: bool =" in cli_source and "semantic_visibility_snapshot.complete" in cli_source.split("text_status_snapshot_complete: bool =", 1)[1].split("\n", 1)[0]

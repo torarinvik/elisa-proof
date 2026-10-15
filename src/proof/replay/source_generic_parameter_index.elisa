@@ -11,6 +11,8 @@ extend ElisaProof:
         def proof_replay_generic_param_key_hash(line: u32, name: sview) -> u32:
             return proof_expr_shape_mix(proof_name_hash(name), line.i64())
 
+        # Keep replay's tuple hash local to this layer. The source index builder uses the same
+        # key shape, but replay must not depend on a private checker-tier implementation.
         def proof_replay_generic_owner_key_hash(name: sview, line: u32, offset: usize) -> u32:
             hash: u32 = proof_expr_shape_mix(proof_name_hash(name), line.i64())
             proof_expr_shape_mix(hash, offset.i64())
@@ -128,39 +130,100 @@ extend ElisaProof:
                 probes <- probes + 1
             return (false, false)
 
+        # The function-name marker identifies an exact declaration, while this indexed
+        # source-row lookup answers whether that declaration binds the requested generic.
+        # Keeping the owner line, offset, and name in the key avoids rescanning all generic
+        # rows for every type-name query in a large function body.
+        def proof_replay_call_generic_param_owner_row_present(name: sview, owner_line: u32, owner_offset: usize, call_target: ProofReplayCallSiteTarget&, work: mutable usize&) -> (complete: bool, present: bool):
+            generics: ProofReplayCallSiteTargetGenerics& = &call_target.generics
+            count: usize = generics.field_conversion_generic_param_owner_row_index_entries
+            hashes_count: usize = generics.field_conversion_generic_param_owner_row_index_hashes.count
+            rows_count: usize = generics.field_conversion_generic_param_owner_row_names.count
+            return (false, false) if:
+                owner_line == 0 or owner_offset > 4294967295
+                not generics.field_conversion_generic_params_valid or not generics.field_conversion_generic_param_owner_row_index_valid
+                rows_count != count or rows_count != generics.field_conversion_generic_param_owner_row_lines.count or rows_count != generics.field_conversion_generic_param_owner_row_offsets.count
+                hashes_count != generics.field_conversion_generic_param_owner_row_index_values.count or hashes_count != generics.field_conversion_generic_param_owner_row_index_counts.count
+            return (true, false) if count == 0 and hashes_count == 0
+            expected_capacity: usize = proof_name_index_capacity(count)
+            return (false, false) if count == 0 or expected_capacity == 0 or hashes_count != expected_capacity
+            return (false, false) if not proof_replay_generic_param_work_add(work, 1) or not proof_replay_generic_param_work_add(work, sview_len(name))
+            wanted_hash: u32 = proof_replay_generic_owner_key_hash(name, owner_line, owner_offset)
+            slot: mutable usize = (wanted_hash.i64() % hashes_count.i64()).usize()
+            probes: mutable usize = 0
+            while probes < hashes_count and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, owner_line, owner_offset, generics, count, hashes_count, work|:
+                return (false, false) if not proof_replay_generic_param_work_add(work, 1)
+                current: usize = generics.field_conversion_generic_param_owner_row_index_values[slot]
+                return (true, false) if current == count
+                return (false, false) if current > count or generics.field_conversion_generic_param_owner_row_index_counts[slot] == 0
+                if generics.field_conversion_generic_param_owner_row_index_hashes[slot] == wanted_hash:
+                    return (false, false) if current >= rows_count
+                    current_name: sview = generics.field_conversion_generic_param_owner_row_names[current]
+                    return (false, false) if not proof_replay_generic_param_work_add(work, 1) or not proof_replay_generic_param_work_add(work, sview_len(current_name))
+                    if generics.field_conversion_generic_param_owner_row_lines[current] == owner_line and generics.field_conversion_generic_param_owner_row_offsets[current] == owner_offset.u32() and current_name == name:
+                        return (false, false) if generics.field_conversion_generic_param_owner_row_index_counts[slot] != 1
+                        return (true, true)
+                slot <- (slot + 1) % hashes_count
+                probes <- probes + 1
+            return (false, false)
+
+        # A source-captured generic row only grants shadowing when its parser-origin identity
+        # marker independently names that exact binder. This uses the existing annotation hash
+        # index, so the row check remains bounded instead of rescanning all generic annotations.
+        def proof_replay_call_generic_param_identity_count(name: sview, owner_line: u32, owner_offset: usize, call_target: ProofReplayCallSiteTarget&, work: mutable usize&) -> (complete: bool, count: usize):
+            generics: ProofReplayCallSiteTargetGenerics& = &call_target.generics
+            annotation_count: usize = call_target.selection.source_annotations.count
+            entries: usize = generics.field_conversion_generic_owner_index_entries
+            hashes_count: usize = generics.field_conversion_generic_owner_index_hashes.count
+            return (false, 0) if:
+                owner_line == 0 or owner_offset > 4294967295
+                not generics.field_conversion_generic_owner_index_valid
+                hashes_count != generics.field_conversion_generic_owner_index_values.count or hashes_count != generics.field_conversion_generic_owner_index_counts.count
+            return (true, 0) if entries == 0 and hashes_count == 0
+            expected_capacity: usize = proof_name_index_capacity(entries)
+            return (false, 0) if entries == 0 or expected_capacity == 0 or hashes_count != expected_capacity
+            return (false, 0) if not proof_replay_generic_param_work_add(work, 1) or not proof_replay_generic_param_work_add(work, sview_len(name))
+            wanted_hash: u32 = proof_replay_generic_owner_key_hash(name, owner_line, owner_offset)
+            slot: mutable usize = (wanted_hash.i64() % hashes_count.i64()).usize()
+            probes: mutable usize = 0
+            while probes < hashes_count and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, owner_line, owner_offset, call_target, generics, annotation_count, entries, hashes_count, work|:
+                return (false, 0) if not proof_replay_generic_param_work_add(work, 1)
+                current: usize = generics.field_conversion_generic_owner_index_values[slot]
+                return (true, 0) if current == annotation_count
+                return (false, 0) if current >= annotation_count or generics.field_conversion_generic_owner_index_counts[slot] == 0
+                if generics.field_conversion_generic_owner_index_hashes[slot] == wanted_hash:
+                    annotation: Ast::EnumAnnotation = call_target.selection.source_annotations[current]
+                    return (false, 0) if not proof_replay_generic_param_work_add(work, sview_len(annotation.name)) or not proof_replay_generic_param_work_add(work, sview_len(annotation.owner))
+                    if annotation.name == "__generic_param_identity" and annotation.line == 3900000131 and annotation.owner == name and annotation.detail_line == owner_line and annotation.offset.usize() == owner_offset:
+                        return (false, 0) if generics.field_conversion_generic_owner_index_counts[slot] != 1
+                        return (true, 1)
+                slot <- (slot + 1) % hashes_count
+                probes <- probes + 1
+            return (false, 0)
+
         def proof_replay_call_generic_param_name(name: sview, generic_owner_line: u32, call_target: ProofReplayCallSiteTarget&, work: mutable usize&) -> (complete: bool, present: bool):
+            # A caller that knows which declaration owns this lookup must provide its
+            # offset as well. Falling back to line-only rows here can let a same-line
+            # sibling declaration's generic binder shadow a type name.
+            return (false, false) if call_target.generics.field_conversion_generic_param_owner_known and not call_target.generics.field_conversion_generic_param_owner_offset_valid
             if call_target.generics.field_conversion_generic_param_owner_offset_valid:
                 return (false, false) if generic_owner_line == 0 or generic_owner_line != call_target.generics.field_conversion_generic_param_line
                 owner: (complete: bool, found: bool) = proof_replay_call_generic_function_owner(generic_owner_line, call_target, work)
                 return (false, false) if not owner.complete
                 if owner.found:
-                    hashes_count: usize = call_target.generics.field_conversion_generic_owner_index_hashes.count
-                    values_count: usize = call_target.generics.field_conversion_generic_owner_index_values.count
-                    counts_count: usize = call_target.generics.field_conversion_generic_owner_index_counts.count
-                    entries: usize = call_target.generics.field_conversion_generic_owner_index_entries
-                    return (false, false) if not call_target.generics.field_conversion_generic_owner_index_valid or hashes_count != values_count or hashes_count != counts_count
-                    return (true, false) if entries == 0 and hashes_count == 0
-                    expected_capacity: usize = proof_name_index_capacity(entries)
-                    return (false, false) if entries == 0 or expected_capacity == 0 or hashes_count != expected_capacity
-                    return (false, false) if not proof_replay_generic_param_work_add(work, 1) or not proof_replay_generic_param_work_add(work, sview_len(name))
-                    wanted_hash: u32 = proof_replay_generic_owner_key_hash(name, generic_owner_line, call_target.generics.field_conversion_generic_param_owner_offset)
-                    slot: mutable usize = (wanted_hash.i64() % hashes_count.i64()).usize()
-                    probes: mutable usize = 0
-                    annotation_count: usize = call_target.selection.source_annotations.count
-                    while probes < hashes_count and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, generic_owner_line, call_target, hashes_count, annotation_count, work|:
-                        return (false, false) if not proof_replay_generic_param_work_add(work, 1)
-                        current: usize = call_target.generics.field_conversion_generic_owner_index_values[slot]
-                        return (true, false) if current == annotation_count
-                        return (false, false) if current >= annotation_count or call_target.generics.field_conversion_generic_owner_index_counts[slot] == 0
-                        if call_target.generics.field_conversion_generic_owner_index_hashes[slot] == wanted_hash:
-                            annotation: Ast::EnumAnnotation = call_target.selection.source_annotations[current]
-                            return (false, false) if not proof_replay_generic_param_work_add(work, sview_len(annotation.owner))
-                            if annotation.name == "__generic_param_identity" and annotation.line == 3900000131 and annotation.owner == name and annotation.detail_line == generic_owner_line and annotation.offset.usize() == call_target.generics.field_conversion_generic_param_owner_offset:
-                                return (false, false) if call_target.generics.field_conversion_generic_owner_index_counts[slot] != 1
-                                return (true, true)
-                        slot <- (slot + 1) % hashes_count
-                        probes <- probes + 1
-                    return (false, false)
+                    lines_count: usize = call_target.generics.field_conversion_generic_param_lines.count
+                    names_count: usize = call_target.generics.field_conversion_generic_param_names.count
+                    offsets_count: usize = call_target.generics.field_conversion_generic_param_owner_offsets.count
+                    return (false, false) if not call_target.generics.field_conversion_generic_params_valid or lines_count != names_count or lines_count != offsets_count
+                    # The owner/name row index is built from the parser snapshot and
+                    # cross-checked against exact generic identity annotations before use.
+                    # Its duplicate counter retains the previous fail-closed behavior.
+                    recorded: (complete: bool, present: bool) = proof_replay_call_generic_param_owner_row_present(name, generic_owner_line, call_target.generics.field_conversion_generic_param_owner_offset, call_target, work)
+                    return (false, false) if not recorded.complete
+                    return (true, false) if not recorded.present
+                    identity: (complete: bool, count: usize) = proof_replay_call_generic_param_identity_count(name, generic_owner_line, call_target.generics.field_conversion_generic_param_owner_offset, call_target, work)
+                    return (false, false) if not identity.complete or identity.count != 1
+                    return (true, true)
                 # Exact declaration identity is available, so a miss means this
                 # function has no generic binders. Falling through to the line-only
                 # compatibility index could let another same-line function's binder

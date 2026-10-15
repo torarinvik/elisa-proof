@@ -1,6 +1,6 @@
 # Entry preconditions are source assumptions, not report-supplied axioms. Replay accepts one only
-# when it is present in the owning function's leading `requires` clauses or follows from a
-# uniquely resolved parameter refinement in the retained source declarations.
+# when it is present in the owning function's leading body `requires`, a parser-retained signature
+# `requires` for that declaration, or follows from a uniquely resolved parameter refinement.
 extend ElisaProof:
     private:
         const PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT: usize = 127
@@ -252,6 +252,37 @@ extend ElisaProof:
                 _:
                     return Ast::Expr.Invalid
 
+        def proof_replay_precondition_contract_expr_matches(report: ProofReport&, trace: ProofFactTrace, requirement: Ast::Expr, candidate_source_cost: usize, work: mutable usize&) -> bool:
+            return false if:
+                not proof_replay_precondition_expr_repetition_charge(requirement, 2, work)
+                not proof_replay_precondition_expr_repetition_charge(trace.expression, 2, work)
+            return true if proof_replay_expr_equal_depth(requirement, trace.expression, 0)
+            # Global immutable literals are substituted before entry facts are recorded. Rebuild
+            # that normalization only from source-validated constant facts owned by this exact
+            # function; mutable or shadowed names have no such witness.
+            normalized: mutable Ast::Expr = requirement
+            for candidate in report.analysis_1.traces.records |normalized, report, trace, candidate_source_cost, work|:
+                return false if:
+                    not proof_replay_precondition_work_add(work, 1)
+                    not proof_replay_precondition_work_add(work, sview_len(candidate.name))
+                    not proof_replay_precondition_work_add(work, sview_len(candidate.kind))
+                continue if candidate.name != trace.name or candidate.owner_line != trace.line
+                continue if candidate.kind != "global-constant" and candidate.kind != "global-constant-qualified"
+                return false if:
+                    not proof_replay_precondition_work_add(work, candidate_source_cost)
+                    not proof_replay_precondition_expr_repetition_charge(candidate.expression, 1, work)
+                continue if not proof_replay_global_constant_fact_is_valid_with_work(report, candidate, work)
+                match candidate.expression:
+                    Ast::Expr.Binary(source_term, TokenKind.EqEq, constant_value, _):
+                        normalized <- proof_replay_precondition_replace_source_term_with_work(normalized, source_term, constant_value, work, 0)
+                    _:
+                        pass
+                return false if proof_replay_expr_is_invalid(normalized)
+            return false if:
+                not proof_replay_precondition_expr_repetition_charge(normalized, 2, work)
+                not proof_replay_precondition_expr_repetition_charge(trace.expression, 2, work)
+            return not proof_replay_expr_is_invalid(normalized) and proof_replay_expr_equal_depth(normalized, trace.expression, 0)
+
         def proof_replay_precondition_body_contract_matches(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt], candidate_source_cost: usize, work: mutable usize&) -> bool:
             leading: mutable bool = true
             for statement in body |leading, report, trace, candidate_source_cost, work|:
@@ -259,40 +290,8 @@ extend ElisaProof:
                 match statement:
                     Ast::Stmt.Contract(kind, requirement, _):
                         if kind == "requires":
-                            return false if:
-                                not leading
-                                not proof_replay_precondition_expr_repetition_charge(requirement, 2, work)
-                                not proof_replay_precondition_expr_repetition_charge(trace.expression, 2, work)
-                            return true if proof_replay_expr_equal_depth(requirement, trace.expression, 0)
-                            # Global immutable literals are substituted before entry facts are
-                            # recorded. Rebuild that normalization only from source-validated
-                            # constant facts owned by this exact function; mutable or shadowed
-                            # names have no such witness. This scan runs once per leading clause,
-                            # so charge each candidate row and each repeated source validation
-                            # here rather than reserving only one pass for the whole fact.
-                            normalized: mutable Ast::Expr = requirement
-                            for candidate in report.analysis_1.traces.records |normalized, report, trace, candidate_source_cost, work|:
-                                return false if:
-                                    not proof_replay_precondition_work_add(work, 1)
-                                    not proof_replay_precondition_work_add(work, sview_len(candidate.name))
-                                    not proof_replay_precondition_work_add(work, sview_len(candidate.kind))
-                                continue if candidate.name != trace.name or candidate.owner_line != trace.line
-                                continue if candidate.kind != "global-constant" and candidate.kind != "global-constant-qualified"
-                                return false if:
-                                    not proof_replay_precondition_work_add(work, candidate_source_cost)
-                                    not proof_replay_precondition_expr_repetition_charge(candidate.expression, 1, work)
-                                continue if not proof_replay_global_constant_fact_is_valid_with_work(report, candidate, work)
-                                match candidate.expression:
-                                    Ast::Expr.Binary(source_term, TokenKind.EqEq, constant_value, _):
-                                        normalized <- proof_replay_precondition_replace_source_term_with_work(normalized, source_term, constant_value, work, 0)
-                                    _:
-                                        pass
-                                return false if proof_replay_expr_is_invalid(normalized)
-                            return false if:
-                                not proof_replay_precondition_expr_repetition_charge(normalized, 2, work)
-                                not proof_replay_precondition_expr_repetition_charge(trace.expression, 2, work)
-                            return true if not proof_replay_expr_is_invalid(normalized) and proof_replay_expr_equal_depth(normalized, trace.expression, 0)
-                            continue
+                            return false if not leading
+                            return true if proof_replay_precondition_contract_expr_matches(report, trace, requirement, candidate_source_cost, work)
                         else:
                             leading <- false
                     _:
@@ -317,6 +316,14 @@ extend ElisaProof:
                 source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 return false
             source_tree_cost: usize = source_work - source_tree_start
+            signature_rows: usize = report.source_contracts.source_signature_contract_lines.count
+            return false if:
+                signature_rows != report.source_contracts.source_signature_contract_kinds.count
+                signature_rows != report.source_contracts.source_signature_contracts.count
+                signature_rows > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + signature_rows
+            for index in 0..<signature_rows |index, report, source_work|:
+                return false if not proof_replay_summary_expr_charge_with_work(report.source_contracts.source_signature_contracts[index], source_work)
             return false if:
                 not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)
                 report.analysis_1.traces.records.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
@@ -350,6 +357,18 @@ extend ElisaProof:
             proof_replay_precondition_find_owner(report.source.source_declarations, trace.name, trace.line, &matches, &parameters, &body, 0)
             return false if matches != 1
             return true if proof_replay_precondition_body_contract_matches(report, trace, body, candidate_source_cost, source_work)
+            # Signature clauses are retained from the parser and keyed by the unique owner's
+            # declaration line. Only `requires` rows can establish entry assumptions.
+            rows: usize = report.source_contracts.source_signature_contract_lines.count
+            return false if:
+                rows != report.source_contracts.source_signature_contract_kinds.count
+                rows != report.source_contracts.source_signature_contracts.count
+            for index in 0..<rows |index, report, trace, source_work|:
+                return false if not proof_replay_precondition_work_add(source_work, 1)
+                continue if report.source_contracts.source_signature_contract_lines[index] != trace.line
+                continue if report.source_contracts.source_signature_contract_kinds[index] != "requires"
+                requirement: Ast::Expr = report.source_contracts.source_signature_contracts[index]
+                return true if proof_replay_precondition_contract_expr_matches(report, trace, requirement, candidate_source_cost, source_work)
             for parameter in parameters |report, trace, parameters|:
                 return true if parameter.name != "" and proof_replay_precondition_refinement_matches(parameter.type_expression, report.source.source_declarations, parameters, parameter.name, trace.expression, source_work, 0)
             return false

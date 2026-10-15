@@ -78,172 +78,6 @@ extend ElisaProof:
             slot: usize = left_lookup.index * nodes.count + right_lookup.index
             return (true, known[slot] and matrix[slot] <= bound)
 
-        def proof_replay_difference_comparison(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&, work: mutable usize&) -> bool:
-            return false if operator != TokenKind.EqEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq
-            primitive: (complete: bool, matches: bool) = proof_replay_primitive_comparison_with_work(left, right, facts, work)
-            return false if not primitive.complete or not primitive.matches
-            bounds: mutable darray[ProofReplayBound] = []
-            for fact in facts |bounds, work|:
-                return false if not proof_replay_collect_bounds(fact, facts, &bounds, work)
-            return false if not proof_replay_close_equalities_with_work(facts, &bounds, work)
-            left_affine_check: (complete: bool, affine: ProofReplayAffine) = proof_replay_affine_expression_with_work(left, work, 0)
-            return false if not left_affine_check.complete
-            right_affine_check: (complete: bool, affine: ProofReplayAffine) = proof_replay_affine_expression_with_work(right, work, 0)
-            return false if not right_affine_check.complete
-            left_affine: ProofReplayAffine = left_affine_check.affine
-            right_affine: ProofReplayAffine = right_affine_check.affine
-            return false if not left_affine.known or not right_affine.known
-            # The difference graph's zero node has a reflexive edge even with no premises.
-            # Do not let that graph edge decide a ground comparison whose integer types were
-            # erased; the literal comparator has already handled its safe positive fragment.
-            return false if left_affine.base == "" and right_affine.base == ""
-            left_safe: (complete: bool, safe: bool) = proof_replay_affine_safe_with_work(left_affine, bounds, work)
-            return false if not left_safe.complete or not left_safe.safe
-            right_safe: (complete: bool, safe: bool) = proof_replay_affine_safe_with_work(right_affine, bounds, work)
-            return false if not right_safe.complete or not right_safe.safe
-            constraints: mutable darray[ProofReplayDifference] = []
-            for fact in facts |bounds, constraints, work|:
-                return false if not proof_replay_collect_differences(fact, facts, bounds, &constraints, work)
-            return false if constraints.count > PROOF_REPLAY_MAX_DIFFERENCE_CONSTRAINTS
-            nodes: mutable darray[sview] = [""]
-            return false if not proof_replay_equality_work_charge(constraints.count, work)
-            for constraint in constraints |nodes, work|:
-                left_lookup: (complete: bool, index: usize) = proof_replay_difference_node_index_with_work(nodes, constraint.left, work)
-                return false if not left_lookup.complete
-                nodes.push(constraint.left) if constraint.left != "" and left_lookup.index == nodes.count
-                right_lookup: (complete: bool, index: usize) = proof_replay_difference_node_index_with_work(nodes, constraint.right, work)
-                return false if not right_lookup.complete
-                nodes.push(constraint.right) if constraint.right != "" and right_lookup.index == nodes.count
-            return false if nodes.count > ElisaProofKernelCore::PROOF_DIFFERENCE_NODE_LIMIT
-            matrix: mutable darray[i64] = []
-            known: mutable darray[bool] = []
-            matrix_size: usize = nodes.count * nodes.count
-            return false if:
-                matrix_size > PROOF_REPLAY_EQUALITY_WORK_LIMIT / 2
-                not proof_replay_equality_work_charge(matrix_size * 2, work)
-            matrix.resize(matrix_size)
-            known.resize(matrix_size)
-            for index in 0..<matrix.count |index, matrix, known, work|:
-                return false if not proof_replay_equality_work_charge(1, work)
-                matrix[index] <- 0
-                known[index] <- false
-            for index in 0..<nodes.count |index, nodes, matrix, known, work|:
-                return false if not proof_replay_equality_work_charge(1, work)
-                slot: usize = index * nodes.count + index
-                matrix[slot] <- 0
-                known[slot] <- true
-            for constraint in constraints |constraint, nodes, matrix, known, work|:
-                return false if not proof_replay_equality_work_charge(1, work)
-                left_lookup: (complete: bool, index: usize) = proof_replay_difference_node_index_with_work(nodes, constraint.left, work)
-                return false if not left_lookup.complete
-                right_lookup: (complete: bool, index: usize) = proof_replay_difference_node_index_with_work(nodes, constraint.right, work)
-                return false if not right_lookup.complete
-                slot: usize = left_lookup.index * nodes.count + right_lookup.index
-                matrix[slot] <- constraint.bound if not known[slot] or constraint.bound < matrix[slot]
-                known[slot] <- true
-            for pivot in 0..<nodes.count |pivot, nodes, matrix, known, work|:
-                return false if not proof_replay_equality_work_charge(1, work)
-                for source in 0..<nodes.count |source, pivot, nodes, matrix, known, work|:
-                    return false if not proof_replay_equality_work_charge(1, work)
-                    first_slot: usize = source * nodes.count + pivot
-                    continue if not known[first_slot]
-                    for target in 0..<nodes.count |target, source, pivot, nodes, matrix, known, work|:
-                        return false if not proof_replay_equality_work_charge(1, work)
-                        second_slot: usize = pivot * nodes.count + target
-                        continue if not known[second_slot]
-                        combined: ProofReplayInt = proof_replay_add_safe(matrix[first_slot], matrix[second_slot])
-                        continue if not combined.known
-                        result_slot: usize = source * nodes.count + target
-                        matrix[result_slot] <- combined.value if not known[result_slot] or combined.value < matrix[result_slot]
-                        known[result_slot] <- true
-            if operator == TokenKind.EqEq:
-                forward: ProofReplayInt = proof_replay_sub_safe(right_affine.offset, left_affine.offset)
-                reverse: ProofReplayInt = proof_replay_sub_safe(left_affine.offset, right_affine.offset)
-                return false if not forward.known or not reverse.known
-                forward_query: (complete: bool, matches: bool) = proof_replay_difference_query_with_work(nodes, matrix, known, left_affine.base, right_affine.base, forward.value, work)
-                return false if not forward_query.complete or not forward_query.matches
-                reverse_query: (complete: bool, matches: bool) = proof_replay_difference_query_with_work(nodes, matrix, known, right_affine.base, left_affine.base, reverse.value, work)
-                return reverse_query.complete and reverse_query.matches
-            if operator == TokenKind.LtEq or operator == TokenKind.Lt:
-                target: mutable ProofReplayInt = proof_replay_sub_safe(right_affine.offset, left_affine.offset)
-                return false if not target.known
-                if operator == TokenKind.Lt:
-                    decremented: ProofReplayInt = proof_replay_sub_safe(target.value, 1)
-                    return false if not decremented.known
-                    target <- decremented
-                query: (complete: bool, matches: bool) = proof_replay_difference_query_with_work(nodes, matrix, known, left_affine.base, right_affine.base, target.value, work)
-                return query.complete and query.matches
-            target: mutable ProofReplayInt = proof_replay_sub_safe(left_affine.offset, right_affine.offset)
-            return false if not target.known
-            if operator == TokenKind.Gt:
-                decremented: ProofReplayInt = proof_replay_sub_safe(target.value, 1)
-                return false if not decremented.known
-                target <- decremented
-            query: (complete: bool, matches: bool) = proof_replay_difference_query_with_work(nodes, matrix, known, right_affine.base, left_affine.base, target.value, work)
-            return query.complete and query.matches
-
-        def proof_replay_interval_comparison(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&, work: mutable usize&) -> bool:
-            return false if operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq
-            primitive: (complete: bool, matches: bool) = proof_replay_primitive_comparison_with_work(left, right, facts, work)
-            return false if not primitive.complete or not primitive.matches
-            bounds: mutable darray[ProofReplayBound] = []
-            for fact in facts |bounds, work|:
-                return false if not proof_replay_collect_bounds(fact, facts, &bounds, work)
-            left_name: mutable sview = ""
-            right_name: mutable sview = ""
-            match left:
-                Ast::Expr.Ident(name, _):
-                    left_name <- name
-                Ast::Expr.Paren(inner, _):
-                    match inner:
-                        Ast::Expr.Ident(name, _):
-                            left_name <- name
-                        _:
-                            pass
-                _:
-                    pass
-            match right:
-                Ast::Expr.Ident(name, _):
-                    right_name <- name
-                Ast::Expr.Paren(inner, _):
-                    match inner:
-                        Ast::Expr.Ident(name, _):
-                            right_name <- name
-                        _:
-                            pass
-                _:
-                    pass
-            left_constant_check: (complete: bool, constant: ProofReplayInt) = proof_replay_constant_int_with_equality_work(left, work)
-            return false if not left_constant_check.complete
-            right_constant_check: (complete: bool, constant: ProofReplayInt) = proof_replay_constant_int_with_equality_work(right, work)
-            return false if not right_constant_check.complete
-            left_constant: ProofReplayInt = left_constant_check.constant
-            right_constant: ProofReplayInt = right_constant_check.constant
-            if left_name != "" and right_constant.known:
-                lookup: (complete: bool, index: usize) = proof_replay_bound_index_with_work(bounds, left_name, work)
-                return false if not lookup.complete
-                bound: ProofReplayBound = bounds[lookup.index] if lookup.index < bounds.count else ProofReplayBound{name: left_name, has_lower: false, lower: 0, has_upper: false, upper: 0}
-                return bound.has_lower and bound.has_upper and bound.lower == bound.upper and bound.lower == right_constant.value if operator == TokenKind.EqEq
-                return (bound.has_upper and bound.upper < right_constant.value) or (bound.has_lower and bound.lower > right_constant.value) if operator == TokenKind.BangEq
-                return bound.has_upper and bound.upper < right_constant.value if operator == TokenKind.Lt
-                return bound.has_upper and bound.upper <= right_constant.value if operator == TokenKind.LtEq
-                return bound.has_lower and bound.lower > right_constant.value if operator == TokenKind.Gt
-                return bound.has_lower and bound.lower >= right_constant.value if operator == TokenKind.GtEq
-            if right_name != "" and left_constant.known:
-                lookup: (complete: bool, index: usize) = proof_replay_bound_index_with_work(bounds, right_name, work)
-                return false if not lookup.complete
-                bound: ProofReplayBound = bounds[lookup.index] if lookup.index < bounds.count else ProofReplayBound{name: right_name, has_lower: false, lower: 0, has_upper: false, upper: 0}
-                return bound.has_lower and bound.has_upper and bound.lower == bound.upper and bound.lower == left_constant.value if operator == TokenKind.EqEq
-                return (bound.has_upper and bound.upper < left_constant.value) or (bound.has_lower and bound.lower > left_constant.value) if operator == TokenKind.BangEq
-                return bound.has_lower and bound.lower > left_constant.value if operator == TokenKind.Lt
-                return bound.has_lower and bound.lower >= left_constant.value if operator == TokenKind.LtEq
-                return bound.has_upper and bound.upper < left_constant.value if operator == TokenKind.Gt
-                return bound.has_upper and bound.upper <= left_constant.value if operator == TokenKind.GtEq
-            return false
-
-        # These are the total fixed-width identities accepted by the main kernel. Keeping the
-        # rewrite set explicit is important: cancellation, division by a variable, and general
-        # algebra are intentionally not part of this independently replayed fragment.
         def proof_replay_definitionally_equal(left: Ast::Expr, right: Ast::Expr) -> bool:
             return proof_replay_definitionally_equal_depth(left, right, 0)
 
@@ -327,6 +161,12 @@ extend ElisaProof:
                 _:
                     pass
             match left:
+                Ast::Expr.Absent:
+                    match right:
+                        Ast::Expr.Absent:
+                            return true
+                        _:
+                            return false
                 Ast::Expr.IntLit(value, _):
                     match right:
                         Ast::Expr.IntLit(other, _):
@@ -336,6 +176,12 @@ extend ElisaProof:
                 Ast::Expr.BoolLit(value, _):
                     match right:
                         Ast::Expr.BoolLit(other, _):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.FloatLit(value, _):
+                    match right:
+                        Ast::Expr.FloatLit(other, _):
                             return value == other
                         _:
                             return false
@@ -414,10 +260,34 @@ extend ElisaProof:
                             return name == other_name and proof_replay_expr_equal_depth(base, other_base, depth + 1)
                         _:
                             return false
+                Ast::Expr.ShorthandMember(parts, _):
+                    match right:
+                        Ast::Expr.ShorthandMember(other_parts, _):
+                            return false if parts.count != other_parts.count
+                            for index in 0..<parts.count |index, parts, other_parts|:
+                                return false if parts[index] != other_parts[index]
+                            return true
+                        _:
+                            return false
                 Ast::Expr.Index(object, index, _):
                     match right:
                         Ast::Expr.Index(other_object, other_index, _):
                             return proof_replay_expr_equal_depth(object, other_object, depth + 1) and proof_replay_expr_equal_depth(index, other_index, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.Slice(object, low, high, _):
+                    match right:
+                        Ast::Expr.Slice(other_object, other_low, other_high, _):
+                            return proof_replay_expr_equal_depth(object, other_object, depth + 1) and proof_replay_expr_equal_depth(low, other_low, depth + 1) and proof_replay_expr_equal_depth(high, other_high, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.IndexN(object, arguments, _):
+                    match right:
+                        Ast::Expr.IndexN(other_object, other_arguments, _):
+                            return false if arguments.count != other_arguments.count or not proof_replay_expr_equal_depth(object, other_object, depth + 1)
+                            for index in 0..<arguments.count |index, arguments, other_arguments, depth|:
+                                return false if not proof_replay_expr_equal_depth(arguments[index], other_arguments[index], depth + 1)
+                            return true
                         _:
                             return false
                 Ast::Expr.Tuple(elements, _):
@@ -442,6 +312,33 @@ extend ElisaProof:
                             return false if elements.count != other_elements.count
                             for index in 0..<elements.count |index, elements, other_elements|:
                                 return false if not proof_replay_expr_equal_depth(elements[index], other_elements[index], depth + 1)
+                            return true
+                        _:
+                            return false
+                Ast::Expr.SetLit(elements, _):
+                    match right:
+                        Ast::Expr.SetLit(other_elements, _):
+                            return false if elements.count != other_elements.count
+                            for index in 0..<elements.count |index, elements, other_elements|:
+                                return false if not proof_replay_expr_equal_depth(elements[index], other_elements[index], depth + 1)
+                            return true
+                        _:
+                            return false
+                Ast::Expr.DictLit(entries, _):
+                    match right:
+                        Ast::Expr.DictLit(other_entries, _):
+                            return false if entries.count != other_entries.count
+                            for index in 0..<entries.count |index, entries, other_entries, depth|:
+                                return false if not proof_replay_expr_equal_depth(entries[index].key, other_entries[index].key, depth + 1) or not proof_replay_expr_equal_depth(entries[index].value, other_entries[index].value, depth + 1)
+                            return true
+                        _:
+                            return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    match right:
+                        Ast::Expr.RecordUpdate(other_base, other_fields, _):
+                            return false if fields.count != other_fields.count or not proof_replay_expr_equal_depth(base, other_base, depth + 1)
+                            for index in 0..<fields.count |index, fields, other_fields, depth|:
+                                return false if fields[index].name != other_fields[index].name or not proof_replay_expr_equal_depth(fields[index].value, other_fields[index].value, depth + 1)
                             return true
                         _:
                             return false

@@ -53,12 +53,12 @@ extend ElisaProof:
                         state.evidence.facts.clear()
                     Ast::Stmt.Expr(expression, position):
                         match expression:
-                            Ast::Expr.RegionNew(operand, region, _):
+                            Ast::Expr.RegionNew(operand, region, allocation_position):
                                 # `new[r] value` is itself the resource transition. A bare
                                 # expression statement discards the resulting reference, but
                                 # the allocation remains valid and must be replayed explicitly.
                                 (proof_resource_check_expression(operand, state, report, function_name, functions) can Global{Read,Write})
-                                proof_resource_add_region_discard(state, report, operand, region, position, function_name)
+                                proof_resource_add_region_discard(state, report, operand, region, allocation_position, function_name)
                             _:
                                 (proof_resource_check_expression(expression, state, report, function_name, functions) can Global{Read,Write})
                                 proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "a region-owned expression must be bound or explicitly rejected at this resource boundary") if proof_resource_expr_statement_discards_region_value(expression, state, functions, report, 0)
@@ -175,9 +175,9 @@ extend ElisaProof:
                                 if return_witness_found:
                                     proof_resource_record_sview_call_return(state, report, return_witness, call_return_formal, position, function_name, returned_region) if unlinked_sview_call
                                     proof_resource_record_sview_return(state, report, return_witness, position, function_name, returned_region) if return_is_sview and not unlinked_sview_call
-                                    proof_resource_record_event(state, report, "resource-region-return", "param-call", return_witness, returned_region, call_return_formal, 1 if return_mutable_reference else 0) if unlinked_reference_call
+                                    proof_resource_record_event_at_position(state, report, "resource-region-return", "param-call", return_witness, returned_region, call_return_formal, 1 if return_mutable_reference else 0, position) if unlinked_reference_call
                                     proof_resource_record_region_value_return(state, report, return_witness, functions.returns.return_types[return_function_index], returned_region, position, function_name, functions) if return_is_region_collection and not return_is_sview and not unlinked_reference_call
-                                    proof_resource_record_event(state, report, "resource-region-return", "param", return_witness, returned_region, "", 1 if return_mutable_reference else 0) if not return_is_sview and not unlinked_reference_call and not return_is_region_collection
+                                    proof_resource_record_event_at_position(state, report, "resource-region-return", "param", return_witness, returned_region, "", 1 if return_mutable_reference else 0, position) if not return_is_sview and not unlinked_reference_call and not return_is_region_collection
                             # A region-less reference return gets a marker only from an exact
                             # witness; without one the summary pins nothing and callers fail closed.
                             # A mutable one must have it: nothing else stops `return shared_formal`
@@ -186,8 +186,8 @@ extend ElisaProof:
                                 direct_formal: bool = return_witness_found and not unlinked_reference_call and proof_resource_regionless_return_witness_is_formal(state, report, functions, return_function_index, return_witness)
                                 call_formal: bool = return_witness_found and unlinked_reference_call
                                 proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "a mutable reference return must be tied to a replayed mutable reference formal") if return_mutable_reference and not direct_formal and not call_formal
-                                proof_resource_record_event(state, report, "resource-region-return", "param-call", return_witness, "", call_return_formal, 1 if return_mutable_reference else 0) if call_formal
-                                proof_resource_record_event(state, report, "resource-region-return", "param", return_witness, "", "", 1 if return_mutable_reference else 0) if direct_formal
+                                proof_resource_record_event_at_position(state, report, "resource-region-return", "param-call", return_witness, "", call_return_formal, 1 if return_mutable_reference else 0, position) if call_formal
+                                proof_resource_record_event_at_position(state, report, "resource-region-return", "param", return_witness, "", "", 1 if return_mutable_reference else 0, position) if direct_formal
                     Ast::Stmt.If(condition, then_body, else_body, _):
                         (proof_resource_check_expression(condition, state, report, function_name, functions) can Global{Read,Write})
                         then_state: mutable ProofResourceState = proof_resource_empty()
@@ -210,6 +210,7 @@ extend ElisaProof:
                         state.evidence.facts.clear()
                     Ast::Stmt.For(_, variables, iterable, for_body, _):
                         (proof_resource_check_expression(iterable, state, report, function_name, functions) can Global{Read,Write})
+                        iterable_position: Ast::Pos = Ast::expr_pos(iterable)
                         for_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &for_state, report)
                         proof_resource_mark_scope_inherited(state, &for_state)
@@ -219,7 +220,7 @@ extend ElisaProof:
                                 # A range binder is a fresh scalar copy of each integer in the
                                 # range. Aliasing it to an outer binding of the same name made
                                 # `for value in 0..<n: assert value >= 0` read as a local borrow.
-                                proof_resource_add_binding_traced(&for_state, report, variable, false, false, false, for_state.bindings.binding_names.count, false, "", proof_resource_empty_place(), 0)
+                                proof_resource_add_binding_traced_at_position(&for_state, report, variable, false, false, false, for_state.bindings.binding_names.count, false, "", proof_resource_empty_place(), 0, iterable_position)
                             elif variable != "":
                                 # A capture listed after `for … |capture|` shadows the outer
                                 # binding inside the loop body. Preserve its write capability:
@@ -236,7 +237,7 @@ extend ElisaProof:
                                 borrow_present: bool = capture_target < state.borrows.borrow_present.count and state.borrows.borrow_present[capture_target]
                                 borrow_mutable: bool = borrow_present and capture_target < state.borrows.borrow_mutable.count and state.borrows.borrow_mutable[capture_target]
                                 target_place: ProofResourcePlace = state.borrows.borrow_target_places[capture_target] if borrow_present and capture_target < state.borrows.borrow_target_places.count else proof_resource_empty_place()
-                                proof_resource_add_binding_traced(&for_state, report, variable, capture_is_reference, capture_is_mutable_reference, capture_is_writable, capture_target, borrow_mutable, variable if capture_is_reference else "", target_place, 0)
+                                proof_resource_add_binding_traced_at_position(&for_state, report, variable, capture_is_reference, capture_is_mutable_reference, capture_is_writable, capture_target, borrow_mutable, variable if capture_is_reference else "", target_place, 0, iterable_position)
                         (proof_resource_check_statements(for_body, &for_state, report, function_name, functions) can Global{Read,Write})
                         proof_resource_close_child(state, for_state, report, true)
                         state.evidence.facts.clear()
@@ -276,7 +277,7 @@ extend ElisaProof:
                             if region_valid:
                                 stable_region: cstr = (proof_resource_stable_region_name(binding) can Global{Read,Write})
                                 state.regions.active_regions.push(stable_region)
-                                proof_resource_record_event(state, report, "resource-region-open", "", 0, binding, "", 0)
+                                proof_resource_record_event_at_position(state, report, "resource-region-open", "", 0, binding, "", 0, block_position)
                             state.evidence.facts.clear()
                             continue
                         block_state: mutable ProofResourceState = proof_resource_empty()
@@ -289,7 +290,7 @@ extend ElisaProof:
                             if region_valid:
                                 stable_region: cstr = (proof_resource_stable_region_name(region_name) can Global{Read,Write})
                                 block_state.regions.active_regions.push(stable_region)
-                                proof_resource_record_event(&block_state, report, "resource-region-open", "", 0, region_name, "", 0)
+                                proof_resource_record_event_at_position(&block_state, report, "resource-region-open", "", 0, region_name, "", 0, block_position)
                             (proof_resource_check_statements(block_body, &block_state, report, function_name, functions) can Global{Read,Write})
                             proof_resource_check_region_boundary(state, block_state, report, function_name, block_position)
                             if region_valid:
@@ -298,7 +299,7 @@ extend ElisaProof:
                                 else:
                                     block_state.regions.active_regions <- block_state.regions.active_regions.truncate(block_state.regions.active_regions.count - 1)
                                     proof_resource_invalidate_region_bindings(&block_state, region_name)
-                                    proof_resource_record_event(&block_state, report, "resource-region-close", "", 0, region_name, "", 0)
+                                    proof_resource_record_event_at_position(&block_state, report, "resource-region-close", "", 0, region_name, "", 0, block_position)
                             proof_resource_close_child(state, block_state, report, true)
                             state.evidence.facts.clear()
                             continue
@@ -322,7 +323,7 @@ extend ElisaProof:
                     _:
                         proof_resource_add_failing_obligation(report, "statement-unsupported", Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}, function_name, "unknown statement form has no resource transition model")
 
-        def proof_check_resource_safety[@r](file: Ast::File&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, facts: darray[Ast::Expr]&, report: mutable ProofReport& @r, function_name: sview, line: u32, owner_offset: u32, functions: mutable ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
+        def proof_check_resource_safety[@r](file: Ast::File&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, facts: darray[Ast::Expr]&, report: mutable ProofReport& @r, function_name: sview, line: u32, owner_offset: u32, functions: mutable ProofFunctionTable&) -> void can[Global{Read,Write}]:
             failed_before: u32 = report.results.failed
             state: mutable ProofResourceState = proof_resource_empty()
             state.context.function_name <- function_name

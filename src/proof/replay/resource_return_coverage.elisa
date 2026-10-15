@@ -1,0 +1,231 @@
+extend ElisaProof:
+    private:
+        def proof_replay_resource_return_place_root_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, name: sview, position: Ast::Pos):
+            return (false, "", Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Ident(name, position):
+                    return (false, "", position) if name == "" or not proof_replay_owner_work_charge(sview_len(name), source_work)
+                    (true, name, position)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Move(inner, _):
+                    proof_replay_resource_return_place_root_with_work(inner, source_work, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    proof_replay_resource_return_place_root_with_work(object, source_work, depth + 1)
+                Ast::Expr.Index(object, _, _) | Ast::Expr.IndexN(object, _, _) | Ast::Expr.Slice(object, _, _, _):
+                    proof_replay_resource_return_place_root_with_work(object, source_work, depth + 1)
+                _:
+                    (false, "", Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+
+        def proof_replay_resource_return_place_root_name_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, name: sview):
+            root: (complete: bool, name: sview, position: Ast::Pos) = proof_replay_resource_return_place_root_with_work(expression, source_work, depth)
+            (root.complete, root.name)
+
+        def proof_replay_resource_return_allocation_region_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, is_allocation: bool, region: sview):
+            return (false, false, "") if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.RegionNew(_, region, _):
+                    return (false, false, "") if not proof_replay_owner_work_charge(sview_len(region), source_work)
+                    (true, true, region)
+                Ast::Expr.Paren(inner, _):
+                    proof_replay_resource_return_allocation_region_with_work(inner, source_work, depth + 1)
+                _:
+                    (true, false, "")
+
+        def proof_replay_resource_return_name_has_external_region_with_work(report: ProofReport&, owner_line: u32, returned_name: sview, source_work: mutable usize&) -> (complete: bool, external_region: bool):
+            name_matches: mutable usize = 0
+            external_matches: mutable usize = 0
+            for binding in report.source.source_local_region_annotations |binding, report, owner_line, returned_name, source_work|:
+                return (false, false) if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(binding.name), source_work) or not proof_replay_owner_work_charge(sview_len(binding.region), source_work)
+                continue if binding.line != owner_line or binding.name != returned_name
+                name_matches <- name_matches + 1
+                return (false, false) if name_matches > 1
+                continue if binding.region == ""
+                region_matches: mutable usize = 0
+                for region_parameter in report.source.source_local_region_annotations |region_parameter, binding, owner_line, source_work|:
+                    return (false, false) if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(region_parameter.region), source_work)
+                    region_matches <- region_matches + 1 if region_parameter.line == owner_line and region_parameter.name == "__region_param" and region_parameter.region == binding.region
+                    return (false, false) if region_matches > 1
+                external_matches <- external_matches + 1 if region_matches == 1
+            (true, name_matches == 1 and external_matches == 1)
+
+        def proof_replay_resource_return_name_is_reference_formal_with_work(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, owner_line: u32, owner_offset: u32, returned_name: sview, source_work: mutable usize&) -> (complete: bool, reference_formal: bool):
+            matches: mutable usize = 0
+            reference_formal: mutable bool = false
+            for parameter in parameters |parameter, report, owner_line, owner_offset, returned_name, source_work, matches, reference_formal|:
+                return (false, false) if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(parameter.name), source_work)
+                continue if parameter.name != returned_name
+                matches <- matches + 1
+                return_markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(parameter.type_expression, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, owner_line, owner_offset, report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, &source_work)
+                return (false, false) if not return_markers.complete
+                reference_formal <- return_markers.reference
+            (true, matches == 1 and reference_formal)
+
+        def proof_replay_resource_return_region_is_external_with_work(report: ProofReport&, owner_line: u32, region: sview, source_work: mutable usize&) -> (complete: bool, external_region: bool):
+            return (true, false) if region == ""
+            matches: mutable usize = 0
+            for annotation in report.source.source_local_region_annotations |annotation, owner_line, region, source_work, matches|:
+                return (false, false) if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(annotation.name), source_work) or not proof_replay_owner_work_charge(sview_len(annotation.region), source_work)
+                if annotation.line == owner_line and annotation.name == "__region_param" and annotation.region == region:
+                    matches <- matches + 1
+                    return (false, false) if matches > 1
+            (true, matches == 1)
+
+        def proof_replay_resource_return_alloc_matches_expression_with_work(report: ProofReport&, allocation: ElisaProofKernelCore::ProofKernelNode, expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> (complete: bool, matches: usize):
+            return (false, 0) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_replay_resource_return_alloc_matches_expression_with_work(report, allocation, inner, source_work, depth + 1)
+                Ast::Expr.RegionNew(operand, region, _):
+                    return (false, 0) if not proof_replay_owner_work_charge(sview_len(region), source_work)
+                    return (true, 0) if region != allocation.secondary_name or allocation.left >= report.analysis_1.kernel.nodes.count
+                    same_operand: bool = proof_replay_ast_matches_kernel_with_work(report, operand, allocation.left, source_work, depth + 1)
+                    return (false, 0) if not same_operand and source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    (true, 1 if same_operand else 0)
+                _:
+                    (true, 0)
+
+        def proof_replay_resource_return_alloc_source_count_with_work(report: ProofReport&, allocation: ElisaProofKernelCore::ProofKernelNode, body: darray[Ast::Stmt]&, source_work: mutable usize&, depth: usize) -> (complete: bool, count: usize):
+            return (false, 0) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            count: mutable usize = 0
+            for statement in body |report, allocation, source_work, depth, count|:
+                return (false, 0) if not proof_replay_owner_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.Return(expression, _):
+                        match_result: (complete: bool, count: usize) = proof_replay_resource_return_alloc_matches_expression_with_work(report, allocation, expression, source_work, 0)
+                        return (false, 0) if not match_result.complete or count > 1 - match_result.count
+                        count <- count + match_result.count
+                    Ast::Stmt.If(_, yes, no, _):
+                        yes_count: (complete: bool, count: usize) = proof_replay_resource_return_alloc_source_count_with_work(report, allocation, yes, source_work, depth + 1)
+                        return (false, 0) if not yes_count.complete or count > 1 - yes_count.count
+                        count <- count + yes_count.count
+                        no_count: (complete: bool, count: usize) = proof_replay_resource_return_alloc_source_count_with_work(report, allocation, no, source_work, depth + 1)
+                        return (false, 0) if not no_count.complete or count > 1 - no_count.count
+                        count <- count + no_count.count
+                    Ast::Stmt.While(_, nested_body, _) | Ast::Stmt.For(_, _, _, nested_body, _) | Ast::Stmt.Block(_, _, _, nested_body, _):
+                        nested: (complete: bool, count: usize) = proof_replay_resource_return_alloc_source_count_with_work(report, allocation, nested_body, source_work, depth + 1)
+                        return (false, 0) if not nested.complete or count > 1 - nested.count
+                        count <- count + nested.count
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |report, allocation, source_work, depth, count|:
+                            return (false, 0) if not proof_replay_owner_work_charge(1, source_work)
+                            nested: (complete: bool, count: usize) = proof_replay_resource_return_alloc_source_count_with_work(report, allocation, arm.body, source_work, depth + 1)
+                            return (false, 0) if not nested.complete or count > 1 - nested.count
+                            count <- count + nested.count
+                    _:
+                        pass
+            (true, count)
+
+        # Expression blocks can contain early returns even when the enclosing statement is
+        # not itself a Return. This conservative expression walk admits ordinary value syntax
+        # and rejects block/control forms whose return paths need explicit statement traversal.
+        def proof_replay_resource_return_expression_has_no_hidden_return_with_work(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Block(_, _, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.Comprehension(_, _, _, _, _) | Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    return false
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_replay_resource_return_expression_has_no_hidden_return_with_work(operand, source_work, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(callee, source_work, depth + 1)
+                    for argument in arguments |source_work, depth|:
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(argument, source_work, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _) | Ast::Expr.Move(inner, _):
+                    return proof_replay_resource_return_expression_has_no_hidden_return_with_work(inner, source_work, depth + 1)
+                Ast::Expr.Refinement(inner, predicate, _):
+                    return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(inner, source_work, depth + 1)
+                    return proof_replay_resource_return_expression_has_no_hidden_return_with_work(predicate, source_work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(left, source_work, depth + 1)
+                    return proof_replay_resource_return_expression_has_no_hidden_return_with_work(right, source_work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(object, source_work, depth + 1)
+                    for argument in arguments |source_work, depth|:
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(argument, source_work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(object, source_work, depth + 1)
+                    return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(low, source_work, depth + 1)
+                    return proof_replay_resource_return_expression_has_no_hidden_return_with_work(high, source_work, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |source_work, depth|:
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(element, source_work, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |source_work, depth|:
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(entry.key, source_work, depth + 1)
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(entry.value, source_work, depth + 1)
+                Ast::Expr.Construct(base, fields, _):
+                    return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(base, source_work, depth + 1)
+                    for field in fields |source_work, depth|:
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(field.value, source_work, depth + 1)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(base, source_work, depth + 1)
+                    for field in fields |source_work, depth|:
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(field.value, source_work, depth + 1)
+                Ast::Expr.If(condition, yes, no, _):
+                    return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(condition, source_work, depth + 1)
+                    return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(yes, source_work, depth + 1)
+                    return proof_replay_resource_return_expression_has_no_hidden_return_with_work(no, source_work, depth + 1)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                _:
+                    return false
+            true
+
+        # Reverse coverage for return markers: mutable reference returns and direct values
+        # carrying an annotated external region require one exact source return marker.
+        def proof_replay_resource_return_markers_covered_with_work(report: ProofReport&, root: ElisaProofKernelCore::ProofKernelNode, body: darray[Ast::Stmt]&, parameters: darray[Ast::ParamDecl]&, owner_line: u32, return_reference: bool, return_mutable_reference: bool, return_scalar: bool, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for statement in body |report, root, source_work, depth|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                match statement:
+                    Ast::Stmt.Return(expression, position):
+                        return false if position.offset == 0 or position.offset > 4294967295
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(expression, source_work, 0)
+                        returned: (complete: bool, name: sview) = proof_replay_resource_return_place_root_name_with_work(expression, source_work, 0)
+                        allocation: (complete: bool, is_allocation: bool, region: sview) = proof_replay_resource_return_allocation_region_with_work(expression, source_work, 0)
+                        return false if not allocation.complete
+                        external_region_result: (complete: bool, external_region: bool) = (true, false)
+                        external_region_result <- proof_replay_resource_return_name_has_external_region_with_work(report, owner_line, returned.name, source_work) if returned.complete
+                        return false if not external_region_result.complete
+                        external_region: bool = external_region_result.external_region
+                        allocation_region_external: (complete: bool, external_region: bool) = (true, false)
+                        allocation_region_external <- proof_replay_resource_return_region_is_external_with_work(report, owner_line, allocation.region, source_work) if allocation.is_allocation
+                        return false if not allocation_region_external.complete
+                        reference_formal: (complete: bool, reference_formal: bool) = (true, false)
+                        reference_formal <- proof_replay_resource_return_name_is_reference_formal_with_work(report, parameters, owner_line, root.value.u32(), returned.name, source_work) if returned.complete and return_reference and not external_region
+                        return false if not reference_formal.complete
+                        requires_marker: bool = return_reference and (return_mutable_reference or reference_formal.reference_formal) or external_region and not return_scalar or allocation_region_external.external_region and not return_scalar
+                        return false if not returned.complete and return_reference and return_mutable_reference and not allocation.is_allocation
+                        if requires_marker:
+                            markers: (complete: bool, count: usize) = proof_replay_resource_event_count_in_root_with_work(report, root, "resource-region-return", position.offset.usize(), "", source_work)
+                            return false if not markers.complete or markers.count != 1
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(expression, source_work, 0)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(target, source_work, 0)
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(value, source_work, 0)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(condition, source_work, 0)
+                        return false if not proof_replay_resource_return_markers_covered_with_work(report, root, yes, parameters, owner_line, return_reference, return_mutable_reference, return_scalar, source_work, depth + 1)
+                        return false if not proof_replay_resource_return_markers_covered_with_work(report, root, no, parameters, owner_line, return_reference, return_mutable_reference, return_scalar, source_work, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(condition, source_work, 0)
+                        return false if not proof_replay_resource_return_markers_covered_with_work(report, root, nested, parameters, owner_line, return_reference, return_mutable_reference, return_scalar, source_work, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        return false if not proof_replay_resource_return_markers_covered_with_work(report, root, nested, parameters, owner_line, return_reference, return_mutable_reference, return_scalar, source_work, depth + 1)
+                    Ast::Stmt.For(_, _, iterable, nested, _):
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(iterable, source_work, 0)
+                        return false if not proof_replay_resource_return_markers_covered_with_work(report, root, nested, parameters, owner_line, return_reference, return_mutable_reference, return_scalar, source_work, depth + 1)
+                    Ast::Stmt.Match(value, arms, _):
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(value, source_work, 0)
+                        for arm in arms |report, root, source_work, depth|:
+                            return false if not proof_replay_owner_work_charge(1, source_work)
+                            return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(arm.guard, source_work, 0)
+                            return false if not proof_replay_resource_return_markers_covered_with_work(report, root, arm.body, parameters, owner_line, return_reference, return_mutable_reference, return_scalar, source_work, depth + 1)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        return false if not proof_replay_resource_return_expression_has_no_hidden_return_with_work(initializer, source_work, 0)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    Ast::Stmt.Invalid:
+                        return false
+                    _:
+                        return false
+            true

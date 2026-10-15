@@ -1,0 +1,241 @@
+extend ElisaProof:
+    private:
+        # The trace index is a bounded cache, separate from canonical proof nodes. Reserve at
+        # most two slots per admitted trace so large reports stay indexed without a full table.
+        const PROOF_REPLAY_TRACE_INDEX_SLOT_BUDGET: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET * 2
+        const PROOF_REPLAY_TRACE_INDEX_WORK_BUDGET: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET * 8
+        const PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET * 16
+
+        # One report-wide budget covers both bounded indexes and candidate equality work during
+        # a replay batch. A per-lookup cap alone would still multiply by certificate facts.
+        def proof_replay_trace_lookup_charge_amount(report: mutable ProofReport&, amount: usize) -> bool:
+            return false if report.analysis_1.kernel.budget_exhausted
+            if report.analysis_1.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET:
+                return false
+            remaining: usize = PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET - report.analysis_1.traces.lookup_work_used
+            if amount > remaining:
+                report.analysis_1.traces.lookup_work_used <- PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET + 1
+                return false
+            report.analysis_1.traces.lookup_work_used <- report.analysis_1.traces.lookup_work_used + amount
+            return true
+
+        def proof_replay_trace_lookup_remaining_work(report: ProofReport&) -> usize:
+            return 0 if report.analysis_1.kernel.budget_exhausted or report.analysis_1.traces.lookup_work_used >= PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET
+            PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET - report.analysis_1.traces.lookup_work_used
+
+        def proof_replay_trace_lookup_charge(report: mutable ProofReport&) -> bool:
+            return proof_replay_trace_lookup_charge_amount(report, 1)
+
+        # Charge a conservative structural upper bound before source-expression equality. The
+        # equality helper has a depth bound, but its aggregate-child loops also need a report-wide
+        # cap because adversarial reports can contain very wide calls, tuples, or constructors.
+        def proof_replay_trace_pattern_work(report: mutable ProofReport&, pattern: Ast::Pattern, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_trace_lookup_charge(report)
+            match pattern:
+                Ast::Pattern.Literal(value) | Ast::Pattern.Binding(value) | Ast::Pattern.Pin(value) | Ast::Pattern.Rest(value) | Ast::Pattern.Other(value):
+                    return proof_replay_trace_lookup_charge_amount(report, sview_len(value))
+                Ast::Pattern.Variant(path, fields) | Ast::Pattern.Struct(path, fields):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(path)) or not proof_replay_trace_lookup_charge_amount(report, fields.count)
+                    for field in fields |report, depth|:
+                        return false if not proof_replay_trace_pattern_work(report, field, depth + 1)
+                    return true
+                Ast::Pattern.Field(selector, fields):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(selector)) or not proof_replay_trace_lookup_charge_amount(report, fields.count)
+                    for field in fields |report, depth|:
+                        return false if not proof_replay_trace_pattern_work(report, field, depth + 1)
+                    return true
+                Ast::Pattern.Tuple(fields) | Ast::Pattern.Or(fields):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, fields.count)
+                    for field in fields |report, depth|:
+                        return false if not proof_replay_trace_pattern_work(report, field, depth + 1)
+                    return true
+                Ast::Pattern.TypeBind(type_name, binder):
+                    return proof_replay_trace_lookup_charge_amount(report, sview_len(type_name)) and proof_replay_trace_lookup_charge_amount(report, sview_len(binder))
+                Ast::Pattern.Range(low, high, _):
+                    return proof_replay_trace_lookup_charge_amount(report, sview_len(low)) and proof_replay_trace_lookup_charge_amount(report, sview_len(high))
+                Ast::Pattern.As(name, inner):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(name)) or not proof_replay_trace_lookup_charge_amount(report, inner.count)
+                    for field in inner |report, depth|:
+                        return false if not proof_replay_trace_pattern_work(report, field, depth + 1)
+                    return true
+                Ast::Pattern.Wildcard:
+                    return true
+                _:
+                    return false
+
+        def proof_replay_trace_pattern_array_work(report: mutable ProofReport&, patterns: darray[Ast::Pattern]&, depth: usize) -> bool:
+            return false if patterns.count > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET or not proof_replay_trace_lookup_charge_amount(report, patterns.count)
+            for pattern in patterns |report, depth|:
+                return false if not proof_replay_trace_pattern_work(report, pattern, depth + 1)
+            return true
+
+        def proof_replay_trace_statement_array_expression_work(report: mutable ProofReport&, statements: darray[Ast::Stmt]&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_trace_lookup_charge_amount(report, statements.count)
+            for statement in statements |report, depth|:
+                return false if not proof_replay_trace_statement_expression_work(report, statement, depth + 1)
+            return true
+
+        def proof_replay_trace_statement_expression_work(report: mutable ProofReport&, statement: Ast::Stmt, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_trace_lookup_charge(report)
+            match statement:
+                Ast::Stmt.VarDecl(name, type_expression, initializer, _):
+                    return false if:
+                        not proof_replay_trace_lookup_charge_amount(report, sview_len(name))
+                        not proof_replay_trace_expression_work(report, type_expression, depth + 1)
+                    return proof_replay_trace_expression_work(report, initializer, depth + 1)
+                Ast::Stmt.Expr(expression, _):
+                    return proof_replay_trace_expression_work(report, expression, depth + 1)
+                Ast::Stmt.Contract(kind, expression, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(kind))
+                    return proof_replay_trace_expression_work(report, expression, depth + 1)
+                Ast::Stmt.Return(value, _):
+                    if value is expression:
+                        return proof_replay_trace_expression_work(report, expression, depth + 1)
+                    return true
+                Ast::Stmt.Assign(target, _, value, _):
+                    return false if not proof_replay_trace_expression_work(report, target, depth + 1)
+                    return proof_replay_trace_expression_work(report, value, depth + 1)
+                Ast::Stmt.If(condition, yes, no, _):
+                    return false if:
+                        not proof_replay_trace_expression_work(report, condition, depth + 1)
+                        not proof_replay_trace_statement_array_expression_work(report, yes, depth + 1)
+                    return proof_replay_trace_statement_array_expression_work(report, no, depth + 1)
+                Ast::Stmt.While(condition, body, _):
+                    return false if not proof_replay_trace_expression_work(report, condition, depth + 1)
+                    return proof_replay_trace_statement_array_expression_work(report, body, depth + 1)
+                Ast::Stmt.For(_, variables, iterable, body, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, variables.count)
+                    for variable in variables |report|:
+                        return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(variable))
+                    return false if not proof_replay_trace_expression_work(report, iterable, depth + 1)
+                    return proof_replay_trace_statement_array_expression_work(report, body, depth + 1)
+                Ast::Stmt.Block(kind, clauses, binding, body, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(kind)) or not proof_replay_trace_lookup_charge_amount(report, clauses.count) or not proof_replay_trace_lookup_charge_amount(report, sview_len(binding))
+                    for clause in clauses |report|:
+                        return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(clause))
+                    return proof_replay_trace_statement_array_expression_work(report, body, depth + 1)
+                Ast::Stmt.Match(scrutinee, arms, _):
+                    return false if:
+                        not proof_replay_trace_expression_work(report, scrutinee, depth + 1)
+                        not proof_replay_trace_lookup_charge_amount(report, arms.count)
+                    for arm in arms |report, depth|:
+                        return false if:
+                            not proof_replay_trace_pattern_work(report, arm.pattern, depth + 1)
+                            not proof_replay_trace_expression_work(report, arm.guard, depth + 1)
+                            not proof_replay_trace_statement_array_expression_work(report, arm.body, depth + 1)
+                    return true
+                Ast::Stmt.Break(label, _) | Ast::Stmt.Continue(label, _):
+                    return proof_replay_trace_lookup_charge_amount(report, sview_len(label))
+                _:
+                    return false
+
+        def proof_replay_trace_expression_work(report: mutable ProofReport&, expression: Ast::Expr, depth: usize) -> bool:
+            return false if:
+                report.analysis_1.kernel.budget_exhausted
+                depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+                not proof_replay_trace_lookup_charge(report)
+            match expression:
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.FloatLit(value, _):
+                    return proof_replay_trace_lookup_charge_amount(report, sview_len(value))
+                Ast::Expr.ShorthandMember(parts, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, parts.count)
+                    for part in parts |report|:
+                        return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(part))
+                    return true
+                Ast::Expr.CharLit(value, _):
+                    return proof_replay_trace_lookup_charge_amount(report, sview_len(value))
+                Ast::Expr.Ident(name, _):
+                    return proof_replay_trace_lookup_charge_amount(report, sview_len(name))
+                Ast::Expr.StringLit(value, _):
+                    return proof_replay_trace_lookup_charge_amount(report, sview_len(value))
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _):
+                    return proof_replay_trace_expression_work(report, inner, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return false if not proof_replay_trace_expression_work(report, left, depth + 1)
+                    return proof_replay_trace_expression_work(report, right, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if:
+                        not proof_replay_trace_expression_work(report, object, depth + 1)
+                        not proof_replay_trace_expression_work(report, low, depth + 1)
+                    return proof_replay_trace_expression_work(report, high, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return false if:
+                        not proof_replay_trace_expression_work(report, condition, depth + 1)
+                        not proof_replay_trace_expression_work(report, then_expression, depth + 1)
+                    return proof_replay_trace_expression_work(report, else_expression, depth + 1)
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return false if:
+                        not proof_replay_trace_lookup_charge_amount(report, arguments.count)
+                        not proof_replay_trace_lookup_charge_amount(report, argument_names.count)
+                        not proof_replay_trace_expression_work(report, callee, depth + 1)
+                    for argument in arguments |argument, report, depth|:
+                        return false if not proof_replay_trace_expression_work(report, argument, depth + 1)
+                    for argument_name in argument_names |argument_name, report|:
+                        return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(argument_name))
+                    return true
+                Ast::Expr.Field(object, field, _) | Ast::Expr.Scope(object, field, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(field))
+                    return proof_replay_trace_expression_work(report, object, depth + 1)
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return false if:
+                        not proof_replay_trace_lookup_charge_amount(report, fields.count)
+                        not proof_replay_trace_expression_work(report, type_expression, depth + 1)
+                    for field in fields |field, report, depth|:
+                        return false if:
+                            not proof_replay_trace_lookup_charge_amount(report, sview_len(field.name))
+                            not proof_replay_trace_expression_work(report, field.value, depth + 1)
+                    return true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if:
+                        not proof_replay_trace_lookup_charge_amount(report, fields.count)
+                        not proof_replay_trace_expression_work(report, base, depth + 1)
+                    for field in fields |field, report, depth|:
+                        return false if:
+                            not proof_replay_trace_lookup_charge_amount(report, sview_len(field.name))
+                            not proof_replay_trace_expression_work(report, field.value, depth + 1)
+                    return true
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if:
+                        not proof_replay_trace_lookup_charge_amount(report, arguments.count)
+                        not proof_replay_trace_expression_work(report, object, depth + 1)
+                    for argument in arguments |argument, report, depth|:
+                        return false if not proof_replay_trace_expression_work(report, argument, depth + 1)
+                    return true
+                Ast::Expr.Tuple(elements, _) | Ast::Expr.Array(elements, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, elements.count)
+                    for element in elements |element, report, depth|:
+                        return false if not proof_replay_trace_expression_work(report, element, depth + 1)
+                    return true
+                Ast::Expr.SetLit(elements, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, elements.count)
+                    for element in elements |element, report, depth|:
+                        return false if not proof_replay_trace_expression_work(report, element, depth + 1)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, entries.count)
+                    for entry in entries |entry, report, depth|:
+                        return false if:
+                            not proof_replay_trace_expression_work(report, entry.key, depth + 1)
+                            not proof_replay_trace_expression_work(report, entry.value, depth + 1)
+                    return true
+                Ast::Expr.GetElse(value, recovery, _):
+                    return false if not proof_replay_trace_expression_work(report, value, depth + 1)
+                    return proof_replay_trace_statement_array_expression_work(report, recovery, depth + 1)
+                Ast::Expr.Block(statements, body, captures, _):
+                    return true if captures.count != 0 or statements.count == 0 or statements.count > ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS
+                    return false if not proof_replay_trace_lookup_charge_amount(report, statements.count)
+                    for statement in statements |statement, report, depth|:
+                        return false if not proof_replay_trace_statement_expression_work(report, statement, depth)
+                    return proof_replay_trace_expression_work(report, body, depth + 1)
+                _:
+                    return false
+
+        # Replay equality is a bounded structural walk over the admitted AST forms. This
+        # Charge both the structural preflight and the exact comparison pass.
+        def proof_replay_trace_expression_equality_work(report: mutable ProofReport&, expression: Ast::Expr) -> bool:
+            start_work: usize = report.analysis_1.traces.lookup_work_used
+            return false if not proof_replay_trace_expression_work(report, expression, 0)
+            comparison_work: usize = report.analysis_1.traces.lookup_work_used - start_work
+            return proof_replay_trace_lookup_charge_amount(report, comparison_work)

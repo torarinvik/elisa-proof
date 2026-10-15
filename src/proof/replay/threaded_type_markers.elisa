@@ -1,0 +1,363 @@
+# Kernel source marker reconstruction for threaded-call summaries.
+extend ElisaProof:
+    private:
+        # Literal-set membership compares a source name with each candidate. Charge a safe
+        # upper bound for those byte comparisons before consulting the fixed whitelist.
+        def proof_replay_thread_name_set_work_add(name: sview, candidate_count: usize, literal_bytes: usize, work: mutable usize&) -> bool:
+            return false if candidate_count == 0 or not proof_replay_generic_param_work_add(work, literal_bytes)
+            name_length: usize = sview_len(name)
+            return false if name_length > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / candidate_count
+            proof_replay_generic_param_work_add(work, name_length * candidate_count)
+
+        # Threaded-call replay models one outer reference parameter as a write to its
+        # pointee. Preserve nested references in that pointee so the storage check can
+        # reject reference-to-reference shapes instead of silently stripping them too.
+        def proof_replay_thread_parameter_storage_type(expression: Ast::Expr, depth: usize) -> Ast::Expr:
+            return expression if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_replay_thread_parameter_storage_type(inner, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return inner if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
+                    return proof_replay_thread_parameter_storage_type(inner, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return expression
+                _:
+                    return expression
+
+        def proof_replay_thread_function_module_path_find(declarations: darray[Ast::Decl]&, wanted_name: sview, wanted_line: u32, wanted_offset: usize, current_path: darray[sview]&, found_path: mutable darray[sview]&, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT or work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + declarations.count
+            for declaration in declarations |wanted_name, wanted_line, wanted_offset, current_path, found_path, matches, work, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, position):
+                        return false if wanted_name != "" and not proof_replay_thread_name_compare_work_charge(name, wanted_name, work)
+                        if (wanted_name == "" or name == wanted_name) and position.line == wanted_line and position.offset.usize() == wanted_offset:
+                            matches <- matches + 1
+                            found_path.clear()
+                            for segment in current_path |segment, found_path, work|:
+                                return false if not proof_replay_generic_param_work_add(work, sview_len(segment))
+                                found_path.push(segment)
+                    Ast::Decl.Module(module_name, nested, _):
+                        nested_path: (complete: bool, path_scope: darray[sview]) = proof_replay_global_constant_scope_with_module_and_work(current_path, module_name, work)
+                        return false if not nested_path.complete
+                        return false if not proof_replay_thread_function_module_path_find(nested, wanted_name, wanted_line, wanted_offset, nested_path.path_scope, found_path, matches, work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_thread_function_module_path_find(nested, wanted_name, wanted_line, wanted_offset, current_path, found_path, matches, work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+            true
+
+        def proof_replay_thread_import_scope_visible(owner_path: darray[sview]&, import_module: sview, work: mutable usize&) -> (complete: bool, visible: bool):
+            return (true, true) if import_module == ""
+            empty_path: darray[sview] = []
+            normalized: (complete: bool, path_scope: darray[sview]) = proof_replay_global_constant_scope_with_module_and_work(empty_path, import_module, work)
+            return (false, false) if not normalized.complete
+            if normalized.path_scope.count > 1:
+                return (true, false) if owner_path.count < normalized.path_scope.count
+                for index in 0..<normalized.path_scope.count |index, owner_path, normalized, work|:
+                    return (false, false) if not proof_replay_thread_name_compare_work_charge(owner_path[index], normalized.path_scope[index], work)
+                    return (true, false) if owner_path[index] != normalized.path_scope[index]
+                return (true, true)
+            for segment in owner_path |segment, import_module, work|:
+                return (false, false) if not proof_replay_thread_name_compare_work_charge(segment, import_module, work)
+                return (true, true) if segment == import_module
+            (true, false)
+
+        def proof_replay_thread_import_shadows_type(report: ProofReport&, wanted: sview, owner_path: darray[sview]&, work: mutable usize&) -> (complete: bool, shadowed: bool):
+            for annotation in report.source.source_annotations |annotation, wanted, owner_path, work|:
+                return (false, false) if not proof_replay_generic_param_work_add(work, 1)
+                imported_name: sview = ""
+                return (false, false) if not proof_replay_thread_name_compare_work_charge(annotation.name, "__binding_wildcard_import", work)
+                if annotation.name == "__binding_wildcard_import":
+                    path_scope: (complete: bool, visible: bool) = proof_replay_thread_import_scope_visible(owner_path, annotation.module, work)
+                    return (false, false) if not path_scope.complete
+                    return (true, true) if path_scope.visible
+                    continue
+                return (false, false) if not proof_replay_thread_name_compare_work_charge(annotation.owner, "__from_member", work)
+                imported_name <- annotation.name if annotation.owner == "__from_member"
+                return (false, false) if not proof_replay_thread_name_compare_work_charge(annotation.name, "__using_alias", work)
+                imported_name <- annotation.owner if annotation.name == "__using_alias"
+                return (false, false) if not proof_replay_thread_name_compare_work_charge(imported_name, wanted, work)
+                if imported_name != "" and imported_name == wanted:
+                    path_scope: (complete: bool, visible: bool) = proof_replay_thread_import_scope_visible(owner_path, annotation.module, work)
+                    return (false, false) if not path_scope.complete
+                    return (true, true) if path_scope.visible
+            (true, false)
+
+        def proof_replay_thread_import_shadow_check(report: ProofReport&, wanted: sview, owner_path: darray[sview]&, work: mutable usize&) -> bool:
+            shadow: (complete: bool, shadowed: bool) = proof_replay_thread_import_shadows_type(report, wanted, owner_path, work)
+            return false if not shadow.complete or shadow.shadowed
+            true
+
+        def proof_replay_thread_active_owner_path(report: ProofReport&, work: mutable usize&) -> (complete: bool, path: darray[sview]):
+            return (false, []) if not report.analysis_2.replay_owner_offset_valid or report.analysis_2.replay_owner_line == 0
+            root_path: darray[sview] = []
+            path: mutable darray[sview] = []
+            matches: mutable usize = 0
+            complete: bool = proof_replay_thread_function_module_path_find(report.source.source_declarations, "", report.analysis_2.replay_owner_line, report.analysis_2.replay_owner_offset, root_path, &path, &matches, work, 0)
+            return (false, []) if not complete or matches != 1
+            (true, path)
+
+        def proof_replay_thread_marker_type_declaration(report: ProofReport&, name: sview, work: mutable usize&, depth: usize) -> (complete: bool, count: usize, kind: sview, target: Ast::Expr, nested_match: bool, has_formals: bool):
+            empty: Ast::Expr = Ast::Expr.Invalid
+            return (false, 0, "", empty, false, false) if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT
+            lookup: (complete: bool, declarations: usize, aliases: usize, target: Ast::Expr, nested_scope: bool, has_formals: bool) = proof_resource_marker_type_name_with_work(report.source_types.source_effect_index, name, work, 0)
+            return (false, 0, "", empty, false, false) if not lookup.complete
+            kind: mutable sview = ""
+            if lookup.declarations == 1:
+                kind <- "alias" if lookup.aliases == 1
+                kind <- "nominal" if lookup.aliases == 0
+                return (false, 0, "", empty, false, false) if kind == ""
+            target: Ast::Expr = lookup.target if lookup.aliases == 1 else Ast::Expr.Absent
+            # The shared marker index records duplicate declarations, nested path_scope and alias
+            # formals, so one bounded lookup replaces both full source walks.
+            (true, lookup.declarations, kind, target, lookup.nested_scope, lookup.has_formals)
+
+        def proof_replay_thread_type_has_reference_syntax(expression: Ast::Expr, report: ProofReport&, owner_path: darray[sview]&, work: mutable usize&, depth: usize) -> (complete: bool, has_reference: bool):
+            return (false, false) if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT or work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            work <- work + 1
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_replay_thread_type_has_reference_syntax(inner, report, owner_path, work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    if operator == TokenKind.Ampersand or operator == TokenKind.Lmut:
+                        return (true, true)
+                    return proof_replay_thread_type_has_reference_syntax(inner, report, owner_path, work, depth + 1) if operator in {TokenKind.Mutable, TokenKind.Static, TokenKind.Heap, TokenKind.Stack, TokenKind.Tail}
+                    return (false, false)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |element, report, owner_path, work, depth|:
+                        nested: (complete: bool, has_reference: bool) = proof_replay_thread_type_has_reference_syntax(element, report, owner_path, work, depth + 1)
+                        return (false, false) if not nested.complete
+                        return (true, true) if nested.has_reference
+                    return (true, false)
+                Ast::Expr.Index(head, argument, _):
+                    match head:
+                        Ast::Expr.Ident(name, _):
+                            return (false, false) if not proof_replay_thread_import_shadow_check(report, name, owner_path, work)
+                            shadow: (complete: bool, count: usize, kind: sview, target: Ast::Expr, nested_match: bool, has_formals: bool) = proof_replay_thread_marker_type_declaration(report, name, work, 0)
+                            return (false, false) if not shadow.complete or shadow.count > 0
+                            return (false, false) if not proof_replay_thread_name_set_work_add(name, 3, 13, work)
+                            return proof_replay_thread_type_has_reference_syntax(argument, report, owner_path, work, depth + 1) if name in {"darray", "view", "set"}
+                            return (false, false) if not proof_replay_thread_name_set_work_add(name, 16, 56, work)
+                            return (true, false) if name in {"i8", "i16", "i32", "int", "isize", "i64", "u8", "u16", "u32", "usize", "uintptr", "u64", "bool", "char", "f32", "f64"}
+                            return (false, false)
+                        _:
+                            return (false, false)
+                Ast::Expr.IndexN(head, arguments, _):
+                    return (false, false) if arguments.count != 2
+                    match head:
+                        Ast::Expr.Ident("array", _):
+                            return (false, false) if not proof_replay_thread_import_shadow_check(report, "array", owner_path, work)
+                            shadow: (complete: bool, count: usize, kind: sview, target: Ast::Expr, nested_match: bool, has_formals: bool) = proof_replay_thread_marker_type_declaration(report, "array", work, 0)
+                            return (false, false) if not shadow.complete or shadow.count > 0
+                            match arguments[1]:
+                                Ast::Expr.IntLit(_, _):
+                                    return proof_replay_thread_type_has_reference_syntax(arguments[0], report, owner_path, work, depth + 1)
+                                _:
+                                    return (false, false)
+                        _:
+                            return (false, false)
+                Ast::Expr.Ident(name, _):
+                    return (false, false) if not proof_replay_thread_name_set_work_add(name, 40, 327, work)
+                    if name in {"cstr", "sview", "i8", "i16", "i32", "int", "isize", "i64", "u8", "u16", "u32", "usize", "uintptr", "u64", "bool", "char", "f32", "f64", "void", "Local", "Frozen", "Joinable", "Pending", "Held", "LLVMContextRef", "LLVMModuleRef", "LLVMTypeRef", "LLVMValueRef", "LLVMBuilderRef", "LLVMBasicBlockRef", "LLVMTargetRef", "LLVMTargetMachineRef", "LLVMTargetDataRef", "LLVMMetadataRef", "LLVMAttributeRef", "LLVMDIBuilderRef", "LLVMDbgRecordRef", "LLVMPassBuilderOptionsRef", "Arena", "dstr"}:
+                        return (false, false) if not proof_replay_thread_import_shadow_check(report, name, owner_path, work)
+                        shadow: (complete: bool, count: usize, kind: sview, target: Ast::Expr, nested_match: bool, has_formals: bool) = proof_replay_thread_marker_type_declaration(report, name, work, 0)
+                        return (false, false) if not shadow.complete or shadow.count > 0
+                        return (true, false)
+                    declaration: (complete: bool, count: usize, kind: sview, target: Ast::Expr, nested_match: bool, has_formals: bool) = proof_replay_thread_marker_type_declaration(report, name, work, 0)
+                    return (false, false) if not declaration.complete or declaration.count != 1 or declaration.nested_match
+                    if declaration.kind == "alias":
+                        return (false, false) if declaration.has_formals
+                        return proof_replay_thread_type_has_reference_syntax(declaration.target, report, owner_path, work, depth + 1)
+                    if declaration.kind == "nominal":
+                        return proof_replay_thread_named_type_has_reference_syntax(report.source.source_declarations, name, report, owner_path, work, depth + 1)
+                    return (false, false)
+                _:
+                    return (false, false)
+
+        def proof_replay_thread_named_type_has_reference_syntax(declarations: darray[Ast::Decl]&, wanted: sview, report: ProofReport&, owner_path: darray[sview]&, work: mutable usize&, depth: usize) -> (complete: bool, has_reference: bool):
+            return (false, false) if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT
+            matches: mutable usize = 0
+            has_reference: mutable bool = false
+            for declaration in declarations |wanted, work, depth, matches, has_reference|:
+                return (false, false) if not proof_replay_generic_param_work_add(work, 1)
+                match declaration:
+                    Ast::Decl.Struct(name, members, _, _, _, _, _):
+                        return (false, false) if not proof_replay_generic_param_work_add(work, sview_len(name))
+                        if name == wanted:
+                            matches <- matches + 1
+                            for member in members |work, has_reference|:
+                                return (false, false) if not proof_replay_generic_param_work_add(work, 1)
+                                field: (complete: bool, has_reference: bool) = proof_replay_thread_type_has_reference_syntax(member.type_expression, report, owner_path, work, depth + 1)
+                                return (false, false) if not field.complete
+                                has_reference <- true if field.has_reference
+                    Ast::Decl.Enum(name, variants, is_const, _, _):
+                        return (false, false) if not proof_replay_generic_param_work_add(work, sview_len(name))
+                        if name == wanted:
+                            matches <- matches + 1
+                            if not is_const:
+                                for variant in variants |work, has_reference|:
+                                    return (false, false) if not proof_replay_generic_param_work_add(work, 1)
+                                    for field_type in variant.fields |work, has_reference|:
+                                        field: (complete: bool, has_reference: bool) = proof_replay_thread_type_has_reference_syntax(field_type, report, owner_path, work, depth + 1)
+                                        return (false, false) if not field.complete
+                                        has_reference <- true if field.has_reference
+                    Ast::Decl.Module(_, _, _) | Ast::Decl.Scoped(_, _):
+                        pass
+                    Ast::Decl.Alias(_, _, _) | Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Law(_, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _):
+                        pass
+                    _:
+                        return (false, false)
+            return (false, false) if matches != 1
+            return (true, has_reference)
+
+        def proof_replay_thread_named_type_has_borrowed_storage(declarations: darray[Ast::Decl]&, wanted: sview, report: ProofReport&, owner_path: darray[sview]&, work: mutable usize&, depth: usize) -> (complete: bool, borrowed: bool):
+            return (false, false) if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT
+            matches: mutable usize = 0
+            borrowed: mutable bool = false
+            for declaration in declarations |wanted, report, work, depth, matches, borrowed|:
+                return (false, false) if not proof_replay_generic_param_work_add(work, 1)
+                match declaration:
+                    Ast::Decl.Struct(name, members, _, _, _, _, _):
+                        return (false, false) if not proof_replay_generic_param_work_add(work, sview_len(name))
+                        if name == wanted:
+                            matches <- matches + 1
+                            for member in members |report, work, depth, borrowed|:
+                                return (false, false) if not proof_replay_generic_param_work_add(work, 1)
+                                field: (complete: bool, borrowed: bool) = proof_replay_thread_type_contains_borrowed_storage(member.type_expression, report, owner_path, work, depth + 1)
+                                return (false, false) if not field.complete
+                                borrowed <- true if field.borrowed
+                    Ast::Decl.Enum(name, variants, is_const, _, _):
+                        return (false, false) if not proof_replay_generic_param_work_add(work, sview_len(name))
+                        if name == wanted:
+                            matches <- matches + 1
+                            if not is_const:
+                                for variant in variants |report, work, depth, borrowed|:
+                                    return (false, false) if not proof_replay_generic_param_work_add(work, 1)
+                                    for field_type in variant.fields |report, work, depth, borrowed|:
+                                        field: (complete: bool, borrowed: bool) = proof_replay_thread_type_contains_borrowed_storage(field_type, report, owner_path, work, depth + 1)
+                                        return (false, false) if not field.complete
+                                        borrowed <- true if field.borrowed
+                    Ast::Decl.Module(_, _, _) | Ast::Decl.Scoped(_, _):
+                        # The caller's unique declaration lookup rejects nested leaf matches.
+                        pass
+                    Ast::Decl.Alias(_, _, _) | Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Law(_, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _):
+                        pass
+                    _:
+                        return (false, false)
+            return (false, false) if matches != 1
+            return (true, borrowed)
+
+        # Replay-local storage classification. Names and aliases must resolve uniquely in
+        # the retained source tree; unsupported or scoped shapes remain incomplete.
+        def proof_replay_thread_type_contains_borrowed_storage(expression: Ast::Expr, report: ProofReport&, owner_path: darray[sview]&, work: mutable usize&, depth: usize) -> (complete: bool, borrowed: bool):
+            return (false, false) if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT or work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            work <- work + 1
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_replay_thread_type_contains_borrowed_storage(inner, report, owner_path, work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return (true, true) if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
+                    return proof_replay_thread_type_contains_borrowed_storage(inner, report, owner_path, work, depth + 1) if operator in {TokenKind.Mutable, TokenKind.Static, TokenKind.Heap, TokenKind.Stack, TokenKind.Tail}
+                    return (false, false)
+                Ast::Expr.Tuple(elements, _):
+                    borrowed: mutable bool = false
+                    for element in elements |report, work, depth, borrowed|:
+                        item: (complete: bool, borrowed: bool) = proof_replay_thread_type_contains_borrowed_storage(element, report, owner_path, work, depth + 1)
+                        return (false, false) if not item.complete
+                        borrowed <- true if item.borrowed
+                    return (true, borrowed)
+                Ast::Expr.Index(head, argument, _):
+                    match head:
+                        Ast::Expr.Ident(name, _):
+                            return (false, false) if not proof_replay_thread_name_set_work_add(name, 4, 21, work)
+                            return (false, false) if not proof_replay_thread_import_shadow_check(report, name, owner_path, work)
+                            shadow: (complete: bool, count: usize, kind: sview, target: Ast::Expr, nested_match: bool, has_formals: bool) = proof_replay_thread_marker_type_declaration(report, name, work, 0)
+                            return (false, false) if not shadow.complete or shadow.count > 0
+                            return (true, true) if name == "view"
+                            return proof_replay_thread_type_contains_borrowed_storage(argument, report, owner_path, work, depth + 1) if name == "darray" or name == "set" or name == "array"
+                            return (false, false) if not proof_replay_thread_name_set_work_add(name, 16, 56, work)
+                            return (true, false) if name in {"i8", "i16", "i32", "int", "isize", "i64", "u8", "u16", "u32", "usize", "uintptr", "u64", "bool", "char", "f32", "f64"}
+                            return (false, false)
+                        _:
+                            return (false, false)
+                Ast::Expr.IndexN(head, arguments, _):
+                    match head:
+                        Ast::Expr.Ident("array", _):
+                            return (false, false) if not proof_replay_thread_import_shadow_check(report, "array", owner_path, work)
+                            return (false, false) if arguments.count != 2
+                            shadow: (complete: bool, count: usize, kind: sview, target: Ast::Expr, nested_match: bool, has_formals: bool) = proof_replay_thread_marker_type_declaration(report, "array", work, 0)
+                            return (false, false) if not shadow.complete or shadow.count > 0
+                            match arguments[1]:
+                                Ast::Expr.IntLit(_, _):
+                                    return proof_replay_thread_type_contains_borrowed_storage(arguments[0], report, owner_path, work, depth + 1)
+                                _:
+                                    return (false, false)
+                        _:
+                            return (false, false)
+                Ast::Expr.Ident(name, _):
+                    return (false, false) if not proof_replay_thread_name_set_work_add(name, 40, 327, work)
+                    return (false, false) if not proof_replay_thread_import_shadow_check(report, name, owner_path, work)
+                    declaration: (complete: bool, count: usize, kind: sview, target: Ast::Expr, nested_match: bool, has_formals: bool) = proof_replay_thread_marker_type_declaration(report, name, work, 0)
+                    return (false, false) if not declaration.complete or declaration.nested_match or declaration.count > 1
+                    if name == "sview":
+                        return (false, false) if declaration.count != 0
+                        return (true, true)
+                    return (false, false) if declaration.count == 0 and name in {"view", "darray", "set", "array"}
+                    if declaration.count == 1:
+                        if declaration.kind == "alias":
+                            return (false, false) if declaration.has_formals
+                            return proof_replay_thread_type_contains_borrowed_storage(declaration.target, report, owner_path, work, depth + 1)
+                        if declaration.kind == "nominal":
+                            return proof_replay_thread_named_type_has_borrowed_storage(report.source.source_declarations, name, report, owner_path, work, depth + 1)
+                        return (false, false)
+                    if name in {"cstr", "i8", "i16", "i32", "int", "isize", "i64", "u8", "u16", "u32", "usize", "uintptr", "u64", "bool", "char", "f32", "f64", "void", "Local", "Frozen", "Joinable", "Pending", "Held", "LLVMContextRef", "LLVMModuleRef", "LLVMTypeRef", "LLVMValueRef", "LLVMBuilderRef", "LLVMBasicBlockRef", "LLVMTargetRef", "LLVMTargetMachineRef", "LLVMTargetDataRef", "LLVMMetadataRef", "LLVMAttributeRef", "LLVMDIBuilderRef", "LLVMDbgRecordRef", "LLVMPassBuilderOptionsRef", "Arena", "dstr"}:
+                        return (true, false)
+                    return (false, false)
+                _:
+                    return (false, false)
+
+        # Independently derive marker flags for explicit syntax and unambiguous root aliases.
+        # Generic-formal detection uses the parser's alias-owner annotation; scoped, ambiguous,
+        # and unsupported paths remain incomplete.
+        def proof_replay_thread_direct_type_markers(expression: Ast::Expr, report: ProofReport&, owner_path: darray[sview]&, work: mutable usize&, depth: usize) -> (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool):
+            return (false, false, false, false) if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT or work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            work <- work + 1
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_replay_thread_direct_type_markers(inner, report, owner_path, work, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    return (false, false, false, false) if operator not in {TokenKind.Ampersand, TokenKind.Lmut, TokenKind.Mutable, TokenKind.Static, TokenKind.Heap, TokenKind.Stack, TokenKind.Tail}
+                    nested: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_replay_thread_direct_type_markers(operand, report, owner_path, work, depth + 1)
+                    return (false, false, false, false) if not nested.complete
+                    reference: bool = nested.reference or operator == TokenKind.Ampersand or operator == TokenKind.Lmut
+                    is_mutable: bool = nested.is_mutable or operator == TokenKind.Mutable
+                    mutable_reference: bool = nested.mutable_reference or operator == TokenKind.Lmut or (operator == TokenKind.Ampersand and is_mutable) or (operator == TokenKind.Mutable and nested.reference)
+                    return (reference, mutable_reference, is_mutable, true)
+                Ast::Expr.Ident(name, _):
+                    return (false, false, false, false) if not proof_replay_thread_name_set_work_add(name, 40, 327, work)
+                    builtin: bool = name in {"cstr", "sview", "i8", "i16", "i32", "int", "isize", "i64", "u8", "u16", "u32", "usize", "uintptr", "u64", "bool", "char", "f32", "f64", "void", "Local", "Frozen", "Joinable", "Pending", "Held", "LLVMContextRef", "LLVMModuleRef", "LLVMTypeRef", "LLVMValueRef", "LLVMBuilderRef", "LLVMBasicBlockRef", "LLVMTargetRef", "LLVMTargetMachineRef", "LLVMTargetDataRef", "LLVMMetadataRef", "LLVMAttributeRef", "LLVMDIBuilderRef", "LLVMDbgRecordRef", "LLVMPassBuilderOptionsRef", "Arena", "dstr"}
+                    return (false, false, false, false) if not proof_replay_thread_import_shadow_check(report, name, owner_path, work)
+                    return (false, false, false, true) if builtin
+                    declaration: (complete: bool, count: usize, kind: sview, target: Ast::Expr, nested_match: bool, has_formals: bool) = proof_replay_thread_marker_type_declaration(report, name, work, 0)
+                    return (false, false, false, false) if not declaration.complete or declaration.count != 1 or declaration.nested_match
+                    return (false, false, false, true) if declaration.kind == "nominal"
+                    return (false, false, false, false) if declaration.kind != "alias"
+                    return (false, false, false, false) if declaration.has_formals
+                    return proof_replay_thread_direct_type_markers(declaration.target, report, owner_path, work, depth + 1)
+                Ast::Expr.Index(head, _, _) | Ast::Expr.IndexN(head, _, _):
+                    match head:
+                        Ast::Expr.Ident(name, _):
+                            return (false, false, false, false) if not proof_replay_thread_import_shadow_check(report, name, owner_path, work)
+                            return (false, false, false, false) if not proof_replay_thread_name_set_work_add(name, 3, 15, work)
+                            return (false, false, false, true) if name in {"array", "darray", "view"}
+                            return (false, false, false, false)
+                        _:
+                            return (false, false, false, false)
+                _:
+                    return (false, false, false, false)
+
+        def proof_replay_thread_markers_cover_direct_syntax(markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool), direct: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool)) -> bool:
+            return markers.complete and direct.complete and (not direct.reference or markers.reference) and (not direct.mutable_reference or markers.mutable_reference) and (not direct.is_mutable or markers.is_mutable)
