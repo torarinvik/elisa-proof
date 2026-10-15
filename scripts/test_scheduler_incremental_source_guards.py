@@ -64,7 +64,7 @@ assert function_body_text.count(
 ) >= 2, "new findings must be indexed after each scheduled component"
 schedule_path = proof / "verification_schedule.elisa"
 function_node = function_body(schedule_path, "proof_check_scheduled_function")
-assert "proof_function_finding_row_contract_type(function_findings, target, &schedule_work)" in function_node
+assert "proof_function_finding_row_contract_type(function_findings, target, schedule_work)" in function_node
 
 lemma_schedule = schedule_path
 lemma_body = function_body(lemma_schedule, "proof_compute_verified_lemmas")

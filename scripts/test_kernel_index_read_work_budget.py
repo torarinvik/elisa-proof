@@ -192,7 +192,7 @@ assert "index.next_rows.resize(bounds.count)" in builder
 assert "slots: usize = nodes.count * 3 + capacity * 2 + bounds.count" in builder
 assert "index.next_rows[prior_row] <- row" in builder
 assert "index.bucket_tails[slot] <- row" in builder
-assert "row: usize = index.heads[" in indexed_find
+assert "row: mutable usize = index.heads[" in indexed_find
 assert "row <- index.next_rows[row]" in indexed_find
 assert "index.hashes[bound.term_root] == query.hash" in indexed_find
 assert "proof_kernel_replay_goal_search_expr_equal(nodes, children, bound.term_root, root, work)" in indexed_find

@@ -105,7 +105,8 @@ assert "not scalar_parameter.complete or not scalar_parameter.scalar" in omissio
 assert "markers.reference or markers.mutable_reference or markers.is_mutable" in omission_classifier
 assert "syntax.has_reference" in omission_classifier
 assert "sview_parameter.sview_type" in omission_classifier
-assert "return_type is not declared_return_type" in omission_classifier
+assert "if return_type is declared_return_type:" in omission_classifier
+assert re.search(r"else:\s+return false", omission_classifier)
 assert "not scalar_return.complete or not scalar_return.scalar" in omission_classifier
 assert "return_markers.reference or return_markers.mutable_reference or return_markers.is_mutable" in omission_classifier
 assert "return_syntax.has_reference" in omission_classifier

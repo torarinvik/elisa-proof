@@ -22,7 +22,7 @@ def body(source: str, name: str) -> str:
 
 
 source_equal = body(control, "proof_replay_control_expr_source_equal_with_work")
-recursive_positions = "proof_replay_trace_expression_positions_equal_with_work(left, right, 0, &work, work_limit)"
+recursive_positions = "proof_replay_trace_expression_positions_equal_with_work(left, right, 0, work, work_limit)"
 assert source_equal.index("proof_replay_summary_expr_equal_with_limit") < source_equal.index(recursive_positions)
 assert source_equal.index(recursive_positions) < source_equal.index("match left:")
 # Root identifier substitution is the one supported span exception, because the checker
@@ -33,18 +33,18 @@ assert "proof_replay_control_expr_position_equal(" not in control
 assert "proof_replay_control_expr_source_equal(" not in control
 loop_sources = (ROOT / "src/proof/replay/boundary_loop_fact_sources.elisa").read_text(encoding="utf-8")
 branch_sources = (ROOT / "src/proof/replay/boundary_branch_fact_sources.elisa").read_text(encoding="utf-8")
-assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, lower, 0, &source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in loop_sources
-assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, upper, 0, &source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in loop_sources
-assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, expected_exit, 0, &source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in loop_sources
-assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, negated, 0, &work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in branch_sources
-assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, rejected, 0, &work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in branch_sources
+assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, lower, 0, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in loop_sources
+assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, upper, 0, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in loop_sources
+assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, expected_exit, 0, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in loop_sources
+assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, negated, 0, work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in branch_sources
+assert "proof_replay_trace_expression_positions_equal_with_work(trace.expression, rejected, 0, work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)" in branch_sources
 assert "proof_replay_control_expr_position_equal(" not in loop_sources
 assert "proof_replay_control_expr_position_equal(" not in branch_sources
 
 positions = body(position_source, "proof_replay_trace_expression_positions_equal_with_work")
 assert "depth >= PROOF_REPLAY_AST_DEPTH_LIMIT" in positions
-assert "proof_replay_position_work_charge(&work, 6, work_limit)" in positions
-assert positions.index("proof_replay_position_work_charge(&work, 6, work_limit)") < positions.index("Ast::expr_pos(left)")
+assert "proof_replay_position_work_charge(work, 6, work_limit)" in positions
+assert positions.index("proof_replay_position_work_charge(work, 6, work_limit)") < positions.index("Ast::expr_pos(left)")
 for constructor in (
     "Ast::Expr.Unary", "Ast::Expr.Binary", "Ast::Expr.If", "Ast::Expr.Call",
     "Ast::Expr.Field", "Ast::Expr.Scope", "Ast::Expr.Index", "Ast::Expr.Construct",

@@ -193,9 +193,9 @@ assert "proof_output_text_equal_with_work(index.names[current], name, work)" in 
 assert "PROOF_DECLARATION_GAP_INDEX_MAX_CLUSTER" in gap_index_record and "PROOF_DECLARATION_GAP_INDEX_MAX_CLUSTER" in gap_index_find
 assert "work_used <- limit + 1" in (ROOT / "src/app/output_replay_status.elisa").read_text(encoding="utf-8").split("def proof_output_reserve_status_snapshot_work(", 1)[1].split("def proof_output_checked_view_goal_statuses_with_work", 1)[0]
 assert "work <- limit + 1" in gap_index_build
-assert "work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1" in gap_index_find
+assert "work <- ElisaProof::proof_replay_summary_source_work_limit() + 1" in gap_index_find
 assert "if not proof_declaration_gap_index_record(index," in gap_index_build and "work <- limit + 1" in gap_index_build
-assert '"output-work-limit" if replay_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT else "declaration-gap-index-incomplete"' in declaration_gap_body
+assert '"output-work-limit" if replay_work > ElisaProof::proof_replay_summary_source_work_limit() else "declaration-gap-index-incomplete"' in declaration_gap_body
 assert "proof_goal_fingerprint_with_limit(report, report.results.goal_attempts[goal_id], &replay_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)" in suggestion_body
 assert "suggestions_complete <- false if replay_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT" in suggestion_body
 assert "proof_goal_fingerprint(report, report.results.goal_attempts[goal_id])" not in suggestion_body
