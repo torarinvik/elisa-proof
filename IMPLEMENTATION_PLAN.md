@@ -32579,3 +32579,13 @@ source-admission, and difference-closure guards to match current syntax while re
 metering and recursive-span requirements. The checked-view authority guard also now initializes
 its public-signature inventory before checking returned types, fixing a `NameError`. Python AST
 parsing and `git diff --check` pass; guards and compiler were not run.
+
+### 23.27.2115 Hide mutable enum annotations behind the checked-view boundary (2026-10-15)
+
+An authority review found that the public enum-annotation projection returned a borrowed array of
+`Ast::EnumAnnotation`, whose `end_line` field is mutable. A caller could mutate parser-owned source
+metadata after checked-view issuance. Made the getter private while preserving its internal app
+consumer, and extended the authority guard to require private visibility. The checked-view,
+control-span, kernel-index, resource-call, scheduler, linear-search, and quantified-call static
+guards pass. Source-admission guard updates are underway; compiler/runtime qualification remains
+blocked by the stale compiler provenance described in the checkpoint review.

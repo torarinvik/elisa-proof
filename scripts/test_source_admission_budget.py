@@ -196,8 +196,8 @@ assert "work <- limit + 1" in gap_index_build
 assert "work <- ElisaProof::proof_replay_summary_source_work_limit() + 1" in gap_index_find
 assert "if not proof_declaration_gap_index_record(index," in gap_index_build and "work <- limit + 1" in gap_index_build
 assert '"output-work-limit" if replay_work > ElisaProof::proof_replay_summary_source_work_limit() else "declaration-gap-index-incomplete"' in declaration_gap_body
-assert "proof_goal_fingerprint_with_limit(report, report.results.goal_attempts[goal_id], &replay_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)" in suggestion_body
-assert "suggestions_complete <- false if replay_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT" in suggestion_body
+assert "proof_goal_fingerprint_with_limit(report, report.results.goal_attempts[goal_id], replay_work, ElisaProof::proof_replay_summary_source_work_limit())" in suggestion_body
+assert "suggestions_complete <- false if replay_work > ElisaProof::proof_replay_summary_source_work_limit()" in suggestion_body
 assert "proof_goal_fingerprint(report, report.results.goal_attempts[goal_id])" not in suggestion_body
 unsafe_source_shape = goal_admission.split("def proof_report_postcondition_has_unsafe_source_shape_depth(", 1)[1].split("# Find unqualified result variables", 1)[0]
 assert "Ast::Expr.Absent |" not in unsafe_source_shape
