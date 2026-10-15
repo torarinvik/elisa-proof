@@ -35,6 +35,19 @@ assert "not borrowed.complete or borrowed.borrowed" in resource_lend_storage_gua
 resource_call_argument_guard = function_body(resource_source_path, "proof_replay_resource_call_arguments_match_with_work")
 assert "proof_replay_resource_lend_storage_is_confined_with_work(report, parameters, parameter_markers_by_index" in resource_call_argument_guard
 
+resource_purity_path = ROOT / "src/proof/replay/resource_call_pure_source.elisa"
+resource_scalar_guard = function_body(resource_purity_path, "proof_replay_resource_call_scalar_type_with_work")
+assert "proof_replay_resource_scalar_type_with_work(expression, report, source_work, 0)" in resource_scalar_guard
+assert "not scalar.complete or not scalar.scalar" in resource_scalar_guard
+assert "proof_replay_control_match_guard_scalar_type(expression)" in resource_scalar_guard
+resource_purity_function = function_body(resource_purity_path, "proof_replay_resource_call_pure_function")
+assert "proof_structural_typed_operator_statements_have_overload(body, parameters, declaration_line, operator_source, 0, entry.owner, true)" in resource_purity_function
+assert "or overloaded_operator" in resource_purity_function
+resource_name_counts = function_body(ROOT / "src/proof/replay/resource_call_name_counts.elisa", "proof_replay_resource_call_name_counts_match")
+assert "proof_replay_resource_call_name_is_irrelevant_with_work(report, operator_source" in resource_name_counts
+resource_coverage = function_body(resource_source_path, "proof_replay_resource_call_coverage_for_owner_with_work")
+assert "proof_replay_resource_call_name_counts_match(source_calls, event_names, report, cache.scratch" in resource_coverage
+
 resource_lend_producer = function_body(ROOT / "src/proof/resources/call_region_lending.elisa", "proof_resource_call_lend_storage_is_confined")
 assert "return_borrowed_view_free" in resource_lend_producer
 assert "all_parameter_target_borrowed_view_free" in resource_lend_producer

@@ -3,5 +3,6 @@
 python3 "$ROOT_DIR/scripts/test_pattern_literal_source_guards.py"
 python3 "$ROOT_DIR/scripts/test_scheduler_incremental_source_guards.py"
 python3 "$ROOT_DIR/scripts/test_source_authority_static_guards.py"
+python3 "$ROOT_DIR/scripts/test_source_lemma_multiplicity_static.py"
 python3 "$ROOT_DIR/scripts/test_resource_call_storage_confinement_static.py"
 python3 "$ROOT_DIR/scripts/test_structural_replay_source_guards.py"

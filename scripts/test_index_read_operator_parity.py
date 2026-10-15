@@ -1,6 +1,7 @@
 """Keep overloaded indexed reads opaque until replay carries builtin type evidence."""
 
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def function_body(path: Path, name: str) -> str:
     lines = path.read_text(encoding="utf-8").splitlines()
     for index, line in enumerate(lines):
-        if line.lstrip().startswith(f"def {name}("):
+        if re.match(rf"def {re.escape(name)}(?:\[[^\]]+\])?\(", line.lstrip()):
             indent = len(line) - len(line.lstrip())
             body = []
             for following in lines[index + 1 :]:
@@ -43,10 +44,24 @@ assert "proof_kernel_replay_integral_sort(left_index_sort)" in typed_rule
 assert 'left_result_sort.family not in {"integer", "boolean", "character"}' in typed_rule
 assert "reachable: mutable darray[usize] = [left.right]" in typed_rule
 assert "edge_sort_states[fact_index]" in typed_rule
-assert 'candidate.operator != "=="' in typed_rule
+assert 'kind_is_binary and candidate.operator == "=="' in typed_rule
 assert "proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, candidate.left, candidate.right" in typed_rule
 assert "edge_primitive_states.push(1 if primitive else 2)" in typed_rule
 assert "continue if edge_primitive_states[fact_index] != 1" in typed_rule
+assert 'nodes[left.left].kind != "ident" or nodes[right.left].kind != "ident"' in typed_rule
+assert "proof_kernel_replay_disjunction_term_has_call_with_work(nodes, children, left.right" in typed_rule
+assert "proof_kernel_replay_disjunction_term_has_call_with_work(nodes, children, right.right" in typed_rule
+assert "proof_kernel_replay_disjunction_term_has_call_with_work(nodes, children, candidate.left" in typed_rule
+assert "proof_kernel_replay_disjunction_term_has_call_with_work(nodes, children, candidate.right" in typed_rule
+assert "proof_kernel_replay_disjunction_term_has_untrusted_operator_with_work(nodes, children, markers, left.right" in typed_rule
+assert "proof_kernel_replay_disjunction_term_has_untrusted_operator_with_work(nodes, children, markers, candidate.left" in typed_rule
+operator_scan = function_body(ROOT / "src/proof/kernel_replay/disjunction_call_guard.elisa", "proof_kernel_replay_disjunction_term_has_untrusted_operator_with_work")
+assert "proof_kernel_replay_untrusted_operator_applies_with_work" in operator_scan
+assert "PROOF_KERNEL_REPLAY_WITNESS_UNTRUSTED_ELEMENT_OPERATOR" in operator_scan
+assert "proof_kernel_replay_disjunction_term_has_untrusted_operator_with_work(nodes, children, markers, node.left" in operator_scan
+assert 'return (true, false) if node.kind in {"int", "typed-int", "bool", "float", "string", "char", "ident"}' in operator_scan
+assert "sview_len(candidate.kind)" in typed_rule
+assert "sview_len(candidate.operator)" in typed_rule
 producer_markers = (ROOT / "src/proof/check/operator_impl_queries.elisa").read_text(encoding="utf-8")
 scalar_gate = (ROOT / "src/proof/check/operator_witness_queries.elisa").read_text(encoding="utf-8")
 kernel_scalar_gate = (ROOT / "src/proof/kernel_replay/scalar_witness_work.elisa").read_text(encoding="utf-8")

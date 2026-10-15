@@ -61,6 +61,9 @@ assert "sview_escaped_newline_pattern_refused" in collision_tests
 assert '"line\\\\n"' in collision_tests
 for literal_text in ('"01"', '"0x1"', '"true"', '"null"'):
     assert literal_text in collision_tests
+boolean_collision_tests = (ROOT / "scripts/pattern_literal_boolean_cases.py").read_text(encoding="utf-8")
+for boolean_collision in ('bool_true_pattern_collision', 'bool_false_pattern_collision'):
+    assert boolean_collision in boolean_collision_tests
 char_guard = function_body(producer, "proof_pattern_unambiguous_char_literal")
 assert "length < 3" in char_guard
 assert "character >= 32 and character <= 126" in char_guard

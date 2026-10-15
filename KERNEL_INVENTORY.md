@@ -432,9 +432,18 @@ claim.
    authenticated receiver sort. The typed kernel API admits indexed-read equality when its
    supplied environment establishes a built-in indexable receiver and the kernel checks the
    index and result sorts. The rule also refuses call-bearing indices and equality edges because
-   the environment has no effect or purity metadata. The API validates environment structure,
-   not source provenance, so source evidence still requires a source adapter to authenticate the
-   environment and any call-purity assumptions. Direct callers remain responsible for provenance.
+   the environment has no effect or purity metadata. It walks each index and edge subterm against
+   parser-origin untrusted operator markers as well, since overloaded arithmetic is represented by
+   ordinary binary nodes. Both walks validate node shapes, charge the shared goal-work budget, and
+   fail closed on malformed or unsupported terms. The equality-edge prepass also charges the
+   dynamic `kind` and binary `operator` lengths before dispatch. The API validates environment
+   structure, not source provenance. The indexed-read rule itself rejects calls and source-marked
+   overloaded operators in positions it uses; however, `proof_kernel_replay_goal_report_typed`
+   can fall back to general goal replay after that rule declines. Source adapters must authenticate
+   the environment and apply their call- and operator-purity policies to any result that can rely
+   on that fallback. The proof source adapter uses the dedicated indexed-read entry point, which
+   returns only the indexed-read rule's result and does not take the general fallback. Direct
+   callers remain responsible for provenance.
 
 3. **General arena admission shares the goal-search work ceiling.** The checked goal replay API
    debits full arena validation (including per-node workspace initialization) to the same
@@ -451,7 +460,9 @@ claim.
    guard already does per-receiver lookup when it derives one unique receiver type; it falls back
    to the global mask for unknown types. Extending that source-authenticated receiver lookup to
    other type-erased consumers can recover proof coverage; the scalar spelling classifier alone
-   is not sufficient evidence.
+   is not sufficient evidence. Resource-call omission purity now relies on its complete,
+   source-bound per-receiver operator audit instead of an earlier global-mask rejection, so an
+   override on an unrelated receiver no longer excludes a scalar-pure body.
 
 5. **Ordinary arena admission is root-reachable.** Goal and fact replay validates nodes reachable
    from those supplied roots. The `*_checked_arena` entry points validate every serialized node,

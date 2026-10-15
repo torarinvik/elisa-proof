@@ -63,7 +63,11 @@ extend ElisaProof:
             for parameter_index in 0..<parameters.count |parameter_index, parameter_markers, has_lent_reference, source_work|:
                 return false if not proof_replay_owner_work_charge(1, source_work)
                 has_lent_reference <- true if parameter_markers[parameter_index].reference
-            return true if not has_lent_reference
+            # A lend event must describe at least one parser-declared reference formal.
+            # Otherwise a forged zero-argument event can be attached to any source call;
+            # replay would treat it as an effect-free no-op and bypass omitted-call purity
+            # classification.
+            return false if not has_lent_reference
             # Every lent reference is checked against the same set of writable targets. The
             # former nested scan repeated these parser-owned type checks once per reference
             # formal. Its self-target exception was unreachable: a shared-reference target
@@ -534,6 +538,9 @@ extend ElisaProof:
         # position and a capability-bearing callee.
         def proof_replay_resource_call_coverage_for_owner_with_work(report: mutable ProofReport&, root: usize, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
             return false if root >= report.analysis_1.kernel.nodes.count or owner == "" or owner_line == 0 or owner_offset > 4294967295
+            if not cache.initialized:
+                return false if not proof_replay_structural_validation_cache_build(report, source_work, &cache)
+            return false if not cache.complete
             return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
             located: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
             return false if not located.complete or located.matches != 1 or located.row >= cache.deterministic_calls.declaration_index.entries.count
@@ -552,10 +559,19 @@ extend ElisaProof:
             # Until resource traces carry those selected implementations, reject owners whose
             # body or defaults dispatch through an overloaded operator. Debit the independent
             # typed-operator scan to the same replay source-work budget.
-            operator_work_before: usize = report.source_types.source_effect_index.work.implicit_effect_work
-            overloaded_body: bool = proof_structural_typed_operator_statements_have_overload(body, parameters, owner_line, report, 0, owner_module, true)
-            overloaded_defaults: bool = proof_structural_typed_operator_defaults_have_overload(parameters, owner_line, report, owner_module, true)
-            operator_work_after: usize = report.source_types.source_effect_index.work.implicit_effect_work
+            # Use the replay-built source snapshot for overload resolution. The input report's
+            # operator index and protocol mask are producer claims and may be invalidated or
+            # cleared independently of the parser-owned declarations.
+            return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if cache.scratch.source_types.source_effect_index.work.implicit_effect_work > source_work:
+                prior_operator_work: usize = cache.scratch.source_types.source_effect_index.work.implicit_effect_work - source_work
+                return false if not proof_replay_owner_work_charge(prior_operator_work, source_work)
+            else:
+                cache.scratch.source_types.source_effect_index.work.implicit_effect_work <- source_work
+            operator_work_before: usize = cache.scratch.source_types.source_effect_index.work.implicit_effect_work
+            overloaded_body: bool = proof_structural_typed_operator_statements_have_overload(body, parameters, owner_line, cache.scratch, 0, owner_module, true)
+            overloaded_defaults: bool = proof_structural_typed_operator_defaults_have_overload(parameters, owner_line, cache.scratch, owner_module, true)
+            operator_work_after: usize = cache.scratch.source_types.source_effect_index.work.implicit_effect_work
             return false if operator_work_after < operator_work_before or operator_work_after > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             operator_work_used: usize = operator_work_after - operator_work_before
             return false if not proof_replay_owner_work_charge(operator_work_used, source_work) or overloaded_body or overloaded_defaults
@@ -567,7 +583,7 @@ extend ElisaProof:
             return false if event_names.count != event_offsets.count
             return false if not proof_replay_resource_call_event_offsets_unique_with_work(event_offsets, source_work)
             return false if source_calls.count > report.analysis_1.kernel.nodes.count or event_names.count > source_calls.count
-            return false if not proof_replay_resource_call_name_counts_match(source_calls, event_names, report, cache.deterministic_calls.declaration_index, parameters, body, source_work)
+            return false if not proof_replay_resource_call_name_counts_match(source_calls, event_names, report, cache.scratch, cache.deterministic_calls.declaration_index, parameters, body, source_work)
             resource_root: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
             ordinary: (complete: bool, count: usize) = proof_replay_resource_event_kind_count_in_root_with_work(report, resource_root, "resource-call", source_work)
             return false if not ordinary.complete or ordinary.count > report.analysis_1.kernel.nodes.count

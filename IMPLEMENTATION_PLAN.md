@@ -4,7 +4,7 @@
 
 This is the active high-return sequence. Use the newest Elisa compiler that can produce a source-matched Stage1. Preserve expression-based Elisa, explicit local effect grants, contracts, and region/ownership checks. Keep performance timing skipped until the proof product passes correctness gates.
 
-1. **Recover a verifiable newest-compiler lane.** Proof `main` is `e20c1f4e8` and matches `origin/main`; the working tree contains a large uncommitted proof diff. `ELISA_COMPILER_REV` pins `c5a6616a740434c2e2002582970b004b5ca0ecfa`; the shared compiler checkout has uncommitted parser/backend/authority work. `ELISA_STAGE0_REV` pins Core `ba2691aa610b59d935b12d5e0d9005a0383cc9bf`. The installed Stage1 is stale (provenance source revision `f7b6c4a…`), and a direct proof run produced no object. The latest pinned-Core proof build, `/private/tmp/proof-stage0-parallel-retry33.log`, reports zero missing Global grants and no parser errors, but exits without a product on 150 region-parameter inference failures and 567 dangling-reference diagnostics. The isolated c5a seed retry with a 10 GiB cap is terminal and failed with no Stage1 product: `/private/tmp/elisa-proof-c5a-seed-live-fixes-10g.log` reports 80 region-inference failures, 443 dangling-reference diagnostics, and additional type/effect/hidden-mutation errors. The compiler owner's separate dirty-worktree p165 attempt also exited without an object and reported 490 lifetime diagnostics. Treat every candidate as unqualified until a source-matched build succeeds and its manifest is verified. Do not modify or clean up compiler-owner worktrees.
+1. **Recover a verifiable newest-compiler lane.** Proof `main` is `e20c1f4e8` and matches `origin/main`; the working tree contains a large uncommitted proof diff. The latest remote heads are compiler `8b81a19e10bee7dee10feaa390ebf081d6641abc` and clean Core `5241b2aed51641a217ca44ac4ee116ee66ac96e6`. A guarded Stage1 seed using the current compiler checkout's five dirty source files exited 1 without an artifact. It reproduces failure to infer `__rg_source_identity` at `emit_edir.elisa:1374` and dangling references at `codegen_stmt_assign_place.elisa:260/582/587`. The compiler owner is restoring the explicit borrow and investigating true region flow. No retry is running or authorized. The proof's `ELISA_COMPILER_REV` still pins `c5a6616a740434c2e2002582970b004b5ca0ecfa`, and `ELISA_STAGE0_REV` pins older Core `ba2691aa610b59d935b12d5e0d9005a0383cc9bf`; the installed Stage1 is stale (provenance source revision `f7b6c4a…`). Historical pinned-Core and c5a seed builds also failed without producing a Stage1, with region-inference, dangling-reference, and additional type/effect/hidden-mutation errors; the compiler owner's separate p165 attempt reported 490 lifetime diagnostics. Treat every candidate as unqualified until a source-matched build succeeds and its manifest is verified. Do not modify or clean up compiler-owner worktrees.
 
 2. **Complete Global grant migration and qualify it.** The Go/Core implementation already enforces `Global.Read`/`Global.Write` on mutable fields under immutable aggregates and reference projections; commit `1547f32e` has focused regression coverage. The Elisa-written Stage1 implementation still needs parity: `ga_access_slot` currently records only Read when a write path reaches a global binding whose aggregate is immutable, even when the projected field is mutable. The compiler owner is tracking this in the active Stage1 worktree. Proof source uses grouped exported effect rows (`Global{Read,Write}`) and narrow local grants at each diagnosed call, plus two narrow `Global.Write` blocks for direct mutable-global assignments. The latest pinned-Core proof build reports zero missing Global grants and zero ungranted writes. All 13 focused source guards pass; the binary-dependent collision test still refuses the stale product. After lifetime-safe compilation, run the source-bound grant matrix and negative cases for reads, writes, aliases, fields, and indexed mutation. Never replace call-site grants with broad module or function grants.
 
@@ -14,7 +14,7 @@ This is the active high-return sequence. Use the newest Elisa compiler that can 
 
 5. **Measure only after correctness.** Keep timing skipped until the source-matched proof product passes the full focused correctness set. Then use paired runs on fixed workloads and report median/p95, CPU, and peak RSS; operation counts alone are not a speed claim.
 
-6. **Keep main reviewable.** Proof and Core `main` currently match their remotes, and the proof repository has one worktree. Leave compiler-agent worktrees intact while their ownership or active use is uncertain. Commit proof source only after the matching compiler build and relevant checks pass; do not mark the broad dirty snapshot qualified based on static guards alone.
+6. **Keep main reviewable.** Proof `main` matches `origin/main`; the latest reported Core `origin/main` is clean at `5241b2aed51641a217ca44ac4ee116ee66ac96e6`, while the proof Stage0 pin remains older. Leave compiler-agent worktrees intact while their ownership or active use is uncertain. Commit proof source only after the matching compiler build and relevant checks pass; do not mark the broad dirty snapshot qualified based on static guards alone.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -28571,3 +28571,127 @@ lemma identity index uses name, line, and offset together. Admission now also re
 summary's `source_offset` to equal its marker's offset. The source-authority static guard checks
 this comparison; the guard, source-length gate, and `git diff --check` pass. Compiler/runtime
 qualification remains open.
+
+### 23.27.1724 Meter typed indexed-read edge dispatch labels (2026-10-15)
+
+The typed indexed-read equality prepass classified each fact by its dynamic kernel `kind` and
+`operator` strings after charging only one unit per fact. It now charges the `kind` before
+dispatch and the `operator` for binary nodes, so long serialized dispatch labels cannot evade the
+rule's work ceiling. Unused payload names do not consume this dispatch budget. `git diff --check`
+and the source-length gate pass; compiler/runtime qualification remains open.
+
+### 23.27.1725 Cover boolean pattern literals in collision regressions (2026-10-15)
+
+The pattern-collision suite covered numeric text that resembles booleans, but did not exercise
+boolean scrutinees directly. Added true-arm and false-arm contract violations to the end-to-end
+collision matrix and pinned both cases in the source guard. This ensures that any future replay
+change admitting boolean literal facts is checked against actual source branching and proof
+admission. Kept the cases in a separate fixture module to preserve the 600-line source limit.
+Python syntax compilation, the pattern-literal and source-authority static guards, the source-
+length gate, and `git diff --check` pass; source-matched runtime qualification remains open.
+
+### 23.27.1728 Use receiver-specific operator checks for omitted pure calls (2026-10-15)
+
+The resource-call omission purity walk rejected every scalar operator if the source-wide primitive
+mask found an overload on any receiver type. The same function already receives a source-bound,
+per-receiver operator audit over its complete return body before acceptance. Removed the redundant
+global-mask rejection, preserving rejection of actual overloaded dispatch while allowing an
+unrelated type's overload to stop suppressing scalar-pure call omission. `git diff --check` and
+the source-length gate pass; compiler/runtime qualification remains open.
+
+### 23.27.1727 Keep proof-specific ElisaScript ports inside Elisa-Proof (2026-10-15)
+
+Moved the active report-layout script candidate and its qualification notes from the general-purpose
+ElisaScript repository into `scripts/elisascript/`, alongside the Python reference. The ElisaScript
+repository now contains no Elisa-Proof-specific port directory; its pre-existing unrelated source
+edit remains untouched. Updated the indexed-read static guard to recognize generic function
+signatures, then added checks for receiver shape, call-free compared indices and equality edges,
+and metered dispatch labels. Indexed-read parity/work guards, pattern/source-authority guards,
+Python syntax compilation, source-length, and whitespace checks pass. The current native ElisaScript
+runner exits 138 on the relocated candidate; runtime parity remains open.
+
+The report-layout ElisaScript candidate also contained an unbound `contains` call, despite the
+shared ElisaScript implementation providing substring search as `sview.index`. Replaced that call
+with the built-in view search and recorded the API in the port table. Static whitespace and source-
+length checks pass; runner qualification remains pending.
+
+### 23.27.1729 Require a reference formal for resource-call-lend events (2026-10-15)
+
+Replay rejects `resource-call-lend` events when the resolved callee has no reference formal,
+because a zero-reference event could mask an omitted source call without carrying a lent capability.
+The producer now applies the same rule before creating a lend event, so it records no certificate
+that replay must later refuse. `git diff --check` and the source-length gate pass; compiler/runtime
+qualification remains open.
+
+### 23.27.1737 Resolve omitted-call operators from the replay source snapshot (2026-10-15)
+
+The resource-call omission guard used the submitted report's operator index and protocol mask.
+An invalid index could fall back to a producer-supplied mask and hide a source-declared overload.
+Replay now performs the typed body/default operator scan against the source-derived structural
+cache, initializing and requiring that cache before the scan, and debits the cache's implicit-work
+delta to the shared resource replay budget. Static checks pass; compiler/runtime qualification
+remains open.
+
+### 23.27.1730 Reject source-marked overloaded operators in typed index congruence (2026-10-15)
+
+The typed indexed-read congruence rule rejected calls in goal indices and equality edges, but
+overloaded arithmetic is encoded as ordinary binary arena nodes. Since the type environment does
+not establish operator purity, identical syntax could still represent separate stateful operator
+evaluations. Added a bounded walk over every index subterm and equality-edge operand that checks
+parser-origin untrusted-operator markers, including element and scalar-reference protocols. Calls
+remain rejected by the existing call walk; unsupported node kinds fail closed. The indexed-read
+source guard, source-authority guard, source-length gate, and `git diff --check` pass. Compiler and
+runtime qualification remain open.
+
+### 23.27.1734 Bound the active ElisaScript report-layout port's input (2026-10-15)
+
+The active ElisaScript counterpart used `Path.read_text()`, which is not the shared file-reading
+API. It now calls the general `EsBoundedText::read_utf8` helper with a 16 KB cap for its 4.5 KB
+source target. This preserves the Python reference's checks while bounding file input. The current
+retained v0.1 runners do not resolve the included `EsBoundedText` module, so no parity claim is
+made; the Python implementation remains authoritative. The Python reference, source-length gate,
+and whitespace checks pass.
+
+### 23.27.1731 Source-authenticate scalar types in resource-call purity (2026-10-15)
+
+The resource-call purity checker accepted primitive-looking type identifiers by spelling alone,
+so a source alias or nominal declaration shadowing `i64` could enter its scalar-only subset.
+Purity admission now calls the independent replay scalar classifier, which checks parser-owned
+declarations and rejects unresolved imports, then applies the narrower scalar allowlist required
+by this rule. The resource-call static guard also pins the typed operator-overload scan that
+replaced the overly broad global mask. The focused resource-call guard, `git diff --check`, and
+source-length gate pass; compiler/runtime qualification remains open.
+
+### 23.27.1732 Reuse typed indexed-read edge classification (2026-10-15)
+
+The typed indexed-read rule now reuses its prepass classification during each equality-graph
+reachability round. Each premise still consumes one unit per round, while serialized `kind` and
+`operator` text is charged once during prepass instead of redispatched and recharged on every
+round. The rule checks both cached state-vector lengths before indexing. `git diff --check` passes;
+compiler/runtime qualification remains open.
+
+### 23.27.1733 Validate flattened parameter ranges before resource lending (2026-10-15)
+
+The resource-call producer computed flattened parameter slots as `parameter_start + offset` and
+checked each resulting slot. Although these tables are parser-produced, a malformed or internally
+inconsistent range could wrap before the per-slot check. The lending and storage-confinement
+paths now prove the full range fits using subtraction-based bounds before entering their loops,
+and require the parallel reference/type-marker arrays to have matching lengths. Static source-length
+and whitespace checks pass; compiler/runtime qualification remains open.
+
+### 23.27.1735 Use replay-built operator indexes in recursive purity checks (2026-10-15)
+
+The resource-call omission audit rebuilt operator indexes from parser-owned source for the current
+owner, but the purity checker recursively followed helper calls and checked those helpers against
+the submitted report's operator index. The replay-built structural source snapshot now flows through
+that recursion and supplies the operator index for every helper body. Static resource-call and
+source-authority guards, source-length, and `git diff --check` pass; compiler/runtime qualification
+remains open.
+
+### 23.27.1736 Pass the replay operator snapshot through scalar-call purity (2026-10-15)
+
+The resource-call purity API now takes a replay-built operator-analysis report so recursive helper
+checks cannot read overload metadata from the submitted report. The scalar-call purity entry point
+still used the old signature and skipped index preparation. It now ensures the replay analysis
+context first and passes that scratch report through the purity check. Static call-site search,
+source-length, and whitespace checks pass; compiler/runtime qualification remains open.

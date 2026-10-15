@@ -14,6 +14,7 @@ from pattern_literal_overloaded_eq_case import (
     STRING_EQ_OVERRIDE_PRELUDE,
 )
 from pattern_literal_local_collision_cases import LOCAL_PATTERN_COLLISIONS
+from pattern_literal_boolean_cases import BOOLEAN_PATTERN_COLLISIONS
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = proof_test_binary(ROOT)
@@ -229,6 +230,7 @@ def u64_max_literal_collision(value: u64) -> i64:
 ''',
 }
 PATTERN_COLLISIONS.update(LOCAL_PATTERN_COLLISIONS)
+PATTERN_COLLISIONS.update(BOOLEAN_PATTERN_COLLISIONS)
 PATTERN_COLLISIONS.update(FIXED_WIDTH_PATTERN_COLLISIONS)
 PATTERN_COLLISIONS.update(STRING_EQ_OVERRIDE_COLLISIONS)
 

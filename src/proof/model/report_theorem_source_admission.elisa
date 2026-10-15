@@ -76,6 +76,64 @@ extend ElisaProof:
                 return ProofDeclarationNameMultiplicityIndex{} if probes >= capacity or probes > PROOF_NAME_INDEX_MAX_CLUSTER
             return index
 
+        # Duplicate parser lemma markers intentionally produce no theorem summaries. Build
+        # the multiplicity table from parser-owned annotations so the inventory can skip
+        # ambiguous names without trusting the producer's declaration inventory for that
+        # exclusion.
+        def proof_report_source_lemma_name_multiplicity_index[@r](source: ProofSourceAnalysis[r]& @r, work: mutable usize&) -> ProofDeclarationNameMultiplicityIndex can[Memory.Allocate]:
+            declarations: mutable usize = 0
+            for annotation in source.file.enum_annotations |declarations, work|:
+                return ProofDeclarationNameMultiplicityIndex{} if not proof_report_source_work_charge(1, work) or not proof_report_source_work_charge(sview_len(annotation.owner), work)
+                declarations <- declarations + 1 if annotation.owner == "__lemma"
+            empty_index: mutable ProofDeclarationNameMultiplicityIndex = ProofDeclarationNameMultiplicityIndex{valid: true}
+            return empty_index if declarations == 0
+            if declarations > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return ProofDeclarationNameMultiplicityIndex{}
+            capacity: mutable usize = 1
+            target_capacity: usize = declarations * 2
+            while capacity < target_capacity |capacity, target_capacity, declarations, work|:
+                return ProofDeclarationNameMultiplicityIndex{} if not proof_report_source_work_charge(1, work)
+                if capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4:
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return ProofDeclarationNameMultiplicityIndex{}
+                capacity <- capacity * 2
+            return ProofDeclarationNameMultiplicityIndex{} if not proof_report_source_work_charge(capacity, work)
+            index: mutable ProofDeclarationNameMultiplicityIndex = ProofDeclarationNameMultiplicityIndex{valid: true}
+            index.slot_values.resize(capacity)
+            return ProofDeclarationNameMultiplicityIndex{} if not proof_report_source_work_charge(capacity, work)
+            index.hashes.resize(capacity)
+            for slot in 0..<capacity |slot, index, capacity, work|:
+                return ProofDeclarationNameMultiplicityIndex{} if not proof_report_source_work_charge(1, work)
+                index.slot_values[slot] <- capacity
+            for annotation in source.file.enum_annotations |annotation, index, capacity, work|:
+                return ProofDeclarationNameMultiplicityIndex{} if not proof_report_source_work_charge(1, work) or not proof_report_source_work_charge(sview_len(annotation.owner), work)
+                continue if annotation.owner != "__lemma"
+                name_hash: (complete: bool, hash: u32) = proof_report_declaration_name_hash(annotation.name, work)
+                return ProofDeclarationNameMultiplicityIndex{} if not name_hash.complete
+                hash: u32 = name_hash.hash
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, annotation, index, capacity, work|:
+                    return ProofDeclarationNameMultiplicityIndex{} if not proof_report_source_work_charge(1, work)
+                    current: usize = index.slot_values[slot]
+                    if current == capacity:
+                        name_index: usize = index.names.count
+                        index.names.push(annotation.name)
+                        index.hashes[slot] <- hash
+                        index.counts.push(1)
+                        index.slot_values[slot] <- name_index
+                        break
+                    if index.hashes[slot] == hash:
+                        return ProofDeclarationNameMultiplicityIndex{} if not proof_report_source_work_charge(sview_len(annotation.name), work)
+                        if index.names[current] == annotation.name:
+                            index.counts[current] <- index.counts[current] + 1
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return ProofDeclarationNameMultiplicityIndex{} if probes >= capacity or probes > PROOF_NAME_INDEX_MAX_CLUSTER
+            return index
+
         def proof_report_declaration_name_is_unique(index: ProofDeclarationNameMultiplicityIndex, name: sview, work: mutable usize&) -> bool:
             capacity: usize = index.slot_values.count
             return false if:
@@ -97,15 +155,19 @@ extend ElisaProof:
                 probes <- probes + 1
             return false
 
-        # Re-enumerate parser-origin lemma markers before trusting the producer's theorem table.
-        # The parser and declaration recorder retain source order, so matching each marker to the
-        # next summary by name and line gives a bounded bijection and catches omitted summaries.
-        def proof_report_source_lemma_inventory_matches_with_work[@r](source: ProofSourceAnalysis[r]& @r, report: ProofReport&, source_work: mutable usize&) -> bool:
+        # Re-enumerate unique parser-origin lemma markers before trusting the producer's theorem
+        # table. Ambiguous names are deliberately omitted by declaration recording; the unique
+        # markers and summaries retain source order, so their sequence gives a bounded bijection.
+        def proof_report_source_lemma_inventory_matches_with_work[@r](source: ProofSourceAnalysis[r]& @r, report: ProofReport&, lemma_names: ProofDeclarationNameMultiplicityIndex, source_work: mutable usize&) -> bool:
             return false if not source.issued
+            return false if not lemma_names.valid or (lemma_names.names.count > 0 and lemma_names.slot_values.count == 0)
             summary_index: mutable usize = 0
             for annotation in source.file.enum_annotations |source, report, source_work, summary_index|:
                 return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(annotation.owner), source_work)
                 continue if annotation.owner != "__lemma"
+                unique_name: bool = proof_report_declaration_name_is_unique(lemma_names, annotation.name, source_work)
+                return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                continue if not unique_name
                 return false if summary_index >= report.analysis_1.theorems.summaries.count
                 theorem: ProofTheoremSummary = report.analysis_1.theorems.summaries[summary_index]
                 return false if not proof_report_source_work_charge(sview_len(annotation.name), source_work) or not proof_report_source_work_charge(sview_len(theorem.name), source_work)
@@ -148,7 +210,9 @@ extend ElisaProof:
         def proof_report_theorem_source_status_snapshot[@r](source: ProofSourceAnalysis[r]& @r, report: ProofReport&, goal_source_statuses: darray[bool]&, goal_statuses_complete: bool, fact_source_statuses: darray[bool]&, fact_statuses_complete: bool, import_failed: bool, semantic_errors: u32, source_work: mutable usize&) -> (statuses: darray[(source_admissible: bool, declaration_identity_unambiguous: bool)], complete: bool, claims_admissible: bool) can[Memory.Allocate]:
             statuses: mutable darray[(source_admissible: bool, declaration_identity_unambiguous: bool)] = []
             return (statuses, false, false) if not goal_statuses_complete or goal_source_statuses.count != report.results.goal_attempts.count or not fact_statuses_complete or fact_source_statuses.count != report.results.goal_attempts.count
-            return (statuses, false, false) if not proof_report_source_lemma_inventory_matches_with_work(source, report, source_work)
+            lemma_names: ProofDeclarationNameMultiplicityIndex = proof_report_source_lemma_name_multiplicity_index(source, source_work)
+            return (statuses, false, false) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not lemma_names.valid
+            return (statuses, false, false) if not proof_report_source_lemma_inventory_matches_with_work(source, report, lemma_names, source_work)
             return (statuses, true, true) if report.analysis_1.theorems.summaries.count == 0
             index: ProofDeclarationNameMultiplicityIndex = proof_report_declaration_name_multiplicity_index(report, source_work)
             return (statuses, false, false) if:
