@@ -59,6 +59,15 @@ assert "proof_linear_safety_scalar_witness_with_work(argument, markers_result.wi
 assert "proof_value_binding_argument_with_work(argument, report, 0, budget, exhausted)" in deterministic_worker
 assert "proof_shared_fixed_parameter_with_work(report, caller_names, caller_parameters" in deterministic_worker
 assert "proof_scalar_term_witnessed(argument, facts, 0)" not in deterministic_worker
+linear_source = (ROOT / "src/proof/linear/producer_scalar_comparison.elisa").read_text(encoding="utf-8")
+linear_scalar_witness = linear_source.split("def proof_linear_search_scalar_term_witnessed(", 1)[1].split("\n        def ", 1)[0]
+integrated_source = (ROOT / "src/proof/linear/bounds_and_markers_integrated_helpers.elisa").read_text(encoding="utf-8")
+integrated_scalar_witness = integrated_source.split("def proof_linear_safety_scalar_witness_with_work(", 1)[1].split("\n        def ", 1)[0]
+assert "proof_linear_search_scalar_term_witnessed(expression, markers, 0, &budget, PROOF_LINEAR_SAFETY_WORK_LIMIT, true)" in integrated_scalar_witness
+assert "not witnessed.complete or exhausted" in integrated_scalar_witness
+assert "proof_linear_safety_expr_cost_with_work(expression" not in integrated_scalar_witness
+assert "proof_linear_safety_charge_cross_with_work" not in integrated_scalar_witness
+assert "proof_linear_search_expr_equal_with_work(scalar_term, expression" in linear_scalar_witness
 owner_source = (ROOT / "src/proof/check/function_contracts_and_frames.elisa").read_text(encoding="utf-8")
 owner_wrapper = owner_source.split("def proof_add_deterministic_call_witness(", 1)[1].split("def ", 1)[0]
 assert "proof_frame_source_work_report_exhaustion" in owner_wrapper

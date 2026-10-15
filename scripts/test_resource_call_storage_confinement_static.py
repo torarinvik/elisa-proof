@@ -159,6 +159,11 @@ assert "proof_type_contains_borrowed_view_with_work" in function_collection
 assert "all_parameter_target_borrowed_view_free" in function_collection
 assert "return_borrowed_view_free" in function_collection
 
+kernel_lend = function_body(ROOT / "src/proof/kernel_replay/resource_call_lend.elisa", "proof_kernel_replay_resource_lend")
+assert "region_mapping_used.push(false)" in kernel_lend and "return false if not region_mapping_used[mapping_index]" in kernel_lend
+kernel_fixture = (ROOT / "examples/kernel_resource_bootstrap_runtime.elisa").read_text(encoding="utf-8")
+assert '"unused-region-mapping"' in kernel_fixture and "return 28 if proof_kernel_replay_resource_report" in kernel_fixture
+
 # Return-marker coverage reuses the already built per-owner position index; each
 # required source return still needs exactly one event at its exact parser offset.
 owner_validator = function_body(resource_source_path, "proof_replay_resource_safety_owner_valid_with_work")

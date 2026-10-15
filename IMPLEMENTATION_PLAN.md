@@ -29131,6 +29131,14 @@ set while retaining the file-wide custom `__cast__` veto and the existing shadow
 conversion methods. `git diff --check` passes; compiler and runtime qualification remain under the
 validation hold.
 
+### 23.27.1813 Keep active script fragment search linear-time (2026-10-15)
+
+The ElisaScript port's fragment matcher previously retried a full fragment comparison at every
+source byte, giving worst-case work proportional to source length times fragment length. It now
+builds a KMP prefix table and scans normalized source once, keeping matching linear under the
+reader's 16 MiB cap. The porting record now describes the implementation accurately. Static diff
+and source-length gates pass; compiled/runtime parity remains unqualified under the validation hold.
+
 ### 23.27.1778 Keep resource join transitions source-closed until alternatives carry identity (2026-10-15)
 
 The resource kernel validates `resource-join-move` against pending moved slots, but source
@@ -29369,13 +29377,33 @@ It now requires a complete no-shadow lookup and a clear custom-cast/import snaps
 the builtin type rule, matching replay's conservative classification. `git diff --check` passes;
 tests and compiler qualification remain open under the validation hold.
 
+### 23.27.1821 Meter scalar witness traversal directly in linear safety (2026-10-15)
+
+The linear-safety adapter previously estimated a subtree-square allowance with a fixed multiplier,
+then called the unmetered scalar-witness predicate. It now uses the existing work-aware witness
+mirror, which charges each marker scan, recursive term visit, and structural equality against the
+shared solver budget and fails closed on exhaustion. This removes the undocumented fixed-factor
+assumption from scalar witness checking; the retained marker scale is also checked against the
+global meter bound before traversal. Static diff and source-length gates pass; runtime
+qualification remains open under the compiler provenance hold.
+
+### 23.27.1819 Pin unused resource-call region mapping refusal (2026-10-15)
+
+Kernel resource-call lending now records whether each declared region mapping is consumed by a
+region-annotated formal and rejects unused mappings, which the source collector never emits. The
+existing resource-call static guard now pins both this check and its forged-event fixture. The
+active port parity guard was aligned with its current generic runtime umbrella include. The
+tactic-output authority guard also pins the full report-state rule: incomplete finding, source,
+admission, or replay snapshots yield `unknown` before any individual `disproved` result. All
+focused static guards, source-length, and `git diff --check` pass; no compiler or runtime command
+was run.
+
 ### 23.27.1805 Meter static-effect call lowering by the arrays it builds (2026-10-15)
 
-Exact resource-call lookup no longer reserves three times the capture/argument count before
-lowering a static-effect node. It charges the lowering loop and both value/label appends for each
-capture and argument; the subsequent recursive source walk continues to meter each expression.
-This removes avoidable budget rejection while preserving bounded work. Diff and source-length
-gates pass; compiler/runtime qualification remains open under the validation hold.
+Exact resource-call lookup charges the static-effect lowering traversal and both value/label array
+appends for each capture and argument. The subsequent recursive source walk meters each nested
+expression separately. This ties the budget to the arrays the lowerer builds while preserving the
+bounded traversal; compiler/runtime qualification remains open under the validation hold.
 
 ### 23.27.1806 Align recursive-call `as_sview` admission with replay (2026-10-15)
 
@@ -29400,5 +29428,100 @@ both functions and externs, so a same-named `sview` or `as_sview` extern could b
 intrinsic by the producer and refused by replay. Resource conversion and `as_sview` provenance
 classification now require a complete source-index miss and reject custom casts or unresolved
 imported dispatch, matching implicit-effect admission and replay. Numeric selectors retain their
-reserved builtin precedence. `git diff --check` passes; compiler and runtime qualification remain
-open under the validation hold.
+reserved builtin precedence. The resource expression walker also no longer performs a second
+function-table name lookup for these conversions or collection builtins after the complete source
+index has decided dispatch, reducing repeated per-call lookup work. `git diff --check` passes;
+compiler and runtime qualification remain open under the validation hold.
+
+### 23.27.1812 Apply region-line ambiguity checks to omitted-call candidates (2026-10-15)
+
+The resource-call omission purity walker also reads function-scoped local-region rows, before
+the owner/callee event validators run. It now uses the same declaration-index check and rejects an
+omission proof when a candidate shares its annotation line with another function. This closes the
+remaining resource-replay consumer of line-only region metadata. Static diff and source-length
+gates pass; compiler/runtime qualification remains open under the validation hold.
+
+### 23.27.1818 Require exact caller identity for replay generic shadowing (2026-10-15)
+
+Type-alias expansion in call replay now refuses generic-parameter shadow checks unless the replay
+target carries both a known caller declaration and its exact owner offset. A line-only fallback
+could conflate same-line functions and hide a caller generic during alias resolution. Generic
+lookup still verifies the active declaration line and recorded binder identity after this guard.
+Static diff and source-length gates pass; compiler/runtime qualification remains open under the
+validation hold.
+
+### 23.27.1809 Bind static-effect labels in frame-call replay (2026-10-15)
+
+The static-effect lowering meter charged copied named-argument labels but its AST pattern had
+discarded the `argument_names` field, leaving the label loop without a binding. The frame-call
+pattern now retains that field. Source review confirms replay-gap summaries keep
+`verification_state` unknown and the CLI returns nonzero when source or replay completeness fails.
+No tests or compiler runs were performed under the validation hold.
+
+### 23.27.1810 Refuse same-line sibling region metadata during resource replay (2026-10-15)
+
+Resource function declarations are selected by exact offset, while the compiler's local-region
+side table records only source lines. A region annotation on a line shared by multiple functions
+could therefore be attributed to the wrong owner. Resource replay now checks the report-scoped
+declaration index whenever local region metadata exists on a candidate line and refuses ambiguous
+owners and callees. The bounded check preserves unique-line cases. Static diff and source-length
+gates pass; compiler/runtime qualification remains open under the validation hold.
+
+### 23.27.1811 Check extern ambiguity for nested calls in omission proofs (2026-10-15)
+
+Resource-call omission admission now permits unrelated extern declarations, since they cannot be
+selected by the omitted source call. The recursive purity proof also needs to rule out an extern
+with the same name as each nested helper call; checking only the omitted call's name left an
+ambiguous source/extern resolution path. Candidate and nested-call checks now use the complete
+parser-owned declaration index's equal-name group, including extern and non-function entries.
+This avoids rescanning the whole declaration tree per call while remaining on the shared source
+work meter. `git diff --check` passes; compiler and runtime qualification remain open under the
+validation hold.
+
+### 23.27.1814 Separate the active port's compiler environment failure from parity (2026-10-15)
+
+The source-matched bounded lowering of `test_report_output_loop_layout.elisascript` passed with
+Core 5241, but bounded `-emit test` stopped because direct Core compilation does not provide
+interpreter-injected ElisaScript types and effects such as `Path` and `File`. The runtime source
+documents that the interpreter supplies nominal `Path` typing. This is a runner-environment
+limitation, not evidence of script parity; retain the Python reference. Refreshed static checks
+now pass after the resource-call omission check switched to the declaration index's equal-name
+group: source-authority, structural-replay, resource-event boundary, resource-call storage,
+active-port parity guard, source-length, and `git diff --check`. No compiler or runtime command was
+run in this refresh.
+
+### 23.27.1820 Pin report-level unknown precedence in the authority guard (2026-10-15)
+
+The report status now returns `unknown` whenever finding counts, source checks, or replay are
+incomplete, before exposing an individual disproved or unsupported finding as the report-level
+state. The existing tactic-output authority guard now pins all finding, source, and replay
+completeness gates before that ordering, so a later refactor cannot publish a conclusive top-level
+result from an incomplete snapshot. Static review confirms the guard matches the helper. No
+compiler or runtime validation was run.
+
+### 23.27.1815 Keep report verification unknown when source or replay is incomplete (2026-10-15)
+
+The report-level status helper previously prioritized disproved and unsupported findings before
+checking whether the report's finding, source, and replay snapshots were complete. That allowed a
+replay-gap report to publish a conclusive top-level `verification_state`, contrary to the documented
+report contract. Incompleteness now yields `unknown` before individual finding outcomes; the
+structured findings retain their specific statuses. `git diff --check` passes; tests and compiler
+qualification remain open under the validation hold.
+
+### 23.27.1816 Include source snapshot completeness in report verification state (2026-10-15)
+
+Follow-up review found that the prior report-state guard checked source-check completion but only
+downgraded incomplete source snapshots when the provisional state was `proved`. A report with a
+disproved finding could therefore still publish `disproved` when source admission was incomplete.
+The guard now requires source completeness, source admissibility, and complete source admissions
+before exposing any conclusive report-level state. Static diff and source-length checks pass;
+tests and compiler qualification remain open under the validation hold.
+
+### 23.27.1822 Separate node range checks from dereferences (2026-10-15)
+
+The hostile-index guard flagged a resource binding identity check that combined `root >= nodes.count`
+with `nodes[root]` in one boolean expression. The code now rejects an out-of-range root before
+reading the node, so the safety argument does not rely on short-circuit evaluation. Kernel guarded
+index reads, indexed-read work budgeting and operator parity, resource-call storage, tactic output
+authority, source authority, structural replay, resource-event boundary, active-port parity,
+source-length, and `git diff --check` guards pass. No compiler or runtime validation was run.

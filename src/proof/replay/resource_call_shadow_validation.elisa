@@ -112,31 +112,25 @@ extend ElisaProof:
                         return true
             false
 
-        # The deterministic declaration index contains callable declarations only. Make sure a
-        # same-spelled constant, type, module, or law cannot win source name resolution instead.
-        def proof_replay_resource_call_nonfunction_name_present(declarations: darray[Ast::Decl]&, wanted: sview, source_work: mutable usize&, depth: usize) -> bool:
-            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(declarations.count, source_work)
-            for declaration in declarations |wanted, source_work, depth|:
-                return true if not proof_replay_owner_work_charge(1, source_work)
-                match declaration:
-                    Ast::Decl.Func(name, _, _, _, _, _, _):
-                        return true if not proof_replay_owner_work_charge(sview_len(name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work)
-                    Ast::Decl.Module(name, nested, _):
-                        return true if not proof_replay_owner_work_charge(sview_len(name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work) or name == wanted
-                        return true if proof_replay_resource_call_nonfunction_name_present(nested, wanted, source_work, depth + 1)
-                    Ast::Decl.Scoped(nested, _):
-                        return true if proof_replay_resource_call_nonfunction_name_present(nested, wanted, source_work, depth + 1)
-                    Ast::Decl.Const(name, _, _, _, _) | Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _) | Ast::Decl.Alias(name, _, _) | Ast::Decl.Law(name, _, _):
-                        return true if not proof_replay_owner_work_charge(sview_len(name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work) or name == wanted
-                    Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Invalid:
-                        return true
-                    _:
-                        return true
-            false
+        # The parser-owned declaration index includes functions, externs and other names. Use
+        # its complete equal-name group instead of rescanning the whole source for every omission
+        # candidate and nested helper call.
+        def proof_replay_resource_call_group_has_nonfunction(index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, source_work: mutable usize&) -> bool:
+            group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(index, wanted, source_work)
+            return true if not group.complete
+            row: mutable usize = group.head
+            for _ in 0..<group.count |group, index, wanted, source_work, row|:
+                return true if row >= index.entries.count
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
+                return true if not proof_replay_owner_work_charge(1, source_work) or not proof_replay_owner_work_charge(sview_len(entry.name), source_work)
+                return true if entry.name != wanted or not entry.is_function
+                row <- entry.next_index
+                return true if row > index.entries.count
+            return row != index.entries.count
 
         def proof_replay_resource_call_name_is_irrelevant_with_work(report: ProofReport&, operator_source: mutable ProofReport&, index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, source_work: mutable usize&, omission_sources_clear: bool, owner_parameters: darray[Ast::ParamDecl]&, owner_body: darray[Ast::Stmt]&) -> bool:
             return false if not omission_sources_clear
-            return false if proof_replay_resource_call_nonfunction_name_present(report.source.source_declarations, wanted, source_work, 0)
+            return false if proof_replay_resource_call_group_has_nonfunction(index, wanted, source_work)
             for parameter in owner_parameters |parameter, wanted, source_work|:
                 return false if not proof_replay_owner_work_charge(sview_len(parameter.name), source_work) or not proof_replay_owner_work_charge(sview_len(wanted), source_work) or parameter.name == wanted
                 return false if parameter.has_default and proof_replay_resource_call_shadow_name_in_expr(parameter.default_value, wanted, source_work, 0)
@@ -237,3 +231,23 @@ extend ElisaProof:
                 visited <- visited + 1
             return (false, 0, 0) if candidate != cache.deterministic_calls.declaration_index.entries.count or matches > 1
             (true, matches, selected_row)
+
+        # Local region annotations carry only a line number. If multiple functions share
+        # that line, a region row cannot be tied to the exact declaration offset selected
+        # above; reject resource replay when that line has any region metadata.
+        def proof_replay_resource_region_line_owner_unambiguous(index: ProofReplayDeterministicDeclarationIndex&, annotations: darray[Ast::LocalRegionAnnotation]&, wanted_line: u32, source_work: mutable usize&) -> bool:
+            has_region_annotation: mutable bool = false
+            for annotation in annotations |annotation, wanted_line, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                has_region_annotation <- true if annotation.line == wanted_line
+            return true if not has_region_annotation
+            functions_on_line: mutable usize = 0
+            for entry in index.entries |entry, wanted_line, functions_on_line, source_work|:
+                return false if not proof_replay_owner_work_charge(1, source_work)
+                continue if not entry.is_function
+                match entry.declaration:
+                    Ast::Decl.Func(_, _, _, _, _, _, position):
+                        functions_on_line <- functions_on_line + 1 if position.line == wanted_line
+                    _:
+                        return false
+            functions_on_line <= 1

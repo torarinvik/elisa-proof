@@ -262,11 +262,11 @@ assert "Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Fie
 assert "A dynamic callee has no name-only purity proof." in resource_call_shadow_expr
 resource_call_nonfunction_guard = function_body(
     ROOT / "src/proof/replay/resource_call_shadow_validation.elisa",
-    "proof_replay_resource_call_nonfunction_name_present",
+    "proof_replay_resource_call_group_has_nonfunction",
 )
-assert "Ast::Decl.Const(name" in resource_call_nonfunction_guard
-assert "Ast::Decl.Func(name" in resource_call_nonfunction_guard
-assert "proof_replay_resource_call_nonfunction_name_present(report.source.source_declarations" in resource_call_omission
+assert "proof_replay_deterministic_declaration_group(index, wanted, source_work)" in resource_call_nonfunction_guard
+assert "not entry.is_function" in resource_call_nonfunction_guard and "return row != index.entries.count" in resource_call_nonfunction_guard
+assert "proof_replay_resource_call_group_has_nonfunction(index, wanted, source_work)" in resource_call_omission
 resource_call_counts = function_body(
     ROOT / "src/proof/replay/resource_call_name_counts.elisa",
     "proof_replay_resource_call_name_counts_match",
@@ -278,7 +278,7 @@ assert "return false if not omission_sources_clear" in resource_call_omission
 assert "proof_replay_resource_call_has_opaque_target_with_work" in resource_call_counts
 assert "proof_replay_summary_has_unresolved_import" in resource_call_counts
 assert "index.source_counts[row] > index.event_counts[row]" in resource_call_counts
-assert "Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Invalid" in resource_call_opaque_target
+assert "Ast::Decl.Import(_, _) | Ast::Decl.Invalid" in resource_call_opaque_target and "Ast::Decl.Extern(_, _, _, _, _, _, _, _):\n                        pass" in resource_call_opaque_target
 resource_scalar = function_body(
     ROOT / "src/proof/replay/resource_type_source_validation.elisa",
     "proof_replay_resource_scalar_type_with_work",

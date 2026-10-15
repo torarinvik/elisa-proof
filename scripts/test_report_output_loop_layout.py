@@ -53,6 +53,10 @@ def read_bounded_utf8(path: Path) -> str:
         opened = retry_eintr(os.fstat, descriptor)
         if not stat.S_ISREG(opened.st_mode) or not same_file(named_before_open, opened):
             raise OSError("opened source differs from named file")
+        if opened.st_size < 0:
+            raise OSError("invalid source file size")
+        if opened.st_size > MAX_SOURCE_BYTES:
+            raise OSError("source file exceeds bounded reader limit")
         named_after_open = retry_eintr(path.stat)
         if not same_file(opened, named_after_open):
             raise OSError("source path changed during open")

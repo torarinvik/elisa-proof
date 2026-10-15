@@ -75,4 +75,12 @@ assert "proof_checked_view_source_checks_complete(checked_view)" in engine_state
 assert "proof_checked_view_source_admissible(checked_view)" in engine_state
 assert "proof_checked_view_source_admissions_complete(checked_view)" in engine_state
 
+report_status = OUTPUT_STATUS.read_text(encoding="utf-8").split("def proof_report_verification_state_from_findings", 1)[1].split("def proof_report_engine_state_from_status", 1)[0]
+report_incomplete_gate = (
+    'return "unknown" if not finding_counts.complete or not source_checks_complete '
+    'or not source_complete or not source_admissible or not source_admissions_complete '
+    'or not replay_complete'
+)
+assert report_status.index(report_incomplete_gate) < report_status.index('return "disproved" if finding_counts.disproved > 0')
+
 print("tactic output authority: public status remains tied to checked source admission")
