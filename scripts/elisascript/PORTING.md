@@ -10,7 +10,7 @@ tooling work; do not put Elisa-Proof scripts there.
 
 | Python reference | ElisaScript counterpart | Status |
 | --- | --- | --- |
-| `scripts/test_report_output_loop_layout.py` | `scripts/elisascript/test_report_output_loop_layout.elisascript` | Active source port. `scripts/test_elisascript_report_output_port_parity.py` pins their repository-root path derivation, fragments, diagnostics, strict UTF-8, byte/path bounds, full-precision file mutation checks, file-size-aware reader and content-buffer sizing, and universal newline normalization. Runtime parity remains unqualified; retain Python. |
+| `scripts/test_report_output_loop_layout.py` | `scripts/test_report_output_loop_layout.elisascript` | Active source port, colocated with its Python reference. `scripts/test_elisascript_report_output_port_parity.py` pins their repository-root path derivation, fragments, diagnostics, strict UTF-8, byte/path bounds, full-precision file mutation checks, file-size-aware reader and content-buffer sizing, and universal newline normalization. Runtime parity remains unqualified; retain Python. |
 | `scripts/test_global_mutable_array_owner_identity.py` | queued | No candidate promoted until the active port has parity evidence. |
 | `scripts/test_resource_call_storage_confinement_static.py` | queued | No candidate promoted until the active port has parity evidence. |
 
@@ -19,7 +19,7 @@ tooling work; do not put Elisa-Proof scripts there.
 The Python reference exits 0 and prints the expected success line. The installed
 runner and retained native binaries identify as version 0.1 and predate this
 source. An earlier nested-module draft failed with `UnsupportedDeclaration`.
-After relocation under `elisa-proof/scripts/elisascript` and correction of the
+After relocation under `elisa-proof/scripts` and correction of the
 source-root path, the old candidate using `Path.read_text()` caused the rebuilt
 runner to exit 138 without diagnostics. The current candidate uses the bounded
 reader, but retained v0.1 runners reject its included `EsBoundedText` name during
@@ -31,6 +31,8 @@ uses the shared `EsBoundedText::read_utf8` API with the reader's 16 MiB maximum;
 the Python reference now applies the same bound with a nonblocking descriptor.
 Both readers require a regular file, verify device/inode identity when opening,
 and compare identity, size, modification time, and change time after reading.
+Both retry interrupted open, stat, fstat, and read operations up to four times;
+close remains single-shot to avoid retrying a potentially reused descriptor.
 Both require strict UTF-8 and normalize CRLF and CR line endings. Python checks
 fragments with `in`; ElisaScript uses caught `sview.index`, which raises when a
 fragment is missing. Both enforce the same 16 MiB source and 4096-byte path caps,

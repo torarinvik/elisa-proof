@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 python_source = (ROOT / "scripts/test_report_output_loop_layout.py").read_text(encoding="utf-8")
-elisa_source = (ROOT / "scripts/elisascript/test_report_output_loop_layout.elisascript").read_text(encoding="utf-8")
+elisa_source = (ROOT / "scripts/test_report_output_loop_layout.elisascript").read_text(encoding="utf-8")
 bounded_reader = (ROOT.parent / "elisa-script/src/runtime/bounded_text_posix.elisa").read_text(encoding="utf-8")
 reader_body = bounded_reader.split("def read_utf8(", 1)[1].split("def descriptor_shape", 1)[0]
 
@@ -33,13 +33,12 @@ elisa_fragments = tuple(
 assert python_fragments == elisa_fragments, (python_fragments, elisa_fragments)
 
 # The source-relative target must resolve identically from the Python reference and its
-# nested ElisaScript counterpart; otherwise matching fragment lists would check different files.
+# colocated ElisaScript counterpart; otherwise matching fragment lists would check different files.
 assert "Path(__file__).resolve().parents[1]" in python_source
 for path_step in (
     "path_real(path(Script::source_path()))",
     "script_file.parent()",
-    "script_directory.parent()",
-    "scripts_directory.parent()",
+    "proof_root: Path = script_directory.parent()",
     'proof_root.joinpath("src/app/report_output_serialization_helpers.elisa")',
 ):
     assert path_step in elisa_source, path_step
@@ -56,9 +55,22 @@ assert python_messages == elisa_messages, (python_messages, elisa_messages)
 
 assert python_assignment("MAX_SOURCE_BYTES") == 16_777_216
 assert python_assignment("MAX_PATH_BYTES") == 4096
+assert python_assignment("MAX_EINTR_RETRIES") == 4
+assert "for retry in range(MAX_EINTR_RETRIES + 1):" in python_source
+for operation in (
+    "retry_eintr(path.stat)",
+    "retry_eintr(os.open, path, flags)",
+    "retry_eintr(os.fstat, descriptor)",
+    "retry_eintr(os.read, descriptor, remaining)",
+):
+    assert operation in python_source, operation
+assert "os.close(descriptor)" in python_source
+assert "retry_eintr(os.close" not in python_source
 assert "EsBoundedText::read_utf8(source_file, 16777216)" in elisa_source
 assert "MAX_BYTES: usize = 16777216" in bounded_reader
 assert "PATH_BYTES: usize = 4096" in bounded_reader
+assert "READ_EINTR_RETRIES: usize = 4" in bounded_reader
+assert "close_status: int = elisascript_posix_close(descriptor)" in bounded_reader
 assert "chunk_capacity: usize = maximum_bytes + 1" in bounded_reader
 assert "initial_capacity: usize = maximum_bytes if maximum_bytes < Limits::READ_CHUNK_BYTES else Limits::READ_CHUNK_BYTES" in reader_body
 assert "initial_capacity <- opened.size.usize() if opened.size.usize() < maximum_bytes" in reader_body

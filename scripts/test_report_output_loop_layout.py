@@ -6,6 +6,7 @@ import sys
 
 MAX_SOURCE_BYTES = 16_777_216
 MAX_PATH_BYTES = 4096
+MAX_EINTR_RETRIES = 4
 try:
     ROOT = Path(__file__).resolve().parents[1]
 except (OSError, RuntimeError):
@@ -28,28 +29,38 @@ def stable_file(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
+def retry_eintr(operation, *args):
+    for retry in range(MAX_EINTR_RETRIES + 1):
+        try:
+            return operation(*args)
+        except InterruptedError:
+            if retry == MAX_EINTR_RETRIES:
+                raise
+    raise OSError("interrupted operation retry limit reached")
+
+
 def read_bounded_utf8(path: Path) -> str:
     path_bytes = os.fsencode(path)
     if not path_bytes or len(path_bytes) >= MAX_PATH_BYTES or b"\0" in path_bytes:
         raise OSError("invalid source path")
-    named_before_open = path.stat()
+    named_before_open = retry_eintr(path.stat)
     if not stat.S_ISREG(named_before_open.st_mode):
         raise OSError("source path is not a regular file")
 
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(path, flags)
+    descriptor = retry_eintr(os.open, path, flags)
     try:
-        opened = os.fstat(descriptor)
+        opened = retry_eintr(os.fstat, descriptor)
         if not stat.S_ISREG(opened.st_mode) or not same_file(named_before_open, opened):
             raise OSError("opened source differs from named file")
-        named_after_open = path.stat()
+        named_after_open = retry_eintr(path.stat)
         if not same_file(opened, named_after_open):
             raise OSError("source path changed during open")
 
         chunks: list[bytes] = []
         remaining = MAX_SOURCE_BYTES + 1
         while remaining:
-            chunk = os.read(descriptor, remaining)
+            chunk = retry_eintr(os.read, descriptor, remaining)
             if not chunk:
                 break
             chunks.append(chunk)
@@ -58,8 +69,8 @@ def read_bounded_utf8(path: Path) -> str:
         if len(source_bytes) > MAX_SOURCE_BYTES:
             raise OSError("source file exceeds bounded reader limit")
 
-        final_opened = os.fstat(descriptor)
-        final_named = path.stat()
+        final_opened = retry_eintr(os.fstat, descriptor)
+        final_named = retry_eintr(path.stat)
         if not stable_file(opened, final_opened) or not stable_file(final_opened, final_named):
             raise OSError("source file changed during read")
     finally:

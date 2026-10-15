@@ -29331,8 +29331,10 @@ precedence there. Diff and source-length checks pass; compiler/runtime qualifica
 
 The exact-offset call locator now follows calls inside array, tuple, dictionary, record, slice,
 comprehension, match/catch, block, and lambda expressions, plus expression/return statements,
-loops, matches, and nested statement blocks. This lets source replay inspect qualified resource calls
-inside common nested bodies while retaining exact-position uniqueness and bounded work accounting.
+loops, matches, and nested statement blocks. For a uniquely resolvable static-effect node at the
+target offset, it mirrors source-call collection by lowering handler captures and arguments into
+the exact backend call shape before replay checks the event. Exact-position uniqueness and bounded
+work accounting remain in force.
 Unsupported AST forms and depth/work exhaustion still fail closed. `git diff --check` and the
 source-length gate pass; compiler/runtime qualification remains open under the validation hold.
 
@@ -29343,3 +29345,60 @@ checking whether `darray` resolved to the builtin in the declaring module. It no
 source-aware generic-head lookup used by builtin collection methods and refuses imported dispatch
 for this classification. `git diff --check` passes; tests and compiler qualification remain open
 under the validation hold.
+
+### 23.27.1801 Match bounded EINTR retries in the active Python reference (2026-10-15)
+
+The active ElisaScript reader retries interrupted open, stat, fstat, and read operations four
+times, while the Python reference relied on Python's implicit EINTR behavior. The reference now
+uses an explicit bounded retry wrapper for those same operations, and the source parity guard pins
+the retry limit and call sites. Descriptor close remains single-shot. `git diff --check` and the
+source-length gate pass; parity execution remains unavailable under the validation hold.
+
+### 23.27.1803 Keep the active script port beside its Python reference (2026-10-15)
+
+The active ElisaScript candidate now lives under `scripts/` beside the Python reference. This
+removes duplicate competing candidates and makes both source-root calculations explicit and
+comparable. The parity guard and porting table point to the single retained candidate. Whitespace
+and source-length gates pass; runtime parity remains unqualified under the validation hold.
+
+### 23.27.1804 Reject shadowed `as_sview` in implicit-effect admission (2026-10-15)
+
+The implicit-effect guard treated every byte-array `as_sview` call as a pure builtin before checking
+whether a source conversion with that name, a custom cast hook, or an import could change dispatch.
+It now requires a complete no-shadow lookup and a clear custom-cast/import snapshot before applying
+the builtin type rule, matching replay's conservative classification. `git diff --check` passes;
+tests and compiler qualification remain open under the validation hold.
+
+### 23.27.1805 Meter static-effect call lowering by the arrays it builds (2026-10-15)
+
+Exact resource-call lookup no longer reserves three times the capture/argument count before
+lowering a static-effect node. It charges the lowering loop and both value/label appends for each
+capture and argument; the subsequent recursive source walk continues to meter each expression.
+This removes avoidable budget rejection while preserving bounded work. Diff and source-length
+gates pass; compiler/runtime qualification remains open under the validation hold.
+
+### 23.27.1806 Align recursive-call `as_sview` admission with replay (2026-10-15)
+
+The producer's intrinsic-call classifier accepted byte-array `as_sview` conversions without
+checking source conversion declarations or imported dispatch, while resource replay rejected those
+same calls. The producer now requires a complete no-shadow lookup and clear custom-cast/import
+metadata before classifying the conversion as intrinsic. Diff and source-length gates pass;
+compiler/runtime qualification remains open under the validation hold.
+
+### 23.27.1807 Meter text copied while locating lowered static-effect calls (2026-10-15)
+
+Frame source-call replay now charges the candidate callee and owner spellings plus every named
+argument label before lowering a static-effect call. The existing reservation covers the loop and
+both destination appends; this closes the remaining variable-text work gap on that path. Diff and
+source-length gates pass; compiler/runtime qualification remains open under the validation hold.
+
+### 23.27.1808 Use the complete conversion index for resource-call admission (2026-10-15)
+
+Resource producer admission used the function table to detect shadowed conversion selectors, but
+that table excludes extern declarations. Replay uses a source-derived conversion index containing
+both functions and externs, so a same-named `sview` or `as_sview` extern could be treated as an
+intrinsic by the producer and refused by replay. Resource conversion and `as_sview` provenance
+classification now require a complete source-index miss and reject custom casts or unresolved
+imported dispatch, matching implicit-effect admission and replay. Numeric selectors retain their
+reserved builtin precedence. `git diff --check` passes; compiler and runtime qualification remain
+open under the validation hold.
