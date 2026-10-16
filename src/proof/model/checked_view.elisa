@@ -72,6 +72,49 @@ extend ElisaProof:
                         return (false, false)
             return (true, false)
 
+        # Build one conservative parser-derived mask. Fail closed if the parser adds a
+        # declaration form before its operator-dispatch implications are classified.
+        def proof_source_analysis_operator_declaration_mask(declarations: darray[Ast::Decl]&, source_work: mutable usize&, depth: usize, mask: mutable usize&) -> bool:
+            return false if depth >= 64
+            for declaration in declarations |declaration, source_work, depth, mask|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Module(name, nested, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        return false if not proof_source_analysis_operator_declaration_mask(nested, source_work, depth + 1, mask)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_analysis_operator_declaration_mask(nested, source_work, depth + 1, mask)
+                    Ast::Decl.Func(name, _, _, _, _, _, _) | Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        mask <- mask | proof_source_operator_dunder_mask(name)
+                    Ast::Decl.Import(name, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        mask <- PROOF_SOURCE_OPERATOR_ALL_FLAGS
+                    Ast::Decl.Invalid:
+                        mask <- PROOF_SOURCE_OPERATOR_ALL_FLAGS
+                    Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    _:
+                        return false
+            true
+
+        def proof_source_analysis_operator_mask_from_source(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&) -> (complete: bool, mask: usize):
+            annotation_shape: (complete: bool, overloaded: bool) = proof_source_primitive_operator_overloaded_with_work(annotations, source_work)
+            return (false, PROOF_SOURCE_OPERATOR_ALL_FLAGS) if not annotation_shape.complete
+            # Implementation annotations establish scopes, not operator protocols. The
+            # compiler dispatches by the matching dunder on a struct receiver, so source-only
+            # guards use the retained declarations to deny exactly the protocols present in
+            # this source. Receiver typing remains erased here, making the result conservative
+            # across custom struct types while preserving unrelated builtin operators.
+            mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
+            return (false, PROOF_SOURCE_OPERATOR_ALL_FLAGS) if not proof_source_analysis_operator_declaration_mask(declarations, source_work, 0, &mask)
+            generic_bound_mask: (complete: bool, mask: usize) = proof_source_operator_mask_with_generic_bounds(annotations, mask, source_work)
+            return (false, PROOF_SOURCE_OPERATOR_ALL_FLAGS) if not generic_bound_mask.complete
+            (true, generic_bound_mask.mask)
+
+        def proof_source_analysis_operator_mask(file: Ast::File&, source_work: mutable usize&) -> (complete: bool, mask: usize):
+            proof_source_analysis_operator_mask_from_source(file.top_decls, file.enum_annotations, source_work)
+
         def proof_source_analysis_hash(source: darray[u8]&, source_bytes: usize) -> u32:
             hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
             for offset in 0..<source_bytes |offset, source, hash|:
@@ -106,6 +149,8 @@ extend ElisaProof:
                 assert_by_inventory_work_limited: bool = assert_by_inventory_status.work_limited
                 assert_by_inventory: mutable darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = assert_by_inventory_status.inventory
                 proof_push_source_int_types(&file, tokens, source, source_bytes)
+                operator_mask_work: mutable usize = 0
+                operator_mask_status: (complete: bool, mask: usize) = proof_source_analysis_operator_mask(file, &operator_mask_work)
                 refinement_refusals: mutable ProofReport = proof_empty_report()
                 refined_functions: mutable darray[sview] = []
                 proof_add_refinement_signature_contracts(&file, &refinement_refusals, &refined_functions)
@@ -121,7 +166,7 @@ extend ElisaProof:
                 stray_nul_line: u32 = proof_source_stray_nul_line(tokens, source, source_bytes)
                 source_identity: uintptr = (&source[0]).cast[uintptr]
                 fingerprint: u32 = proof_source_analysis_hash(source, source_bytes)
-                analysis: ProofSourceAnalysis[r] = ProofSourceAnalysis{source: source, tokens: tokens, file: file, source_bytes: source_bytes, source_fingerprint: fingerprint, source_identity: source_identity, file_identity: source_identity, import_failed: import_failed, pass_statement_offsets: pass_offsets, stray_nul_line: stray_nul_line, refinement_findings: refinement_refusals.results.findings, refined_functions: refined_functions, source_struct_invariant_scan_complete: struct_invariant_scan.complete, source_has_struct_invariants: struct_invariant_scan.found, literal_ensure_inventory: literal_inventory, literal_ensure_inventory_complete: literal_inventory_complete, literal_ensure_inventory_work_limited: literal_inventory_work_limited, postcondition_ast_inventory: postcondition_ast_inventory, postcondition_ast_inventory_complete: postcondition_ast_inventory_complete, postcondition_ast_inventory_work_limited: postcondition_ast_inventory_work_limited, postcondition_return_inventory: postcondition_return_inventory, postcondition_return_inventory_complete: postcondition_return_inventory_complete, assert_by_inventory: assert_by_inventory, assert_by_inventory_complete: assert_by_inventory_complete, assert_by_inventory_work_limited: assert_by_inventory_work_limited, issued: true}
+                analysis: ProofSourceAnalysis[r] = ProofSourceAnalysis{source: source, tokens: tokens, file: file, source_bytes: source_bytes, source_fingerprint: fingerprint, source_identity: source_identity, file_identity: source_identity, import_failed: import_failed, pass_statement_offsets: pass_offsets, stray_nul_line: stray_nul_line, refinement_findings: refinement_refusals.results.findings, refined_functions: refined_functions, source_struct_invariant_scan_complete: struct_invariant_scan.complete, source_has_struct_invariants: struct_invariant_scan.found, source_primitive_operator_mask: operator_mask_status.mask, source_operator_protocol_mask: operator_mask_status.mask, source_operator_masks_valid: operator_mask_status.complete, literal_ensure_inventory: literal_inventory, literal_ensure_inventory_complete: literal_inventory_complete, literal_ensure_inventory_work_limited: literal_inventory_work_limited, postcondition_ast_inventory: postcondition_ast_inventory, postcondition_ast_inventory_complete: postcondition_ast_inventory_complete, postcondition_ast_inventory_work_limited: postcondition_ast_inventory_work_limited, postcondition_return_inventory: postcondition_return_inventory, postcondition_return_inventory_complete: postcondition_return_inventory_complete, assert_by_inventory: assert_by_inventory, assert_by_inventory_complete: assert_by_inventory_complete, assert_by_inventory_work_limited: assert_by_inventory_work_limited, issued: true}
                 return analysis
 
         def proof_source_analysis_import_failed[@r](source: ProofSourceAnalysis[r]& @r) -> bool:
@@ -231,6 +276,16 @@ extend ElisaProof:
         # Source bytes are read-only and can be projected to serializers and repair tooling.
         def proof_checked_view_source[@view](view: ProofCheckedView[view]& @view) -> darray[u8]& @view:
             view.source_analysis.source
+
+        # Suggestion matching needs parser annotations, but callers must not borrow the
+        # parser's mutable side-table aggregate. Copy only the scalar annotation rows under
+        # the standard source-admission work ceiling.
+        def proof_checked_view_copy_suggestion_annotations[@view](view: ProofCheckedView[view]& @view, output: mutable darray[Ast::EnumAnnotation]&, source_work: mutable usize&) -> bool:
+            return false if not proof_checked_view_source_validated(view)
+            for annotation in view.source_analysis.file.enum_annotations |annotation, output, source_work|:
+                return false if not proof_source_analysis_charge_work(1 + sview_len(annotation.owner) + sview_len(annotation.name), source_work)
+                output.push(annotation)
+            return true
 
     private:
         # The full AST file stays internal because its parser metadata contains mutable side tables.

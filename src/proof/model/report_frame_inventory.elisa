@@ -2,37 +2,73 @@
 # require source-context replay; this does not grant a kernel proof.
 extend ElisaProof:
     private:
+        struct ProofFrameClauseSource:
+            key: ProofSourcePostconditionKey
+            valid: bool
+
+        def proof_report_frame_clause_source_find(rows: darray[ProofFrameClauseSource]&, key: ProofSourcePostconditionKey, source_work: mutable usize&) -> (complete: bool, found: bool, valid: bool):
+            matched: mutable bool = false
+            clause_valid: mutable bool = false
+            for row in rows |row, key, source_work, matched, clause_valid|:
+                return (false, false, false) if not proof_report_source_work_charge(1, source_work)
+                if row.key.name == key.name and row.key.function_offset == key.function_offset and row.key.line == key.line and row.key.source_index == key.source_index:
+                    return (false, false, false) if matched
+                    matched <- true
+                    clause_valid <- row.valid
+            (true, matched, clause_valid)
+
+        def proof_report_frame_clause_root_is_parameter(names: darray[sview]&, root: sview, source_work: mutable usize&) -> bool:
+            return false if root == "" or not proof_report_source_work_charge(sview_len(root), source_work)
+            for name in names |name, root, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(name), source_work)
+                return true if name == root
+            false
+
         # Parser-origin inventory for the direct body frame clauses checked by
         # `proof_check_frame_specs`. This gate receives the retained immutable source AST;
         # dynamic writes/calls remain separate `frame` rows.
-        def proof_report_frame_clause_keys_collect(declarations: darray[Ast::Decl]&, keys: mutable darray[ProofSourcePostconditionKey]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate]:
+        def proof_report_frame_clause_keys_collect(declarations: darray[Ast::Decl]&, rows: mutable darray[ProofFrameClauseSource]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate]:
             return false if depth >= 64
-            for declaration in declarations |keys, source_work, depth|:
+            for declaration in declarations |rows, source_work, depth|:
                 return false if not proof_report_source_work_charge(1, source_work)
                 match declaration:
-                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                    Ast::Decl.Func(name, parameters, _, body, _, _, position):
                         frame_clause_index: mutable usize = 0
-                        for statement in body |keys, source_work, name, position, frame_clause_index|:
+                        parameter_names: mutable darray[sview] = []
+                        for parameter in parameters |parameter_names, source_work|:
+                            return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(parameter.name), source_work)
+                            parameter_names.push(parameter.name)
+                        for statement in body |rows, source_work, name, position, frame_clause_index, parameter_names|:
                             return false if not proof_report_source_work_charge(1, source_work)
                             match statement:
-                                Ast::Stmt.Contract(kind, _, contract_position):
+                                Ast::Stmt.Contract(kind, expression, contract_position):
                                     if kind in {"changes", "preserves"}:
                                         return false if:
-                                            keys.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+                                            rows.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
                                             not proof_report_source_work_charge(sview_len(name), source_work)
-                                        keys.push(ProofSourcePostconditionKey{name: name, function_offset: position.offset, line: contract_position.line, source_index: frame_clause_index})
+                                        expression_cost: mutable usize = 0
+                                        return false if not proof_replay_summary_expr_cost(expression, &expression_cost, source_work, 0)
+                                        return false if not proof_report_source_work_charge(expression_cost, source_work)
+                                        decoded: (known: bool, place: ProofFramePlace) = proof_frame_place(expression)
+                                        valid: bool = decoded.known and proof_report_frame_clause_root_is_parameter(parameter_names, decoded.place.root, source_work)
+                                        key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: name, function_offset: position.offset, line: contract_position.line, source_index: frame_clause_index}
+                                        rows.push(ProofFrameClauseSource{key: key, valid: valid})
                                         frame_clause_index <- frame_clause_index + 1
                                 _:
                                     pass
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_report_frame_clause_keys_collect(nested, keys, source_work, depth + 1)
+                        return false if not proof_report_frame_clause_keys_collect(nested, rows, source_work, depth + 1)
                     _:
                         pass
             return true
 
         def proof_report_frame_clause_inventory_consistent(report: ProofReport&, declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
+            expected_rows: mutable darray[ProofFrameClauseSource] = []
+            return false if not proof_report_frame_clause_keys_collect(declarations, &expected_rows, source_work, 0)
             expected_keys: mutable darray[ProofSourcePostconditionKey] = []
-            return false if not proof_report_frame_clause_keys_collect(declarations, &expected_keys, source_work, 0)
+            for row in expected_rows |expected_keys, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                expected_keys.push(row.key)
             index: mutable ProofSourcePostconditionCountIndex = proof_report_source_postcondition_index_create(expected_keys.count, source_work)
             return false if not index.valid
             policy_owner_index: mutable ProofSourcePostconditionCountIndex = proof_report_source_postcondition_index_create(report.results.obligation_inventory.count, source_work)
@@ -52,6 +88,8 @@ extend ElisaProof:
                 key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: entry.source_name, function_offset: entry.source_function_offset, line: entry.source_line, source_index: entry.source_obligation_index}
                 found: (complete: bool, found: bool, count: usize) = proof_report_source_postcondition_index_find(index, key, source_work)
                 return false if not found.complete or not found.found
+                source_clause: (complete: bool, found: bool, valid: bool) = proof_report_frame_clause_source_find(expected_rows, key, source_work)
+                return false if not source_clause.complete or not source_clause.found or entry.proven != source_clause.valid
                 return false if not proof_report_source_postcondition_index_add(&index, key, 1, false, source_work)
             for key in expected_keys |index, source_work|:
                 found: (complete: bool, found: bool, count: usize) = proof_report_source_postcondition_index_find(index, key, source_work)

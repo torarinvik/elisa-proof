@@ -1,0 +1,300 @@
+# Replay-local `(owner, kernel structural hash)` buckets for resource-fact provenance.
+# Structural hashes only narrow candidates; exact kernel equality is still authoritative.
+extend ElisaProof:
+    private:
+        const PROOF_REPLAY_KERNEL_FACT_ROOT_MAX_CLUSTER: usize = 64
+        const PROOF_REPLAY_KERNEL_FACT_ROOT_OWNER_SCAN_LIMIT: usize = 8
+
+        def proof_replay_kernel_fact_root_hash_text(report: mutable ProofReport&, hash: mutable u32&, tag: i64, value: sview) -> bool:
+            return false if not proof_replay_trace_lookup_charge(report)
+            hash <- proof_expr_shape_mix(hash, tag)
+            return false if not proof_replay_trace_lookup_charge(report)
+            hash <- proof_expr_shape_mix(hash, sview_len(value).i64())
+            for offset in 0..<sview_len(value) |offset, report, hash, value|:
+                return false if not proof_replay_trace_lookup_charge(report)
+                hash <- proof_expr_shape_mix(hash, value[offset].i64())
+            true
+
+        def proof_replay_kernel_fact_root_hash_incomplete(index: mutable ProofReplayKernelFactRootIndex&, root: usize) -> (complete: bool, supported: bool, hash: u32):
+            index.node_hash_states[root] <- 0 if root < index.node_hash_states.count
+            (false, false, 0)
+
+        def proof_replay_kernel_fact_root_hash_unsupported(index: mutable ProofReplayKernelFactRootIndex&, root: usize) -> (complete: bool, supported: bool, hash: u32):
+            index.node_hash_states[root] <- 3 if root < index.node_hash_states.count
+            (true, false, 0)
+
+        def proof_replay_kernel_fact_root_hash_child(report: mutable ProofReport&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, child_root: usize, depth: usize, index: mutable ProofReplayKernelFactRootIndex&, hash: mutable u32&) -> (complete: bool, supported: bool):
+            return (false, false) if not proof_replay_trace_lookup_charge(report)
+            child: (complete: bool, supported: bool, hash: u32) = proof_replay_kernel_fact_root_hash_node(report, nodes, children, child_root, depth + 1, index)
+            return (false, false) if not child.complete
+            return (true, false) if not child.supported
+            hash <- proof_expr_shape_mix(hash, child.hash.i64())
+            (true, true)
+
+        def proof_replay_kernel_fact_root_hash_span(report: mutable ProofReport&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, start: usize, count: usize, depth: usize, index: mutable ProofReplayKernelFactRootIndex&, hash: mutable u32&) -> (complete: bool, supported: bool):
+            return (false, false) if start > children.count or count > children.count - start
+            return (false, false) if not proof_replay_trace_lookup_charge(report)
+            hash <- proof_expr_shape_mix(hash, count.i64())
+            for offset in 0..<count |offset, report, nodes, children, start, count, depth, index, hash|:
+                child_root: usize = children[start + offset]
+                child: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_child(report, nodes, children, child_root, depth, index, hash)
+                return (false, false) if not child.complete
+                return (true, false) if not child.supported
+            (true, true)
+
+        # Hash exactly the expression tree shapes accepted by the public replay equality walk.
+        # Every common node field checked by pair_nodes_valid is mixed; auxiliary and child-count
+        # fields are mixed where equality observes them. Arena validation supplies canonical
+        # shapes for fields equality intentionally ignores.
+        def proof_replay_kernel_fact_root_hash_node(report: mutable ProofReport&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize, index: mutable ProofReplayKernelFactRootIndex&) -> (complete: bool, supported: bool, hash: u32):
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            empty: (complete: bool, supported: bool, hash: u32) = (false, false, 0)
+            return empty if:
+                depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+                root >= nodes.count or root >= index.node_hash_states.count or root >= index.node_hashes.count
+                not proof_replay_trace_lookup_charge(report)
+            state: u8 = index.node_hash_states[root]
+            return (true, true, index.node_hashes[root]) if state == 2
+            return (true, false, 0) if state == 3
+            return empty if state == 1
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            index.node_hash_states[root] <- 1
+            hash: mutable u32 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS.u32()
+            return proof_replay_kernel_fact_root_hash_incomplete(index, root) if:
+                not proof_replay_kernel_fact_root_hash_text(report, &hash, 1, node.kind)
+                not proof_replay_kernel_fact_root_hash_text(report, &hash, 2, node.operator)
+                not proof_replay_kernel_fact_root_hash_text(report, &hash, 3, node.name)
+                not proof_replay_kernel_fact_root_hash_text(report, &hash, 4, node.secondary_name)
+                not proof_replay_trace_lookup_charge(report)
+            hash <- proof_expr_shape_mix(hash, node.value)
+            if node.kind == "absent" or node.kind == "int" or node.kind == "bool" or node.kind == "typed-int" or node.kind in {"float", "opaque-float-literal", "string", "char", "ident", "shorthand"}:
+                pass
+            elif node.kind in {"field", "scope", "call_arg", "field-init", "unary", "move"}:
+                child: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_child(report, nodes, children, node.left, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not child.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not child.supported
+            # Keep this aligned with expression equality: checked-index retains its
+            # fallback in `right`; checked-get omits recovery and remains unsupported.
+            elif node.kind in {"binary", "index", "dict_entry", "checked-index"}:
+                left: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_child(report, nodes, children, node.left, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not left.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not left.supported
+                right: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_child(report, nodes, children, node.right, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not right.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not right.supported
+            elif node.kind == "slice" or node.kind == "if":
+                left: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_child(report, nodes, children, node.left, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not left.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not left.supported
+                right: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_child(report, nodes, children, node.right, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not right.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not right.supported
+                auxiliary: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_child(report, nodes, children, node.auxiliary, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not auxiliary.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not auxiliary.supported
+            elif node.kind in {"array", "tuple", "set", "dict"}:
+                outcome: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_span(report, nodes, children, node.children_start, node.children_count, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not outcome.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not outcome.supported
+            elif node.kind in {"index-n", "construct", "record-update"}:
+                head: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_child(report, nodes, children, node.left, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not head.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not head.supported
+                outcome: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_span(report, nodes, children, node.children_start, node.children_count, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not outcome.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not outcome.supported
+            elif node.kind == "call":
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not proof_replay_trace_lookup_charge(report)
+                hash <- proof_expr_shape_mix(hash, node.auxiliary.i64())
+                head: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_child(report, nodes, children, node.left, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not head.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not head.supported
+                outcome: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_span(report, nodes, children, node.children_start, node.children_count, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not outcome.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not outcome.supported
+            elif node.kind == "quantifier":
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not proof_replay_trace_lookup_charge(report)
+                hash <- proof_expr_shape_mix(hash, node.auxiliary.i64())
+                left: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_child(report, nodes, children, node.left, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not left.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not left.supported
+                right: (complete: bool, supported: bool) = proof_replay_kernel_fact_root_hash_child(report, nodes, children, node.right, depth, index, hash)
+                return proof_replay_kernel_fact_root_hash_incomplete(index, root) if not right.complete
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root) if not right.supported
+            else:
+                return proof_replay_kernel_fact_root_hash_unsupported(index, root)
+            index.node_hashes[root] <- hash
+            index.node_hash_states[root] <- 2
+            (true, true, hash)
+
+        def proof_replay_kernel_fact_root_index_reset(index: mutable ProofReplayKernelFactRootIndex&) -> void:
+            index.attempted <- false
+            index.complete <- false
+            index.report_identity <- 0
+            index.trace_count <- 0
+            index.kernel_node_count <- 0
+            index.kernel_child_count <- 0
+            index.node_hash_states.clear()
+            index.node_hashes.clear()
+            index.bucket_hashes.clear()
+            index.bucket_root_hashes.clear()
+            index.bucket_owners.clear()
+            index.bucket_heads.clear()
+            index.bucket_occupied.clear()
+            index.next_indices.clear()
+
+        def proof_replay_kernel_fact_root_index_dimensions_match(report: ProofReport&, index: ProofReplayKernelFactRootIndex&) -> bool:
+            return index.report_identity == (&report).cast[uintptr] and index.trace_count == report.analysis_1.traces.records.count and index.kernel_node_count == report.analysis_1.kernel.nodes.count and index.kernel_child_count == report.analysis_1.kernel.children.count
+
+        def proof_replay_kernel_fact_root_index_ready(report: ProofReport&, index: ProofReplayKernelFactRootIndex&) -> bool:
+            index.complete and proof_replay_kernel_fact_root_index_dimensions_match(report, index)
+
+        def proof_replay_kernel_fact_root_index_build(report: mutable ProofReport&, index: mutable ProofReplayKernelFactRootIndex&) -> bool:
+            count: usize = report.analysis_1.traces.records.count
+            nodes: usize = report.analysis_1.kernel.nodes.count
+            capacity: usize = proof_replay_trace_index_capacity(count)
+            index.complete <- false
+            return false if report.analysis_1.kernel.budget_exhausted or not report.analysis_1.kernel.arena_validated or count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET or nodes > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+            if count == 0:
+                index.complete <- true
+                return true
+            return false if capacity == 0 or capacity > PROOF_REPLAY_TRACE_INDEX_SLOT_BUDGET
+            return false if:
+                not proof_replay_trace_lookup_charge_amount(report, nodes)
+                not proof_replay_trace_lookup_charge_amount(report, nodes)
+                not proof_replay_trace_lookup_charge_amount(report, count)
+                not proof_replay_trace_lookup_charge_amount(report, capacity)
+                not proof_replay_trace_lookup_charge_amount(report, capacity)
+                not proof_replay_trace_lookup_charge_amount(report, capacity)
+                not proof_replay_trace_lookup_charge_amount(report, capacity)
+                not proof_replay_trace_lookup_charge_amount(report, capacity)
+            index.node_hash_states.resize(nodes)
+            index.node_hashes.resize(nodes)
+            for node in 0..<nodes |node, report, index|:
+                return false if not proof_replay_trace_lookup_charge(report) or not proof_replay_trace_lookup_charge(report)
+                index.node_hash_states[node] <- 0
+                index.node_hashes[node] <- 0
+            index.next_indices.resize(count)
+            for row in 0..<count |row, report, index, count|:
+                return false if not proof_replay_trace_lookup_charge(report)
+                index.next_indices[row] <- count
+            index.bucket_hashes.resize(capacity)
+            index.bucket_root_hashes.resize(capacity)
+            index.bucket_owners.resize(capacity)
+            index.bucket_heads.resize(capacity)
+            index.bucket_occupied.resize(capacity)
+            for slot in 0..<capacity |slot, report, index, count|:
+                return false if not proof_replay_trace_lookup_charge(report) or not proof_replay_trace_lookup_charge(report) or not proof_replay_trace_lookup_charge(report) or not proof_replay_trace_lookup_charge(report) or not proof_replay_trace_lookup_charge(report)
+                index.bucket_hashes[slot] <- 0
+                index.bucket_root_hashes[slot] <- 0
+                index.bucket_owners[slot] <- ""
+                index.bucket_heads[slot] <- count
+                index.bucket_occupied[slot] <- false
+            for row in 0..<count |row, report, index, capacity, count, nodes|:
+                return false if not proof_replay_trace_lookup_charge(report)
+                trace: ProofFactTrace = report.analysis_1.traces.records[row]
+                continue if trace.kernel_expression >= nodes
+                root_hash: (complete: bool, supported: bool, hash: u32) = proof_replay_kernel_fact_root_hash_node(report, report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, trace.kernel_expression, 0, index)
+                return false if not root_hash.complete
+                continue if not root_hash.supported
+                return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(trace.name))
+                owner_hash: u32 = proof_replay_owner_hash(trace.name)
+                key_hash: u32 = proof_expr_shape_mix(owner_hash, root_hash.hash.i64())
+                slot: mutable usize = (key_hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_REPLAY_KERNEL_FACT_ROOT_MAX_CLUSTER |slot, key_hash, root_hash, trace, index, report, count, capacity, probes, row, placed|:
+                    return false if not proof_replay_trace_lookup_charge(report)
+                    if not index.bucket_occupied[slot]:
+                        return false if not proof_replay_trace_lookup_charge(report)
+                        index.bucket_occupied[slot] <- true
+                        index.bucket_hashes[slot] <- key_hash
+                        index.bucket_root_hashes[slot] <- root_hash.hash
+                        index.bucket_owners[slot] <- trace.name
+                        index.bucket_heads[slot] <- row
+                        placed <- true
+                        break
+                    if index.bucket_hashes[slot] == key_hash and index.bucket_root_hashes[slot] == root_hash.hash:
+                        return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(index.bucket_owners[slot])) or not proof_replay_trace_lookup_charge_amount(report, sview_len(trace.name))
+                        if index.bucket_owners[slot] == trace.name:
+                            return false if not proof_replay_trace_lookup_charge(report)
+                            index.next_indices[row] <- index.bucket_heads[slot]
+                            index.bucket_heads[slot] <- row
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed or probes > PROOF_REPLAY_KERNEL_FACT_ROOT_MAX_CLUSTER
+            index.complete <- true
+            true
+
+        def proof_replay_kernel_fact_root_index_ensure(report: mutable ProofReport&, index: mutable ProofReplayKernelFactRootIndex&) -> bool:
+            return index.complete if index.attempted and proof_replay_kernel_fact_root_index_dimensions_match(report, index)
+            proof_replay_kernel_fact_root_index_reset(index)
+            index.attempted <- true
+            index.report_identity <- (&report).cast[uintptr]
+            index.trace_count <- report.analysis_1.traces.records.count
+            index.kernel_node_count <- report.analysis_1.kernel.nodes.count
+            index.kernel_child_count <- report.analysis_1.kernel.children.count
+            proof_replay_kernel_fact_root_index_build(report, index)
+
+        def proof_replay_kernel_fact_root_index_find(report: mutable ProofReport&, owner: sview, root_hash: u32, index: mutable ProofReplayKernelFactRootIndex&) -> (complete: bool, head: usize):
+            count: usize = report.analysis_1.traces.records.count
+            capacity: usize = index.bucket_heads.count
+            return (false, count) if not index.complete or not proof_replay_kernel_fact_root_index_dimensions_match(report, index)
+            return (true, count) if count == 0
+            return (false, count) if capacity == 0 or capacity > PROOF_REPLAY_TRACE_INDEX_SLOT_BUDGET or index.bucket_hashes.count != capacity or index.bucket_root_hashes.count != capacity or index.bucket_owners.count != capacity or index.bucket_occupied.count != capacity or index.next_indices.count != count
+            return (false, count) if not proof_replay_trace_lookup_charge_amount(report, sview_len(owner))
+            key_hash: u32 = proof_expr_shape_mix(proof_replay_owner_hash(owner), root_hash.i64())
+            slot: mutable usize = (key_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_REPLAY_KERNEL_FACT_ROOT_MAX_CLUSTER |slot, key_hash, root_hash, owner, index, report, capacity, probes, count|:
+                return (false, count) if not proof_replay_trace_lookup_charge(report)
+                if not index.bucket_occupied[slot]:
+                    return (true, count)
+                if index.bucket_hashes[slot] == key_hash and index.bucket_root_hashes[slot] == root_hash:
+                    return (false, count) if not proof_replay_trace_lookup_charge_amount(report, sview_len(index.bucket_owners[slot])) or not proof_replay_trace_lookup_charge_amount(report, sview_len(owner))
+                    return (true, index.bucket_heads[slot]) if index.bucket_owners[slot] == owner
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, count) if probes > PROOF_REPLAY_KERNEL_FACT_ROOT_MAX_CLUSTER
+            (true, count)
+
+        def proof_replay_kernel_fact_root_index_chain_next(report: mutable ProofReport&, current: usize, index: ProofReplayKernelFactRootIndex&) -> (complete: bool, next: usize):
+            count: usize = report.analysis_1.traces.records.count
+            return (false, count) if current >= count or current >= index.next_indices.count or not proof_replay_trace_lookup_charge(report)
+            next: usize = index.next_indices[current]
+            return (false, count) if next >= current and next != count
+            return (true, count) if next >= count
+            (true, next)
+
+        def proof_replay_kernel_fact_root_candidate_matches_with_stack[@r](report: mutable ProofReport& @r, trace_index: usize, fact: usize, owner: sview, dependency_stack: darray[sview]&, revalidate_arena: bool, require_unconditional_source: bool, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global{Read,Write}]:
+            return false if trace_index >= report.analysis_1.traces.records.count
+            trace: ProofFactTrace = report.analysis_1.traces.records[trace_index]
+            if require_unconditional_source and trace.kind not in {"global-constant", "global-constant-qualified", "global-mutable-array-type", "global-mutable-array-index-bound", "const-enum-member-value", "precondition"}:
+                return false if not proof_replay_trace_lookup_charge(report)
+                return false
+            kernel_equality_work: mutable usize = 0
+            same_kernel_expression: mutable bool = false
+            if trace.kernel_expression < report.analysis_1.kernel.nodes.count:
+                if trace.kernel_expression == fact:
+                    return false if not proof_replay_trace_lookup_charge(report)
+                    same_kernel_expression <- true
+                else:
+                    equality_limit: usize = proof_replay_trace_lookup_remaining_work(report)
+                    return false if equality_limit == 0
+                    same_kernel_expression <- ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public_with_work(report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, trace.kernel_expression, fact, 0, equality_limit, &kernel_equality_work)
+            return false if not proof_replay_trace_lookup_charge_amount(report, kernel_equality_work)
+            return false if not same_kernel_expression
+            if require_unconditional_source and trace.kind == "precondition":
+                return (proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, trace_index, owner, 0, dependency_stack, revalidate_arena, active_certificates, validation_workspace, structural_cache, true) can Global{Read,Write})
+            return (proof_replay_kernel_trace_valid_memo(report, trace_index, owner, 0, dependency_stack, revalidate_arena, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
+
+        def proof_replay_kernel_fact_root_candidates_with_work(report: mutable ProofReport&, fact: usize, owner: sview, structural_cache: mutable ProofReplayStructuralValidationCache&) -> (complete: bool, head: usize):
+            count: usize = report.analysis_1.traces.records.count
+            return (false, count) if fact >= report.analysis_1.kernel.nodes.count or not proof_replay_kernel_fact_root_index_ensure(report, &structural_cache.fact_root_index)
+            return (true, count) if count == 0
+            root_hash: (complete: bool, supported: bool, hash: u32) = proof_replay_kernel_fact_root_hash_node(report, report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, fact, 0, &structural_cache.fact_root_index)
+            return (false, count) if not root_hash.complete
+            return (true, count) if not root_hash.supported
+            proof_replay_kernel_fact_root_index_find(report, owner, root_hash.hash, &structural_cache.fact_root_index)

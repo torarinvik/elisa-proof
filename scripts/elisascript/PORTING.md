@@ -6,10 +6,10 @@ output. Migrate and qualify one script at a time.
 
 The inventory covers the tracked and nonignored Python source files in this
 checkout. Ignored `build/` and `.codex-worktrees/` copies are generated build or
-worktree snapshots, not canonical source entries. As of 2026-10-15, all 575
+worktree snapshots, not canonical source entries. As of 2026-10-16, all 577
 canonical Python paths are represented by unique colocated `.elisascript`
 destination paths and current source hashes in `PORTING_INVENTORY.csv`; the
-inventory currently has one active unqualified candidate and 574 queued entries.
+inventory currently has one active unqualified candidate and 576 queued entries.
 
 Proof-specific ElisaScript ports and their tests stay in this repository, and
 each `.elisascript` counterpart lives beside its original Python script. The
@@ -18,7 +18,7 @@ tooling work; do not put Elisa-Proof scripts there.
 
 | Python reference | ElisaScript counterpart | Status |
 | --- | --- | --- |
-| `scripts/test_report_output_loop_layout.py` | `scripts/test_report_output_loop_layout.elisascript` | Active source port, colocated with its Python reference. The candidate resolves the original launch spelling with `path_real(Script::invocation_path())`, matching Python `Path.resolve()` when symlink components and `..` interact. It uses the `read_text_bounded` builtin backed by the shared stable UTF-8 reader, then checks four fixed fragments with a local KMP matcher with a fixed stack table so repeated near-matches stay linear without per-search allocation. The source parity guard pins repository-root derivation, fragments, diagnostics, strict UTF-8, reader limits and stability checks, and the matcher. Current reader source rejects empty/NUL paths and UTF-8 path views of 4,096 bytes or more; all post-open cleanup paths now propagate close failure as a read error. Positive short reads continue through EOF within the byte cap, and consecutive `EINTR` retries remain bounded; Python uses one pre-sized bytearray bounded by the opened-file size, avoiding retention of a separate bytes object for each positive short read. Regressions cover one-byte reads, a full-limit file delivered in 512-byte reads with requests capped at 16,384 bytes, transient and repeated EINTR, same-inode size drift before open, growth during reading, same-size metadata drift at the intermediate fstat, and descriptor closure on errors. The current Python and ElisaScript readers align on opened-size bounds and short-request metadata checks. Runtime parity is still unqualified, so retain Python. |
+| `scripts/test_report_output_loop_layout.py` | `scripts/test_report_output_loop_layout.elisascript` | Active source port, colocated with its Python reference. The candidate uses `script_invocation.resolve()` with `PathReal` mode 1, matching Python's default `Path.resolve(strict=False)` handling of symlinks, missing components, and dangling targets; symlink loops follow Python 3.13+ behavior by retaining the repeated link spelling and continuing through remaining components. Resolution remains bounded by POSIX path size, symlink-count, and traversal-step limits. The candidate uses the `read_text_bounded` builtin backed by the shared stable UTF-8 reader, then checks four fixed fragments with a local KMP matcher with a fixed stack table so repeated near-matches stay linear without per-search allocation. The source parity guard pins repository-root derivation, fragments, diagnostics, strict UTF-8, reader limits and stability checks, and the matcher. Current reader source rejects empty/NUL paths and UTF-8 path views of 4,096 bytes or more; all post-open cleanup paths now propagate close failure as a read error. Positive short reads continue through EOF within the byte cap, and consecutive `EINTR` retries remain bounded; Python uses one pre-sized bytearray bounded by the opened-file size, avoiding retention of a separate bytes object for each positive short read. Regressions cover one-byte reads, a full-limit file delivered in 512-byte reads with requests capped at 16,384 bytes, transient and repeated EINTR, same-inode size drift before open, growth during reading, same-size metadata drift at the intermediate fstat, and descriptor closure on errors. The current Python and ElisaScript readers align on opened-size bounds and short-request metadata checks. Runtime parity is still unqualified, so retain Python. |
 | `scripts/test_global_mutable_array_owner_identity.py` | queued | No candidate promoted until the active port has parity evidence. |
 | `scripts/test_resource_call_storage_confinement_static.py` | queued | No candidate promoted until the active port has parity evidence. |
 
@@ -503,6 +503,13 @@ validation identity gate still refuses before compilation. Source API
 consistency is improved, but the active Python/ElisaScript port stays
 `active_unqualified` until a source-matched runtime check succeeds.
 
+### Bounded-reader API simplification — 2026-10-15
+
+The generic `read_utf8[T: Str]` entry point was subsequently removed. Current
+callers use `read_utf8_path_text(sview, limit)`, which validates path text
+before allocating the POSIX path buffer. Do not treat the preceding audit's
+statement that the generic wrapper remains available as current API guidance.
+
 ### Current2 bounded-runner source trace — 2026-10-15
 
 A read-only inspection of `.validation/native/port-build-current2-20261015`
@@ -529,11 +536,11 @@ widened that protocol to include `Global{Read,Write}` and
 This rules out the generic wrapper as the cause of an error in the retained
 current2 source snapshot; the snapshot is stale relative to HEAD.
 
-The generic `read_utf8[T: Str]` wrapper formats `T`, so its effect row now
-includes `Console.Format` and `Unsafe.PointerArithmetic`, matching the current
-`Str.__cast__` protocol alongside the existing global, allocation, and pointer
-cast effects. This is source alignment only; no source-matched compiler has
-checked the signature. Runtime parity remains unqualified.
+At that snapshot, the generic `read_utf8[T: Str]` wrapper formatted `T`, so its
+effect row included `Console.Format` and `Unsafe.PointerArithmetic`. That wrapper
+has since been removed as recorded in the bounded-reader API update above. The
+current reader uses the path-text API; source API consistency does not qualify
+runtime parity, which remains unverified.
 
 The Python reference and shared ElisaScript reader accept positive short reads
 until EOF, bounded by the input byte limit and file-stability checks. Repeated
@@ -676,3 +683,363 @@ The four candidate Python/source checks pass, and an independent source audit
 found no concrete mismatch. No candidate-specific runtime execution is
 available, so leave this candidate `active_unqualified`, keep Python
 authoritative, and do not advance the queue.
+
+### Run-only launcher dependency cut — 2026-10-15
+
+In the sibling `elisa-script` checkout, the combined runner is now split into
+`src/ir/runner_program.elisa` and `src/ir/runner_tests.elisa`; the existing
+`runner.elisa` facade includes both, preserving the full API. A new
+`execution_program.elisa` omits the script-test state machine, test adapters,
+CLI parser, and report-formatting modules. The full `execution.elisa` and
+`ir.elisa` facades retain their CLI and test APIs. The new
+`src/driver/elisascript_run_only.elisa` uses standard program execution,
+including interpreter fallback for `ReadBoundedText`. This is source-only
+dependency separation; the launcher has not been compiled or run with the
+pinned compiler. The active candidate remains `active_unqualified`, Python
+remains authoritative, and no queued port should start until this launcher has
+source-matched runtime parity evidence.
+
+### Run-only port-guard alignment — 2026-10-15
+
+The active candidate's source-parity guard now pins the actual run-only include
+chain (`elisascript_run_only` -> `execution_program` -> `runner_program`) and
+checks that this facade includes the shared bounded reader while excluding the
+full runner's test and CLI adapters. It also pins the current execution
+boundary: `ReadBoundedText` is explicitly excluded from direct bytecode, and
+bytecode execution routes unsupported modules through the verified interpreter
+fallback. This closes a source-guard coverage gap only; it does not establish
+launcher compilation or runtime parity. Python remains authoritative and the
+candidate remains `active_unqualified`.
+
+### Direct bounded-read support — 2026-10-15
+
+The direct bytecode path now implements `ReadBoundedText` through the shared
+`EsBoundedText::read_utf8_path_text` reader. It preserves the interpreter's
+runtime type checks, rejects negative or non-round-tripping limits, and maps
+reader failures to `InterpretError.FileIo`. The source-parity guard now checks
+this direct path and still checks interpreter fallback for other unsupported
+modules. This is source-only evidence: the launcher has not been compiled or
+run with the pinned compiler. The candidate remains `active_unqualified` and
+Python remains authoritative until matched runtime parity is established.
+
+### 2026-10-16: non-strict Path.resolve integration and bounded launcher compile
+
+The active candidate now calls `script_invocation.resolve()` directly. The
+ElisaScript `Path.resolve()` builtin is carried as `PathReal` mode 1 through
+registry lookup, lowering, IR validation, and both interpreter and direct
+bytecode dispatch; mode 0 remains strict `.realpath()` behavior. The source
+parity guard pins this mode and the candidate call. The port targets Python
+3.13+ `Path.resolve(strict=False)` semantics: symlink loops leave the repeated
+path spelling in place and resolution continues through remaining components,
+as documented in [Python's pathlib reference](https://docs.python.org/3.13/library/pathlib.html#pathlib.Path.resolve).
+The resolver remains subject to documented POSIX, path-size, 1,024-symlink,
+and 16,384-step bounds.
+
+A bounded lowering attempt used the clean pinned Core compiler at revision
+`6dbe19f8c7bf0ed9a3c896d1362f6545b81d60d5` (binary SHA-256
+`61e51730ea40a709cd7baba8576ca6571311ea3cb7a00a23307301bd44bce412`). The
+first run found the reserved identifier `stack` in the new resolver; it was
+renamed to `pending_tokens`. The next run passed that parser error but reached
+the 512 MiB sampled RSS guard at 524,848 KiB after eight samples and was
+terminated with status 137. It produced no lowered launcher. The watchdog did
+not report timeout or output-limit breach, and no compiler process or emergency
+stop latch remained after cleanup. A source-matched launcher and runtime parity
+are still unavailable; keep Python authoritative and the candidate
+`active_unqualified`.
+
+A subsequent smaller guarded lowering passed for the exact 3,620-byte active
+candidate at SHA-256
+`d84ef70f2d330bd74ec7d810a88ce4322f332aa045d0b08e7e2e8983be93dc6a`, using
+the same pinned Core compiler identity; it peaked at 7,296 KiB RSS and emitted
+no diagnostics. The retained log SHA-256 is
+`afcaecef5a4f80e820188241624db5523bf990dd42e33c898b34b12dcaf8c18d`. This
+qualifies candidate lowering only. Focused IR, interpreter, and direct-bytecode
+regressions now cover strict versus non-strict mode encoding, rejection of
+unknown IR modes, missing components, and a dangling symlink followed by `..`;
+they have not been executed. The self-symlink and two-link-cycle regressions now
+pin Python 3.13+ loop fallback paths in the interpreter and direct-bytecode
+suites. These updated tests have not been executed. The candidate remains
+`active_unqualified`, and Python remains authoritative until source-matched
+runtime parity passes.
+
+### Path.resolve runtime smoke admission — 2026-10-16
+
+Two attempts to compile the focused `test/driver/elisascript_path_resolve_runtime_smoke.elisascript`
+fixture with the same pinned compiler were stopped by the 512 MiB RSS guard
+before the test executed. The first fixture (3,787 bytes) peaked at 534,768
+KiB; after removing its bytecode dependencies, the 3,078-byte fixture at
+SHA-256 `a86eb8dc79e890bc1c0bf40bb0b099d95a10c87acd4d856e12b748a499669ea9`
+peaked at 544,064 KiB. Neither run hit the time or output guard, and neither
+produced execution evidence. The metadata and compiler logs are retained under
+the matching `.validation/952d78d2ef9c8ff90936e94b8c1156608b52c7cdab34fe6a097ac838d3ae6ecc/logs/`
+directory in `elisa-script`. Its validation stop latch remains set with reason
+`run_bounded_test rss_guard pid=94432 rss_kb=544064 limit_kb=524288`. Do not
+count this fixture as a passing regression; runtime parity remains
+unqualified, and Python remains authoritative.
+
+### Invocation-path composition regression — 2026-10-16
+
+Added a bytecode/interpreter differential regression to
+`elisa-script/test/ir/elisascript_bytecode_test.elisa`. It verifies that
+`Script::invocation_path()` preserves a symlink launch spelling and that
+`Path.resolve()` follows that spelling to the canonical target in both engines.
+The active-port source guard now requires this case. The guard passes, but the
+runtime test has not run; the validation stop latch above still applies. The
+candidate remains `active_unqualified`, and Python remains authoritative.
+
+### v18 compiler effect-diagnostic source audit — 2026-10-16
+
+A read-only comparison found a concrete vendored compiler migration gap behind
+the v18 `Global.Read` diagnostics. `vendor/elisa-compiler/SOURCE.md` records the
+parser snapshot at commit `e56d6f2` from 2026-08-27. In that vendored snapshot,
+`parser_core_cursor.elisa` calls `statement`, `skip_trailing_can`, and related
+effectful helpers without local `can Global{Read,Write}` scopes. The current
+`../Elisa-compiler/src/parser/parser_core_cursor.elisa` has explicit scopes at
+the corresponding call sites, including `statement`, `skip_trailing_can`, and
+`consume_indented_statement`. This confirms that at least this diagnostic
+cluster is a real missing-grant migration in the adapted vendor tree, not stale
+effect diagnostics. The v18 log contains 969 diagnostics total; 936 are
+`requires can[Global]` call-site diagnostics across 40 files. The remaining
+files still need source-by-source comparison before classifying every error.
+
+The next source-only step is to compare those call sites against the current
+compiler and migrate the necessary local effect scopes while preserving
+ElisaScript-specific parser/runtime adaptations. Do not replace the vendored
+compiler wholesale. No build or tests were run for this audit. The candidate
+remains `active_unqualified`, and Python remains authoritative until a
+source-matched launcher establishes runtime parity.
+
+### Parser effect-scope source update — 2026-10-16
+
+The source-only compatibility pass has added matching `Global{Read,Write}`
+scopes in the vendored `parser_core_blocks.elisa`, `parser_expr.elisa`, and
+`parser_stmt_control_flow.elisa` call sites, alongside the earlier
+`parser_core_cursor.elisa` update. The affected parser operations were matched
+against their current compiler call sites; the pinned vendor parser logic and
+AST construction were preserved. `git diff --check` passes for these source
+changes. The v18 diagnostic log predates the edits and cannot establish the
+current remaining diagnostic count. No build or tests were run; the launcher
+and active Python/ElisaScript runtime parity are still unqualified.
+
+The same source-only comparison now covers `parser_stmt.elisa`: all 58 call
+sites named in its v18 diagnostics have matching `Global{Read,Write}` scopes,
+consistent with the current compiler's split parser implementations. The
+diagnostic log predates these edits; no build or tests were run, and the active
+Python/ElisaScript runtime parity remains unqualified.
+
+`parser_expr_literals.elisa` now has the same source-only treatment for its 47
+v18 call-site diagnostics. Every helper has corresponding scoped calls in the
+current compiler's expression parser. No build or tests were run, so the stale
+log cannot report the current diagnostic count and Python remains authoritative.
+
+The declaration dispatcher `parser_decl_dispatch.elisa` now also has local
+`Global{Read,Write}` scopes at the 29 call sites listed in the preserved
+current3 diagnostics. The source file matched that immutable snapshot before
+editing, and the corresponding parser operations in `../Elisa-compiler` use
+the same explicit scopes. The parser logic and AST construction were not
+changed. A source check confirms every preserved diagnostic site is scoped,
+and `git diff --check` passes; no current-source build or runtime test was run.
+The launcher and Python/ElisaScript runtime parity remain unqualified.
+
+The same pass added local `Global{Read,Write}` scopes at the 26 preserved
+diagnostic sites in `parser_stmt_control.elisa`. Its vendor source matched the
+immutable current3 snapshot before editing, and every affected call name has a
+scoped counterpart in `../Elisa-compiler/src/parser/parser_stmt_control.elisa`.
+The source check covers all 26 sites; `git diff --check` passes. No compiler
+build or runtime test was run, so the active script port remains unqualified.
+
+`parser_stmt_machine_from.elisa` now has local `Global{Read,Write}` scopes at
+all 16 sites in the preserved current3 diagnostics. Its vendored source matched
+that immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser. The source check and `git diff
+--check` pass; no current-source build or runtime test was run, so the active
+script port remains unqualified.
+
+`parser_stmt_when.elisa` now has local `Global{Read,Write}` scopes at all 15
+sites in the preserved current3 diagnostics. Its vendored source matched that
+immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser. The source check and `git diff
+--check` pass; no current-source build or runtime test was run, so the active
+script port remains unqualified.
+
+`parser_types_function.elisa` now has local `Global{Read,Write}` scopes at all
+15 sites in the preserved current3 diagnostics. Its vendored source matched
+that immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_decl_module.elisa` now has local `Global{Read,Write}` scopes at all 13
+sites in the preserved current3 diagnostics. Its vendored source matched that
+immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_types_struct.elisa` now has local `Global{Read,Write}` scopes at all
+12 sites in the preserved current3 diagnostics. Its vendored source matched
+that immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_types_signature.elisa` now has local `Global{Read,Write}` scopes at all
+10 sites in the preserved current3 diagnostics. Its vendored source matched
+that immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_stmt_pattern.elisa` now has local `Global{Read,Write}` scopes at all
+9 sites in the preserved current3 diagnostics. Its vendored source matched
+that immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_stmt_machine_arms.elisa` now has local `Global{Read,Write}` scopes at
+all 10 preserved current3 diagnostic sites, including the callback-argument
+site on `declarations.push(declaration)`. The vendored file matched its
+snapshot before editing; every parser helper and the push expression have
+scoped counterparts in the current compiler. The source check and `git diff
+--check` pass; no current-source build or runtime test was run, so the active
+script port remains unqualified.
+
+`parser_stmt_with.elisa` now has local `Global{Read,Write}` scopes at all 7
+sites in the preserved current3 diagnostics. Its vendored source matched that
+immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_stmt_machine_stmt.elisa` now has local `Global{Read,Write}` scopes at
+all 7 sites in the preserved current3 diagnostics. Its vendored source matched
+that immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_types_enum.elisa` now has local `Global{Read,Write}` scopes at all 6
+sites in the preserved current3 diagnostics. Its vendored source matched that
+immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_decl.elisa` now has local `Global{Read,Write}` scopes at all 7 sites
+in the preserved current3 diagnostics. Its vendored source matched that
+immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_decl_impl.elisa` now has local `Global{Read,Write}` scopes at all 5
+sites in the preserved current3 diagnostics. Its vendored source matched that
+immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_decl_law.elisa` now has local `Global{Read,Write}` scopes at all 5
+sites in the preserved current3 diagnostics. Its vendored source matched that
+immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_decl_typestate.elisa` now has local `Global{Read,Write}` scopes at all
+5 sites in the preserved current3 diagnostics. Its vendored source matched that
+immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_types_aggregate.elisa` now has local `Global{Read,Write}` scopes at all
+5 sites in the preserved current3 diagnostics. Its vendored source matched that
+immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+`parser_types_extern.elisa` now has local `Global{Read,Write}` scopes at all 3
+sites in the preserved current3 diagnostics. Its vendored source matched that
+immutable snapshot before editing, and every affected helper has a scoped
+counterpart in the current compiler parser sources. The source check and `git
+diff --check` pass; no current-source build or runtime test was run, so the
+active script port remains unqualified.
+
+### Retained launcher artifact audit — 2026-10-16
+
+The executable files under `../elisa-script/.validation/native` are not
+source-matched launchers for the current ElisaScript checkout at
+`b09068b140afe9b64e343cdbcf0a53438095b10a`. Their recorded SHA-256 values are
+`80fe9f28cd0d36434e0bae68267b8652c833447c1b6bd01c0e4eaf7a8eca94bf`
+(`elisascript`, modified 2026-09-17),
+`40710d596e27c6fbbf59a2edab863fc6371351fccdb4ac3bf440349dd3c1a2e2`
+(`elisascript-current`, modified 2026-09-23),
+`b873e3c98c0cc0df6ca6de0e017e12528cb123f42293c9dec51b5627b1b28f96`
+(`elisascript-current-rebuilt`, modified 2026-09-23), and
+`143b22a691f88f5d17eadf60b2f5bbad97981e1928feed13ae36ab047e8b91e5`
+(`elisascript.before-block-expressions-20260917`, modified 2026-09-17). The
+October 15 bounded launcher reports exited 1 and produced no executable in
+their snapshots. Do not use any retained binary as runtime parity evidence for
+the active report-loop candidate; Python remains authoritative.
+
+### Bounded symlink memo lookup — 2026-10-16
+
+The active candidate's non-strict path resolver now indexes symlink-resolution
+memos with a fixed 2,048-slot open-addressed table instead of scanning all
+previous symlinks for every lookup. Candidate paths are hashed once and still
+compared by exact path contents after a hash match. Each lookup probes at most
+16 slots; an exhausted probe budget fails closed with the existing filesystem
+error path. The table and symlink limits bound storage and lookup work, while
+preserving the resolver's existing fallback behavior. This is source-only
+progress: no compiler or runtime validation was run, and the candidate remains
+`active_unqualified` with Python authoritative.
+
+### Bounded reader source parity audit — 2026-10-16
+
+A source-only comparison of `test_report_output_loop_layout.py`'s
+`read_bounded_utf8` with the current `EsBoundedText::read_utf8_path_text`
+implementation found aligned checks for valid UTF-8 paths under the shared
+4,096-byte bound: regular-file admission, nonblocking open, same-file checks,
+initial-size and caller byte limits, short reads, small-buffer metadata checks,
+final descriptor/path stability, close handling, and UTF-8 validation. This
+does not establish runtime parity. The available v18 compiler log predates the
+October 16 path-resolver edits and cannot qualify the current interpreter
+source; no build or runtime check was run. Keep Python authoritative and the
+candidate `active_unqualified` until a source-matched launcher can run the
+differential checks.
+
+### Interpreter local global-effect scopes — 2026-10-16
+
+The current `elisa-script/src/ir/interpret.elisa` source had direct calls to
+vendored runtime helpers that require `Global{Read,Write}`: `string_view_copy`
+inside `permanent_text_copy`, `ctx_fstr_alloc` inside `decode_literal_text`,
+`int_to_string` inside `evaluate_format_int`, and
+`float_to_string_scratch`/`ctx_fstr_alloc` inside `evaluate_format_float`.
+`ctx_fstr_alloc` was also unscoped in `evaluate_text_case`, `evaluate_join`,
+and `nul_terminated_text`, where it builds a POSIX string. These sequences now
+have local scopes for the effects, preserving the helpers' declared effect rows
+and keeping callers of `nul_terminated_path` effect-narrow. `git diff --check`
+passes for the source edits. This is source-only progress: no build or runtime
+test was run, so it does not update the active report-loop candidate's
+`active_unqualified` status or make Python safe to remove.
+
+### Validation latch blocks runtime qualification — 2026-10-16
+
+The active candidate's source parity guard passes. An initial bounded lowering
+request was refused before compiler launch because the shared
+`elisascript-validation.disabled` latch recorded a prior test-emitter RSS breach
+at 544,064 KiB against the 524,288 KiB limit. Review of both retained incidents
+confirmed completed wrappers, exit status 137, peaks of 534,768 KiB and
+544,064 KiB, and no timeout or output-limit breach. The compiler processes had
+terminated and no validation lease remained, so the reviewed latch was cleared.
+
+A subsequent lowering request for the current 3,620-byte candidate snapshot
+(SHA-256 `d84ef70f2d330bd74ec7d810a88ce4322f332aa045d0b08e7e2e8983be93dc6a`)
+was refused before compiler launch by the provenance gate: the canonical
+Elisa-core checkout is dirty and ahead of its remote branch. No lease or new
+RSS latch was created. The candidate remains `active_unqualified`; source guards
+pass, but there is no current-source lowering or runtime parity result, and
+Python remains authoritative.

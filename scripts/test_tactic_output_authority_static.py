@@ -12,6 +12,7 @@ CHECKED_VIEW_ADMISSION = ROOT / "src/proof/model/checked_view_admission.elisa"
 REPLAY_API = ROOT / "src/proof/replay/api.elisa"
 CLI_SUPPORT = ROOT / "src/app/cli_support.elisa"
 OUTPUT_STATUS = ROOT / "src/app/output_replay_status.elisa"
+TACTIC_JSON = ROOT / "src/proof/tactic_json.elisa"
 
 
 def function_body(name: str) -> str:
@@ -26,6 +27,20 @@ def function_body(name: str) -> str:
                 body.append(following)
             return "\n".join(body)
     raise AssertionError(f"function {name} not found in {SOURCE}")
+
+
+def tactic_json_body(name: str) -> str:
+    lines = TACTIC_JSON.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if re.match(rf"\s*def {re.escape(name)}\b", line):
+            indent = len(line) - len(line.lstrip())
+            body = [line]
+            for following in lines[index + 1 :]:
+                if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                    break
+                body.append(following)
+            return "\n".join(body)
+    raise AssertionError(f"function {name} not found in {TACTIC_JSON}")
 
 
 admission = function_body("proof_tactic_result_admitted")
@@ -69,13 +84,57 @@ target_run = (ROOT / "src/proof/tactic_json.elisa").read_text(encoding="utf-8").
 assert "proof_checked_view_goal_source_admissions_with_work(checked_view, goal_id, source_work)" in target_run
 assert "not status.complete or not status.source_admitted" in target_run
 assert "source_admitted: bool)" in target_run
+assert "kernel_work: mutable usize&" in target_run
+assert "kernel_work >= ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT" in target_run
+assert "tree.total_kernel_replay_work <- kernel_work" in target_run
+assert "kernel_work <- tree.total_kernel_replay_work" in target_run
+tactic_source_candidate = tactic_json_body("proof_tactic_json_run_source_candidate")
+assert "tree.total_kernel_replay_work != 0" not in tactic_source_candidate
+
+# Imported quantifier names originate in the shorter-lived JSON arena. Retain only static
+# spellings in EnumAnnotation, and keep the iterative tree verifier on its shared mutable meter.
+annotation_parse = tactic_json_body("proof_tactic_json_parse_annotations_with_work")
+assert 'name.value == "forall"' in annotation_parse
+assert 'name.value == "exists"' in annotation_parse
+assert 'name: stored_name' in annotation_parse
+assert 'name: name.value' not in annotation_parse
+tree_certificate = tactic_json_body("proof_tactic_json_tree_certificate_replay")
+assert "replay_work: mutable usize& = &tree.total_kernel_replay_work" in tree_certificate
+assert "proof_tactic_kernel_trace_replay_with_work(leaf, annotations, replay_work)" in tree_certificate
+assert "proof_tactic_kernel_replay_with_trace_work(leaf, annotations, replay_work)" in tree_certificate
+assert "annotations, replay_work)" in tree_certificate
+actions = tactic_json_body("proof_tactic_json_run_actions")
+assert "json_exhausted" not in actions
+assert "return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT" in actions
+source_status = tactic_json_body("proof_tactic_json_run_source_with_status")
+assert "proof_tactic_json_run_source_candidate(root, source_state, annotations, state, tree, scratch, report, goal_id) can Global{Read,Write}" in source_status
+source_target = tactic_json_body("proof_tactic_json_run_source")
+assert "proof_tactic_json_run_source_with_target_work(root, source_state, annotations, state, tree, scratch, checked_view, goal_id, &source_work, &kernel_work) can Global{Read,Write}" in source_target
+
 repair_check = (ROOT / "src/app/repair.elisa").read_text(encoding="utf-8").split(
     "def proof_repair_check_candidate", 1
 )[1].split("def proof_repair_push_actions", 1)[0]
 assert "source_work: mutable usize&" in repair_check
+assert "kernel_work: mutable usize&" in repair_check
+assert "proof_tactic_source_state_kernel_matches_with_trace_work(report, goal_id, source_facts, source_goal.value, report.source.source_annotations, kernel_work)" in repair_check
 assert "proof_tactic_json_run_source_with_target_work" in repair_check
+assert "candidate_tree.total_kernel_replay_work <- kernel_work" in repair_check
+assert "kernel_work <- candidate_tree.total_kernel_replay_work" in repair_check
+assert "if kernel_work >= ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT and not admitted:" in repair_check
+assert "usable <- false" in repair_check
 assert "usable <- candidate_run.source_admitted" in repair_check
+repair_search = (ROOT / "src/app/repair.elisa").read_text(encoding="utf-8").split(
+    "def proof_repair_search", 1
+)[1].split("def proof_push_repair_goal", 1)[0]
+assert "kernel_work: mutable usize&" in repair_search
+assert repair_search.count("proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated, source_work, kernel_work)") == 3
 cli_run = SOURCE.read_text(encoding="utf-8")
+cli_main = (ROOT / "src/app/cli.elisa").read_text(encoding="utf-8")
+assert "repair_kernel_work: mutable usize = 0" in cli_main
+assert cli_main.count("proof_repair_search(checked_view,") == 2
+assert "source_goal_admissions_complete, replay_work, repair_kernel_work|:" in cli_main
+assert cli_main.count("goal_index, replay_work, repair_kernel_work)") == 1
+assert cli_main.count("focused_goal_id, replay_work, repair_kernel_work)") == 1
 assert "proof_tactic_json_run_source_with_status" in cli_run
 assert "if not tactic_status_ready:" in cli_run
 assert "proof_checked_view_tactic_status_snapshot_with_work(checked_view, target_goal_id, &tactic_status_work)" in cli_run

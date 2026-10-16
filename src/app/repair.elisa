@@ -213,7 +213,8 @@ def proof_repair_strip_outer_parens(expression: Ast::Expr) -> (complete: bool, v
                 return (true, current)
     return (false, current)
 
-def proof_repair_check_candidate[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize, repair_state: darray[u8]&, script_text: darray[u8]&, context_prevalidated: bool, source_work: mutable usize&) -> (usable: bool, admitted: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global{Read,Write}]:
+def proof_repair_check_candidate[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize, repair_state: darray[u8]&, script_text: darray[u8]&, context_prevalidated: bool, source_work: mutable usize&, kernel_work: mutable usize&) -> (usable: bool, admitted: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global{Read,Write}]:
+    return (false, false) if kernel_work >= ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT
     report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
     candidate_arena: mutable Arena = zeroed
     usable: mutable bool = false
@@ -235,7 +236,7 @@ def proof_repair_check_candidate[@view](checked_view: ProofCheckedView[view]& @v
                 source_bound <- not proof_source_tactic_expression_has_overloaded_operator(source_goal.value, report.source.source_primitive_operator_mask)
                 for fact in source_facts |fact, report, source_bound|:
                     source_bound <- false if proof_source_tactic_expression_has_overloaded_operator(fact, report.source.source_primitive_operator_mask)
-                source_bound <- false if not proof_tactic_source_state_kernel_matches(report, goal_id, source_facts, source_goal.value)
+                source_bound <- false if not proof_tactic_source_state_kernel_matches_with_trace_work(report, goal_id, source_facts, source_goal.value, report.source.source_annotations, kernel_work)
             usable <- source_bound
         if usable:
             parsed_candidate: JsonParseResult[candidate_arena] = (json_parse_checked(&candidate_arena, ElisaProofJson::bytes_range_ref(script_text, 0, script_text.count)) can Global{Read,Write})
@@ -244,10 +245,14 @@ def proof_repair_check_candidate[@view](checked_view: ProofCheckedView[view]& @v
                 candidate_scratch: mutable darray[ProofTacticJsonBranchScratch] @candidate_arena = []
                 candidate_tree: mutable ProofTacticJsonTree& @candidate_arena = proof_tactic_tree_in_arena(&candidate_arena)
                 candidate_annotations: mutable darray[Ast::EnumAnnotation] @candidate_arena = []
-                candidate_run: (result: ProofTacticJsonResult, source_admitted: bool) = (proof_tactic_json_run_source_with_target_work(ElisaProofJson::from_result(parsed_candidate), ElisaProofJson::from_result(parsed_state), &candidate_annotations, candidate_state, candidate_tree, &candidate_scratch, checked_view, goal_id, source_work) can Global{Read,Write})
+                candidate_tree.total_kernel_replay_work <- kernel_work
+                candidate_run: (result: ProofTacticJsonResult, source_admitted: bool) = (proof_tactic_json_run_source_with_target_work(ElisaProofJson::from_result(parsed_candidate), ElisaProofJson::from_result(parsed_state), &candidate_annotations, candidate_state, candidate_tree, &candidate_scratch, checked_view, goal_id, source_work, kernel_work) can Global{Read,Write})
+                kernel_work <- candidate_tree.total_kernel_replay_work
                 usable <- candidate_run.source_admitted
                 candidate_result: ProofTacticJsonResult = candidate_run.result
                 admitted <- candidate_result.valid and candidate_result.solved and candidate_result.trace_replayed and candidate_result.kernel_trace_replayed and candidate_result.kernel_replayed and candidate_result.certificate_replayed
+                if kernel_work >= ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT and not admitted:
+                    usable <- false
     (arena_free(&candidate_arena) can Global{Read,Write})
     return (usable, admitted)
 
@@ -325,7 +330,7 @@ def proof_repair_push_script_text(buffer: mutable darray[u8]&, report: ProofRepo
 # One goal's bounded search, shared by the single-goal and whole-file repair modes. It reports only
 # what was tried and which candidate the *checked engine* accepted; it never reaches a verdict of
 # its own. Rewrites are generated only from explicit equalities in this goal's own fact list.
-def proof_repair_search[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize, source_work: mutable usize&) -> (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool, has_apply: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global{Read,Write}]:
+def proof_repair_search[@view](checked_view: ProofCheckedView[view]& @view, goal_id: usize, source_work: mutable usize&, kernel_work: mutable usize&) -> (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool, has_apply: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global{Read,Write}]:
     source_status: (complete: bool, replayed: bool, goal_source_admitted: bool, facts_source_admitted: bool, source_admitted: bool, proven: bool, producer_claim: bool) = proof_checked_view_attempt_status_snapshot_with_work(checked_view, goal_id, source_work)
     return (false, 0, 0, false, "", 0, false, false, false) if not source_status.complete or not source_status.source_admitted
     report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
@@ -380,12 +385,12 @@ def proof_repair_search[@view](checked_view: ProofCheckedView[view]& @view, goal
         repair_store: Ast::Node.Store[Local] = Ast::Node.Store(repair_region)
         in repair_store:
             if repair_state.count > 0:
-                for candidate_index in 0..<base_candidates.count |candidate_index, base_candidates, repair_state, report, checked_view, repaired, searched, winning, goal_id, candidate_context_usable, candidate_context_prevalidated, source_work|:
+                for candidate_index in 0..<base_candidates.count |candidate_index, base_candidates, repair_state, report, checked_view, repaired, searched, winning, goal_id, candidate_context_usable, candidate_context_prevalidated, source_work, kernel_work|:
                     break if repaired or not candidate_context_usable
                     candidate: sview = base_candidates[candidate_index]
                     script_text: mutable darray[u8] = []
                     proof_repair_push_script_json(&script_text, goal_id, candidate)
-                    candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated, source_work) can Global{Read,Write})
+                    candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated, source_work, kernel_work) can Global{Read,Write})
                     if not candidate_check.usable:
                         exhaustive <- false
                         candidate_context_usable <- false
@@ -421,12 +426,12 @@ def proof_repair_search[@view](checked_view: ProofCheckedView[view]& @view, goal
                                     break
                                 relevant_apply_facts <- relevant_apply_facts + 1
                                 candidate_count <- candidate_count + apply_closers.count
-                                for closer_index in 0..<apply_closers.count |closer_index, fact_index, apply_closers, repair_state, report, checked_view, goal_id, repaired, searched, winning, winning_fact_index, has_apply, candidate_context_usable, candidate_context_prevalidated, source_work|:
+                                for closer_index in 0..<apply_closers.count |closer_index, fact_index, apply_closers, repair_state, report, checked_view, goal_id, repaired, searched, winning, winning_fact_index, has_apply, candidate_context_usable, candidate_context_prevalidated, source_work, kernel_work|:
                                     break if repaired or not candidate_context_usable
                                     closer: sview = apply_closers[closer_index]
                                     script_text: mutable darray[u8] = []
                                     proof_repair_push_indexed_apply_script_json(&script_text, goal_id, fact_index, closer)
-                                    candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated, source_work) can Global{Read,Write})
+                                    candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated, source_work, kernel_work) can Global{Read,Write})
                                     if not candidate_check.usable:
                                         exhaustive <- false
                                         candidate_context_usable <- false
@@ -467,12 +472,12 @@ def proof_repair_search[@view](checked_view: ProofCheckedView[view]& @view, goal
                                     reverse: bool = direction == 1
                                     continue if reverse and not right_to_left.changed
                                     continue if not reverse and not left_to_right.changed
-                                    for closer_index in 0..<rewrite_closers.count |closer_index, direction, reverse, fact_index, rewrite_closers, repair_state, report, checked_view, goal_id, repaired, searched, winning, winning_fact_index, winning_reverse, has_rewrite, exhaustive, candidate_context_usable, candidate_context_prevalidated, source_work|:
+                                    for closer_index in 0..<rewrite_closers.count |closer_index, direction, reverse, fact_index, rewrite_closers, repair_state, report, checked_view, goal_id, repaired, searched, winning, winning_fact_index, winning_reverse, has_rewrite, exhaustive, candidate_context_usable, candidate_context_prevalidated, source_work, kernel_work|:
                                         break if repaired or not candidate_context_usable
                                         closer: sview = rewrite_closers[closer_index]
                                         script_text: mutable darray[u8] = []
                                         proof_repair_push_indexed_script_json(&script_text, goal_id, fact_index, reverse, closer)
-                                        candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated, source_work) can Global{Read,Write})
+                                        candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(checked_view, goal_id, repair_state, script_text, candidate_context_prevalidated, source_work, kernel_work) can Global{Read,Write})
                                         if not candidate_check.usable:
                                             exhaustive <- false
                                             candidate_context_usable <- false

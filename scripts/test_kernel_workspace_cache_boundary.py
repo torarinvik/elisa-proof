@@ -114,6 +114,22 @@ for name in workspace_api_names:
     else:
         assert "arena_valid_with_workspace_limit" not in endpoint, name
 
+# Goal and quantifier APIs reuse a workspace across proof roots, so arena admission
+# must debit the cumulative arena and goal-work meters instead of receiving a fresh
+# per-call validation allowance on every query.
+for name in (
+    "proof_kernel_replay_goal_report_with_workspace",
+    "proof_kernel_replay_goal_report_status_with_workspace",
+    "proof_kernel_replay_quantifier_report_with_workspace",
+):
+    endpoint = body(api_path, name)
+    assert "proof_kernel_replay_arena_valid_with_goal_work_and_workspace(" in endpoint, name
+    assert "&workspace.kernel_goal_work_used" in endpoint, name
+    assert "proof_kernel_replay_arena_valid_with_workspace(" not in endpoint, name
+
+goal_status_endpoint = body(api_path, "proof_kernel_replay_goal_report_status_with_workspace")
+assert "arena_exhausted or proof_kernel_replay_goal_search_meter_exhausted(workspace.kernel_goal_work_used)" in goal_status_endpoint
+
 # The private reuse path validates every root against the exact same arrays before tactic replay
 # can mutate the arena. Once state comparison begins, the first mutation is an append-only rewrite.
 tactic_api_wrapper = body(api_path, "proof_kernel_replay_tactic_step_with_trace_work")

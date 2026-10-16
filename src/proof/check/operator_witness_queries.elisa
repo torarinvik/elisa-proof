@@ -8,21 +8,73 @@ extend ElisaProof:
                 _:
                     return ""
 
-        def proof_builtin_operator_term_witnessed(expression: Ast::Expr, protocol: sview, facts: darray[Ast::Expr]&) -> bool:
+        # Meter exact term comparisons used by the runtime operator gate. `proof_expr_equal`
+        # performs a quick-difference walk, two support walks, and a structural walk; reserve
+        # for all of them, including text payloads, before invoking the legacy comparator.
+        def proof_runtime_operator_work_charge(amount: usize, work: mutable usize&, limit: usize) -> bool:
+            if work > limit or amount > limit - work:
+                work <- limit + 1
+                return false
+            work <- work + amount
+            return true
+
+        # Decoding a marker walks its complete fact expression. Charge that syntax and payload
+        # before any marker helper inspects it, in addition to the per-row probe itself.
+        def proof_runtime_operator_fact_charge(fact: Ast::Expr, work: mutable usize&, limit: usize) -> bool:
+            cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(fact, &cost, work, limit):
+                work <- limit + 1
+                return false
+            proof_runtime_operator_work_charge(cost + 1, work, limit)
+
+        def proof_runtime_operator_terms_equal_with_work(left: Ast::Expr, right: Ast::Expr, work: mutable usize&, limit: usize = PROOF_MATCH_LOWERING_WORK_LIMIT) -> bool:
+            if work >= limit:
+                work <- limit + 1
+                return false
+            left_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(left, &left_cost, work, limit):
+                work <- limit + 1
+                return false
+            if left_cost > limit - work:
+                work <- limit + 1
+                return false
+            right_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(right, &right_cost, work + left_cost, limit):
+                work <- limit + 1
+                return false
+            remaining: usize = limit - work
+            passes_available: usize = remaining / 5
+            if left_cost > passes_available or right_cost > passes_available - left_cost:
+                work <- limit + 1
+                return false
+            comparison_cost: usize = (left_cost + right_cost) * 5
+            return false if not proof_runtime_operator_work_charge(comparison_cost, work, limit)
+            proof_expr_equal(left, right)
+
+        def proof_builtin_operator_term_witnessed_with_work(expression: Ast::Expr, protocol: sview, facts: darray[Ast::Expr]&, work: mutable usize&, depth: usize = 0, limit: usize = PROOF_MATCH_LOWERING_WORK_LIMIT) -> bool:
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                work <- limit + 1
+                return false
             match expression:
                 Ast::Expr.StringLit(_, _):
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_builtin_operator_term_witnessed(inner, protocol, facts)
+                    return proof_builtin_operator_term_witnessed_with_work(inner, protocol, facts, work, depth + 1, limit)
                 _:
                     pass
-            for fact in facts:
+            for fact in facts |fact, work|:
+                return false if not proof_runtime_operator_fact_charge(fact, work, limit)
                 continue if not proof_marker_has_callee(fact, "__elisa_builtin_operator_type")
                 marker: (known: bool, term: Ast::Expr, protocol: sview) = proof_builtin_operator_marker_info(fact)
-                return true if marker.known and proof_operator_protocol_matches(marker.protocol, protocol) and proof_expr_equal(marker.term, expression)
+                if marker.known and proof_operator_protocol_matches(marker.protocol, protocol):
+                    return true if proof_runtime_operator_terms_equal_with_work(marker.term, expression, work, limit)
+                    return false if work > limit
             return false
 
-        def proof_index_operator_term_witnessed(expression: Ast::Expr, protocol: sview, facts: darray[Ast::Expr]&, trusted: bool) -> bool:
+        def proof_index_operator_term_witnessed_with_work(expression: Ast::Expr, protocol: sview, facts: darray[Ast::Expr]&, trusted: bool, work: mutable usize&, depth: usize = 0, limit: usize = PROOF_MATCH_LOWERING_WORK_LIMIT) -> bool:
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                work <- limit + 1
+                return false
             object: mutable Ast::Expr = expression
             match expression:
                 Ast::Expr.Index(indexed_object, _, _):
@@ -30,41 +82,57 @@ extend ElisaProof:
                 Ast::Expr.IndexN(indexed_object, _, _):
                     object <- indexed_object
                 Ast::Expr.Paren(inner, _):
-                    return proof_index_operator_term_witnessed(inner, protocol, facts, trusted)
+                    return proof_index_operator_term_witnessed_with_work(inner, protocol, facts, trusted, work, depth + 1, limit)
                 _:
                     return false
             wanted_protocol: sview = proof_index_operator_protocol(protocol)
             wanted_marker: sview = "__elisa_builtin_operator_type" if trusted else "__elisa_untrusted_operator_type"
-            for fact in facts:
+            for fact in facts |fact, work|:
+                return false if not proof_runtime_operator_fact_charge(fact, work, limit)
                 continue if not proof_marker_has_callee(fact, wanted_marker)
                 marker: (known: bool, term: Ast::Expr, protocol: sview) = proof_builtin_operator_marker_info(fact) if trusted else proof_untrusted_operator_marker_info(fact)
-                return true if marker.known and proof_operator_protocol_matches(marker.protocol, wanted_protocol) and proof_expr_equal(marker.term, object)
+                if marker.known and proof_operator_protocol_matches(marker.protocol, wanted_protocol):
+                    return true if proof_runtime_operator_terms_equal_with_work(marker.term, object, work, limit)
+                    return false if work > limit
             return false
 
-        def proof_builtin_index_expression_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+        def proof_builtin_index_expression_witnessed_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, work: mutable usize&, depth: usize = 0, limit: usize = PROOF_MATCH_LOWERING_WORK_LIMIT) -> bool:
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                work <- limit + 1
+                return false
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_builtin_index_expression_witnessed(inner, facts)
+                    return proof_builtin_index_expression_witnessed_with_work(inner, facts, work, depth + 1, limit)
                 Ast::Expr.Index(object, _, _):
-                    for fact in facts:
+                    for fact in facts |fact, work|:
+                        return false if not proof_runtime_operator_fact_charge(fact, work, limit)
                         continue if not proof_marker_has_callee(fact, "__elisa_builtin_index_type")
                         marker: (known: bool, term: Ast::Expr) = proof_builtin_index_marker_info(fact)
-                        return true if marker.known and proof_expr_equal(marker.term, object)
+                        if marker.known:
+                            return true if proof_runtime_operator_terms_equal_with_work(marker.term, object, work, limit)
+                            return false if work > limit
                     return false
                 Ast::Expr.IndexN(object, _, _):
-                    for fact in facts:
+                    for fact in facts |fact, work|:
+                        return false if not proof_runtime_operator_fact_charge(fact, work, limit)
                         continue if not proof_marker_has_callee(fact, "__elisa_builtin_index_type")
                         marker: (known: bool, term: Ast::Expr) = proof_builtin_index_marker_info(fact)
-                        return true if marker.known and proof_expr_equal(marker.term, object)
+                        if marker.known:
+                            return true if proof_runtime_operator_terms_equal_with_work(marker.term, object, work, limit)
+                            return false if work > limit
                     return false
                 _:
                     return false
 
-        def proof_const_enum_shorthand_has_builtin_equality_with_work(expression: Ast::Expr, protocol: sview, report: ProofReport&, source_work: mutable usize&) -> bool:
+        def proof_const_enum_shorthand_has_builtin_equality_with_work(expression: Ast::Expr, protocol: sview, report: ProofReport&, source_work: mutable usize&, depth: usize = 0) -> bool:
             return false if protocol != "Eq"
+            if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return false if not proof_type_audit_work_charge(1, source_work)
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_const_enum_shorthand_has_builtin_equality_with_work(inner, protocol, report, source_work)
+                    return proof_const_enum_shorthand_has_builtin_equality_with_work(inner, protocol, report, source_work, depth + 1)
                 Ast::Expr.ShorthandMember(parts, _):
                     return false if parts.count != 1
                     member: (complete: bool, known: bool, owner: sview, fieldless: bool) = proof_unique_const_enum_member_owner_with_work(parts[0], report, source_work)
@@ -76,9 +144,11 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_runtime_operator_operand_untrusted(expression: Ast::Expr, protocol: sview, facts: darray[Ast::Expr]&, report: mutable ProofReport&, functions: mutable ProofFunctionTable&, depth: usize) -> bool can[Global.Read]:
+        def proof_runtime_operator_operand_untrusted(expression: Ast::Expr, protocol: sview, facts: darray[Ast::Expr]&, report: mutable ProofReport&, functions: mutable ProofFunctionTable&, depth: usize, work: mutable usize&) -> bool can[Global.Read]:
             return true if report.source_types.source_effect_index.work.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return false if proof_scalar_runtime_term_witnessed(expression, facts, functions, depth)
+            scalar_witnessed: bool = proof_scalar_runtime_term_witnessed_with_work(expression, facts, functions, depth, work)
+            return true if work > PROOF_MATCH_LOWERING_WORK_LIMIT
+            return false if scalar_witnessed
             source_work: mutable usize = report.source_types.source_effect_index.work.implicit_effect_work
             const_enum_builtin: bool = proof_const_enum_shorthand_has_builtin_equality_with_work(expression, protocol, report, &source_work)
             report.source_types.source_effect_index.work.implicit_effect_work <- source_work
@@ -89,17 +159,21 @@ extend ElisaProof:
             return true if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return false if:
                 plain_enum_builtin
-                proof_builtin_operator_term_witnessed(expression, protocol, facts)
-                proof_index_operator_term_witnessed(expression, protocol, facts, true)
-            for fact in facts:
+                proof_builtin_operator_term_witnessed_with_work(expression, protocol, facts, work)
+                proof_index_operator_term_witnessed_with_work(expression, protocol, facts, true, work)
+            for fact in facts |fact, work|:
+                return true if not proof_runtime_operator_fact_charge(fact, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                 continue if not proof_marker_has_callee(fact, "__elisa_untrusted_operator_type")
                 marker: (known: bool, term: Ast::Expr, protocol: sview) = proof_untrusted_operator_marker_info(fact)
-                return true if marker.known and proof_operator_protocol_matches(marker.protocol, protocol) and proof_expr_equal(marker.term, expression)
-            return true if proof_index_operator_term_witnessed(expression, protocol, facts, false)
-            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+                if marker.known and proof_operator_protocol_matches(marker.protocol, protocol):
+                    return true if proof_runtime_operator_terms_equal_with_work(marker.term, expression, work)
+                    return true if work > PROOF_MATCH_LOWERING_WORK_LIMIT
+            return true if proof_index_operator_term_witnessed_with_work(expression, protocol, facts, false, work)
+            return true if work > PROOF_MATCH_LOWERING_WORK_LIMIT
+            return true if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return (proof_runtime_operator_operand_untrusted(inner, protocol, facts, report, functions, depth + 1) can Global.Read)
+                    return (proof_runtime_operator_operand_untrusted(inner, protocol, facts, report, functions, depth + 1, work) can Global.Read)
                 Ast::Expr.StringLit(_, _):
                     return false
                 Ast::Expr.FloatLit(_, _):
@@ -119,7 +193,9 @@ extend ElisaProof:
                     # Source protocol overrides still require their own verified dispatch;
                     # this admission adds no arithmetic or repeated-call congruence law.
                     if called_index < functions.returns.return_types.count:
-                        concrete: sview = (proof_builtin_operator_type_name(functions.returns.return_types[called_index], report.source.source_declarations, 0) can Global.Read)
+                        concrete: sview = (proof_builtin_operator_type_name_with_work(functions.returns.return_types[called_index], report.source.source_declarations, 0, &source_work) can Global.Read)
+                        report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                        return true if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         if protocol != "" and concrete in {"f32", "f64"}:
                             implementation: (complete: bool, exists: bool) = proof_report_builtin_operator_impl_exists_with_work(report, concrete, protocol, &source_work)
                             report.source_types.source_effect_index.work.implicit_effect_work <- source_work
@@ -132,15 +208,26 @@ extend ElisaProof:
                         report.source_types.source_effect_index.work.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
                         return true
                     imported: usize = imported_lookup.index
-                    if (proof_float_mode can Global.Read) and proof_resource_function_name_count(functions, called) == 0 and imported < functions.externs.extern_signatures.count:
-                        signature: ProofExternSignature = functions.externs.extern_signatures[imported]
-                        concrete: sview = signature.return_type_name
-                        valid_shape: bool = signature.return_metadata_valid and not signature.return_reference and not signature.return_optional and signature.parameters_valid and not signature.variadic and signature.declared_arity == arguments.count
-                        if valid_shape and protocol != "" and concrete in {"f32", "f64"}:
-                            implementation: (complete: bool, exists: bool) = proof_report_builtin_operator_impl_exists_with_work(report, concrete, protocol, &source_work)
+                    if (proof_float_mode can Global.Read) and imported < functions.externs.extern_signatures.count:
+                        # Contextual resolution can miss an ambiguous source spelling. Keep any
+                        # same-named source declaration ahead of extern return metadata, charging
+                        # the fallback name probe to this scan's shared source-work budget.
+                        source_function_exists: mutable bool = called_index < functions.lookup.source.names.count
+                        return true if called_index > functions.lookup.source.names.count
+                        if not source_function_exists:
+                            source_function: (complete: bool, row: usize, repeated: bool) = proof_function_name_lookup_with_work(functions, called, &source_work)
                             report.source_types.source_effect_index.work.implicit_effect_work <- source_work
-                            return true if not implementation.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                            return false if not implementation.exists
+                            return true if not source_function.complete or source_function.row > functions.lookup.source.names.count or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                            source_function_exists <- source_function.row < functions.lookup.source.names.count
+                        if not source_function_exists:
+                            signature: ProofExternSignature = functions.externs.extern_signatures[imported]
+                            concrete: sview = signature.return_type_name
+                            valid_shape: bool = signature.return_metadata_valid and not signature.return_reference and not signature.return_optional and signature.parameters_valid and not signature.variadic and signature.declared_arity == arguments.count
+                            if valid_shape and protocol != "" and concrete in {"f32", "f64"}:
+                                implementation: (complete: bool, exists: bool) = proof_report_builtin_operator_impl_exists_with_work(report, concrete, protocol, &source_work)
+                                report.source_types.source_effect_index.work.implicit_effect_work <- source_work
+                                return true if not implementation.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                return false if not implementation.exists
                     return true
                 Ast::Expr.Index(_, _, _):
                     return true
@@ -168,12 +255,11 @@ extend ElisaProof:
                 Ast::Expr.RecordUpdate(_, _, _):
                     return true
                 Ast::Expr.Catch(guarded, arms, _):
-                    operator_work: mutable usize = 0
-                    return true if (proof_expr_has_unmodeled_operator_with_work(guarded, facts, report, functions, depth + 1, &operator_work) can Global.Read)
-                    for arm in arms |facts, functions, depth, operator_work|:
-                        return true if (proof_expr_has_unmodeled_operator_with_work(arm.guard, facts, report, functions, depth + 1, &operator_work) can Global.Read)
-                        for arm_statement in arm.body |facts, functions, operator_work|:
-                            return true if (proof_statement_has_unmodeled_operator_with_work(arm_statement, facts, report, functions, &operator_work) can Global.Read)
+                    return true if (proof_expr_has_unmodeled_operator_with_work(guarded, facts, report, functions, depth + 1, work) can Global.Read)
+                    for arm in arms |arm, facts, functions, depth, work|:
+                        return true if (proof_expr_has_unmodeled_operator_with_work(arm.guard, facts, report, functions, depth + 1, work) can Global.Read)
+                        for arm_statement in arm.body |arm_statement, facts, functions, work|:
+                            return true if (proof_statement_has_unmodeled_operator_with_work(arm_statement, facts, report, functions, work) can Global.Read)
                     return false
                 Ast::Expr.Lambda(_, _, _):
                     return true
@@ -194,18 +280,21 @@ extend ElisaProof:
                 _:
                     return true
 
-        def proof_runtime_operator_expression_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: mutable ProofReport&, functions: mutable ProofFunctionTable&, depth: usize) -> bool can[Global.Read]:
-            return true if proof_scalar_runtime_term_witnessed(expression, facts, functions, depth)
-            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+        def proof_runtime_operator_expression_witnessed_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: mutable ProofReport&, functions: mutable ProofFunctionTable&, depth: usize, work: mutable usize&) -> bool can[Global.Read]:
+            return true if proof_scalar_runtime_term_witnessed_with_work(expression, facts, functions, depth, work)
+            return false if work > PROOF_MATCH_LOWERING_WORK_LIMIT
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1
+                return false
             match expression:
                 Ast::Expr.Unary(operator, operand, _):
                     protocol: sview = proof_builtin_unary_operator_protocol(operator)
-                    return not (proof_runtime_operator_operand_untrusted(operand, protocol, facts, report, functions, depth + 1) can Global.Read) if operator == TokenKind.Plus or operator == TokenKind.Not
-                    return protocol != "" and not (proof_runtime_operator_operand_untrusted(operand, protocol, facts, report, functions, depth + 1) can Global.Read)
+                    return not (proof_runtime_operator_operand_untrusted(operand, protocol, facts, report, functions, depth + 1, work) can Global.Read) if operator == TokenKind.Plus or operator == TokenKind.Not
+                    return protocol != "" and not (proof_runtime_operator_operand_untrusted(operand, protocol, facts, report, functions, depth + 1, work) can Global.Read)
                 Ast::Expr.Binary(left, operator, right, _):
                     protocol: sview = proof_builtin_operator_protocol(operator)
-                    return not (proof_runtime_operator_operand_untrusted(left, protocol, facts, report, functions, depth + 1) can Global.Read) and not (proof_runtime_operator_operand_untrusted(right, protocol, facts, report, functions, depth + 1) can Global.Read) if protocol == "" and proof_congruent_binary_operator(operator)
-                    return protocol != "" and not (proof_runtime_operator_operand_untrusted(left, protocol, facts, report, functions, depth + 1) can Global.Read) and not (proof_runtime_operator_operand_untrusted(right, protocol, facts, report, functions, depth + 1) can Global.Read)
+                    return not (proof_runtime_operator_operand_untrusted(left, protocol, facts, report, functions, depth + 1, work) can Global.Read) and not (proof_runtime_operator_operand_untrusted(right, protocol, facts, report, functions, depth + 1, work) can Global.Read) if protocol == "" and proof_congruent_binary_operator(operator)
+                    return protocol != "" and not (proof_runtime_operator_operand_untrusted(left, protocol, facts, report, functions, depth + 1, work) can Global.Read) and not (proof_runtime_operator_operand_untrusted(right, protocol, facts, report, functions, depth + 1, work) can Global.Read)
                 _:
                     return false
 

@@ -6,7 +6,33 @@ from pathlib import Path
 import sys
 
 
+def _reject_nonstandard_constant(value):
+    raise ValueError(f"non-standard JSON numeric constant: {value}")
+
+
+def _reject_unpaired_surrogates(value):
+    pending = [iter((value,))]
+    while pending:
+        try:
+            item = next(pending[-1])
+        except StopIteration:
+            pending.pop()
+            continue
+        if isinstance(item, str):
+            if any(0xD800 <= ord(character) <= 0xDFFF for character in item):
+                raise ValueError("JSON string contains an unpaired surrogate")
+        elif isinstance(item, dict):
+            pending.append(iter(component for pair in item.items() for component in pair))
+        elif isinstance(item, list):
+            pending.append(iter(item))
+
+
 def expected_exit(report):
+    _reject_unpaired_surrogates(report)
+    return _expected_exit_validated(report)
+
+
+def _expected_exit_validated(report):
     if not isinstance(report, dict):
         raise ValueError("JSON report root must be an object")
     status = report.get("status")
@@ -26,7 +52,10 @@ def expected_exit(report):
             raise ValueError("proved status requires a replay report with zero gaps")
         return 0
     if status == "failed":
-        if report.get("verification_state") not in {"unknown", "unsupported", "disproved"}:
+        # JSON values may be arrays or objects, which are unhashable in Python. Use
+        # tuple membership so malformed states produce the same validation error
+        # instead of leaking a TypeError from the reference CLI.
+        if report.get("verification_state") not in ("unknown", "unsupported", "disproved"):
             raise ValueError("failed status requires unknown, unsupported, or disproved verification_state")
         return 1
     if status == "proved_with_replay_gaps":
@@ -43,12 +72,16 @@ def main(argv):
         print("usage: report_exit_status.py <report.json>", file=sys.stderr)
         return 2
     try:
-        report = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        report = json.loads(
+            Path(argv[1]).read_text(encoding="utf-8"),
+            parse_constant=_reject_nonstandard_constant,
+        )
+        _reject_unpaired_surrogates(report)
+    except (OSError, UnicodeError, ValueError) as error:
         print(f"malformed --json output: {error}", file=sys.stderr)
         return 2
     try:
-        print(expected_exit(report))
+        print(_expected_exit_validated(report))
         return 0
     except ValueError as error:
         print(f"invalid --json result lattice: {error}", file=sys.stderr)

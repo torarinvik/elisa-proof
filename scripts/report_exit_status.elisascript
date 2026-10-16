@@ -1,0 +1,145 @@
+# ElisaScript candidate port of report_exit_status.py with a standalone CLI.
+
+include "../../elisa-script/src/runtime/bounded_text_posix.elisa"
+include "../../elisa-script/src/runtime/data_model.elisa"
+include "../../elisa-script/src/runtime/json_model.elisa"
+include "../../elisa-script/src/runtime/json_lexer_model.elisa"
+include "../../elisa-script/src/runtime/json_parse_model.elisa"
+
+using EsBoundedText
+using EsData
+using EsJson
+using EsJsonLex
+using EsJsonParse
+
+
+module EsReportExitStatus:
+    public:
+        const REPORT_BYTES_LIMIT: usize = 268435456
+
+
+    private:
+        def object_member_index(document: JsonDocument&, object_index: usize, key: sview) -> usize:
+            return EsJson::JSON_INDEX_NONE if object_index >= document.nodes.count
+            object: JsonNode = document.nodes[object_index]
+            return EsJson::JSON_INDEX_NONE if object.kind != JsonNodeKind.Object
+            for ordinal in 0..<object.member_count |document, object, key|:
+                member_index: usize = object.member_start + ordinal
+                member: JsonMember = document.members[member_index]
+                stored_key: sview = sview(bytes_view(document.key_bytes), member.key_start.i64(), member.key_bytes.i64())
+                return member_index if stored_key == key
+            EsJson::JSON_INDEX_NONE
+
+
+        def optional_member_value(document: JsonDocument&, object_index: usize, key: sview) -> usize:
+            member_index: usize = object_member_index(document, object_index, key)
+            return EsJson::JSON_INDEX_NONE if member_index == EsJson::JSON_INDEX_NONE
+            document.members[member_index].value_index
+
+
+        def member_text(document: JsonDocument&, object_index: usize, key: sview) -> sview:
+            node_index: usize = optional_member_value(document, object_index, key)
+            return "" if node_index >= document.nodes.count or document.nodes[node_index].kind != JsonNodeKind.Text
+            node: JsonNode = document.nodes[node_index]
+            sview(bytes_view(document.scalar_data), node.scalar_start.i64(), node.scalar_bytes.i64())
+
+
+        def member_integer(document: JsonDocument&, object_index: usize, key: sview) -> (valid: bool, value: sview):
+            node_index: usize = optional_member_value(document, object_index, key)
+            return (false, "") if node_index >= document.nodes.count or document.nodes[node_index].kind != JsonNodeKind.Number
+            node: JsonNode = document.nodes[node_index]
+            value: sview = sview(bytes_view(document.scalar_data), node.scalar_start.i64(), node.scalar_bytes.i64())
+            return (false, "") if value == "" or value.index(".") >= 0 or value.index("e") >= 0 or value.index("E") >= 0
+            start: usize = 0
+            if sview_at(value, 0) == 45u8:
+                start <- 1
+            return (false, "") if start >= len(value)
+            for index in start..<len(value) |value, start|:
+                digit: u8 = sview_at(value, index)
+                return (false, "") if digit < 48u8 or digit > 57u8
+            magnitude: sview = sview(value, start.i64(), (len(value) - start).i64())
+            if magnitude == "0":
+                return (true, "0")
+            return (false, "") if start == 1
+            (true, magnitude)
+
+
+        def nonnegative_integer_le(left: sview, right: sview) -> bool:
+            return true if len(left) < len(right)
+            return false if len(left) > len(right)
+            for offset in 0..<len(left) |left, right|:
+                left_byte: u8 = sview_at(left, offset)
+                right_byte: u8 = sview_at(right, offset)
+                return true if left_byte < right_byte
+                return false if left_byte > right_byte
+            true
+
+
+        def classify_document(document: JsonDocument&) -> (valid: bool, code: i64, message: sview):
+            return (false, 2i64, "JSON report root must be an object") if document.roots.count != 1
+            root: usize = document.roots[0]
+            return (false, 2i64, "JSON report root must be an object") if root >= document.nodes.count or document.nodes[root].kind != JsonNodeKind.Object
+            status: sview = member_text(document, root, "status")
+            verification_state: sview = member_text(document, root, "verification_state")
+            if status == "proved":
+                return (false, 2i64, "proved status requires verification_state=proved") if verification_state != "proved"
+                summary: usize = optional_member_value(document, root, "summary")
+                return (false, 2i64, "proved status requires obligation counters") if summary >= document.nodes.count or document.nodes[summary].kind != JsonNodeKind.Object
+                proven: (valid: bool, value: sview) = member_integer(document, summary, "proven")
+                obligations: (valid: bool, value: sview) = member_integer(document, summary, "obligations")
+                return (false, 2i64, "proved status requires all obligations counted as proven") if not proven.valid or not obligations.valid or not nonnegative_integer_le(proven.value, obligations.value) or proven.value != obligations.value
+                replay: usize = optional_member_value(document, root, "replay")
+                gaps: (valid: bool, value: sview) = member_integer(document, replay, "gaps")
+                return (false, 2i64, "proved status requires a replay report with zero gaps") if not gaps.valid or gaps.value != "0"
+                return (true, 0i64, "")
+            if status == "failed":
+                return (false, 2i64, "failed status requires unknown, unsupported, or disproved verification_state") if verification_state != "unknown" and verification_state != "unsupported" and verification_state != "disproved"
+                return (true, 1i64, "")
+            if status == "proved_with_replay_gaps":
+                replay: usize = optional_member_value(document, root, "replay")
+                gaps: (valid: bool, value: sview) = member_integer(document, replay, "gaps")
+                return (false, 2i64, "proved_with_replay_gaps requires unknown state and positive replay.gaps") if verification_state != "unknown" or not gaps.valid or gaps.value == "0"
+                return (true, 1i64, "")
+            (false, 2i64, "unrecognized top-level result-lattice status")
+
+
+        def parse_and_validate(source: sview) -> (valid_json: bool, valid_result: bool, code: i64, message: sview) can[Memory.Allocate, Abort.Panic]:
+            limits: DataDecodeLimits = DataDecodeLimits{input_bytes: REPORT_BYTES_LIMIT}
+            policy: JsonPolicy = JsonPolicy{duplicate_keys: JsonDuplicateKeyPolicy.KeepLast, numbers: DataNumberPolicy.Decimal}
+            lexed: JsonLexedSource = try lex_json(source, limits, policy) else err:
+                return (false, false, 2i64, "invalid JSON")
+            document: JsonDocument = try parse_json_document(lexed) else err:
+                return (false, false, 2i64, "invalid JSON")
+            result: (valid: bool, code: i64, message: sview) = classify_document(document)
+            (true, result.valid, result.code, result.message)
+
+
+        def run_cli(arguments: darray[sview]) -> i64 can[Blocking.IO, Memory.Allocate, Abort.Panic, Console.Write, Console.Format, File.Read, Unsafe.PointerCast, Global{Read,Write}]:
+            if arguments.count != 1:
+                _ = write_stderr("usage: report_exit_status.py <report.json>\n")
+                return 2i64
+            input_path: Path = path(arguments[0])
+            source: sview = try EsBoundedText::read_utf8_path_text(f"{input_path}", REPORT_BYTES_LIMIT) else err:
+                _ = write_stderr("malformed --json output: unable to read report\n")
+                return 2i64
+            result: (valid_json: bool, valid_result: bool, code: i64, message: sview) = parse_and_validate(source)
+            if not result.valid_json:
+                _ = write_stderr("malformed --json output: " + result.message + "\n")
+                return 2i64
+            if not result.valid_result:
+                _ = write_stderr("invalid --json result lattice: " + result.message + "\n")
+                return 2i64
+            _ = print(result.code)
+            0i64
+
+
+    public:
+        # Reusable counterpart to the Python expected_exit(report) helper. The
+        # caller supplies a validated document produced with KeepLast duplicate
+        # semantics, matching Python's json.loads object behavior.
+        def expected_exit(document: JsonDocument&) -> (valid: bool, code: i64, message: sview):
+            classify_document(document)
+
+
+def main(arguments: darray[sview]) -> i64 can[Blocking.IO, Memory.Allocate, Abort.Panic, Console.Write, Console.Format, File.Read, Unsafe.PointerCast, Global{Read,Write}]:
+    EsReportExitStatus::run_cli(arguments)

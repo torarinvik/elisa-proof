@@ -1,5 +1,11 @@
 extend ElisaProof:
     private:
+        # Replay inventories only And/Or nodes with a distinct, nonzero position. The parser
+        # also synthesizes binary nodes at operand or declaration positions; those cannot
+        # anchor a uniquely source-addressable alternative.
+        def proof_replay_resource_is_source_short_circuit(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, position: Ast::Pos) -> bool:
+            (operator == TokenKind.And or operator == TokenKind.Or) and position.line > 0 and position.offset > 0 and position.offset != Ast::expr_pos(left).offset and position.offset != Ast::expr_pos(right).offset
+
         def proof_replay_resource_event_find_expression_with_work(expression: Ast::Expr, offset: usize, wanted_kind: sview, wanted_name: sview, matches: mutable usize&, found: mutable Ast::Expr&, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_owner_work_charge(1, source_work)
             match expression:
@@ -54,7 +60,11 @@ extend ElisaProof:
                             matches <- matches + 1
                             found <- expression
                     return proof_replay_resource_event_find_expression_with_work(operand, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
-                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                Ast::Expr.Binary(left, operator, right, position):
+                    matches <- matches + 1 if wanted_kind == "resource-alternatives-inventory" and proof_replay_resource_is_source_short_circuit(left, operator, right, position)
+                    return false if not proof_replay_resource_event_find_expression_with_work(left, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
+                    return proof_replay_resource_event_find_expression_with_work(right, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
+                Ast::Expr.Index(left, right, _):
                     return false if not proof_replay_resource_event_find_expression_with_work(left, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     return proof_replay_resource_event_find_expression_with_work(right, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                 Ast::Expr.IndexN(object, arguments, _):
@@ -80,7 +90,8 @@ extend ElisaProof:
                     return false if not proof_replay_resource_event_find_expression_with_work(base, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     for field in fields |offset, wanted_kind, wanted_name, matches, found, source_work, depth|:
                         return false if not proof_replay_resource_event_find_expression_with_work(field.value, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
-                Ast::Expr.If(condition, yes, no, _):
+                Ast::Expr.If(condition, yes, no, position):
+                    matches <- matches + 1 if wanted_kind == "resource-alternatives-inventory" and position.line > 0
                     return false if not proof_replay_resource_event_find_expression_with_work(condition, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     return false if not proof_replay_resource_event_find_expression_with_work(yes, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     return proof_replay_resource_event_find_expression_with_work(no, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
@@ -88,7 +99,8 @@ extend ElisaProof:
                     return false if not proof_replay_resource_event_find_expression_with_work(iterable, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     return false if not proof_replay_resource_event_find_expression_with_work(condition, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     return proof_replay_resource_event_find_expression_with_work(body, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
-                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                Ast::Expr.Match(scrutinee, arms, position) | Ast::Expr.Catch(scrutinee, arms, position):
+                    matches <- matches + 1 if wanted_kind == "resource-alternatives-inventory" and position.line > 0
                     return false if not proof_replay_resource_event_find_expression_with_work(scrutinee, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     for arm in arms |offset, wanted_kind, wanted_name, matches, found, source_work, depth|:
                         return false if not proof_replay_resource_event_find_expression_with_work(arm.guard, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
@@ -108,7 +120,6 @@ extend ElisaProof:
                 _:
                     return false
             true
-
         def proof_replay_resource_event_find_statements_with_work(body: darray[Ast::Stmt]&, offset: usize, wanted_kind: sview, wanted_name: sview, matches: mutable usize&, found: mutable Ast::Expr&, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
             for statement in body |offset, wanted_kind, wanted_name, matches, found, source_work, depth|:
@@ -155,7 +166,7 @@ extend ElisaProof:
                                     return false if stripped.complete and stripped.expression is Ast::Expr.RegionNew
                         return false if not proof_replay_resource_event_find_expression_with_work(expression, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):
-                        return false if not proof_replay_resource_event_find_expression_with_work(expression, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
+                        return false if expression is not Ast::Expr.Absent and not proof_replay_resource_event_find_expression_with_work(expression, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                     Ast::Stmt.Assign(target, operator, value, position):
                         if wanted_kind == "resource-region-rebind-alloc" and position.offset == offset.u32():
                             target_name: (complete: bool, name: sview) = proof_replay_resource_region_assignment_direct_name_with_work(target, source_work, 0)
@@ -169,7 +180,8 @@ extend ElisaProof:
                             found <- value
                         return false if not proof_replay_resource_event_find_expression_with_work(target, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                         return false if not proof_replay_resource_event_find_expression_with_work(value, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
-                    Ast::Stmt.If(condition, yes, no, _):
+                    Ast::Stmt.If(condition, yes, no, position):
+                        matches <- matches + 1 if wanted_kind == "resource-alternatives-inventory" and position.line > 0
                         return false if not proof_replay_resource_event_find_expression_with_work(condition, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                         return false if not proof_replay_resource_event_find_statements_with_work(yes, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                         return false if not proof_replay_resource_event_find_statements_with_work(no, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
@@ -188,7 +200,8 @@ extend ElisaProof:
                                 pass
                         return false if not proof_replay_resource_event_find_expression_with_work(condition, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                         return false if not proof_replay_resource_event_find_statements_with_work(nested, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
-                    Ast::Stmt.Match(scrutinee, arms, _):
+                    Ast::Stmt.Match(scrutinee, arms, position):
+                        matches <- matches + 1 if wanted_kind == "resource-alternatives-inventory" and position.line > 0
                         return false if not proof_replay_resource_event_find_expression_with_work(scrutinee, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
                         for arm in arms |offset, wanted_kind, wanted_name, matches, found, source_work, depth|:
                             return false if not proof_replay_resource_event_find_expression_with_work(arm.guard, offset, wanted_kind, wanted_name, matches, found, source_work, depth + 1)
@@ -313,7 +326,7 @@ extend ElisaProof:
             return (false, "") if root.children_start > report.analysis_1.kernel.children.count or root.children_count > report.analysis_1.kernel.children.count - root.children_start or prefix_end > root.children_count
             matches: mutable usize = 0
             region: mutable sview = ""
-            # Search complete owner trace; local region aliases are nested in later scopes.
+        # Local region aliases may be nested in later scopes.
             for index in 0..<root.children_count |index, report, root, wanted_name, matches, region, source_work|:
                 return (false, "") if not proof_replay_owner_work_charge(1, source_work)
                 child: usize = report.analysis_1.kernel.children[root.children_start + index]
@@ -391,7 +404,7 @@ extend ElisaProof:
                     return false
             true
 
-        # Authenticate each region-tracked binding assignment against one positioned event.
+        # Authenticate region assignments against positioned events.
         def proof_replay_resource_region_assignment_statements_covered_with_work(report: ProofReport&, root: ElisaProofKernelCore::ProofKernelNode, prefix_end: usize, body: darray[Ast::Stmt]&, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
             for statement in body |report, root, prefix_end, source_work, depth|:
@@ -403,9 +416,7 @@ extend ElisaProof:
                         target_region: (complete: bool, region: sview) = proof_replay_resource_region_binding_for_name_with_work(report, root, prefix_end, target_root.name, source_work)
                         return false if not target_region.complete
                         source_root: (complete: bool, name: sview, position: Ast::Pos) = proof_replay_resource_return_place_root_with_work(value, source_work, 0)
-                        # A non-place RHS cannot rebind a tracked formal through this rule.
-                        # Let ordinary scalar/call updates continue through their dedicated
-                        # source and effect checks, but refuse the unsupported region write.
+                        # Refuse non-place region writes; scalar/call updates use other checks.
                         return false if not source_root.complete and target_region.region != ""
                         if source_root.complete:
                             source_region: (complete: bool, region: sview) = proof_replay_resource_region_binding_for_name_with_work(report, root, prefix_end, source_root.name, source_work)
@@ -440,8 +451,10 @@ extend ElisaProof:
                         for arm in arms |report, root, prefix_end, source_work, depth|:
                             return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, arm.guard, source_work, depth + 1)
                             return false if not proof_replay_resource_region_assignment_statements_covered_with_work(report, root, prefix_end, arm.body, source_work, depth + 1)
-                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                    Ast::Stmt.Expr(expression, _):
                         return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, expression, source_work, depth + 1)
+                    Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                        return false if expression is not Ast::Expr.Absent and not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, expression, source_work, depth + 1)
                     Ast::Stmt.VarDecl(_, type_expression, initializer, _):
                         return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, type_expression, source_work, depth + 1)
                         return false if not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, initializer, source_work, depth + 1)
@@ -503,8 +516,7 @@ extend ElisaProof:
                 _:
                     false
 
-        # Body-local value binds are admitted only when the event names one exact parser
-        # declaration at this source position. Reference binds need a separate source bridge.
+        # Body-local value binds need one exact source declaration; reference binds need a separate bridge.
         def proof_replay_resource_local_value_bind_source_valid_with_work(report: ProofReport&, event: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
             return false if not proof_replay_owner_work_charge(sview_len(event.kind), source_work) or not proof_replay_owner_work_charge(sview_len(event.operator), source_work) or not proof_replay_owner_work_charge(sview_len(event.name), source_work) or not proof_replay_owner_work_charge(sview_len(event.secondary_name), source_work) or not proof_replay_owner_work_charge(sview_len(owner), source_work) or not proof_replay_owner_work_charge(sview_len(owner_module), source_work)
             return false if event.kind != "resource-bind" or event.operator != "value" or event.name == "" or event.secondary_name != "" or event.left != 0 or event.auxiliary != 0 or event.value <= 0 or event.value > 4294967295 or owner == "" or owner_line == 0 or owner_offset > 4294967295
@@ -533,65 +545,3 @@ extend ElisaProof:
             return false if matches != 1 or source_type is Ast::Expr.Invalid
             markers: (reference: bool, mutable_reference: bool, is_mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_at_offset_with_work(source_type, report.source.source_declarations, report.source_types.source_generic_param_lines, report.source_types.source_generic_param_names, owner_line, owner_offset.u32(), report.source_types.source_generic_owner_params_valid, report.source_types.source_effect_index, report.source_types.source_generic_params_valid and report.source_types.source_generic_param_lines.count == report.source_types.source_generic_param_names.count, source_work)
             markers.complete and not markers.reference and not markers.mutable_reference and not markers.is_mutable
-
-        def proof_replay_resource_discard_event_position_count_with_work(report: ProofReport&, root: usize, offset: usize, source_work: mutable usize&, depth: usize) -> (complete: bool, count: usize):
-            return (false, 0) if depth >= PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT or root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
-            node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[root]
-            return (false, 0) if node.children_start > report.analysis_1.kernel.children.count or node.children_count > report.analysis_1.kernel.children.count - node.children_start
-            return (false, 0) if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
-            return (true, 0) if node.kind == "resource-disjoint"
-            is_container: mutable bool = false
-            return (false, 0) if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
-            is_container <- node.kind == "resource-safety"
-            if not is_container:
-                return (false, 0) if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
-                is_container <- node.kind == "resource-scope"
-            if not is_container:
-                return (false, 0) if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
-                is_container <- node.kind == "resource-alternatives"
-            if not is_container:
-                return (false, 0) if not proof_replay_owner_work_charge(sview_len(node.kind), source_work)
-                is_discard: bool = node.kind == "resource-region-alloc-discard"
-                return (true, 1 if is_discard and node.value == offset.i64() else 0)
-            count: mutable usize = 0
-            for index in 0..<node.children_count |index, report, node, offset, source_work, depth, count|:
-                return (false, 0) if not proof_replay_owner_work_charge(1, source_work)
-                child: usize = report.analysis_1.kernel.children[node.children_start + index]
-                nested: (complete: bool, count: usize) = proof_replay_resource_discard_event_position_count_with_work(report, child, offset, source_work, depth + 1)
-                return (false, 0) if not nested.complete or count > report.analysis_1.kernel.nodes.count or nested.count > report.analysis_1.kernel.nodes.count - count
-                count <- count + nested.count
-            (true, count)
-
-        def proof_replay_resource_discard_allocation_source_valid_with_work(report: ProofReport&, resource_root: usize, event: ElisaProofKernelCore::ProofKernelNode, owner: sview, owner_line: u32, owner_offset: usize, owner_module: sview, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
-            return false if not proof_replay_owner_work_charge(sview_len(event.kind), source_work)
-            return false if event.kind != "resource-region-alloc-discard" or event.value <= 0 or event.value > 4294967295 or event.name != "" or event.secondary_name == "" or owner == "" or owner_line == 0 or owner_offset > 4294967295
-            return false if not proof_replay_owner_work_charge(sview_len(event.secondary_name), source_work) or not proof_replay_owner_work_charge(sview_len(owner), source_work) or not proof_replay_owner_work_charge(sview_len(owner_module), source_work)
-            positioned_events: (complete: bool, count: usize) = proof_replay_resource_discard_event_position_count_with_work(report, resource_root, event.value.usize(), source_work, 0)
-            return false if not positioned_events.complete or positioned_events.count != 1
-            return false if not proof_replay_deterministic_call_declaration_index_ensure(report, source_work, &cache.deterministic_calls)
-            caller: (complete: bool, matches: usize, row: usize) = proof_replay_summary_owner_function_at_offset(cache.deterministic_calls.declaration_index, owner, owner_line, owner_offset, source_work)
-            return false if not caller.complete or caller.matches != 1 or caller.row >= cache.deterministic_calls.declaration_index.entries.count
-            entry: ProofReplayDeterministicDeclarationEntry = cache.deterministic_calls.declaration_index.entries[caller.row]
-            return false if not proof_replay_owner_work_charge(sview_len(entry.owner), source_work)
-            return false if entry.owner != owner_module
-            body: mutable darray[Ast::Stmt] = []
-            match entry.declaration:
-                Ast::Decl.Func(_, _, _, declared_body, _, _, _):
-                    body <- declared_body
-                _:
-                    return false
-            matches: mutable usize = 0
-            found: mutable Ast::Expr = Ast::Expr.Invalid
-            return false if not proof_replay_resource_event_find_statements_with_work(body, event.value.usize(), event.kind, event.secondary_name, matches, found, source_work, 0)
-            return false if matches != 1
-            operand: mutable Ast::Expr = Ast::Expr.Invalid
-            source_region: mutable sview = ""
-            match found:
-                Ast::Expr.RegionNew(source_operand, source_region_name, _):
-                    operand <- source_operand
-                    source_region <- source_region_name
-                _:
-                    return false
-            return false if not proof_replay_owner_work_charge(sview_len(source_region), source_work)
-            return false if source_region != event.secondary_name or event.left >= report.analysis_1.kernel.nodes.count
-            proof_replay_ast_matches_kernel_with_work(report, operand, event.left, source_work, 0)

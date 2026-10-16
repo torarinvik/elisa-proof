@@ -77,7 +77,7 @@ extend ElisaProof:
                 return false if:
                     not proof_report_source_work_charge(1, source_work)
                     cursor >= report.analysis_1.declaration_details.count
-                    not proof_report_declaration_matches_source(declaration, report.analysis_1.declaration_details[cursor], theorem_index, source_work)
+                    not proof_report_declaration_matches_source(declaration, report.analysis_1.declaration_details[cursor[0]], theorem_index, source_work)
                 cursor <- cursor + 1
                 match declaration:
                     Ast::Decl.Module(_, nested, _):
@@ -148,7 +148,7 @@ extend ElisaProof:
         def proof_report_goal_attempts_bounded_by_obligations(report: ProofReport&, source_work: mutable usize&, track_open_goals: bool, has_open_goal: mutable bool&) -> bool:
             frame_obligations: (complete: bool, count: usize) = proof_report_proven_frame_obligations(report, source_work)
             return false if not frame_obligations.complete or report.results.producer_proven_count.usize() > report.results.obligations.usize()
-            uncovered_proven: usize = report.results.producer_proven_count.usize()
+            uncovered_proven: mutable usize = report.results.producer_proven_count.usize()
             if report.results.goal_attempts.count >= uncovered_proven:
                 uncovered_proven <- 0
             else:
@@ -160,7 +160,7 @@ extend ElisaProof:
                     not proof_report_source_work_charge(1, source_work)
                     event.attempts_start != cursor or cursor > report.results.goal_attempts.count
                     event.attempts_count > report.results.goal_attempts.count - cursor
-                return false if event.attempts_count > 0 and event.owner_function_line == 0
+                return false if (event.proven and event.attempts_count == 0 and event.source_kind != "frame-clause") or (event.attempts_count > 0 and event.owner_function_line == 0) or (event.source_kind == "frame" and event.attempts_count > 0)
                 all_paths_proven: mutable bool = true
                 for attempt_offset in 0..<event.attempts_count |attempt_offset, event, report, cursor, source_work, track_open_goals, has_open_goal|:
                     return false if not proof_report_source_work_charge(1, source_work)
@@ -175,12 +175,12 @@ extend ElisaProof:
                 cursor <- cursor + event.attempts_count
             return cursor == report.results.goal_attempts.count
 
-        # Proven frame-check rows: accounted obligations that by construction have no attempt.
+        # Direct frame clauses are inventoried; dynamic frame rows await write/call replay.
         def proof_report_proven_frame_obligations(report: ProofReport&, source_work: mutable usize&) -> (complete: bool, count: usize):
             count: mutable usize = 0
             for obligation in report.results.obligation_inventory |count, source_work|:
                 return (false, count) if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(obligation.source_kind), source_work)
-                count <- count + 1 if obligation.proven and obligation.source_kind in {"frame", "frame-clause"}
+                count <- count + 1 if obligation.proven and obligation.source_kind == "frame-clause"
             return (true, count)
 
         struct ProofReportCallRequiresSourceIndex:
@@ -191,11 +191,11 @@ extend ElisaProof:
             callee_names: mutable darray[sview] = []
             hashes: mutable darray[u32] = []
             slots: mutable darray[usize] = []
-            empty: usize = 0
-            valid: bool = false
+            empty: mutable usize = 0
+            valid: mutable bool = false
 
         def proof_report_call_requires_key_hash(owner_name: sview, owner_line: u32, owner_offset: u32, position: Ast::Pos) -> u32:
-            hash: u32 = proof_expr_shape_mix(proof_name_hash(owner_name), owner_line.i64())
+            hash: mutable u32 = proof_expr_shape_mix(proof_name_hash(owner_name), owner_line.i64())
             hash <- proof_expr_shape_mix(hash, owner_offset.i64())
             proof_expr_shape_mix(hash, position.offset.i64())
 
@@ -396,9 +396,9 @@ extend ElisaProof:
             proof_report_source_postcondition_inventory_consistent_with_work(report, &source_work)
 
         def proof_report_source_postcondition_inventory_consistent_with_work(report: ProofReport&, source_work: mutable usize&) -> bool:
-            event_keys: mutable darray[ProofSourcePostconditionKey] = []
+            event_rows: mutable darray[usize] = []
             frame_entry_indices: mutable darray[usize] = []
-            for obligation_index in 0..<report.results.obligation_inventory.count |obligation_index, report, event_keys, frame_entry_indices, source_work|:
+            for obligation_index in 0..<report.results.obligation_inventory.count |obligation_index, report, event_rows, frame_entry_indices, source_work|:
                 return false if not proof_report_source_postcondition_work_charge(1, source_work)
                 obligation: ProofObligationEntry = report.results.obligation_inventory[obligation_index]
                 return false if not proof_report_source_postcondition_work_charge(sview_len(obligation.source_kind), source_work)
@@ -406,9 +406,9 @@ extend ElisaProof:
                     return false if obligation.source_call_position.line != 0 or obligation.source_call_position.column != 0 or obligation.source_call_position.offset != 0 or obligation.source_call_position.end_line != 0 or obligation.source_call_position.end_column != 0 or obligation.source_call_position.end_offset != 0 or obligation.source_call_callee_name != "" or obligation.source_call_callee_module != "" or obligation.source_call_callee_line != 0 or obligation.source_call_callee_offset != 0 or obligation.source_call_requires_index != 0
                 if obligation.source_kind == "postcondition":
                     return false if:
-                        event_keys.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+                        event_rows.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
                         not proof_report_source_postcondition_work_charge(sview_len(obligation.source_name), source_work)
-                    event_keys.push(ProofSourcePostconditionKey{name: obligation.source_name, function_offset: obligation.source_function_offset, line: obligation.source_line, source_index: obligation.source_obligation_index})
+                    event_rows.push(obligation_index)
                 elif obligation.source_kind in {"changes", "preserves", "allow", "preserve"}:
                     frame_entry_indices.push(obligation_index)
                 elif obligation.source_kind == "frame-clause":
@@ -465,11 +465,17 @@ extend ElisaProof:
             return false if not owner_index.valid
             for key in owner_keys |owner_index, source_work|:
                 return false if not proof_report_source_postcondition_index_add(&owner_index, key, 1, false, source_work)
-            event_index: mutable ProofSourcePostconditionCountIndex = proof_report_source_postcondition_index_create(event_keys.count, source_work)
+            event_index: mutable ProofSourcePostconditionCountIndex = proof_report_source_postcondition_index_create(event_rows.count, source_work)
             return false if not event_index.valid
-            for key in event_keys |event_index, source_work|:
+            for obligation_index in event_rows |obligation_index, report, event_index, source_work|:
+                return false if obligation_index >= report.results.obligation_inventory.count
+                obligation: ProofObligationEntry = report.results.obligation_inventory[obligation_index]
+                key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: obligation.source_name, function_offset: obligation.source_function_offset, line: obligation.source_line, source_index: obligation.source_obligation_index}
                 return false if not proof_report_source_postcondition_index_add(&event_index, key, 1, false, source_work)
-            for key in event_keys |owner_index, source_work|:
+            for obligation_index in event_rows |obligation_index, report, owner_index, source_work|:
+                return false if obligation_index >= report.results.obligation_inventory.count
+                obligation: ProofObligationEntry = report.results.obligation_inventory[obligation_index]
+                key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: obligation.source_name, function_offset: obligation.source_function_offset, line: obligation.source_line, source_index: obligation.source_obligation_index}
                 owner: (complete: bool, found: bool, count: usize) = proof_report_source_postcondition_index_find(owner_index, key, source_work)
                 return false if not owner.complete or not owner.found or owner.count != 1
             proof_report_source_postconditions_have_events_with_work(report.source.source_declarations, report, event_index, source_work, 0)
@@ -586,15 +592,3 @@ extend ElisaProof:
             source_work: mutable usize = 0
             complete: mutable bool = true
             proof_source_literal_ensure_candidate_with_work(declaration, &source_work, &complete)
-        # Legacy report diagnostic: this checks aggregate report invariants and producer-marked
-        # obligation closure only. It does not carry a replay receipt or parser-origin source
-        # capability, so false is not a source-admission verdict. Source-positive status belongs
-        # to ProofCheckedView after source validation and independent replay.
-        def proof_report_source_has_unresolved_checks(report: ProofReport&, import_failed: bool, semantic_errors: u32) -> bool:
-            has_open_goal: mutable bool = false
-            return true if proof_report_source_admission_failure(report, &has_open_goal) != ""
-            return true if import_failed or semantic_errors > 0 or report.results.failed > 0
-            return true if not proof_report_all_obligations_proven(report) or has_open_goal
-            return false
-
-include "./report_focused_source_ensures.elisa"

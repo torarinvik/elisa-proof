@@ -159,21 +159,20 @@ extend ElisaProof:
                 _:
                     return true
 
-        # Inspect result/old visibility and Match lowering eligibility together. The Match
-        # subset and binder projection checks are shared with substitution, so perform them once
-        # per arm while retaining the same fail-closed result for unsupported forms.
-        def proof_report_postcondition_source_scan(expression: Ast::Expr, source_work: mutable usize&) -> (complete: bool, has_result: bool, has_old: bool, has_match: bool):
+        # Inspect result/old visibility and return-path splitting together. Branching forms are
+        # tracked so postcondition admission can refuse evidence without an exact exit identity.
+        def proof_report_postcondition_source_scan(expression: Ast::Expr, source_work: mutable usize&) -> (complete: bool, has_result: bool, has_old: bool, has_path_split: bool):
             has_result: mutable bool = false
             has_old: mutable bool = false
-            has_match: mutable bool = false
-            complete: bool = proof_report_postcondition_source_scan_depth(expression, 0, true, true, &has_result, &has_old, &has_match, source_work)
-            (complete, has_result, has_old, has_match)
+            has_path_split: mutable bool = false
+            complete: bool = proof_report_postcondition_source_scan_depth(expression, 0, true, true, &has_result, &has_old, &has_path_split, source_work)
+            (complete, has_result, has_old, has_path_split)
 
-        def proof_report_postcondition_source_scan_depth(expression: Ast::Expr, depth: usize, result_visible: bool, old_visible: bool, has_result: mutable bool&, has_old: mutable bool&, has_match: mutable bool&, source_work: mutable usize&) -> bool:
+        def proof_report_postcondition_source_scan_depth(expression: Ast::Expr, depth: usize, result_visible: bool, old_visible: bool, has_result: mutable bool&, has_old: mutable bool&, has_path_split: mutable bool&, source_work: mutable usize&) -> bool:
             can Abort.Panic:
                 return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
                 return false if not proof_report_source_work_charge(1, source_work)
-                return true if proof_goal_bool_ref_value(has_old) or (proof_goal_bool_ref_value(has_result) and proof_goal_bool_ref_value(has_match))
+                return true if proof_goal_bool_ref_value(has_old) or (proof_goal_bool_ref_value(has_result) and proof_goal_bool_ref_value(has_path_split))
                 match expression:
                     Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _):
                         return true
@@ -183,84 +182,94 @@ extend ElisaProof:
                         has_old <- true if old_visible and name == "old"
                         return true
                     Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
-                        return proof_report_postcondition_source_scan_depth(inner, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
-                    Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
-                        return false if not proof_report_postcondition_source_scan_depth(left, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
-                        proof_report_postcondition_source_scan_depth(right, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        return proof_report_postcondition_source_scan_depth(inner, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
+                    Ast::Expr.Binary(left, operator, right, _):
+                        has_path_split <- true if operator == TokenKind.And or operator == TokenKind.Or
+                        return false if not proof_report_postcondition_source_scan_depth(left, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
+                        proof_report_postcondition_source_scan_depth(right, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
+                    Ast::Expr.Index(left, right, _):
+                        return false if not proof_report_postcondition_source_scan_depth(left, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
+                        proof_report_postcondition_source_scan_depth(right, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
                     Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
-                        return proof_report_postcondition_source_scan_depth(object, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        return proof_report_postcondition_source_scan_depth(object, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
                     Ast::Expr.Slice(object, low, high, _):
-                        return false if not proof_report_postcondition_source_scan_depth(object, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
-                        return false if not proof_report_postcondition_source_scan_depth(low, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
-                        proof_report_postcondition_source_scan_depth(high, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        return false if not proof_report_postcondition_source_scan_depth(object, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
+                        return false if not proof_report_postcondition_source_scan_depth(low, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
+                        proof_report_postcondition_source_scan_depth(high, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
                     Ast::Expr.IndexN(object, arguments, _):
-                        return false if not proof_report_postcondition_source_scan_depth(object, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
-                        for argument in arguments |depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
-                            return false if not proof_report_postcondition_source_scan_depth(argument, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        return false if not proof_report_postcondition_source_scan_depth(object, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
+                        for argument in arguments |depth, result_visible, old_visible, has_result, has_old, has_path_split, source_work|:
+                            return false if not proof_report_postcondition_source_scan_depth(argument, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
                         return true
                     Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
-                        for element in elements |depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
-                            return false if not proof_report_postcondition_source_scan_depth(element, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        for element in elements |depth, result_visible, old_visible, has_result, has_old, has_path_split, source_work|:
+                            return false if not proof_report_postcondition_source_scan_depth(element, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
                         return true
                     Ast::Expr.DictLit(entries, _):
-                        for entry in entries |depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
-                            return false if not proof_report_postcondition_source_scan_depth(entry.key, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
-                            return false if not proof_report_postcondition_source_scan_depth(entry.value, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        for entry in entries |depth, result_visible, old_visible, has_result, has_old, has_path_split, source_work|:
+                            return false if not proof_report_postcondition_source_scan_depth(entry.key, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
+                            return false if not proof_report_postcondition_source_scan_depth(entry.value, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
                         return true
                     Ast::Expr.Construct(_, fields, _):
                         # The constructor head is a type expression; substitution only rewrites
                         # runtime values in the fields.
-                        for field in fields |depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
-                            return false if not proof_report_postcondition_source_scan_depth(field.value, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        for field in fields |depth, result_visible, old_visible, has_result, has_old, has_path_split, source_work|:
+                            return false if not proof_report_postcondition_source_scan_depth(field.value, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
                         return true
                     Ast::Expr.RecordUpdate(base, fields, _):
-                        return false if not proof_report_postcondition_source_scan_depth(base, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
-                        for field in fields |depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
-                            return false if not proof_report_postcondition_source_scan_depth(field.value, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        return false if not proof_report_postcondition_source_scan_depth(base, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
+                        for field in fields |depth, result_visible, old_visible, has_result, has_old, has_path_split, source_work|:
+                            return false if not proof_report_postcondition_source_scan_depth(field.value, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
                         return true
                     Ast::Expr.If(condition, then_expression, else_expression, _):
-                        return false if not proof_report_postcondition_source_scan_depth(condition, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
-                        return false if not proof_report_postcondition_source_scan_depth(then_expression, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
-                        proof_report_postcondition_source_scan_depth(else_expression, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        has_path_split <- true
+                        return false if not proof_report_postcondition_source_scan_depth(condition, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
+                        return false if not proof_report_postcondition_source_scan_depth(then_expression, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
+                        proof_report_postcondition_source_scan_depth(else_expression, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
                     Ast::Expr.Match(scrutinee, arms, position):
-                        has_match <- true
+                        has_path_split <- true
                         return false if proof_goal_bool_ref_value(has_result)
-                        return false if not proof_report_postcondition_source_scan_depth(scrutinee, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        return false if not proof_report_postcondition_source_scan_depth(scrutinee, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
                         return false if proof_goal_bool_ref_value(has_result)
-                        for arm in arms |position, depth, result_visible, old_visible, has_result, has_old, has_match, source_work|:
+                        for arm in arms |position, depth, result_visible, old_visible, has_result, has_old, has_path_split, source_work|:
                             return false if not proof_report_source_work_charge(1, source_work)
                             return false if arm.body.count != 1 or not proof_report_match_pattern_closed_with_work(arm.pattern, source_work)
                             arm_visibility: (known: bool, check_result: bool, check_old: bool) = proof_report_postcondition_match_binder_visibility(arm.pattern, position, result_visible, old_visible, source_work)
                             return false if not arm_visibility.known
                             if arm.guard != Ast::Expr.Absent:
-                                return false if not proof_report_postcondition_source_scan_depth(arm.guard, depth + 1, arm_visibility.check_result, arm_visibility.check_old, has_result, has_old, has_match, source_work)
+                                return false if not proof_report_postcondition_source_scan_depth(arm.guard, depth + 1, arm_visibility.check_result, arm_visibility.check_old, has_result, has_old, has_path_split, source_work)
                             match arm.body[0]:
                                 Ast::Stmt.Expr(value, _):
-                                    return false if not proof_report_postcondition_source_scan_depth(value, depth + 1, arm_visibility.check_result, arm_visibility.check_old, has_result, has_old, has_match, source_work)
+                                    return false if not proof_report_postcondition_source_scan_depth(value, depth + 1, arm_visibility.check_result, arm_visibility.check_old, has_result, has_old, has_path_split, source_work)
                                 _:
                                     return false
                         return true
+                    Ast::Expr.Catch(_, _, _):
+                        has_path_split <- true
+                        return false
                     Ast::Expr.Comprehension(variable, iterable, condition, body, _):
-                        return false if not proof_report_postcondition_source_scan_depth(iterable, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        has_path_split <- true
+                        return false if not proof_report_postcondition_source_scan_depth(iterable, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
                         body_result_visible: bool = result_visible and variable != "result"
                         body_old_visible: bool = old_visible and variable != "old"
-                        return false if not proof_report_postcondition_source_scan_depth(condition, depth + 1, body_result_visible, body_old_visible, has_result, has_old, has_match, source_work)
-                        proof_report_postcondition_source_scan_depth(body, depth + 1, body_result_visible, body_old_visible, has_result, has_old, has_match, source_work)
+                        return false if not proof_report_postcondition_source_scan_depth(condition, depth + 1, body_result_visible, body_old_visible, has_result, has_old, has_path_split, source_work)
+                        proof_report_postcondition_source_scan_depth(body, depth + 1, body_result_visible, body_old_visible, has_result, has_old, has_path_split, source_work)
                     Ast::Expr.Refinement(base, predicate, _):
-                        return false if not proof_report_postcondition_source_scan_depth(base, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
-                        proof_report_postcondition_source_scan_depth(predicate, depth + 1, result_visible, old_visible, has_result, has_old, has_match, source_work)
+                        return false if not proof_report_postcondition_source_scan_depth(base, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
+                        proof_report_postcondition_source_scan_depth(predicate, depth + 1, result_visible, old_visible, has_result, has_old, has_path_split, source_work)
                     Ast::Expr.Block(statements, value, _, _):
+                        has_path_split <- true
                         value_result_visible: mutable bool = result_visible
                         value_old_visible: mutable bool = old_visible
-                        for statement in statements |value_result_visible, value_old_visible, depth, has_result, has_old, has_match, source_work|:
+                        for statement in statements |value_result_visible, value_old_visible, depth, has_result, has_old, has_path_split, source_work|:
                             match statement:
                                 Ast::Stmt.VarDecl(local_name, _, initializer, _):
-                                    return false if not proof_report_postcondition_source_scan_depth(initializer, depth + 1, value_result_visible, value_old_visible, has_result, has_old, has_match, source_work)
+                                    return false if not proof_report_postcondition_source_scan_depth(initializer, depth + 1, value_result_visible, value_old_visible, has_result, has_old, has_path_split, source_work)
                                     value_result_visible <- false if local_name == "result"
                                     value_old_visible <- false if local_name == "old"
                                 _:
                                     return false
-                        proof_report_postcondition_source_scan_depth(value, depth + 1, value_result_visible, value_old_visible, has_result, has_old, has_match, source_work)
+                        proof_report_postcondition_source_scan_depth(value, depth + 1, value_result_visible, value_old_visible, has_result, has_old, has_path_split, source_work)
                     _:
                         # Calls, recovery expressions, and unknown syntax remain inadmissible.
                         return false
@@ -294,7 +303,22 @@ extend ElisaProof:
             return (true, false, false, absent) if count != 1 or not selected_matches
             (true, true, selected.supported, selected.expression)
 
-        def proof_report_postcondition_result_substitution_matches(source_expression: Ast::Expr, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, report: ProofReport&, attempt: ProofGoalAttempt, source_work: mutable usize&) -> bool:
+        # The supported parser subset has one source exit, so every body or signature
+        # postcondition for that owner must have exactly one ledger event. Check the complete
+        # source inventory once per admission batch, including rows with no attempts.
+        def proof_report_supported_postcondition_events_consistent(postcondition_inventory: darray[(name: sview, function_offset: u32, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)]&, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, postcondition_ast_index: ProofSourcePostconditionAstIndex, event_index: ProofSourcePostconditionCountIndex, source_work: mutable usize&) -> bool:
+            for source in postcondition_inventory |source, return_inventory, postcondition_ast_index, event_index, source_work|:
+                source_ast: (complete: bool, found: bool, row: usize, count: usize, contract_line: u32, expression: Ast::Expr) = proof_source_postcondition_ast_index_find(postcondition_ast_index, source.name, source.function_offset, source.line, source.source_index, source_work)
+                return false if not source_ast.complete or not source_ast.found or source_ast.count != 1
+                owner: (complete: bool, found: bool, supported: bool, expression: Ast::Expr) = proof_report_postcondition_return_lookup(return_inventory, source.name, source.line, source.function_offset, source_work)
+                return false if not owner.complete or not owner.found
+                continue if not owner.supported
+                event_key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: source.name, function_offset: source.function_offset, line: source.line, source_index: source.source_index}
+                event_count: (complete: bool, found: bool, count: usize) = proof_report_source_postcondition_index_find(event_index, event_key, source_work)
+                return false if not event_count.complete or not event_count.found or event_count.count != 1
+            true
+
+        def proof_report_postcondition_result_substitution_matches(source_expression: Ast::Expr, source_operator_mask: usize, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, report: ProofReport&, attempt: ProofGoalAttempt, source_work: mutable usize&) -> bool:
             return false if attempt.owner_function_line == 0
             return_row: (complete: bool, found: bool, supported: bool, expression: Ast::Expr) = proof_report_postcondition_return_lookup(return_inventory, attempt.name, attempt.owner_function_line, attempt.owner_function_offset, source_work)
             returned: Ast::Expr = return_row.expression
@@ -306,7 +330,7 @@ extend ElisaProof:
             overloaded_return_work_exhausted: mutable bool = false
             return false if:
                 proof_report_postcondition_has_unsafe_source_shape_depth(returned, 0, true, true, true, source_work)
-                proof_source_expression_has_overloaded_operator_with_work(returned, report.source.source_primitive_operator_mask, source_work, overloaded_return_work_exhausted)
+                proof_source_expression_has_overloaded_operator_with_work(returned, source_operator_mask, source_work, overloaded_return_work_exhausted)
                 overloaded_return_work_exhausted
             names: mutable darray[sview] = ["result"]
             values: mutable darray[Ast::Expr] = [returned]
@@ -316,22 +340,27 @@ extend ElisaProof:
 
         # Validate a goal after the caller has checked report-wide structure. Batch callers
         # pass precomputed finding and literal-source snapshots so report ledgers are scanned once.
-        def proof_report_source_postcondition_ast_goal_attempt_admitted(source_expression: Ast::Expr, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, report: ProofReport&, goal_id: usize, source_work: mutable usize&) -> bool:
+        def proof_report_source_postcondition_ast_goal_attempt_admitted(source_expression: Ast::Expr, source_operator_mask: usize, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, report: ProofReport&, goal_id: usize, source_work: mutable usize&) -> bool:
             return false if goal_id >= report.results.goal_attempts.count
             attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
             work_limit: usize = proof_replay_summary_source_work_limit()
             overloaded_source_work_exhausted: mutable bool = false
-            source_scan: (complete: bool, has_result: bool, has_old: bool, has_match: bool) = proof_report_postcondition_source_scan(source_expression, source_work)
-            return false if not source_scan.complete or source_scan.has_old or (source_scan.has_match and source_scan.has_result)
+            source_scan: (complete: bool, has_result: bool, has_old: bool, has_path_split: bool) = proof_report_postcondition_source_scan(source_expression, source_work)
+            return false if not source_scan.complete or source_scan.has_old or (source_scan.has_path_split and source_scan.has_result)
             has_result_variable: bool = source_scan.has_result
             return false if:
-                proof_source_expression_has_overloaded_operator_with_work(source_expression, report.source.source_primitive_operator_mask, source_work, overloaded_source_work_exhausted)
+                proof_source_expression_has_overloaded_operator_with_work(source_expression, source_operator_mask, source_work, overloaded_source_work_exhausted)
                 overloaded_source_work_exhausted
             if has_result_variable:
-                return false if not proof_report_postcondition_result_substitution_matches(source_expression, return_inventory, report, attempt, source_work)
+                return false if not proof_report_postcondition_result_substitution_matches(source_expression, source_operator_mask, return_inventory, report, attempt, source_work)
             else:
-                # Without a result variable, compare the parser-owned expression directly; the
-                # equality walk is already bounded by the shared source-work limit.
+                # A result-free goal still needs a source exit boundary. Without a return-site
+                # identity in the report, admit it only when the parser inventory proves one
+                # supported straight-line return for this exact function owner.
+                return_row: (complete: bool, found: bool, supported: bool, expression: Ast::Expr) = proof_report_postcondition_return_lookup(return_inventory, attempt.name, attempt.owner_function_line, attempt.owner_function_offset, source_work)
+                return false if not return_row.complete or not return_row.found or not return_row.supported
+                # The parser-owned ensure expression must still match the attempt exactly; the
+                # equality walk is bounded by the shared source-work limit.
                 return false if not proof_replay_summary_expr_equal_with_limit(source_expression, attempt.goal, source_work, work_limit)
             if attempt.producer_proven:
                 return false if not attempt.has_certificate or attempt.certificate_index >= report.analysis_1.certificates.count
@@ -340,11 +369,15 @@ extend ElisaProof:
                     not proof_replay_summary_expr_equal_with_limit(attempt.goal, certificate.goal, source_work, work_limit)
             return true
 
-        def proof_report_goal_source_admissible_after_structure_internal(report: ProofReport&, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, has_return_inventory: bool, goal_id: usize, literal_ensure_inventory: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, literal_index: ProofSourceLiteralEnsureAdmissionIndex, has_literal_index: bool, postcondition_ast_index: ProofSourcePostconditionAstIndex, has_postcondition_ast_index: bool, assert_by_inventory: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal_finding_clear: darray[bool]&, has_finding_snapshot: bool, source_loop_invariants_checked: bool, source_work: mutable usize&) -> bool:
+        def proof_report_goal_source_admissible_after_structure_internal(report: ProofReport&, source_operator_mask: usize, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, has_return_inventory: bool, goal_id: usize, literal_ensure_inventory: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, literal_index: ProofSourceLiteralEnsureAdmissionIndex, has_literal_index: bool, postcondition_ast_index: ProofSourcePostconditionAstIndex, has_postcondition_ast_index: bool, assert_by_inventory: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal_finding_clear: darray[bool]&, has_finding_snapshot: bool, source_loop_invariants_checked: bool, source_work: mutable usize&) -> bool:
             return false if goal_id >= report.results.goal_attempts.count
             attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
             selected_event: (found: bool, entry: ProofObligationEntry) = proof_report_obligation_event_for_goal(report, goal_id, source_work)
             return false if not selected_event.found
+            overloaded_goal_work_exhausted: mutable bool = false
+            return false if:
+                proof_source_expression_has_overloaded_operator_with_work(attempt.goal, source_operator_mask, source_work, overloaded_goal_work_exhausted)
+                overloaded_goal_work_exhausted
             selected: ProofObligationEntry = selected_event.entry
             return false if:
                 selected.owner_function_line == 0
@@ -367,7 +400,7 @@ extend ElisaProof:
                     source_ast: (complete: bool, found: bool, row: usize, count: usize, contract_line: u32, expression: Ast::Expr) = proof_source_postcondition_ast_index_find(postcondition_ast_index, selected.source_name, selected.source_function_offset, selected.source_line, selected.source_obligation_index, source_work)
                     return false if not source_ast.complete or not source_ast.found or source_ast.count != 1
                     source_contract_line <- source_ast.contract_line
-                    event_admitted <- has_return_inventory and proof_report_source_postcondition_ast_goal_attempt_admitted(source_ast.expression, return_inventory, report, goal_id, source_work)
+                    event_admitted <- has_return_inventory and proof_report_source_postcondition_ast_goal_attempt_admitted(source_ast.expression, source_operator_mask, return_inventory, report, goal_id, source_work)
                 if has_literal_index:
                     return false if not has_postcondition_ast_index
                     if not event_admitted:
@@ -416,11 +449,11 @@ extend ElisaProof:
         def proof_report_goal_source_admissible_after_structure(report: ProofReport&, goal_id: usize, literal_ensure_inventory: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, assert_by_inventory: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, source_work: mutable usize&) -> bool:
             no_finding_snapshot: darray[bool] = []
             no_returns: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)] = []
-            proof_report_goal_source_admissible_after_structure_internal(report, no_returns, false, goal_id, literal_ensure_inventory, ProofSourceLiteralEnsureAdmissionIndex{}, false, ProofSourcePostconditionAstIndex{}, false, assert_by_inventory, no_finding_snapshot, false, false, source_work)
+            proof_report_goal_source_admissible_after_structure_internal(report, PROOF_SOURCE_OPERATOR_ALL_FLAGS, no_returns, false, goal_id, literal_ensure_inventory, ProofSourceLiteralEnsureAdmissionIndex{}, false, ProofSourcePostconditionAstIndex{}, false, assert_by_inventory, no_finding_snapshot, false, false, source_work)
 
-        def proof_report_goal_source_admissible_after_structure_with_snapshots(report: ProofReport&, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, goal_id: usize, literal_ensure_inventory: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, literal_index: ProofSourceLiteralEnsureAdmissionIndex, postcondition_ast_index: ProofSourcePostconditionAstIndex, assert_by_inventory: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal_finding_clear: darray[bool]&, source_work: mutable usize&) -> bool:
+        def proof_report_goal_source_admissible_after_structure_with_snapshots(report: ProofReport&, source_operator_mask: usize, return_inventory: darray[(name: sview, line: u32, offset: u32, supported: bool, expression: Ast::Expr)]&, goal_id: usize, literal_ensure_inventory: darray[(name: sview, function_offset: u32, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, literal_index: ProofSourceLiteralEnsureAdmissionIndex, postcondition_ast_index: ProofSourcePostconditionAstIndex, assert_by_inventory: darray[(name: sview, function_offset: u32, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal_finding_clear: darray[bool]&, source_work: mutable usize&) -> bool:
             return false if not literal_index.valid or not postcondition_ast_index.valid
-            proof_report_goal_source_admissible_after_structure_internal(report, return_inventory, true, goal_id, literal_ensure_inventory, literal_index, true, postcondition_ast_index, true, assert_by_inventory, goal_finding_clear, true, true, source_work)
+            proof_report_goal_source_admissible_after_structure_internal(report, source_operator_mask, return_inventory, true, goal_id, literal_ensure_inventory, literal_index, true, postcondition_ast_index, true, assert_by_inventory, goal_finding_clear, true, true, source_work)
 
     private:
         # This raw helper is used only after the checked-view transaction has supplied its frozen

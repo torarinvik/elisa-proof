@@ -73,11 +73,11 @@ extend ElisaProof:
                     return false if not proof_replay_resource_binding_positions_at_with_work(report, child, positions, source_work, depth + 1)
                 return true
             return true if event.kind == "resource-disjoint"
-            if event.kind not in {"resource-use", "resource-write", "resource-move", "resource-bind", "resource-region-return"}:
-                return true if event.kind in {"resource-region-open", "resource-region-close", "resource-region-alloc", "resource-region-bind", "resource-sview-param", "resource-region-alloc-discard", "resource-region-return-alloc", "resource-region-call-alloc", "resource-region-rebind-alloc", "resource-region-assign", "resource-region-param", "resource-call", "resource-call-lend", "resource-call-arg", "resource-call-formal", "resource-call-region", "resource-call-result", "resource-join-move"}
+            if event.kind not in {"resource-use", "resource-write", "resource-move", "resource-bind", "resource-region-return", "resource-region-assign"}:
+                return true if event.kind in {"resource-region-open", "resource-region-close", "resource-region-alloc", "resource-region-bind", "resource-sview-param", "resource-region-alloc-discard", "resource-region-return-alloc", "resource-region-call-alloc", "resource-region-rebind-alloc", "resource-region-param", "resource-call", "resource-call-lend", "resource-call-arg", "resource-call-formal", "resource-call-region", "resource-call-result", "resource-join-move"}
                 return false
             return false if event.value < 0 or event.value > 4294967295 or (event.name == "" and event.kind != "resource-region-return")
-            return false if event.kind in {"resource-use", "resource-write", "resource-move"} and event.value == 0
+            return false if event.kind in {"resource-use", "resource-write", "resource-move", "resource-region-assign"} and event.value == 0
             return false if not proof_replay_owner_work_charge(sview_len(event.name), source_work)
             return false if not proof_replay_owner_work_charge(8, source_work)
             offset: usize = event.value.usize()
@@ -156,6 +156,15 @@ extend ElisaProof:
             event_root: usize = found.identity - 1
             return false if event_root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(1, source_work)
             report.analysis_1.kernel.nodes[event_root].auxiliary <- identity
+            true
+
+        def proof_replay_resource_binding_assignment_annotate_with_work(report: mutable ProofReport&, index: ProofReplayResourceBindingPositionIndex&, offset: usize, target_name: sview, source_identity: usize, target_identity: usize, source_work: mutable usize&) -> bool:
+            found: (complete: bool, found: bool, identity: usize) = proof_replay_resource_binding_position_find_with_work(report, index, "resource-region-assign", offset, target_name, source_work)
+            return false if not found.complete or not found.found or source_identity == 0 or target_identity == 0 or source_identity > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET or target_identity > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+            event_root: usize = found.identity - 1
+            return false if event_root >= report.analysis_1.kernel.nodes.count or not proof_replay_owner_work_charge(2, source_work)
+            report.analysis_1.kernel.nodes[event_root].right <- source_identity
+            report.analysis_1.kernel.nodes[event_root].auxiliary <- target_identity
             true
 
         def proof_replay_resource_binding_for_name_with_work(names: darray[sview]&, binders: darray[usize]&, name: sview, source_work: mutable usize&) -> (complete: bool, bound: bool, identity: usize):
@@ -321,6 +330,19 @@ extend ElisaProof:
                         if binding.bound:
                             return false if position.offset == 0 or position.offset > 4294967295
                             return false if not proof_replay_resource_binding_event_annotate_with_work(report, index, "resource-write", position.offset.usize(), binding.name, binding.identity, source_work)
+                        region_assignment: (complete: bool, count: usize) = proof_replay_resource_binding_position_kind_count_at_with_work(index, "resource-region-assign", position.offset.usize(), source_work)
+                        return false if not region_assignment.complete
+                        if region_assignment.count > 0:
+                            return false if not binding.bound or position.offset == 0 or position.offset > 4294967295
+                            source_value: (complete: bool, value: Ast::Expr) = proof_replay_resource_region_assignment_source_value_with_work(value, source_work, 0)
+                            return false if not source_value.complete
+                            match source_value.value:
+                                Ast::Expr.Ident(source_name, _):
+                                    source_binding: (complete: bool, bound: bool, identity: usize) = proof_replay_resource_binding_for_name_with_work(names, binders, source_name, source_work)
+                                    return false if not source_binding.complete or not source_binding.bound
+                                    return false if not proof_replay_resource_binding_assignment_annotate_with_work(report, index, position.offset.usize(), binding.name, source_binding.identity, binding.identity, source_work)
+                                _:
+                                    return false
                         return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, target, source_work, depth + 1)
                         return false if not proof_replay_resource_binding_expression_uses_covered_with_work(report, index, names, binders, value, source_work, depth + 1)
                     Ast::Stmt.If(condition, yes, no, _):
@@ -376,10 +398,11 @@ extend ElisaProof:
             # an unmatched forged event fail closed even if its attacker-chosen ID names a live slot.
             for entry in 0..<index.event_roots.count |entry, index, report, source_work|:
                 return false if not proof_replay_owner_work_charge(1, source_work)
-                if index.kinds[entry] in {"resource-use", "resource-write", "resource-move"}:
+                if index.kinds[entry] in {"resource-use", "resource-write", "resource-move", "resource-region-assign"}:
                     event_root: usize = index.event_roots[entry]
                     return false if event_root >= report.analysis_1.kernel.nodes.count
                     report.analysis_1.kernel.nodes[event_root].auxiliary <- 0
+                    report.analysis_1.kernel.nodes[event_root].right <- 0 if index.kinds[entry] == "resource-region-assign"
             names: mutable darray[sview] = []
             binders: mutable darray[usize] = []
             for parameter in parameters |parameter, names, binders, source_work|:
@@ -392,7 +415,8 @@ extend ElisaProof:
             return false if not proof_replay_resource_binding_statements_covered_with_work(report, index, names, binders, body, source_work, 0)
             for entry in 0..<index.event_roots.count |entry, index, report, source_work|:
                 return false if not proof_replay_owner_work_charge(1, source_work)
-                if index.kinds[entry] in {"resource-use", "resource-write", "resource-move"}:
+                if index.kinds[entry] in {"resource-use", "resource-write", "resource-move", "resource-region-assign"}:
                     event_root: usize = index.event_roots[entry]
                     return false if event_root >= report.analysis_1.kernel.nodes.count or report.analysis_1.kernel.nodes[event_root].auxiliary == 0
+                    return false if index.kinds[entry] == "resource-region-assign" and report.analysis_1.kernel.nodes[event_root].right == 0
             true

@@ -118,7 +118,7 @@ def _open_regular_file_without_symlink(path):
         raise
 
 
-def _sha256_regular_file(path: Path, max_bytes: int | None = None, *, include_stat=False):
+def _sha256_regular_file(path: Path, max_bytes: "int | None" = None, *, include_stat=False):
     """Hash a regular file without allocating its contents; reject observed mutation."""
     descriptor = None
     try:

@@ -1,0 +1,176 @@
+extend ElisaProof:
+    private:
+        # A top-level value can be mutated through a field even when its binding
+        # is immutable and has no `__global_mutable` annotation. The AST uses
+        # Decl.Const for both const and global bindings, so include every such
+        # source root and treat imports/externs as opaque. The walk shares the
+        # replay source-work meter; exhaustion is conservative.
+        def proof_replay_precondition_parameter_may_alias_global(report: ProofReport&, type_expression: Ast::Expr, work: mutable usize&) -> bool:
+            return true if not proof_type_is_reference_free_with_work(type_expression, report.source.source_declarations, report.source.source_annotations, 0, work)
+            proof_type_contains_borrowed_view_with_work(type_expression, report.source.source_declarations, 0, work)
+
+        # A local reference copied from a parameter or global can be written through
+        # under a different name. Conservatively invalidate an entry fact as soon as
+        # such an alias is introduced in the prefix; replay does not yet retain local
+        # alias provenance across statements.
+        def proof_replay_precondition_statement_introduces_state_alias(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, statement: Ast::Stmt, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT or not proof_replay_precondition_work_add(work, 1)
+            match statement:
+                Ast::Stmt.VarDecl(_, type_expression, initializer, _):
+                    return true if not proof_replay_precondition_work_add(work, 1)
+                    return false if not proof_replay_precondition_parameter_may_alias_global(report, type_expression, work)
+                    root: sview = proof_replay_source_place_root(initializer, 0)
+                    return true if root == ""
+                    for parameter in parameters |report, parameters, root, work|:
+                        return true if not proof_replay_precondition_work_add(work, 1)
+                        return true if not proof_replay_precondition_work_add(work, sview_len(parameter.name))
+                        return true if parameter.name != "" and parameter.name == root
+                    root_expression: Ast::Expr = Ast::Expr.Ident(root, Ast::expr_pos(initializer))
+                    return proof_replay_precondition_mentions_mutable_global(report.source.source_declarations, root_expression, work, 0)
+                Ast::Stmt.If(condition, yes, no, _):
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, condition, work, depth + 1)
+                    return true if proof_replay_precondition_body_introduces_state_alias(report, parameters, yes, work, depth + 1)
+                    return proof_replay_precondition_body_introduces_state_alias(report, parameters, no, work, depth + 1)
+                Ast::Stmt.While(condition, body, _):
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, condition, work, depth + 1)
+                    proof_replay_precondition_body_introduces_state_alias(report, parameters, body, work, depth + 1)
+                Ast::Stmt.For(_, _, iterable, body, _):
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, iterable, work, depth + 1)
+                    proof_replay_precondition_body_introduces_state_alias(report, parameters, body, work, depth + 1)
+                Ast::Stmt.Block(_, _, _, body, _):
+                    return proof_replay_precondition_body_introduces_state_alias(report, parameters, body, work, depth + 1)
+                Ast::Stmt.Match(subject, arms, _):
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, subject, work, depth + 1)
+                    for arm in arms |report, parameters, work, depth|:
+                        return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, arm.guard, work, depth + 1)
+                        return true if proof_replay_precondition_body_introduces_state_alias(report, parameters, arm.body, work, depth + 1)
+                    return false
+                Ast::Stmt.Expr(expression, _):
+                    proof_replay_precondition_expression_introduces_state_alias(report, parameters, expression, work, depth + 1)
+                Ast::Stmt.Assign(target, _, value, _):
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, target, work, depth + 1)
+                    proof_replay_precondition_expression_introduces_state_alias(report, parameters, value, work, depth + 1)
+                Ast::Stmt.Return(value, _):
+                    if value is returned:
+                        return proof_replay_precondition_expression_introduces_state_alias(report, parameters, returned, work, depth + 1)
+                    return false
+                Ast::Stmt.Contract(_, _, _) | Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                    return false
+                _:
+                    return true
+
+        def proof_replay_precondition_body_introduces_state_alias(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
+            for statement in body |report, parameters, work, depth|:
+                return true if not proof_replay_precondition_work_add(work, 1)
+                return true if proof_replay_precondition_statement_introduces_state_alias(report, parameters, statement, work, depth + 1)
+            return false
+
+        # Only block expressions can introduce statements. Walk expression children to
+        # find those blocks, and fail closed on an expression form this source scan does
+        # not understand.
+        def proof_replay_precondition_expression_introduces_state_alias(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, expression: Ast::Expr, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT or not proof_replay_precondition_work_add(work, 1)
+            match expression:
+                Ast::Expr.Absent | Ast::Expr.Invalid | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Block(statements, value, _, _):
+                    return true if proof_replay_precondition_body_introduces_state_alias(report, parameters, statements, work, depth + 1)
+                    proof_replay_precondition_expression_introduces_state_alias(report, parameters, value, work, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _):
+                    proof_replay_precondition_expression_introduces_state_alias(report, parameters, inner, work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _) | Ast::Expr.Refinement(left, right, _):
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, left, work, depth + 1)
+                    proof_replay_precondition_expression_introduces_state_alias(report, parameters, right, work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, object, work, depth + 1)
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, low, work, depth + 1)
+                    proof_replay_precondition_expression_introduces_state_alias(report, parameters, high, work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, object, work, depth + 1)
+                    for argument in arguments |report, parameters, work, depth|:
+                        return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, argument, work, depth + 1)
+                    return false
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |report, parameters, work, depth|:
+                        return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, element, work, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |report, parameters, work, depth|:
+                        return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, entry.key, work, depth + 1)
+                        return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, entry.value, work, depth + 1)
+                    return false
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, base, work, depth + 1)
+                    for field in fields |report, parameters, work, depth|:
+                        return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, field.value, work, depth + 1)
+                    return false
+                Ast::Expr.Match(subject, arms, _) | Ast::Expr.Catch(subject, arms, _):
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, subject, work, depth + 1)
+                    for arm in arms |report, parameters, work, depth|:
+                        return true if proof_replay_precondition_body_introduces_state_alias(report, parameters, arm.body, work, depth + 1)
+                    return false
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, iterable, work, depth + 1)
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, condition, work, depth + 1)
+                    proof_replay_precondition_expression_introduces_state_alias(report, parameters, body, work, depth + 1)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return true if proof_replay_precondition_expression_introduces_state_alias(report, parameters, guarded, work, depth + 1)
+                    proof_replay_precondition_body_introduces_state_alias(report, parameters, recovery, work, depth + 1)
+                Ast::Expr.Call(_, _, _, _) | Ast::Expr.StaticEffectCall(_, _, _, _, _, _) | Ast::Expr.Lambda(_, _, _):
+                    return false
+                _:
+                    return true
+
+        def proof_replay_precondition_mentions_mutable_global(declarations: darray[Ast::Decl]&, expression: Ast::Expr, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
+            for declaration in declarations |declarations, expression, work, depth|:
+                return true if not proof_replay_precondition_work_add(work, 1)
+                match declaration:
+                    # The source AST stores both `const` and global bindings as `Decl.Const`;
+                    # its fourth field is the binding mutability bit, not a global-storage bit.
+                    # Conservatively consider every file-scope name: an immutable global record
+                    # can still expose writable storage through one of its mutable fields.
+                    Ast::Decl.Const(name, _, _, _, _):
+                        return true if not proof_replay_precondition_work_add(work, sview_len(name))
+                        if name != "":
+                            return true if not proof_replay_precondition_expr_repetition_charge(expression, 1, work)
+                            return true if proof_expr_mentions_name(expression, name)
+                    Ast::Decl.Import(name, _) | Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return true if not proof_replay_precondition_work_add(work, sview_len(name))
+                        if name != "":
+                            return true if not proof_replay_precondition_expr_repetition_charge(expression, 1, work)
+                            return true if proof_expr_mentions_name(expression, name)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return true if proof_replay_precondition_mentions_mutable_global(nested, expression, work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return true
+                    _:
+                        pass
+            return false
+
+        def proof_replay_precondition_statement_touches_mutable_global(declarations: darray[Ast::Decl]&, expression: Ast::Expr, statement: Ast::Stmt, all_roots: bool, work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
+            for declaration in declarations |declarations, expression, statement, work, depth|:
+                return true if not proof_replay_precondition_work_add(work, 1)
+                match declaration:
+                    Ast::Decl.Const(name, _, _, _, _):
+                        return true if not proof_replay_precondition_work_add(work, sview_len(name))
+                        if name != "":
+                            return true if not all_roots and not proof_replay_precondition_expr_repetition_charge(expression, 1, work)
+                            if all_roots or proof_expr_mentions_name(expression, name):
+                                return true if proof_replay_source_statement_touches_with_work(declarations, statement, name, true, work)
+                    Ast::Decl.Import(name, _) | Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return true if not proof_replay_precondition_work_add(work, sview_len(name))
+                        if name != "":
+                            return true if not all_roots and not proof_replay_precondition_expr_repetition_charge(expression, 1, work)
+                            if all_roots or proof_expr_mentions_name(expression, name):
+                                return true if proof_replay_source_statement_touches_with_work(declarations, statement, name, true, work)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return true if proof_replay_precondition_statement_touches_mutable_global(nested, expression, statement, all_roots, work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return true
+                    _:
+                        pass
+            return false
+

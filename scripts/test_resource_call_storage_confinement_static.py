@@ -111,6 +111,74 @@ assert "not scalar_return.complete or not scalar_return.scalar" in omission_clas
 assert "return_markers.reference or return_markers.mutable_reference or return_markers.is_mutable" in omission_classifier
 assert "return_syntax.has_reference" in omission_classifier
 assert "sview_return.sview_type" in omission_classifier
+
+# Collection `.count` is a scalar-copy exception only when the declared type was
+# classified completely. An unresolved alias that happens to be named `darray`
+# must not suppress region/resource tracking.
+resource_statement = function_body(
+    ROOT / "src/proof/resources/statement_checker.elisa",
+    "proof_resource_check_statements",
+)
+assert "if local_markers.complete and proof_resource_type_is_collection(type_expression):" in resource_statement
+extent_classifier = function_body(
+    ROOT / "src/proof/resources/place_paths.elisa",
+    "proof_resource_binding_is_extent_bearing",
+)
+assert "slot >= state.bindings.binding_type_marker_complete.count or not state.bindings.binding_type_marker_complete[slot]" in extent_classifier
+marker_summary = function_body(
+    ROOT / "src/proof/resources/type_markers.elisa",
+    "proof_resource_type_marker_summary_with_owner_work_depth",
+)
+assert "lookup.declarations > 0 and proof_resource_marker_builtin_collection_type_name(name)" in marker_summary
+
+# Nested control-flow GetElse forms stay outside the admitted proof language. The
+# parser retains their recovery blocks, but the checker only handles recoveries at
+# statement-value roots; otherwise a recovery can carry a hidden memory access that
+# the statement-level index walk intentionally does not visit.
+runtime_support = function_body(
+    ROOT / "src/proof/check/runtime_support_and_calls.elisa",
+    "proof_statement_value_supported",
+)
+assert all(text in runtime_support for text in (
+    "Ast::Expr.GetElse(guarded, recovery, _):",
+    "return false if recovery.count == 0",
+    "return proof_expr_supported(guarded) and proof_runtime_expression_calls_allowed(guarded, functions)",
+))
+expression_support = function_body(
+    ROOT / "src/proof/expr/pattern_support.elisa",
+    "proof_expr_supported_depth_with_work",
+)
+assert re.search(r"Ast::Expr.GetElse\(_, _, _\):\s+return false", expression_support)
+recovery_extractor = function_body(
+    ROOT / "src/proof/check/index_checks.elisa",
+    "proof_statement_getelse_recovery",
+)
+assert all(text in recovery_extractor for text in (
+    "Ast::Stmt.Return(value, _):",
+    "Ast::Stmt.Expr(expression, _):",
+    "Ast::Stmt.VarDecl(_, _, initializer, _):",
+    "Ast::Stmt.Assign(_, _, initializer, _):",
+    "return (true, guarded, recovery, position.line)",
+))
+assert "Ast::Stmt.If(" not in recovery_extractor
+index_safety_getelse = function_body(
+    ROOT / "src/proof/check/index_safety_value.elisa",
+    "proof_check_index_safety_value",
+)
+assert "Ast::Expr.GetElse(guarded, _, getelse_position):" in index_safety_getelse
+
+# A shared extent is trusted only after every formal has been classified. An
+# incomplete frame must revoke both the count-only and all-fields stability facts.
+shared_borrows = function_body(
+    ROOT / "src/proof/check/shared_borrows.elisa",
+    "proof_record_shared_borrows",
+)
+assert (
+    "if not closed_frame:\n"
+    "report.aliases.shared_extent_names.clear()\n"
+    "report.aliases.shared_fixed_names.clear()"
+) in shared_borrows
+
 resource_coverage = function_body(ROOT / "src/proof/replay/resource_call_site_validation.elisa", "proof_replay_resource_call_coverage_for_owner_with_work")
 assert "proof_replay_resource_call_name_counts_match(cache.resource_call_owner_snapshots[located.row].source_calls, event_names, report, cache.scratch, cache.deterministic_calls.declaration_index, cache.deterministic_calls.alias_index, parameters, body, source_work)" in resource_coverage
 assert "proof_replay_source_call_target_context(parameters, cache.scratch.source.source_annotations, &cache.scratch, entry.name, entry.owner, owner_line, owner_offset, source_work, true, true)" in resource_coverage
@@ -124,6 +192,105 @@ assert "callee_owner.matches != 1" in resource_site_match
 resource_event_walk = function_body(ROOT / "src/proof/replay/certificate_validation.elisa", "proof_replay_resource_event_facts_with_owner")
 assert "proof_replay_resource_call_coverage_for_owner_with_work(report, root, active_owner" in resource_event_walk
 assert "proof_replay_resource_event_facts_with_owner(report, node.left, node.left, 0, callee_root.name" in resource_event_walk
+resource_fact_candidate = function_body(
+    ROOT / "src/proof/replay/kernel_fact_root_index.elisa",
+    "proof_replay_kernel_fact_root_candidate_matches_with_stack",
+)
+assert all(text in resource_fact_candidate for text in (
+    'if require_unconditional_source and trace.kind not in {"global-constant", "global-constant-qualified", "global-mutable-array-type", "global-mutable-array-index-bound", "const-enum-member-value", "precondition"}',
+    "not proof_replay_trace_lookup_charge(report)",
+    "proof_replay_kernel_trace_valid_memo(report, trace_index, owner",
+    'if require_unconditional_source and trace.kind == "precondition":',
+    "proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, trace_index, owner",
+    "structural_cache, true)",
+))
+resource_fact_trace = function_body(
+    ROOT / "src/proof/replay/certificate_validation.elisa",
+    "proof_replay_kernel_fact_root_is_traced_with_stack",
+)
+assert "trace_index <- proof_replay_trace_chain_next(report, trace_index)" in resource_fact_trace
+resource_fact_validation = function_body(
+    ROOT / "src/proof/replay/certificate_validation.elisa",
+    "proof_replay_kernel_fact_trace_is_valid_with_stack",
+)
+assert 'if allow_stable_resource_precondition and trace.kind == "precondition":' in resource_fact_validation
+assert "proof_replay_resource_disjoint_precondition_is_stable_cached" in resource_fact_validation
+resource_disjoint_precondition = function_body(
+    ROOT / "src/proof/replay/precondition_validation.elisa",
+    "proof_replay_resource_disjoint_precondition_is_stable",
+)
+assert 'Ast::Expr.Binary(Ast::Expr.Ident(left_name, _), TokenKind.BangEq, Ast::Expr.Ident(right_name, _), _)' in resource_disjoint_precondition
+assert "proof_replay_resource_disjoint_precondition_body_site_matches" in resource_disjoint_precondition
+assert "parameter.is_mutable or parameter.has_default or parameter.is_affine" in resource_disjoint_precondition
+assert 'Ast::Expr.Ident("usize", _)' in resource_disjoint_precondition
+assert "left_matches != 1 or right_matches != 1" in resource_disjoint_precondition
+assert "proof_replay_source_body_touches_with_work(report.source.source_declarations, body, left_name, true" in resource_disjoint_precondition
+assert "proof_replay_source_body_touches_with_work(report.source.source_declarations, body, right_name, true" in resource_disjoint_precondition
+assert "proof_source_expression_has_overloaded_operator_with_work(trace.expression" in resource_disjoint_precondition
+checked_access_alias_names = function_body(
+    ROOT / "src/proof/model/report_checked_access_alias_names.elisa",
+    "proof_checked_access_alias_mentions_name_with_work",
+)
+assert "proof_replay_summary_expr_cost_with_limit(expression, &cost, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)" in checked_access_alias_names
+assert "target_length: usize = sview_len(target)" in checked_access_alias_names
+assert "multiplier: usize = target_length + 1" in checked_access_alias_names
+assert "cost > remaining / multiplier" in checked_access_alias_names
+assert "work <- work + cost * multiplier" in checked_access_alias_names
+checked_access_alias_store = function_body(
+    ROOT / "src/proof/model/report_checked_access_inventory.elisa",
+    "proof_checked_access_alias_store",
+)
+assert "proof_checked_access_alias_mentions_name_with_work(stored, name, work)" in checked_access_alias_store
+assert "proof_checked_access_alias_mentions_name_with_work(prior_value, name, work)" in checked_access_alias_store
+assert "proof_expr_mentions_name(stored, name)" not in checked_access_alias_store
+assert "proof_expr_mentions_name(prior_value, name)" not in checked_access_alias_store
+mutable_array_source = ROOT / "src/proof/replay/global_mutable_array_validation.elisa"
+bound_precondition = function_body(mutable_array_source, "proof_replay_global_mutable_array_bound_precondition")
+assert "Ast::Expr.Ident(\"usize\", _)" in bound_precondition
+assert "if parameter.name == bound_parameter" in bound_precondition
+assert "not unsigned_parameter" in bound_precondition
+assert "proof_replay_source_body_declares_with_work(report.source.source_declarations, owner_body, bound_parameter, source_work)" in bound_precondition
+assert "proof_replay_source_body_touches_with_work(report.source.source_declarations, owner_body, bound_parameter, true, source_work)" in bound_precondition
+assert "required_parameter == bound_parameter and required_extent == extent" in bound_precondition
+assert "proof_source_analysis_operator_mask_from_source(report.source.source_declarations, report.source.source_annotations, source_work)" in bound_precondition
+assert "proof_source_expression_has_overloaded_operator_with_work(expression, operator_mask_status.mask, source_work, operator_work_exhausted)" in bound_precondition
+assert "not operator_mask_status.complete" in bound_precondition
+assert "or operator_work_exhausted" in bound_precondition
+mutable_array_validate = function_body(mutable_array_source, "proof_replay_global_mutable_array_type_fact_is_valid_after_preflight")
+assert "proof_replay_global_mutable_array_bound_precondition(report, owner_parameters, owner_body, trace.expression, extent, trace.line, source_work)" in mutable_array_validate
+assert "global_matches != 1 or not global_valid or extent < 0" in mutable_array_validate
+assert "not proof_replay_global_mutable_array_fact_shape(trace.expression, global_name, extent, global_position)" in mutable_array_validate
+assert "not source_search_complete or root_binding_count != 1" in mutable_array_validate
+mutable_array_fact_gate = function_body(mutable_array_source, "proof_replay_global_mutable_array_type_fact_is_valid_with_work")
+assert "proof_source_analysis_operator_mask_from_source(report.source.source_declarations, report.source.source_annotations, source_work)" in mutable_array_fact_gate
+assert 'Ast::Expr.Binary(Ast::Expr.Ident(_, _), TokenKind.Lt, Ast::Expr.Field(Ast::Expr.Ident(_, _), "count", _), _):' in mutable_array_fact_gate
+assert "proof_source_expression_has_overloaded_operator_with_work(trace.expression, operator_mask_status.mask, source_work, operator_work_exhausted)" in mutable_array_fact_gate
+root_array = function_body(mutable_array_source, "proof_replay_global_mutable_array_find_root_with_work")
+assert "annotation_matches == 1" in root_array and "proof_replay_global_mutable_array_annotation_count_with_work" in root_array
+fixed_extent = function_body(mutable_array_source, "proof_replay_global_mutable_array_literal_extent")
+assert "Ast::Expr.Index(Ast::Expr.Ident(element, _), Ast::Expr.IntLit(extent, _), _)" in fixed_extent
+assert "Ast::Expr.IndexN(Ast::Expr.Ident(\"array\", _), arguments, _)" in fixed_extent
+assert "return extent if extent >= 0" in fixed_extent
+precondition_source = ROOT / "src/proof/replay/precondition_validation.elisa"
+precondition_liveness = function_body(precondition_source, "proof_replay_precondition_live_at_consumer")
+assert "proof_replay_expression_contains_call_node(trace.expression, 0)" in precondition_liveness
+assert "depends_on_mutable_state <- true if call_dependent" in precondition_liveness
+assert "statement, call_dependent, source_work, 0" in precondition_liveness
+global_liveness = function_body(
+    ROOT / "src/proof/replay/precondition_mutable_global_validation.elisa",
+    "proof_replay_precondition_statement_touches_mutable_global",
+)
+assert "all_roots or proof_expr_mentions_name(expression, name)" in global_liveness
+precondition_harness = (ROOT / "scripts/tests/test_replay_scope_and_context_holes.py").read_text(encoding="utf-8")
+assert '"global mutable precondition_state: i64 = 0\\n"' in precondition_harness
+assert "precondition_state <- 1" in precondition_harness
+assert "precondition_state_is_zero" in precondition_harness
+assert "A call in a requires clause can hide a read of mutable global state." in precondition_harness
+assert "proof_replay_fact_trace_entry(&report, qualified_precondition_index) can Global{Read,Write}), 128" in precondition_harness
+const_enum_value = function_body(ROOT / "src/proof/replay/variant_exclusion_validation.elisa", "proof_replay_const_enum_member_value_valid")
+assert "left.const_enums != 1" in const_enum_value and "right.const_enums != 1" in const_enum_value
+assert "proof_replay_const_enum_member_value_valid(report, trace, source_work)" in function_body(ROOT / "src/proof/replay/boundary_trace_shapes.elisa", "proof_replay_boundary_trace_shape_valid_with_cache")
+assert "proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, active_owner, dependency_stack, false, true" in resource_event_walk
 
 resource_snapshot_path = ROOT / "src/proof/replay/resource_call_site_snapshot.elisa"
 resource_snapshot_select = function_body(resource_snapshot_path, "proof_replay_resource_call_owner_snapshot_select")
@@ -280,4 +447,63 @@ for range_scan in (identity_position_find, kind_count):
 assert "count <- count + 1 if index.kinds[current] == kind" in kind_count
 assert "return (false, 0) if count > 1" in kind_count
 
-print("resource-call and return replay preserve source-bound storage and marker checks")
+checked_access = (ROOT / "src/proof/model/report_checked_access_inventory.elisa").read_text(encoding="utf-8")
+assert all(expected in checked_access for expected in ("proof_report_source_work_charge(sview_len(attempt.name), source_work)", "proof_report_source_work_charge(sview_len(attempt.rule), source_work)", "proof_report_source_work_charge(sview_len(row.owner_name), source_work)", "proof_report_source_work_charge(sview_len(row.rule), source_work)"))
+checked_access_admission = function_body(ROOT / "src/proof/model/report_structure_bound_failure.elisa", "proof_source_analysis_report_structure_bound_failure")
+assert "proof_report_checked_access_coverage(source.file, report, source_work)" in checked_access_admission
+assert 'return "source-checked-access-coverage" if not checked_accesses_covered' in checked_access_admission
+checked_access_index_build = checked_access.split("def proof_checked_access_index_build(", 1)[1].split("def proof_checked_access_index_find(", 1)[0]
+assert "return ProofCheckedAccessIndex{valid: false} if proof_checked_access_key_equal(prior, row.owner_name" in checked_access_index_build
+checked_access_collector = function_body(ROOT / "src/proof/model/report_checked_access_inventory.elisa", "proof_checked_access_collect_expr")
+checked_access_body = function_body(ROOT / "src/proof/model/report_checked_access_inventory.elisa", "proof_checked_access_collect_body")
+checked_match_merge = "proof_checked_access_alias_merge_match_arm(entry_names, entry_values, alias_values, arm_names, arm_values, work)"
+assert checked_access_collector.count(checked_match_merge) == 1
+assert checked_access_body.count(checked_match_merge) == 1
+match_merge = function_body(ROOT / "src/proof/model/report_checked_access_inventory.elisa", "proof_checked_access_alias_merge_match_arm")
+assert "if proof_expr_equal(joined_values[index], entry_values[index]) and proof_expr_equal(arm_values[index], entry_values[index])" in match_merge
+assert "if guard_effect.effectful:" in checked_access_body
+assert "proof_checked_access_alias_invalidate_all(entry_names, entry_values, work)" in checked_access_body
+alias_merge = function_body(ROOT / "src/proof/model/report_checked_access_inventory.elisa", "proof_checked_access_alias_merge_equal_indexes")
+assert "if proof_expr_equal(then_values[index], else_values[index]):" in alias_merge
+assert "alias_values[index] <- Ast::Expr.Invalid" in alias_merge, "a changed alias on a loop exit must fail the equality join"
+while_branch = checked_access_body.split("Ast::Stmt.While(condition, nested, _):", 1)[1].split("Ast::Stmt.For(", 1)[0]
+for_branch = checked_access_body.split("Ast::Stmt.For(_, variables, iterable, nested, _):", 1)[1].split("Ast::Stmt.Match(", 1)[0]
+loop_join = "proof_checked_access_alias_merge_equal_indexes(alias_names, alias_values, entry_names, entry_values, loop_names, loop_values, work)"
+assert loop_join in while_branch and loop_join in for_branch, "loop exits must join the body state with the zero-iteration state"
+exit_alias_invalidation = "transfer.found and not proof_checked_access_alias_invalidate_all(loop_names, loop_values, work)"
+assert exit_alias_invalidation in while_branch and exit_alias_invalidation in for_branch, "loop transfers must not retain body aliases across a possibly early exit"
+assert "not transfer.complete" in while_branch and "not transfer.complete" in for_branch, "loop-flow scanning remains bounded and fail-closed"
+loop_flow = (ROOT / "src/proof/model/report_checked_access_loop_flow.elisa").read_text(encoding="utf-8")
+control_expr_transfer = function_body(
+    ROOT / "src/proof/model/report_checked_access_loop_flow.elisa",
+    "proof_checked_access_control_expr_has_recovery_transfer",
+)
+assert "Ast::Expr.GetElse(value, recovery, _)" in control_expr_transfer
+assert "proof_checked_access_loop_has_exit_transfer(recovery, work, depth + 1, nested_loops)" in control_expr_transfer
+assert "Ast::Expr.Binary(left, _, right, _)" in control_expr_transfer
+loop_exit_transfer = function_body(
+    ROOT / "src/proof/model/report_checked_access_loop_flow.elisa",
+    "proof_checked_access_loop_has_exit_transfer",
+)
+assert "Ast::Stmt.If(condition, yes, no, _):" in loop_exit_transfer
+assert "proof_checked_access_control_expr_has_recovery_transfer(condition, work, depth + 1, nested_loops)" in loop_exit_transfer
+assert "Ast::Stmt.Expr(expression, _):" in loop_exit_transfer
+assert "Ast::Stmt.VarDecl(_, type_expression, value, _):" in loop_exit_transfer
+assert "Ast::Stmt.Assign(target, _, value, _):" in loop_exit_transfer
+for control_branch in ("Ast::Stmt.If(condition, yes, no, _):", "Ast::Stmt.While(condition, nested, _):", "Ast::Stmt.For(_, variables, iterable, nested, _):"):
+    branch = checked_access_body.split(control_branch, 1)[1]
+    branch = branch.split("Ast::Stmt.", 1)[0]
+    assert "proof_checked_access_control_expr_has_recovery_transfer" in branch
+    assert "recovery_transfer.found and not proof_checked_access_alias_invalidate_all" in branch
+assert "return (false, false)" in control_expr_transfer, "unhandled or over-budget control expressions fail closed"
+checked_access_lines = checked_access_collector.splitlines()
+row_push_indices = [index for index, line in enumerate(checked_access_lines) if "rows.push(ProofCheckedAccessSource{" in line]
+assert row_push_indices, "the source census must bound each collected checked-access row"
+for index in row_push_indices:
+    assert index > 0 and "rows.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4" in checked_access_lines[index - 1], checked_access_lines[max(0, index - 1):index + 1]
+checked_access_coverage = checked_access.split("def proof_report_checked_access_coverage(", 1)[1]
+for coverage_rule in ("Ast::expr_pos(attempt.goal)", "found.row >= seen.count", "seen[found.row] <- true", "or not present"):
+    assert coverage_rule in checked_access_coverage
+assert "return false if not found.complete or not found.found or found.row >= seen.count" in checked_access_coverage
+assert "return false if seen[found.row]" not in checked_access_coverage, "repeated evaluations of one checked source occurrence are allowed"
+print("resource replay preserves storage/marker checks and source-bounds checked-access attempts")

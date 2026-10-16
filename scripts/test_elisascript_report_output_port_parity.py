@@ -6,6 +6,7 @@ import hashlib
 import re
 from pathlib import Path
 from test_elisascript_report_output_reader_contract import check_python_reader_contract
+from elisascript_path_resolve_port_contract import check_path_resolve_port_contract
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +25,10 @@ python_source = python_reference.read_text(encoding="utf-8")
 elisa_source = elisa_counterpart.read_text(encoding="utf-8")
 
 with (ROOT / "scripts/elisascript/PORTING_INVENTORY.csv").open(newline="", encoding="utf-8") as inventory_file:
-    active_rows = [row for row in csv.DictReader(inventory_file) if row["python_path"] == "scripts/test_report_output_loop_layout.py"]
+    inventory_rows = list(csv.DictReader(inventory_file))
+active_inventory_rows = [row for row in inventory_rows if row["status"] == "active_unqualified"]
+assert len(active_inventory_rows) == 1, active_inventory_rows
+active_rows = [row for row in active_inventory_rows if row["python_path"] == "scripts/test_report_output_loop_layout.py"]
 assert len(active_rows) == 1, active_rows
 active_row = active_rows[0]
 assert active_row["elisascript_path"] == "scripts/test_report_output_loop_layout.elisascript" and active_row["status"] == "active_unqualified" and active_row["python_sha256"] == hashlib.sha256(python_reference.read_bytes()).hexdigest(), active_row
@@ -32,9 +36,10 @@ interpreter_source = interpreter.read_text(encoding="utf-8")
 lowerer_source = lowerer.read_text(encoding="utf-8")
 ir_model_source = ir_model.read_text(encoding="utf-8")
 verifier_source = verifier.read_text(encoding="utf-8")
+check_path_resolve_port_contract(ROOT)
 registry_source = builtin_registry.read_text(encoding="utf-8")
 bounded_reader = (ROOT.parent / "elisa-script/src/runtime/bounded_text_posix.elisa").read_text(encoding="utf-8")
-reader_body = bounded_reader.split("def read_utf8[T: Str](", 1)[1].split("def descriptor_shape", 1)[0]
+reader_body = bounded_reader.split("def read_utf8_path_text(", 1)[1].split("def descriptor_shape", 1)[0]
 runtime_strings = (ROOT.parent / "elisa-script/vendor/elisa-compiler/elisacore_std/elisacore_runtime_strings.elisa").read_text(encoding="utf-8")
 runtime_prelude = (ROOT.parent / "elisa-script/vendor/elisa-compiler/elisacore_std/elisacore_runtime_prelude.elisa").read_text(encoding="utf-8")
 
@@ -67,13 +72,12 @@ assert python_fragments == elisa_fragments, (python_fragments, elisa_fragments)
 # Both scripts derive the same repository root and read the same target file.
 assert "Path(__file__).resolve().parents[1]" in python_source
 for path_step in (
-    "path_real(Script::invocation_path())",
+    "proof_report_output_loop_layout_resolve_script_file()",
     "script_file.parent()",
     "proof_root: Path = script_directory.parent()",
     'proof_root.joinpath("src/app/report_output_serialization_helpers.elisa")',
 ):
     assert path_step in elisa_source, path_step
-
 # Pin the bounded-reader builtin and the runtime implementation it reaches.
 assert "PROOF_REPORT_OUTPUT_LOOP_LAYOUT_MAX_SOURCE_BYTES: usize = 16777216" in elisa_source
 assert 'include "../runtime/bounded_text_posix.elisa"' in execution_facade.read_text(encoding="utf-8")
@@ -87,15 +91,12 @@ main_signature = next(line for line in elisa_source.splitlines() if line.startsw
 assert "File.Read" in main_signature and "Global" not in main_signature, main_signature
 assert "EsBoundedText::read_utf8_path_text(path_value.text, maximum_bytes)" in interpreter_source
 assert "EsBoundedText::read_utf8(path(path_value.text), maximum_bytes)" not in interpreter_source
-assert "def read_utf8[T: Str](input_path: T, maximum_bytes: usize)" in bounded_reader
-assert 'return try read_utf8_text(f"{input_path}", maximum_bytes)' in bounded_reader
 assert "def read_utf8_path_text(input_path: sview, maximum_bytes: usize)" in bounded_reader
 path_text_reader = bounded_reader.split("def read_utf8_path_text(", 1)[1].split("def read_utf8_text(", 1)[0]
 assert "input_path: sview, maximum_bytes: usize" in path_text_reader
 assert "return try read_utf8_text(input_path, maximum_bytes)" in path_text_reader
 assert "def read_utf8_text(input_path: sview" in bounded_reader
 for reader_signature in (
-    "def read_utf8[T: Str](input_path: T, maximum_bytes: usize)",
     "def read_utf8_path_text(input_path: sview, maximum_bytes: usize)",
     "def read_utf8_text(input_path: sview, maximum_bytes: usize)",
 ):
@@ -203,7 +204,7 @@ assert "PROOF_REPORT_OUTPUT_LOOP_LAYOUT_MAX_FRAGMENT_BYTES: usize = 256" in elis
 assert max(len(fragment.encode("utf-8")) for fragment in python_fragments) <= 256
 assert "normalized_source.contains(fragment)" not in elisa_source
 matcher_start = elisa_source.index("def proof_report_output_loop_layout_contains(")
-matcher_end = elisa_source.index("\ndef main(", matcher_start)
+matcher_end = elisa_source.index("\ndef proof_report_output_loop_layout_resolve_script_file(", matcher_start)
 matcher_source = elisa_source[matcher_start:matcher_end].rstrip()
 expected_matcher_source = '''def proof_report_output_loop_layout_contains(haystack: sview, needle: sview) -> bool:
     haystack_length: usize = sview_len(haystack)
@@ -232,6 +233,9 @@ assert "read_text_bounded" in bounded_text_docs
 assert "Positive short reads continue until EOF" in bounded_text_docs
 assert "Total POSIX read attempts are also capped" not in bounded_text_docs
 
+# Keep the mode boundary and filesystem edge regressions attached to the active
+# Path.resolve port: strict aliases stay mode 0, method resolve is mode 1, and
+# both execution engines cover non-strict missing/dangling path behavior.
 tree = ast.parse(python_source)
 
 
@@ -509,7 +513,7 @@ expected_events = [
 ]
 assert python_events == elisa_events == expected_events, (python_events, elisa_events)
 assert (
-    'script_file: Path = try path_real(Script::invocation_path()) else err:\n'
+    'if not script_resolution.complete:\n'
     '        _ = write_stderr("report serialization loop layout: unable to resolve script path\\n")\n'
     '        return 1i64'
 ) in elisa_source
@@ -539,9 +543,11 @@ required_value_lines = "\n".join(
 )
 expected_candidate_main = r'''def main(arguments: darray[sview]) -> i64 can[Blocking.IO, Memory.Allocate, Abort.Panic, File.Read, Console.Write, Console.Format]:
     _ = arguments
-    script_file: Path = try path_real(Script::invocation_path()) else err:
+    script_resolution: (complete: bool, script_file: Path) = proof_report_output_loop_layout_resolve_script_file()
+    if not script_resolution.complete:
         _ = write_stderr("report serialization loop layout: unable to resolve script path\n")
         return 1i64
+    script_file: Path = script_resolution.script_file
     script_directory: Path = script_file.parent()
     proof_root: Path = script_directory.parent()
     source_file: Path = proof_root.joinpath("src/app/report_output_serialization_helpers.elisa")

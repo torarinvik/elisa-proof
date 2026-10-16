@@ -1,13 +1,15 @@
 # Frame report correspondence to original source
 
-> **Current checkout status (2026-10-11):** The generation-specific validation records below
-> are historical evidence, not proof that source-context frame checking is currently wired into
-> the CLI. In this checkout, `src/app/cli.elisa` calls `proof_check_with_semantic_diagnostics`
-> and `proof_replay_certificates`; there are no production call sites for
-> `proof_check_with_source_context` or `proof_replay_certificates_with_source`. The latter also
-> returns `void`, so its updated frame flags are not projected into the CLI's replay receipt.
-> Treat frame-source CLI integration and portable frame-goal admission as unverified until the
-> current APIs are connected and a generation-matched end-to-end validation is recorded.
+> **Current checkout status (2026-10-15):** Production source preparation records the bounded
+> direct frame-event inventory, and the checked-view API replays it against original declarations,
+> tokens and source bytes. The CLI obtains the source capability through
+> `proof_source_analysis_import_parse`; its checked-view path calls
+> `proof_check_with_source_analysis` and `proof_replay_certificates_with_source` before issuing
+> the replay receipt (`src/app/cli.elisa:242`, `src/proof/replay/api.elisa:446-480`). This closes
+> the earlier producer/CLI wiring gap for the supported direct-event slice. Unsupported or
+> ambiguous mappings still fail closed. The generation-specific logs below document historical
+> implementation stages and do not qualify the complete current checkout; matched-build and
+> broader source-event runtime qualification remain open.
 
 The private `proof_direct_frame_report_matches_source` helper derives the complete
 supported direct-event inventory from the original declarations/tokens/source.

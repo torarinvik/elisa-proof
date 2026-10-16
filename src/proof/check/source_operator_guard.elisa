@@ -9,7 +9,8 @@ extend ElisaProof:
         const PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG: usize = 16
         const PROOF_SOURCE_OPERATOR_DIVISION_FLAG: usize = 32
         const PROOF_SOURCE_OPERATOR_NEGATION_FLAG: usize = 64
-        const PROOF_SOURCE_OPERATOR_ALL_FLAGS: usize = 127
+        const PROOF_SOURCE_OPERATOR_INDEX_FLAG: usize = 128
+        const PROOF_SOURCE_OPERATOR_ALL_FLAGS: usize = 255
 
         # The backend rewrites these source members for operators. Keep the mapping here so
         # source admission, witness lookup, and replay use one protocol-independent dispatch
@@ -22,6 +23,7 @@ extend ElisaProof:
             if name == "__mul__": return PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
             if name == "__div__": return PROOF_SOURCE_OPERATOR_DIVISION_FLAG
             if name == "__neg__": return PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+            if name == "__index__": return PROOF_SOURCE_OPERATOR_INDEX_FLAG
             PROOF_SOURCE_OPERATOR_MASK_EMPTY
 
         def proof_source_operator_mask_for_protocol(protocol: sview) -> usize:
@@ -33,6 +35,7 @@ extend ElisaProof:
                 "Mul" -> PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
                 "Div" -> PROOF_SOURCE_OPERATOR_DIVISION_FLAG
                 "Neg" -> PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+                "Index" -> PROOF_SOURCE_OPERATOR_INDEX_FLAG
                 _ -> PROOF_SOURCE_OPERATOR_MASK_EMPTY
 
         # Classify scalar spellings for drop/effect analysis. This does not authenticate the
@@ -91,7 +94,25 @@ extend ElisaProof:
                 mask <- mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
                 mask <- mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
                 mask <- mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_INDEX_FLAG
             return (true, mask)
+
+        # Generic operator bounds are encoded as synthetic parser annotations rather than as
+        # concrete implementation rows. Preserve their deny bits in every syntax-only source
+        # check; an unknown bound could define any operator protocol, so it keeps the full mask.
+        def proof_source_operator_mask_with_generic_bounds(annotations: darray[Ast::EnumAnnotation]&, initial_mask: usize, source_work: mutable usize&) -> (complete: bool, mask: usize):
+            mask: mutable usize = initial_mask
+            for annotation in annotations |annotation, source_work, mask|:
+                return (false, mask) if:
+                    not proof_report_source_work_charge(1, source_work)
+                    not proof_report_source_work_charge(sview_len(annotation.name), source_work)
+                continue if annotation.line != 3900000130
+                bound_mask: usize = proof_source_operator_mask_for_protocol(annotation.name)
+                if annotation.name == "" or annotation.name == "All" or bound_mask == PROOF_SOURCE_OPERATOR_MASK_EMPTY:
+                    mask <- PROOF_SOURCE_OPERATOR_ALL_FLAGS
+                else:
+                    mask <- mask | bound_mask
+            (true, mask)
 
         # Derive both masks from the already-built flat source index in one bounded pass.
         # AST-only consumers have no authenticated receiver type, so their operator mask must
@@ -112,6 +133,10 @@ extend ElisaProof:
                 # Do not narrow this mask by concrete spelling: syntax-only checks cannot
                 # establish that an expression's receiver is one of the primitive types.
                 primitive_mask <- primitive_mask | implementation.operator_mask
+            generic_bounds: (complete: bool, mask: usize) = proof_source_operator_mask_with_generic_bounds(report.source.source_annotations, PROOF_SOURCE_OPERATOR_MASK_EMPTY, source_work)
+            return (false, primitive_mask, protocol_mask) if not generic_bounds.complete
+            primitive_mask <- primitive_mask | generic_bounds.mask
+            protocol_mask <- protocol_mask | generic_bounds.mask
             return (true, primitive_mask, protocol_mask)
 
         # Report-bound analysis has already built and validated this cache from the same
@@ -142,6 +167,7 @@ extend ElisaProof:
                 mask <- mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
                 mask <- mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
                 mask <- mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_INDEX_FLAG
                 return mask
             return result.mask
 
@@ -153,6 +179,7 @@ extend ElisaProof:
             return (mask & PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG) != 0 if protocol == "Mul"
             return (mask & PROOF_SOURCE_OPERATOR_DIVISION_FLAG) != 0 if protocol == "Div"
             return (mask & PROOF_SOURCE_OPERATOR_NEGATION_FLAG) != 0 if protocol == "Neg"
+            return (mask & PROOF_SOURCE_OPERATOR_INDEX_FLAG) != 0 if protocol == "Index"
             return false
 
         # Compound assignments lower through scalar operations or the built-in dynamic-array
@@ -186,6 +213,7 @@ extend ElisaProof:
                 mask <- mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
                 mask <- mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
                 mask <- mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_INDEX_FLAG
             if protocol == "Eq":
                 mask <- mask | PROOF_SOURCE_OPERATOR_EQUALITY_FLAG
             # Source ordering implementations use the `Less` protocol for `<`; the proof
@@ -202,6 +230,8 @@ extend ElisaProof:
                 mask <- mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
             if protocol == "Neg":
                 mask <- mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+            if protocol == "Index":
+                mask <- mask | PROOF_SOURCE_OPERATOR_INDEX_FLAG
 
         # Replay rebuilds this from source annotations instead of trusting the producer's
         # operator index or the cached report mask. Any recognized impl_scope marker is enough to
@@ -331,8 +361,10 @@ extend ElisaProof:
                 Ast::Expr.Scope(base, _, _):
                     return proof_source_expression_has_overloaded_operator(base, operator_mask, depth + 1)
                 Ast::Expr.Index(object, index, _):
+                    return true if proof_source_primitive_operator_mask_has(operator_mask, "Index")
                     return proof_source_expression_has_overloaded_operator(object, operator_mask, depth + 1) or proof_source_expression_has_overloaded_operator(index, operator_mask, depth + 1)
                 Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_source_primitive_operator_mask_has(operator_mask, "Index")
                     return true if proof_source_expression_has_overloaded_operator(object, operator_mask, depth + 1)
                     for argument in arguments |operator_mask, depth|:
                         return true if proof_source_expression_has_overloaded_operator(argument, operator_mask, depth + 1)

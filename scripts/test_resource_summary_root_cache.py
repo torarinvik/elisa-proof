@@ -24,7 +24,7 @@ def body(path: Path, name: str) -> str:
 
 
 places = ROOT / "src/proof/resources/places_and_calls.elisa"
-states = ROOT / "src/proof/resources/state_and_regions.elisa"
+states = ROOT / "src/proof/resources/state_finish.elisa"
 statements = ROOT / "src/proof/resources/statement_checker.elisa"
 schedule = ROOT / "src/proof/check/function_verification_schedule.elisa"
 region_flow = ROOT / "src/proof/resources/region_flow.elisa"

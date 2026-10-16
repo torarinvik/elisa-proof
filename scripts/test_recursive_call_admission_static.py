@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 module = (ROOT / "src/proof/model/report_recursive_call_admission.elisa").read_text(encoding="utf-8")
 attempt_index = (ROOT / "src/proof/model/report_recursive_call_attempt_index.elisa").read_text(encoding="utf-8")
+structural_owner_index = (ROOT / "src/proof/model/report_recursive_call_structural_owner_index.elisa").read_text(encoding="utf-8")
 structure = (ROOT / "src/proof/model/report_structure_bound_failure.elisa").read_text(encoding="utf-8")
 api = (ROOT / "src/proof/replay/api.elisa").read_text(encoding="utf-8")
 typed_replay = (ROOT / "src/proof/replay/typed_postcondition_replay.elisa").read_text(encoding="utf-8")
@@ -36,9 +37,20 @@ expected_coverage = attempt_index[attempt_index.index("def proof_source_recursiv
 assert "index.attempt_counts[call_index] != expected.count" not in expected_coverage, "path-specific repeated attempts must not be rejected by an exact count"
 assert "slot_counts[slot] <- slot_counts[slot] - 1 if slot_counts[slot] > 0" in expected_coverage, "repeated matching attempts may not consume more than the required multiplicity"
 assert "expected.count == 0 and index.attempt_counts[call_index] != 0" in expected_coverage, "empty obligations must still reject stray attempts"
-assert "proof_source_recursive_call_structural_index_fill(recursive_attempt_index, report, name, owner_position, source_work)" in module
-structural_index_fill_at = module.index("proof_source_recursive_call_structural_index_fill(recursive_attempt_index, report, name")
+structural_index_call = "proof_source_recursive_call_structural_index_fill(recursive_attempt_index, &structural_owners, name, owner_position, source_work)"
+assert structural_index_call in module
+structural_index_fill_at = module.index(structural_index_call)
 assert structural_index_fill_at < module.index("for call_index in 0..<calls.count", structural_index_fill_at), "structural certificate tables must be indexed once before per-call admission"
+structural_fill_start = attempt_index.index("def proof_source_recursive_call_structural_index_fill")
+structural_fill_end = attempt_index.index("\n        def ", structural_fill_start + 1)
+structural_fill = attempt_index[structural_fill_start:structural_fill_end]
+assert "proof_source_recursive_call_structural_owner_row(owners, name, source_work)" in structural_fill
+assert "owners.certificate_owner_lines[record] != owner_position.line" in structural_fill
+assert "owners.certificate_owner_offsets[record] != owner_position.offset" in structural_fill
+assert "proof_source_recursive_call_offset_hash_index(index, owners.certificate_call_offsets[record], source_work)" in structural_fill
+assert "owners.certificate_lines[record] != call_position.line" in structural_fill
+assert "index.structural_certificate_counts[call.call_index] <- index.structural_certificate_counts[call.call_index] + 1" in structural_fill
+assert "return false if count > 1" in structural_fill
 assert "recursive_attempt_index.structural_certificate_counts[call_index] == 1" in module
 assert "proof_expr_shape_hash(expected[expected_index], 0)" in attempt_index
 assert "proof_expr_shape_hash(attempt_goal, 0)" in attempt_index
@@ -56,30 +68,44 @@ assert "proof_source_recursive_call_measure_atom(component)" in module
 assert "TokenKind.GtEq" in module and "TokenKind.Lt" in module and "TokenKind.EqEq" in module
 assert "return false if unsupported_call_context" in module, "stateful surrounding statements must not bypass source substitution"
 assert "proof_source_recursive_call_expr_candidate(signature_exprs[row], name, source_work)" in module, "signature clauses must not hide recursive calls from the body census"
+recursive_expr_candidate = module.split("def proof_source_recursive_call_expr_candidate(", 1)[1].split("def proof_source_recursive_call_stmt_candidate(", 1)[0]
+method_candidate = module.split("def proof_source_recursive_call_method_candidate(", 1)[1].split("def proof_source_recursive_call_expr_candidate(", 1)[0]
+assert "proof_expr_has_call_with_work(expression, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)" in method_candidate, "unknown expression fallback scans must share the source-work meter"
+assert "proof_replay_summary_expr_repeat_charge_with_work(expression, 2, source_work)" in recursive_expr_candidate, "the two whole-expression predicates must remain budgeted"
 assert "proof_source_recursive_call_structural_owner_index_build(report, source_certificates_checked, source_work)" in module
 assert "proof_source_recursive_call_structural_owner_verified(structural_owners, name, source_certificates_checked, source_work)" in module
 assert "structural.function_name_index_values" not in module, "source admission must not trust producer-owned structural hash slots"
-assert "index.counts[row] != 1" in module, "duplicate structural rows must remain ambiguous"
-assert "index.names[row] == name" in module, "hash matches must still compare exact names"
-assert "total != verified.count" in module and "index.verified.push(verified[row])" in module, "the census-local structural index must validate parallel report rows"
+assert "index.counts[row] != 1" in structural_owner_index, "duplicate structural rows must remain ambiguous"
+assert "index.names[row] == name" in structural_owner_index, "hash matches must still compare exact names"
+assert "total != report.analysis_1.structural.verified_members.count" in structural_owner_index and "index.verified.push(report.analysis_1.structural.verified_members[row])" in structural_owner_index, "the census-local structural index must validate parallel report rows without borrowing report fields"
+assert "names: darray[sview]& = report.analysis_1.structural.names" not in structural_owner_index and "verified: darray[bool]& = report.analysis_1.structural.verified_members" not in structural_owner_index, "builder must avoid unsupported borrowed bindings to report fields"
+assert "|probes, slot, hash, row, index, names, verified, total, capacity, source_work, placed|" not in structural_owner_index, "structural-row probe must not capture removed report-field aliases"
+structural_owner_struct = structural_owner_index.split("def proof_source_recursive_call_structural_owner_index_build", 1)[0]
+for field in ("hashes", "slots", "names", "counts", "verified"):
+    declaration = next(line.strip() for line in structural_owner_struct.splitlines() if line.strip().startswith(f"{field}: "))
+    assert declaration.startswith(f"{field}: mutable darray[") and declaration.endswith("= []"), f"structural owner index field {field} must be mutable and default-initialized"
+for field, default in (("valid", "false"), ("empty", "0"), ("entries", "0"), ("empty_certificate", "0")):
+    declaration = next(line.strip() for line in structural_owner_struct.splitlines() if line.strip().startswith(f"{field}: "))
+    expected_type = "bool" if field == "valid" else "mutable usize"
+    assert declaration.startswith(f"{field}: {expected_type} = {default}"), f"structural owner index scalar {field} needs mutable/default declaration {expected_type} = {default}"
 assert "return false if not structural_owner.verified and not has_decreases" in module, "a missing structural claim must not erase recursive termination obligations"
 structural_certificate_replay = fact_trace.split("def proof_replay_certificate_with_stack[", 1)[1].split("def proof_replay_certificate[", 1)[0]
 source_check = "proof_replay_structural_certificate_source_valid_with_work(report, certificate, validation_workspace.source_scan_work_used, structural_cache)"
 kernel_check = "proof_kernel_validate_structural_witness_shape_with_workspace"
 assert source_check in structural_certificate_replay and kernel_check in structural_certificate_replay
 assert structural_certificate_replay.index(source_check) < structural_certificate_replay.index(kernel_check), "structural certificate replay must bind the edge to source before kernel shape admission"
-assert "proof_source_recursive_call_structural_index_fill(recursive_attempt_index, report, name, owner_position, source_work)" in module
+assert structural_index_call in module
 assert "recursive_attempt_index.structural_certificate_counts[call_index] == 1" in module
 assert "return false if structural_owner.verified and not structural_call_verified" in module, "every recursive edge in a structural owner needs its own replayed certificate"
 assert "attempt.owner_function_line != owner_position.line or attempt.owner_function_offset != owner_position.offset" in attempt_index, "structural attempts from another declaration must be ignored"
-assert "not attempt.has_certificate or not attempt.producer_proven" in attempt_index
-assert "certificate.kernel_goal != attempt.kernel_goal" in attempt_index
-assert "certificate_attempt_counts[attempt.certificate_index] != 0" in attempt_index, "certificate-to-attempt matching must be one-to-one"
-assert "root.left != call_position.offset.usize() or certificate.line != call_position.line" in attempt_index, "structural evidence must include this exact recursive call site"
-assert "for attempt in report.results.goal_attempts" in attempt_index and "for certificate_index in 0..<certificate_count" in attempt_index, "certificate reconciliation must scan each report table once per owner"
-assert "proof_source_recursive_call_offset_hash_index(index, root.left, source_work)" in attempt_index
+assert "not attempt.has_certificate" in structural_owner_index and "not attempt.producer_proven" in structural_owner_index
+assert "certificate.kernel_goal != attempt.kernel_goal" in structural_owner_index
+assert "return ProofSourceRecursiveCallStructuralOwnerIndex{} if seen[certificate_index]" in structural_owner_index, "certificate-to-attempt matching must be one-to-one"
+assert "owners.certificate_call_offsets[record] != call_position.offset.usize() or owners.certificate_lines[record] != call_position.line" in structural_fill, "structural evidence must include this exact recursive call site"
+assert "for attempt in report.results.goal_attempts" in structural_owner_index and "for certificate_index in 0..<certificate_count" in structural_owner_index, "certificate reconciliation must scan each report table once per owner"
+assert "proof_source_recursive_call_offset_hash_index(index, owners.certificate_call_offsets[record], source_work)" in structural_fill
 assert "index.offset_slot_hashes[slot] == hashed.hash and index.call_positions[current].offset == offset" in attempt_index
-assert "proof_source_recursive_call_collect(report, declarations, declarations, declaration_names, structural_owners, scheduled_owners, &scheduled_cursor, source_certificates_checked, source_work, 0)" in module
+assert "proof_source_recursive_call_collect(report, declarations, declarations, declaration_names, &structural_owners, scheduled_owners, &scheduled_cursor, source_certificates_checked, source_work, 0)" in module
 assert "complete and scheduled_cursor == scheduled_owners.count" in module
 recording = (ROOT / "src/proof/model/report_recording.elisa").read_text(encoding="utf-8")
 mark_call = recording.split("def proof_mark_call_obligations_since(", 1)[1].split("\n\n", 1)[0]

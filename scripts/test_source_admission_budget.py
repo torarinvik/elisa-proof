@@ -148,7 +148,7 @@ assert "text_status_snapshot_complete: bool =" in cli_source and "semantic_visib
 assert "proof_semantic_diagnostic_visible(" not in output_helpers and "proof_semantic_diagnostic_visible(" not in cli_source
 suggestion_body = theorem_suggestions.split("def proof_push_json_suggestions_with_replayed[", 1)[1]
 outer_theorem_loop = suggestion_body.split("for theorem_index in 0..<report.analysis_1.theorems.summaries.count", 1)[1].split("valid_parameters:", 1)[0]
-assert "proof_suggestion_work_charge(replay_work, 1)" in outer_theorem_loop
+assert "proof_suggestion_work_charge(replay_work, 1)" in outer_theorem_loop and "-> __suggestion_" not in suggestion_body and "|__suggestion_" not in suggestion_body and "values.push(new[store] Ast::Expr.Absent)" in suggestion_body
 assert "proof_checked_view_theorem_source_admission_with_work(checked_view, theorem_index, &replay_work)" in suggestion_body
 assert "theorem_source_status.source_admissible and theorem_source_status.declaration_identity_unambiguous" in suggestion_body
 assert "proof_declaration_name_is_unique" not in suggestion_body
@@ -568,8 +568,8 @@ for requirement in (
     "Ast::Stmt.VarDecl(local_name, Ast::Expr.Ident(local_type, local_type_position), initializer, local_position)",
     'local_sort.sort != "integer" or return_type_sort != "integer"',
     "local_sort.type_identity != return_type_identity",
-    "initializer_scan: (complete: bool, has_result: bool, has_old: bool, has_match: bool)",
-    "initializer_scan.has_result or initializer_scan.has_old",
+    "initializer_scan: (complete: bool, has_result: bool, has_old: bool, has_path_split: bool)",
+    "initializer_scan.has_result or initializer_scan.has_old or initializer_scan.has_path_split",
     "initializer_position: Ast::Pos = Ast::expr_pos(initializer)",
     "initializer_position.offset <= local_position.offset",
     "initializer_position.end_offset <= initializer_position.offset",
@@ -597,4 +597,4 @@ assert goal_root_gate < binary_solver and "proof_kernel_replay_signed_expression
 unsafe_goal_fallback = goal_replay[goal_root_gate:].split("linear_certificate_closed:", 1)[0]
 assert "return (proof_kernel_replay_nested_conditional_goal(" in unsafe_goal_fallback
 assert "proof_kernel_replay_goal_binary_with_work(" not in unsafe_goal_fallback
-print("source admission budget: bounded fallback, float containment, and normalized-goal gates")
+print("source admission budget: bounded fallback, float containment, normalized-goal and checked-access gates")

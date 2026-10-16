@@ -12,8 +12,10 @@ SOURCES = (
     ROOT / "src/proof/check/source_conversion_type_aliases.elisa",
     ROOT / "src/proof/check/source_conversion_type_alias_collectors.elisa",
     ROOT / "src/proof/check/source_conversion_name_lookups.elisa",
+    ROOT / "src/proof/check/source_generic_owner_param_index.elisa",
     ROOT / "src/proof/replay/source_call_type_aliases.elisa",
     ROOT / "src/proof/replay/source_call_type_argument_shape.elisa",
+    ROOT / "src/proof/replay/source_generic_parameter_index.elisa",
 )
 
 
@@ -49,9 +51,24 @@ assert "Generic shadowing applies to explicit call-site syntax" in alias_expand
 
 generic_line_lookup = function_body("proof_source_conversion_generic_line_lookup")
 assert "generic_param_line_index_hashes" in generic_line_lookup
+assert "wanted_hash: u32 = proof_expr_shape_mix(proof_name_hash(name), generic_owner_line.i64())" in generic_line_lookup
 assert "while probes < hashes_count and probes <= PROOF_NAME_INDEX_MAX_CLUSTER" in generic_line_lookup
+assert "source_generic_param_lines[current] == generic_owner_line and current_name == name" in generic_line_lookup
 assert "index.generics.generic_param_line_index_counts[slot] != 1" in generic_line_lookup
 assert "not index.generics.generic_param_line_index_valid" in generic_line_lookup
+assert generic_line_lookup.rstrip().endswith("return (false, 0)")
+probe_loop = generic_line_lookup.split("while probes < hashes_count and probes <= PROOF_NAME_INDEX_MAX_CLUSTER", 1)[1].split("\n", 1)[1].rsplit("\n            return (false, 0)", 1)[0]
+assert "not proof_source_index_work_charge(report, 1)" in probe_loop
+
+# Explicit alias actuals stay in the caller's generic scope while their
+# declaration-owned RHS is expanded in the alias owner's scope.
+index_n = unwrap.split("Ast::Expr.IndexN(head, arguments, position):", 1)[1].split("Ast::Expr.Field", 1)[0]
+assert "for argument in arguments |actuals, declaration_line, check_caller_generics" in index_n
+assert "proof_source_conversion_alias_type_expression_safe(argument, formal_owner_row, &actual_used, seen, resolution_owner, declaration_line, check_caller_generics" in index_n
+assert "proof_source_conversion_type_alias_unwrap_with_formals(argument, declaration_line, check_caller_generics, resolution_owner, resolution_owner_known, formal_owner_row, formal_actuals, true" in index_n
+index_one = unwrap.split("Ast::Expr.Index(head, element, position):", 1)[1].split("Ast::Expr.IndexN", 1)[0]
+assert "proof_source_conversion_alias_type_expression_safe(element, formal_owner_row, &actual_used, seen, resolution_owner, declaration_line, check_caller_generics" in index_one
+assert "proof_source_conversion_type_alias_unwrap_with_formals(element, declaration_line, check_caller_generics, resolution_owner, resolution_owner_known, formal_owner_row, formal_actuals, true" in index_one
 
 generic_name = function_body("proof_source_conversion_generic_name")
 assert "proof_source_conversion_generic_function_owner_lookup(active_line" in generic_name
@@ -60,9 +77,29 @@ assert "return (true, 0) if function_owner.found" in generic_name
 assert "return (false, 0) if owner_known" in generic_name
 assert "for generic_index in report.source_types.source_generic_param_lines" not in generic_name
 
+# Keep producer and replay generic shadow checks bound to the active function's
+# exact declaration. The row indexes must compare the captured line and offset,
+# rather than treating a same-line sibling's generic as in scope.
+producer_owner_rows = function_body("proof_source_generic_owner_param_present_in_index_with_work")
+assert "generic_param_owner_row_lines[current] == owner_line" in producer_owner_rows
+assert "generic_param_owner_row_offsets[current] == owner_offset" in producer_owner_rows
+assert "generic_param_owner_row_names[current]" in producer_owner_rows
+
+replay_generic_name = function_body("proof_replay_call_conversion_generic_name")
+assert "active_function_line == 0" in replay_generic_name
+assert "proof_replay_call_generic_param_name(name, active_function_line" in replay_generic_name
+replay_param_name = function_body("proof_replay_call_generic_param_name")
+assert "generic_owner_line != call_target.generics.field_conversion_generic_param_line" in replay_param_name
+assert "field_conversion_generic_param_lines[current] == generic_owner_line" in replay_param_name
+replay_owner_rows = function_body("proof_replay_call_generic_param_owner_row_present")
+assert "field_conversion_generic_param_owner_row_lines[current] == owner_line" in replay_owner_rows
+assert "field_conversion_generic_param_owner_row_offsets[current] == owner_offset.u32()" in replay_owner_rows
+assert "field_conversion_generic_param_owner_row_names[current]" in replay_owner_rows
+
 applied = function_body("proof_source_conversion_type_alias_expand_applied")
 assert "actuals.count != index.aliases.alias_generic_formal_counts[row]" in applied
 assert "index.aliases.alias_generic_application_valid[row] == false" in applied
+assert "proof_source_conversion_type_alias_unwrap_with_formals(target, index.aliases.alias_lines[row], false, index.aliases.alias_owners[row], true, row, actuals, false" in applied
 global_alias_lookup = function_body("proof_source_conversion_alias_target")
 assert "index.aliases.alias_has_formals[alias.row]" in global_alias_lookup
 replay_global_alias_lookup = function_body("proof_replay_call_conversion_alias_target")

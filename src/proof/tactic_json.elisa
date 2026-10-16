@@ -149,7 +149,11 @@ extend ElisaProof:
                     parsed_line: (known: bool, value: u32) = proof_tactic_json_line(line_field.value)
                     return false if not parsed_line.known
                     line <- parsed_line.value
-                annotations.push(Ast::EnumAnnotation{owner: "__contract_quantifier", name: name.value, line: line})
+                # EnumAnnotation text belongs to the source region. The JSON view may live in a
+                # shorter arena, so retain only the two recognized static quantifier spellings;
+                # unknown names have the same non-quantifier meaning as an empty marker.
+                stored_name: sview = "forall" if name.value == "forall" else "exists" if name.value == "exists" else ""
+                annotations.push(Ast::EnumAnnotation{owner: "__contract_quantifier", name: stored_name, line: line})
             return work_used <= PROOF_JSON_EXPRESSION_WORK_LIMIT
 
         def proof_tactic_json_action_fields_valid(action: sview, has_argument: bool, has_secondary: bool, has_argument_index: bool) -> bool:
@@ -295,11 +299,12 @@ extend ElisaProof:
             validity: mutable darray[bool] = []
             validity.resize(tree.states.count)
             cursor: mutable usize = 0
-            while cursor < tree.states.count |cursor, tree, validity|:
+            replay_work: mutable usize& = &tree.total_kernel_replay_work
+            while cursor < tree.states.count |cursor, tree, validity, replay_work|:
                 if not tree.has_branch[cursor]:
                     leaf: mutable ProofTacticState = tree.states[cursor]
-                    trace_valid: bool = (proof_tactic_kernel_trace_replay_with_work(leaf, annotations, &tree.total_kernel_replay_work) can Global{Read,Write})
-                    kernel_valid: bool = (proof_tactic_kernel_replay_with_trace_work(leaf, annotations, &tree.total_kernel_replay_work) can Global{Read,Write}) if trace_valid else false
+                    trace_valid: bool = (proof_tactic_kernel_trace_replay_with_work(leaf, annotations, replay_work) can Global{Read,Write})
+                    kernel_valid: bool = (proof_tactic_kernel_replay_with_trace_work(leaf, annotations, replay_work) can Global{Read,Write}) if trace_valid else false
                     validity[cursor] <- trace_valid and kernel_valid
                 else:
                     left_index: usize = tree.left[cursor]
@@ -310,7 +315,7 @@ extend ElisaProof:
                     parent: mutable ProofTacticState = tree.states[cursor]
                     left: mutable ProofTacticState = tree.states[left_index]
                     right: mutable ProofTacticState = tree.states[right_index]
-                    validity[cursor] <- (proof_tactic_kernel_branch_transition_replay_with_work(&parent, &left, &right, annotations, &tree.total_kernel_replay_work) can Global{Read,Write})
+                    validity[cursor] <- (proof_tactic_kernel_branch_transition_replay_with_work(&parent, &left, &right, annotations, replay_work) can Global{Read,Write})
                 cursor <- cursor + 1
             return validity[root]
 
@@ -321,7 +326,7 @@ extend ElisaProof:
             return exhausted if tree.states.count >= PROOF_JSON_MAX_TREE_NODES
             return exhausted if depth == 0 and not proof_tactic_json_prepare_operator_mask(tree, annotations)
             actions_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(root, "actions", &tree.total_expression_work)
-            return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+            return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
             return invalid if not actions_field.known or not ElisaProofJson::is_array(actions_field.value)
             count: i64 = ElisaProofJson::array_len(actions_field.value)
             return invalid if count < 0 or count > PROOF_JSON_MAX_ACTIONS
@@ -336,7 +341,7 @@ extend ElisaProof:
             for index in 0..<count |index, actions_field, state, annotations, accepted_count, source_bound|:
                 item: JsonValueHandle[r] = try ElisaProofJson::at(actions_field.value, index) else ElisaProofJson::null_value(actions_field.value)
                 action_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(item, "action", &tree.total_expression_work)
-                return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+                return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
                 action: (known: bool, value: sview) @r = proof_tactic_json_text(action_field.value)
                 return invalid if not action_field.known or not action.known
                 return exhausted if not proof_tactic_json_expression_charge(&tree.total_expression_work, sview_len(action.value))
@@ -462,7 +467,7 @@ extend ElisaProof:
             json_exhausted: ProofTacticJsonResult = ProofTacticJsonResult{..invalid, reason: "source-bound script exhausted its JSON decode-work budget"}
             action_exhausted: ProofTacticJsonResult = ProofTacticJsonResult{..invalid, reason: "source-bound tactic import exhausted its aggregate action work budget"}
             return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
-            return invalid if tree.states.count != 0 or tree.left.count != 0 or tree.right.count != 0 or tree.has_branch.count != 0 or tree.total_actions != 0 or tree.total_trace_fact_snapshots != 0 or tree.total_kernel_replay_work != 0 or tree.total_solver_work != 0 or tree.total_solver_preflight_work != 0 or tree.total_action_ast_work != 0 or tree.primitive_operator_mask != 0 or tree.primitive_operator_mask_initialized
+            return invalid if tree.states.count != 0 or tree.left.count != 0 or tree.right.count != 0 or tree.has_branch.count != 0 or tree.total_actions != 0 or tree.total_trace_fact_snapshots != 0 or tree.total_solver_work != 0 or tree.total_solver_preflight_work != 0 or tree.total_action_ast_work != 0 or tree.primitive_operator_mask != 0 or tree.primitive_operator_mask_initialized
             format_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(root, "format", &tree.total_expression_work)
             return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
             format: (known: bool, value: sview) @r = proof_tactic_json_text(format_field.value)
@@ -536,17 +541,23 @@ extend ElisaProof:
         # Repair search may try many scripts for the same goal. Keep each check tied to the
         # checked view, but compare only that goal's row and charge every candidate to the
         # caller's shared meter instead of rescanning the full report for each candidate.
-        def proof_tactic_json_run_source_with_target_work[@r, @view](root: JsonValueHandle[r], source_state: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticJsonBranchScratch]& @r, checked_view: ProofCheckedView[view]& @view, goal_id: usize, source_work: mutable usize&) -> (result: ProofTacticJsonResult, source_admitted: bool) can[Global{Read,Write}]:
+        def proof_tactic_json_run_source_with_target_work[@r, @view](root: JsonValueHandle[r], source_state: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticJsonBranchScratch]& @r, checked_view: ProofCheckedView[view]& @view, goal_id: usize, source_work: mutable usize&, kernel_work: mutable usize&) -> (result: ProofTacticJsonResult, source_admitted: bool) can[Global{Read,Write}]:
             invalid: ProofTacticJsonResult = ProofTacticJsonResult{reason: "source-bound proof script requires an admitted checked-view goal"}
+            kernel_exhausted: ProofTacticJsonResult = ProofTacticJsonResult{reason: "source-bound tactic import exhausted the aggregate kernel work budget"}
             status: (complete: bool, goal_admitted: bool, facts_admitted: bool, source_admitted: bool) = proof_checked_view_goal_source_admissions_with_work(checked_view, goal_id, source_work)
             return (invalid, false) if not status.complete or not status.source_admitted
+            kernel_work <- tree.total_kernel_replay_work if tree.total_kernel_replay_work > kernel_work
+            return (kernel_exhausted, true) if kernel_work >= ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT
+            tree.total_kernel_replay_work <- kernel_work
             report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
-            result: ProofTacticJsonResult = proof_tactic_json_run_source_candidate(root, source_state, annotations, state, tree, scratch, report, goal_id)
+            result: ProofTacticJsonResult = (proof_tactic_json_run_source_candidate(root, source_state, annotations, state, tree, scratch, report, goal_id) can Global{Read,Write})
+            kernel_work <- tree.total_kernel_replay_work
             (result, true)
 
         def proof_tactic_json_run_source[@r, @view](root: JsonValueHandle[r], source_state: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticJsonBranchScratch]& @r, checked_view: ProofCheckedView[view]& @view, goal_id: usize) -> ProofTacticJsonResult can[Global{Read,Write}]:
             source_work: mutable usize = 0
-            result_with_status: (result: ProofTacticJsonResult, source_admitted: bool) = proof_tactic_json_run_source_with_target_work(root, source_state, annotations, state, tree, scratch, checked_view, goal_id, &source_work)
+            kernel_work: mutable usize = tree.total_kernel_replay_work
+            result_with_status: (result: ProofTacticJsonResult, source_admitted: bool) = (proof_tactic_json_run_source_with_target_work(root, source_state, annotations, state, tree, scratch, checked_view, goal_id, &source_work, &kernel_work) can Global{Read,Write})
             result_with_status.result
 
     public:

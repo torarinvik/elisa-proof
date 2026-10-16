@@ -1,9 +1,59 @@
 # Source obligation and branch attempt accounting gap
 
-The strict report-invariant runtime reaches status 34 on current source:
-removing one open ledger event and decrementing the total leaves two open
-attempts attached to one event, yet source admission accepts the report.
-The existing adversarial assertion is retained.
+> **Current source status (2026-10-15):** The attempt-span integration now also
+> reconciles `event.proven` with the conjunction of `producer_proven` across each
+> non-`call-requires` event's attempt span. Call-requires keeps its selected-attempt
+> check because its span can contain speculative attempts. Static frame-event
+> recording and source-context replay are also wired into the production checked
+> path; see [frame-report-source-correspondence.md](frame-report-source-correspondence.md).
+> Zero-attempt aggregate credit is limited to inventoried `frame-clause` rows. Prepared
+> direct frame events use source-reconstructed, attempt-backed policy rows; generic fallback
+> `frame` rows cannot own attempts or add aggregate success credit. The checked-index/get census
+> uses a bounded owner/position/rule inventory, with substitutions matched by original source
+> occurrence. Static checks only; the edits remain uncompiled and unqualified.
+> These source checks do not establish matched-build runtime qualification. The
+> chronological notes below include earlier states and should be read as history.
+
+## Checked-index/get source census gap
+
+Replay authenticates each present `checked-index` and `checked-get` certificate and
+mirrors its root AST. Source admission also enumerates eligible accesses with a bounded
+visitor and requires each access position/rule to map to at least one attempt for its unique
+owner. Attempt goals may contain substituted aliases, so correspondence uses the retained
+original source occurrence key. The visitor follows the producer's checked-value traversal
+and omits deferred lambda bodies. Unknown AST variants, duplicate census keys, and work
+exhaustion refuse admission. This closes the identified omission path for the currently
+inventoried producer forms, pending compiler/runtime qualification.
+
+The inventory's owner/position/rule index rejects missing or ambiguous source occurrences,
+and allows repeated attempts at one occurrence where evaluation duplicates it. Runtime
+qualification has not been run for these changes.
+
+### Generic frame-row fallback boundary
+
+The current `ProofObligationEntry` stores only the generic `source_kind = "frame"`, the
+owner declaration, a Boolean outcome, and the attempt span. `proof_frame_obligation` takes
+no source position or operation category. Its producers include direct and indexed writes,
+callee `changes` mapped to caller frames, caller-preservation checks, and header frame metadata
+validation. The supported prepared direct-event path replaces those generic rows with
+attempt-backed `changes`/`preserves`/`allow`/`preserve` rows; checked source replay derives
+their complete event inventory, compares positions and order, and recomputes each decision.
+The fallback producer remains for incomplete or unsupported preparations and emits generic
+`frame` rows, which fail closed when proven.
+
+Fallback rows remain rejected as positive evidence: successful zero-attempt `frame` rows fail
+admission, and `frame` rows with nonempty attempt spans are also rejected. Added a mutation case
+showing that a spare successful branch attempt cannot be reassigned to such a row. The supported
+direct-event source pipeline already retains owner, operation position and event order for its
+attempt-backed rows. Wider fallback support needs typed identities for owner, operation position
+(or formal/header policy ordinal), event category, and applied policy ordinal; source admission
+must reconstruct and recompute the full event set before those rows carry credit.
+
+Before span integration, the strict report-invariant runtime reached status 34:
+removing one open ledger event and decrementing the total left two open attempts
+attached to one event, yet source admission accepted the report. The adversarial
+assertion was retained; the integrated span checks later closed this omission
+case, as recorded below.
 
 The old attempts <= obligations rule cannot be restored: one source obligation
 can legitimately have multiple branch attempts. The new
@@ -11,25 +61,30 @@ can legitimately have multiple branch attempts. The new
 proven ledger event, two attempts and two certificates. Its strict O0 compile,
 native link and execution pass. It is wired into the standard matrix.
 
-Required fix: record the accounting event identity for each attempt and validate
-that association independently during admission. Permit many attempts per event,
-permit unsupported events without attempts, refuse attempts for deleted events,
-and reconcile event outcomes with their associated path results. Carry this
-association through report serialization/cache/portable package boundaries and
-mutation controls. Do not substitute a loose aggregate count check.
+Historical requirement before attempt-span integration: bind each attempt to
+exactly one accounting event, permit many attempts per event and unsupported
+events without attempts, reject attempts left behind by a deleted event, and
+reconcile event outcomes with their associated path results. A loose aggregate
+count was insufficient. At that stage, production admission had not changed;
+the `report-invariants-probe` omission mutation failed with status 34 while the
+positive `report-branch-accounting` control passed with status 0.
 
-This is an open task. The positive control establishes the legitimate branch
-case; it does not authenticate arbitrary claimed event identities. Production
-admission has not been changed in this slice. Engine validation artifacts:
-`report-invariants-probe` (status 34), `report-branch-accounting` (status 0).
+The integrated span checks below supersede that status for the omitted-event
+case: current source requires sequential event identities, contiguous bounded
+attempt spans with complete coverage, matching attempt owners, and agreement
+between each non-`call-requires` event outcome and all attempts in its span.
+Those spans remain report metadata rather than an independent source identity.
+Resealed metadata mutations, full event-to-source correspondence across report
+serialization/cache/portable boundaries, and corresponding runtime controls
+remain open; do not infer those guarantees from the span checks alone.
 
-An attempt-span prototype records the contiguous attempts preceding each
+The first attempt-span prototype recorded the contiguous attempts preceding each
 accounting event, including empty spans for unsupported events. Its checker
-rejects gaps, overlaps, out-of-range spans and trailing orphan attempts.
-The omitted-open-event mutation advances past status 34 under this prototype.
-Integration is incomplete: synthetic source-coverage fixtures also introduce
-extra branch attempts and must preserve their intended event associations.
-The prototype patch is retained in engine build/validation as
+rejected gaps, overlaps, out-of-range spans and trailing orphan attempts.
+The omitted-open-event mutation advanced past status 34 under this prototype.
+That initial integration was incomplete: synthetic source-coverage fixtures
+also introduced extra branch attempts and had to preserve their intended event
+associations. The prototype patch is retained in engine build/validation as
 `obligation-attempt-span-candidate.patch`; production source was restored.
 A separate minimal nested-array clear control returns the expected count 2,
 so the suspected reset defect was not reproduced and is not claimed.

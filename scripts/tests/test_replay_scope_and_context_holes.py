@@ -14,7 +14,10 @@ accepted.
   reused for another.
 - An entry-precondition trace is accepted only while it matches a leading source requires clause
   or a parameter refinement; validated qualified-constant substitution is replayed from its
-  exact source path, and changing the source contract invalidates its dependent certificate.
+  exact source path, changing the source contract invalidates its dependent certificate, and a
+  call-bearing precondition is invalidated by earlier writes to hidden global state.
+- A resource-disjoint certificate is revoked when its source inequality changes to equality,
+  then accepted again after restoring the source contract.
 - A call summary's precondition goal must have been proven at that call, not merely be a goal
   with the same text proven at another call.
 """
@@ -34,7 +37,7 @@ FRESHNESS_CHECK = COMPILER_ROOT / "scripts" / "assert_stage1_fresh.sh"
 # Line numbers below are fixed by SOURCE_TEXT; keep them in step with it.
 SOURCE_TEXT = (
     "const limit: i64 = 100\n"  # 1
-    "\n"  # 2
+    "global mutable precondition_state: i64 = 0\n"  # 2
     "def idc(x: i64) -> i64:\n"  # 3
     "    ensure result == x\n"  # 4
     "    return x\n"  # 5
@@ -109,7 +112,21 @@ SOURCE_TEXT = (
     "    requires x >= 0\n"  # 74
     "    requires x <= Caps::TOP\n"  # 75
     "    ensure result <= 10\n"  # 76
-    "    return x\n"  # 77
+    "    can Global.Write:\n"  # 77
+    "        precondition_state <- 1\n"  # 78
+    "    return x\n"  # 79
+    "\n"  # 80
+    "def precondition_state_is_zero() -> bool can[Global.Read]:\n"  # 81
+    "    can Global.Read:\n"  # 82
+    "        return precondition_state == 0\n"  # 83
+    "\n"  # 84
+    "def borrow_symbolic_disjoint(values: mutable i64[2], left: usize, right: usize) -> i64:\n"  # 85
+    "    requires left < 2\n"  # 86
+    "    requires right < 2\n"  # 87
+    "    requires left != right\n"  # 88
+    "    shared: i64& = &values[left]\n"  # 89
+    "    exclusive: mutable i64& = &values[right]\n"  # 90
+    "    return values[0]\n"  # 91
 )
 
 HARNESS = r'''include "../../Elisa-compiler/elisacore_std/elisacore_runtime_prelude.elisa"
@@ -258,6 +275,12 @@ extend ElisaProof:
                     found <- found + 1
             return report.traces.records.count
 
+        def test_scope_resource_certificate_index(report: ProofReport&, owner: sview, owner_line: u32) -> usize:
+            for index in 0..<report.certificates.count |index, report, owner, owner_line|:
+                certificate: ProofGoalCertificate = report.certificates[index]
+                return index if certificate.rule == "resource-safety" and certificate.name == owner and certificate.line == owner_line
+            return report.certificates.count
+
         def test_scope_mutate_precondition(report: mutable ProofReport&, owner: sview, owner_line: u32, ordinal: usize, forged: Ast::Expr) -> bool:
             for index in 0..<report.source_declarations.count |index, report, owner, owner_line|:
                 match report.source_declarations[index]:
@@ -307,6 +330,21 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     (proof_replay_certificates(&report) can Global{Read,Write})
     forged: mutable i64 = 0
     stop: mutable i64 = 0
+
+    # Resource disjointness depends on the exact source precondition. Changing
+    # the leading inequality to equality must revoke its resource certificate.
+    disjoint_certificate: usize = test_scope_resource_certificate_index(&report, "borrow_symbolic_disjoint", 85)
+    return 31 if disjoint_certificate >= report.certificates.count
+    return 32 if not report.certificates[disjoint_certificate].replayed
+    disjoint_position: Ast::Pos = Ast::pos_at_line(88)
+    forged_disjoint: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("left", disjoint_position), TokenKind.EqEq, Ast::Expr.Ident("right", disjoint_position), disjoint_position)
+    return 33 if not test_scope_mutate_precondition(&report, "borrow_symbolic_disjoint", 85, 2, forged_disjoint)
+    (proof_replay_certificates(&report) can Global{Read,Write})
+    return 34 if report.certificates[disjoint_certificate].replayed
+    restored_disjoint: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("left", disjoint_position), TokenKind.BangEq, Ast::Expr.Ident("right", disjoint_position), disjoint_position)
+    return 35 if not test_scope_mutate_precondition(&report, "borrow_symbolic_disjoint", 85, 2, restored_disjoint)
+    (proof_replay_certificates(&report) can Global{Read,Write})
+    return 36 if not report.certificates[disjoint_certificate].replayed
 
     # Global constants: a local spelled like the constant shadows it.
     return 1 if not test_scope_constant_valid(&report, "plain", 12)
@@ -372,12 +410,12 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     # Entry assumptions must be bound to a leading source requires or a retained type refinement.
     bounded_first_index: usize = test_scope_precondition_index(report, "bounded", 73, 0)
     return 17 if bounded_first_index >= report.traces.records.count
-    test_scope_context(&report, 73, 77, 0)
+    test_scope_context(&report, 73, 79, 0)
     return 18 if not (proof_replay_fact_trace_entry(&report, bounded_first_index) can Global{Read,Write})
     qualified_precondition_index: usize = test_scope_precondition_index(report, "bounded", 73, 1)
     return 19 if qualified_precondition_index >= report.traces.records.count
     qualified_precondition_trace: ProofFactTrace = report.traces.records[qualified_precondition_index]
-    test_scope_context(&report, 73, 77, 0)
+    test_scope_context(&report, 73, 79, 0)
     return 20 if not (proof_replay_fact_trace_entry(&report, qualified_precondition_index) can Global{Read,Write})
     qualified_position: Ast::Pos = Ast::pos_at_line(75)
     forged_qualified: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("x", qualified_position), TokenKind.Lt, Ast::Expr.Scope(Ast::Expr.Ident("Caps", qualified_position), "TOP", qualified_position), qualified_position)
@@ -396,8 +434,19 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     forged_pos: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("x", pos_position), TokenKind.Lt, Ast::Expr.IntLit(0, pos_position), pos_position)
     return 26 if not test_scope_mutate_precondition(&report, "pos", 58, 0, forged_pos)
     return 27 if (proof_replay_fact_trace_entry(&report, precondition_index) can Global{Read,Write})
+
+    # A call in a requires clause can hide a read of mutable global state. The call
+    # itself names no global, so a write anywhere in the caller prefix must invalidate
+    # the entry fact conservatively.
+    hidden_call_position: Ast::Pos = Ast::pos_at_line(75)
+    hidden_global_read: Ast::Expr = Ast::Expr.Call(Ast::Expr.Ident("precondition_state_is_zero", hidden_call_position), [], [], hidden_call_position)
+    report.traces.records[qualified_precondition_index] <- test_scope_trace(hidden_global_read, qualified_precondition_trace.kind, qualified_precondition_trace.line, qualified_precondition_trace.name, qualified_precondition_trace.owner_line)
+    return 29 if not test_scope_mutate_precondition(&report, "bounded", 73, 1, hidden_global_read)
+    test_scope_context(&report, 73, 79, 0)
+    stop <- test_scope_forged((proof_replay_fact_trace_entry(&report, qualified_precondition_index) can Global{Read,Write}), 128, &forged)
+    return stop if stop != 0
     (proof_replay_certificates(&report) can Global{Read,Write})
-    return 28 if report.replay_gaps == 0
+    return 30 if report.replay_gaps == 0
     return 128 + forged if SCOPE_MODE == 1
     return 0
 '''

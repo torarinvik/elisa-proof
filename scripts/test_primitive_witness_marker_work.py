@@ -52,6 +52,122 @@ def main() -> None:
     bounded_model = (REPLAY / "goal_metered_bounded_model.elisa").read_text(encoding="utf-8")
     logical_join = (REPLAY / "logical_join_identity.elisa").read_text(encoding="utf-8")
     source_witnesses = (ROOT / "src/proof/check/operator_witnesses.elisa").read_text(encoding="utf-8")
+    operator_queries = ROOT / "src/proof/check/operator_witness_queries.elisa"
+    operator_operand = function_body(operator_queries, "proof_runtime_operator_operand_untrusted")
+    operator_expression = function_body(operator_queries, "proof_runtime_operator_expression_witnessed_with_work")
+    enum_parenthesis_helpers = (
+        (operator_queries, "proof_const_enum_shorthand_has_builtin_equality_with_work", "const_enum_builtin"),
+        (ROOT / "src/proof/check/plain_enum_equality.elisa", "proof_plain_enum_member_has_builtin_equality_with_work", "plain_enum_builtin"),
+    )
+    runtime_support = ROOT / "src/proof/check/runtime_support_and_calls.elisa"
+    bounded_parenthesis_classifiers = (
+        (runtime_support, "proof_statement_region_new_call_supported"),
+    )
+    operator_expression_gate = function_body(
+        ROOT / "src/proof/check/runtime_support_and_calls.elisa",
+        "proof_expr_has_unmodeled_operator_with_work",
+    )
+
+    # Resolving a source-call return type can traverse a large alias/declaration
+    # tree. Keep that classification on the same source-work meter as the other
+    # operator witness lookups, and refuse classification if it exhausts the cap.
+    call_return_type = operator_operand.split(
+        "if called_index < functions.returns.return_types.count:", 1
+    )[1].split("called: sview = proof_callable_name(callee)", 1)[0]
+    assert "proof_builtin_operator_type_name_with_work(" in call_return_type
+    assert "&source_work) can Global.Read" in call_return_type
+    assert "report.source_types.source_effect_index.work.implicit_effect_work <- source_work" in call_return_type
+    assert "return true if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT" in call_return_type
+    assert "proof_builtin_operator_type_name(" not in operator_operand
+    extern_gate = operator_operand.split(
+        "if (proof_float_mode can Global.Read) and imported < functions.externs.extern_signatures.count:",
+        1,
+    )[1].split("\n                    return true", 1)[0]
+    assert "source_function_exists: mutable bool = called_index < functions.lookup.source.names.count" in extern_gate
+    assert "proof_function_name_lookup_with_work(functions, called, &source_work)" in extern_gate
+    assert "report.source_types.source_effect_index.work.implicit_effect_work <- source_work" in extern_gate
+    assert "return true if not source_function.complete" in extern_gate
+    assert "source_function.row < functions.lookup.source.names.count" in extern_gate
+    assert "proof_resource_function_name_count(functions, called)" not in operator_operand
+    assert extern_gate.index("source_function_exists: mutable bool") < extern_gate.index("signature: ProofExternSignature")
+
+    # A depth-limited witness walk must never turn an unvisited suffix into a
+    # trusted builtin operand. Marker decoders poison the shared budget, the
+    # operand query fails closed, and its expression caller rejects no-witness.
+    for helper_name in (
+        "proof_builtin_operator_term_witnessed_with_work",
+        "proof_index_operator_term_witnessed_with_work",
+        "proof_builtin_index_expression_witnessed_with_work",
+    ):
+        helper = function_body(operator_queries, helper_name)
+        depth_refusal = helper.split(
+            "if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:", 1
+        )[1].split("match expression:", 1)[0]
+        assert "work <- limit + 1" in depth_refusal and "return false" in depth_refusal
+    operand_work_check = operator_operand.index(
+        "return true if work > PROOF_MATCH_LOWERING_WORK_LIMIT"
+    )
+    operand_depth_check = operator_operand.index(
+        "return true if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT"
+    )
+    operand_shape_walk = operator_operand.index("match expression:")
+    assert operand_work_check < operand_depth_check < operand_shape_walk
+    expression_depth_refusal = operator_expression.split(
+        "if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:", 1
+    )[1].split("match expression:", 1)[0]
+    assert "work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1" in expression_depth_refusal
+    assert "return false" in expression_depth_refusal
+    expression_witness_gate = (
+        "not (proof_runtime_operator_expression_witnessed_with_work("
+        "expression, facts, report, functions, 0, work) can Global.Read)"
+    )
+    assert expression_witness_gate in operator_expression_gate
+
+    # Enum admission peels parenthesized operands before the outer operator walk.
+    # Keep that peel inside the same bounded source-work accounting and make deep
+    # syntax poison the shared meter so callers fail closed.
+    for path, helper_name, result_name in enum_parenthesis_helpers:
+        helper = function_body(path, helper_name)
+        assert "depth: usize = 0" in helper.splitlines()[0]
+        assert "proof_type_audit_work_charge(1, source_work)" in helper
+        refusal = helper.split("if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT:", 1)[1].split("return false if not", 1)[0]
+        assert "source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1" in refusal
+        assert "depth + 1" in helper
+        call = operator_operand.index(f"{result_name}: bool = {helper_name}(")
+        exhausted = operator_operand.index("return true if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT", call)
+        if result_name == "plain_enum_builtin":
+            result = operator_operand.index(result_name, exhausted)
+        else:
+            result = operator_operand.index(f"return false if {result_name}", call)
+        assert exhausted < result
+
+    # Simple shape classifiers can run before the general bounded AST walk.
+    # Keep their parenthesis-only recursion capped so hostile syntax cannot exhaust
+    # the producer stack even when the classifier itself has no mutable work meter.
+    for path, helper_name in bounded_parenthesis_classifiers:
+        helper = function_body(path, helper_name)
+        assert "depth: usize = 0" in helper.splitlines()[0]
+        assert "return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT" in helper
+        assert "depth + 1" in helper
+
+    terminal_classifier = function_body(runtime_support, "proof_expression_terminal_with_depth")
+    assert "-> (complete: bool, terminal: bool)" in terminal_classifier.splitlines()[0]
+    assert "return (false, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT" in terminal_classifier
+    assert "proof_expression_terminal_with_depth(inner, depth + 1)" in terminal_classifier
+    return_contracts = (ROOT / "src/proof/check/returns/contracts.elisa").read_text(encoding="utf-8")
+    terminal_check = return_contracts.index("terminal_classification: (complete: bool, terminal: bool)")
+    terminal_failure = return_contracts.index("if not terminal_classification.complete:", terminal_check)
+    terminal_use = return_contracts.index("terminal_expression: bool = terminal_classification.terminal", terminal_check)
+    assert terminal_check < terminal_failure < terminal_use
+    terminal_failure_body = return_contracts[terminal_failure:terminal_use]
+    assert 'proof_add_finding(report, "expression-unsupported"' in terminal_failure_body
+    assert "flow.valid <- false" in terminal_failure_body and "flow.normal <- false" not in terminal_failure_body
+    saturation = (ROOT / "src/proof/replay/source_binding_validation/for_saturation.elisa").read_text(encoding="utf-8")
+    assert "not terminal_classification.complete or not terminal_classification.terminal" in saturation
+    saturation_statement = saturation.index("Ast::Stmt.Expr(terminal, _):")
+    summary_charge = saturation.index("not proof_replay_summary_expr_charge_with_work(terminal, source_work)", saturation_statement)
+    terminal_query = saturation.index("proof_expression_terminal_with_depth(terminal, 0)", saturation_statement)
+    assert summary_charge < terminal_query
 
     # Invalid fact/callee references and exhausted name scans are incomplete, never
     # interpreted as an ordinary non-marker fact.

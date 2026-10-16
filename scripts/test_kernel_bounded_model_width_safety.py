@@ -83,7 +83,7 @@ assert "work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT" in bounded_goal[
 assert "proof_kernel_replay_signed_expression_safe_with_bounds_goal_work" in body(
     unsigned_path, "proof_kernel_replay_unsigned_report_safe_with_goal_work"
 )
-assert "proof_kernel_replay_unsigned_expression_safe_with_goal_work" in body(
+assert "proof_kernel_replay_unsigned_expression_safe_with_cached_markers_and_goal_work" in body(
     unsigned_path, "proof_kernel_replay_unsigned_report_safe_with_goal_work"
 )
 unsigned_safety = body(unsigned_path, "proof_kernel_replay_unsigned_expression_safe_with_replay_work")

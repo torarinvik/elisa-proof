@@ -1,0 +1,119 @@
+# ElisaScript port of the adjacent proof source-length checker.
+include "../../elisa-script/src/runtime/source_length_stream_posix.elisa"
+
+module EsProofSourceLength:
+    private:
+        const module Limits:
+            MAX_LINES: usize = 600
+
+
+        struct Pattern:
+            directory: sview
+            suffix: sview
+
+
+        struct Oversized:
+            relative_path: sview
+            lines: usize
+
+
+        def diagnostic(message: sview) -> void can[Console.Write]:
+            _ = write_stderr("source length audit: " + message + "\n")
+
+
+        def append_text(output: mutable darray[u8]&, text: sview) can[Memory.Allocate, Abort.Panic]:
+            for byte in text |output|:
+                output.push(byte)
+
+
+        # Python orders Paths component by component. POSIX filenames cannot
+        # contain NUL, so replacing separators with NUL preserves that order.
+        def path_order_key(value: sview) -> sview:
+            return replace(value, "/", "\0")
+
+
+        def collect_category(project_root: Path, relative_directory: sview, suffix: sview, paths: mutable darray[sview]&, stderr: mutable darray[u8]&) -> bool can[Directory.Read, File.Read, Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console.Write, Console.Format]:
+            scan_root: Path = project_root.joinpath(relative_directory)
+            exists: bool = try is_directory(scan_root) else err:
+                append_text(stderr, "source length audit: unable to inspect source directory: " + f"{scan_root}\n")
+                return false
+            return true if not exists
+
+            directories: mutable darray[Path] = [scan_root]
+            while directories.count > 0:
+                current: Path = directories.pop()
+                children: darray[sview] = try current.iterdir() else err:
+                    append_text(stderr, "source length audit: unable to enumerate directory: " + f"{current}\n")
+                    return false
+                for child in children:
+                    child_path: Path = path(child)
+                    if child_path.name().endswith(suffix):
+                        paths.push(child)
+                    continue if is_symlink(child_path)
+                    child_is_directory: bool = try is_directory(child_path) else err:
+                        append_text(stderr, "source length audit: unable to inspect entry: " + f"{child_path}\n")
+                        return false
+                    if child_is_directory:
+                        directories.push(child_path)
+            return true
+
+
+    public:
+        # Keep the ordering policy available to an independent pure fixture.
+        def ordered_source_paths(paths: darray[sview]) -> darray[sview] can[Memory.Allocate, Abort.Panic]:
+            keys: mutable darray[sview] = []
+            for value in paths:
+                keys.push(path_order_key(value))
+            result: mutable darray[sview] = []
+            for key in sorted(keys):
+                result.push(replace(key, "\0", "/"))
+            return result
+
+
+        def observe_root(project_root: Path, stdout: mutable darray[u8]&, stderr: mutable darray[u8]&) -> i64 can[Directory.Read, File.Read, Blocking.IO, Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console.Write, Console.Format]:
+            stdout <- []
+            stderr <- []
+            patterns: darray[Pattern] = [
+                Pattern{directory: "src", suffix: ".elisa"},
+                Pattern{directory: "scripts", suffix: ".sh"},
+                Pattern{directory: "scripts", suffix: ".py"},
+                Pattern{directory: "test", suffix: ".py"},
+                Pattern{directory: "examples", suffix: ".elisa"}
+            ]
+            oversized: mutable darray[Oversized] = []
+            for pattern in patterns |project_root, stderr, oversized|:
+                paths: darray[sview] = []
+                if not collect_category(project_root, pattern.directory, pattern.suffix, paths, stderr):
+                    return 2i64
+                for source_path in ordered_source_paths(paths):
+                    input_path: Path = path(source_path)
+                    scan: EsSourceLengthFile::ScanResult = try EsSourceLengthFile::read_utf8_line_count(input_path) else err:
+                        append_text(stderr, "source length audit: unable to read UTF-8 source: " + f"{input_path}\n")
+                        return 2i64
+                    if scan.lines > Limits::MAX_LINES:
+                        relative: Path = input_path.relative_to(project_root)
+                        oversized.push(Oversized{relative_path: f"{relative}", lines: scan.lines})
+
+            # Python emits groups in pattern order, retaining each group's path
+            # order, and waits until all reads succeed before reporting sizes.
+            for source in oversized:
+                append_text(stderr, f"file exceeds {Limits::MAX_LINES} lines: {source.relative_path} ({source.lines})\n")
+            return 1i64 if oversized.count > 0 else 0i64
+
+
+        def run_default() -> i64 can[Directory.Read, File.Read, Blocking.IO, Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console.Write, Console.Format]:
+            script_file: Path = try path_real(path(Script::source_path())) else err:
+                diagnostic("unable to resolve script path")
+                return 2i64
+            project_root: Path = script_file.parent().parent()
+            stdout: mutable darray[u8] = []
+            stderr: mutable darray[u8] = []
+            status: i64 = observe_root(project_root, stdout, stderr)
+            if stderr.count > 0:
+                _ = write_stderr(bytes_view(stderr))
+            return status
+
+
+def main(arguments: darray[sview]) -> i64 can[Directory.Read, File.Read, Blocking.IO, Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console.Write, Console.Format]:
+    _ = arguments
+    return EsProofSourceLength::run_default()

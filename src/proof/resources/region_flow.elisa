@@ -2,11 +2,17 @@ extend ElisaProof:
     private:
         def proof_resource_check_write[@s, @r](target: Ast::Expr, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, position: Ast::Pos, functions: ProofFunctionTable&) -> void can[Global{Read,Write}]:
             root: sview = proof_resource_place_root(target, report)
-            return if root == ""
+            if root == "":
+                proof_resource_add_failing_obligation(report, "resource-write-opaque", position, function_name, "a write target without a tracked storage root cannot be checked safely")
+                return
             binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, root, report)
-            return if not binding.complete
+            if not binding.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", position.line, function_name, "resource write root lookup exceeded its shared source-work budget", "resource-source-work", report.source_types.source_effect_index.work.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            if binding.slot >= state.bindings.binding_names.count:
+                proof_resource_add_failing_obligation(report, "resource-write-opaque", position, function_name, "a write to storage outside the tracked function resource frame cannot be checked safely")
+                return
             slot: usize = binding.slot
-            return if slot >= state.bindings.binding_names.count
             region: sview = proof_resource_binding_region(state, slot)
             if region != "" and (not proof_resource_binding_region_is_live(state, slot) or not proof_resource_region_is_active(state, region)):
                 proof_resource_report_unavailable_region(state, slot, report, position, function_name)
@@ -542,10 +548,18 @@ extend ElisaProof:
                 source_place: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(initializer, report)
                 source_binding: (complete: bool, slot: usize) = proof_resource_lookup_with_source_work(state, source_place.place.root, report)
                 source_slot: usize = source_binding.slot
+                target_identity: mutable usize = 0
+                source_identity: mutable usize = 0
+                if target_slot < state.bindings.binding_event_roots.count:
+                    target_event_root: usize = state.bindings.binding_event_roots[target_slot]
+                    target_identity <- target_event_root + 1 if target_event_root < ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+                if source_slot < state.bindings.binding_event_roots.count:
+                    source_event_root: usize = state.bindings.binding_event_roots[source_slot]
+                    source_identity <- source_event_root + 1 if source_event_root < ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
                 target_access: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(target, report)
                 encoded_source: usize = proof_resource_encode_access_place(initializer, report)
                 source_region_owner: bool = source_slot < state.bindings.binding_region_owner.count and state.bindings.binding_region_owner[source_slot]
-                valid: bool = target_name != "" and target_slot < state.bindings.binding_names.count and target_slot < state.bindings.binding_reference.count and not state.bindings.binding_reference[target_slot] and source_slot < state.bindings.binding_names.count and source_place.known and source_place.place.whole and target_access.known and target_access.place.whole and proof_resource_binding_is_writable(state, target_slot) and not proof_resource_binding_is_moved(state, source_slot) and not proof_resource_binding_is_moved(state, target_slot) and target_slot < state.borrows.borrow_present.count and not state.borrows.borrow_present[target_slot] and not (proof_resource_has_borrow_overlap(state, report, target_access.place, state.bindings.binding_names.count) can Global{Read,Write}) and proof_resource_binding_region(state, source_slot) == assigned_region and proof_resource_binding_region_is_live(state, source_slot) and proof_resource_region_is_active(state, assigned_region) and encoded_source < report.analysis_1.kernel.nodes.count
+                valid: bool = target_name != "" and target_identity != 0 and source_identity != 0 and target_slot < state.bindings.binding_names.count and target_slot < state.bindings.binding_reference.count and not state.bindings.binding_reference[target_slot] and source_slot < state.bindings.binding_names.count and source_place.known and source_place.place.whole and target_access.known and target_access.place.whole and proof_resource_binding_is_writable(state, target_slot) and not proof_resource_binding_is_moved(state, source_slot) and not proof_resource_binding_is_moved(state, target_slot) and target_slot < state.borrows.borrow_present.count and not state.borrows.borrow_present[target_slot] and not (proof_resource_has_borrow_overlap(state, report, target_access.place, state.bindings.binding_names.count) can Global{Read,Write}) and proof_resource_binding_region(state, source_slot) == assigned_region and proof_resource_binding_region_is_live(state, source_slot) and proof_resource_region_is_active(state, assigned_region) and encoded_source < report.analysis_1.kernel.nodes.count
                 proof_resource_add_failing_obligation(report, "region-store-escape", position, function_name, "a region-owned value may be assigned only from a directly tracked whole binding") if not valid
                 if valid:
                     state.bindings.binding_region[target_slot] <- assigned_region
@@ -556,6 +570,10 @@ extend ElisaProof:
                     # the source owner usable after installing the same exclusive token on the
                     # target; self-assignment is a no-op for ownership purposes.
                     proof_resource_mark_binding_moved(state, source_slot) if source_region_owner and source_slot != target_slot
-                    proof_resource_record_event_at_position(state, report, "resource-region-assign", "", encoded_source, target_name, assigned_region, 0, position)
+                    event_count: usize = state.evidence.trace_events.count
+                    proof_resource_record_event_at_position(state, report, "resource-region-assign", "", encoded_source, target_name, assigned_region, target_identity, position)
+                    if state.evidence.trace_events.count == event_count + 1:
+                        event: usize = state.evidence.trace_events[event_count]
+                        report.analysis_1.kernel.nodes[event].right <- source_identity if event < report.analysis_1.kernel.nodes.count
             if assigned_region == "" and not proof_resource_binding_is_scalar(state, scalar_target_slot) and proof_resource_expr_contains_unresolved_region_value(initializer, state, functions, report, 0):
                 proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "region value flows through an assignment without a lifetime summary")

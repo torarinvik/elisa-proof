@@ -104,6 +104,24 @@ indexed_depth_refusal = indexed_path.split(
     "if not ElisaProofKernelCore::depth_valid(depth) or depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH:", 1
 )[1].split("return false if not proof_kernel_replay_valid", 1)[0]
 assert "work_used <- work_limit + 1" in indexed_depth_refusal and "return false" in indexed_depth_refusal
+
+# The byte-reference arithmetic classifier is a rejection gate. Depth, work, or
+# pointee-sort uncertainty must not collapse to "not a byte pointer" and admit
+# arithmetic after the other operand checks succeed.
+byte_reference_gate = function_body(
+    ROOT / "src/proof/kernel_replay/scalar_reference_typing.elisa",
+    "proof_kernel_replay_byte_pointer_reference_remaining",
+)
+assert "return true if remaining <= 1 or depth >= PROOF_KERNEL_TYPING_DEPTH_LIMIT or root >= nodes.count" in byte_reference_gate
+assert "return true if not reference_shape.known" in byte_reference_gate
+assert "return false if not reference_shape.is_reference" in byte_reference_gate
+assert "return true if not pointee_sort.known" in byte_reference_gate
+arithmetic_gate = function_body(
+    ROOT / "src/proof/kernel_replay/proposition_typing.elisa",
+    "proof_kernel_replay_term_sort_remaining",
+)
+assert "proof_kernel_replay_byte_pointer_reference_remaining(nodes, children, environment, typing_index, node.left" in arithmetic_gate
+
 assert "proof_expr_equal" not in producer_rule
 assert "proof_kernel_replay_expr_equal" not in kernel_rule
 assert not any(line.startswith("for ") for line in producer_rule.splitlines() + kernel_rule.splitlines())

@@ -2,6 +2,12 @@ extend ElisaProof:
     private:
         const PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT: usize = 64
 
+        # Some parser lowerings synthesize And/Or nodes at a child or declaration position.
+        # Keep those on the conservative sequential walk; only a distinct, nonzero source span
+        # can anchor path-specific resource alternatives.
+        def proof_resource_is_source_short_circuit(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, position: Ast::Pos) -> bool:
+            (operator == TokenKind.And or operator == TokenKind.Or) and position.line > 0 and position.offset > 0 and position.offset != Ast::expr_pos(left).offset and position.offset != Ast::expr_pos(right).offset
+
         def proof_resource_callee_shadowed_by_local_with_work(callee: Ast::Expr, state: ProofResourceState&, report: mutable ProofReport&, depth: usize) -> bool:
             return true if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT
             match callee:
@@ -211,9 +217,22 @@ extend ElisaProof:
                     (proof_resource_check_expression(operand, state, report, function_name, functions) can Global{Read,Write})
                 Ast::Expr.Paren(inner, _):
                     (proof_resource_check_expression(inner, state, report, function_name, functions) can Global{Read,Write})
-                Ast::Expr.Binary(left, _, right, _):
+                Ast::Expr.Binary(left, operator, right, position):
                     (proof_resource_check_expression(left, state, report, function_name, functions) can Global{Read,Write})
-                    (proof_resource_check_expression(right, state, report, function_name, functions) can Global{Read,Write})
+                    if proof_resource_is_source_short_circuit(left, operator, right, position):
+                        # `and` and `or` may skip the RHS. Keep its resource transitions
+                        # branch-local, then conservatively join moves from evaluated and
+                        # skipped paths just like an expression-level `if`.
+                        evaluated_state: mutable ProofResourceState = proof_resource_empty()
+                        skipped_state: mutable ProofResourceState = proof_resource_empty()
+                        proof_resource_copy_into(state, &evaluated_state, report)
+                        proof_resource_copy_into(state, &skipped_state, report)
+                        proof_resource_mark_scope_inherited(state, &evaluated_state)
+                        proof_resource_mark_scope_inherited(state, &skipped_state)
+                        (proof_resource_check_expression(right, &evaluated_state, report, function_name, functions) can Global{Read,Write})
+                        proof_resource_close_if_children(state, &evaluated_state, &skipped_state, report, position.offset.usize())
+                    else:
+                        (proof_resource_check_expression(right, state, report, function_name, functions) can Global{Read,Write})
                 Ast::Expr.Field(object, _, _):
                     (proof_resource_check_expression(object, state, report, function_name, functions) can Global{Read,Write})
                 Ast::Expr.Scope(base, _, _):
@@ -251,7 +270,7 @@ extend ElisaProof:
                     (proof_resource_check_expression(base, state, report, function_name, functions) can Global{Read,Write})
                     for field in fields |field, state, report, function_name, functions|:
                         (proof_resource_check_expression(field.value, state, report, function_name, functions) can Global{Read,Write})
-                Ast::Expr.If(condition, then_expr, else_expr, _):
+                Ast::Expr.If(condition, then_expr, else_expr, position):
                     (proof_resource_check_expression(condition, state, report, function_name, functions) can Global{Read,Write})
                     then_state: mutable ProofResourceState = proof_resource_empty()
                     else_state: mutable ProofResourceState = proof_resource_empty()
@@ -261,7 +280,7 @@ extend ElisaProof:
                     proof_resource_mark_scope_inherited(state, &else_state)
                     (proof_resource_check_expression(then_expr, &then_state, report, function_name, functions) can Global{Read,Write})
                     (proof_resource_check_expression(else_expr, &else_state, report, function_name, functions) can Global{Read,Write})
-                    proof_resource_close_if_children(state, &then_state, &else_state, report)
+                    proof_resource_close_if_children(state, &then_state, &else_state, report, position.offset.usize())
                 Ast::Expr.Comprehension(variable, iterable, condition, body, _):
                     (proof_resource_check_expression(iterable, state, report, function_name, functions) can Global{Read,Write})
                     # The bound variable is a fresh value binding scoped like a `for` variable;
@@ -290,7 +309,7 @@ extend ElisaProof:
                         (proof_resource_check_expression(arm.guard, &arm_state, report, function_name, functions) can Global{Read,Write})
                         (proof_resource_check_statements(arm.body, &arm_state, report, function_name, functions) can Global{Read,Write})
                         proof_resource_close_alternative_child(state, &arm_state, report, &moved_any)
-                    proof_resource_merge_alternative_moves(state, &moved_any, report)
+                    proof_resource_merge_alternative_moves(state, &moved_any, report, position.offset.usize())
                 Ast::Expr.Catch(guarded, arms, position):
                     (proof_resource_check_expression(guarded, state, report, function_name, functions) can Global{Read,Write})
                     pattern_source_classified: mutable bool = false
@@ -305,7 +324,7 @@ extend ElisaProof:
                         (proof_resource_check_expression(arm.guard, &arm_state, report, function_name, functions) can Global{Read,Write})
                         (proof_resource_check_statements(arm.body, &arm_state, report, function_name, functions) can Global{Read,Write})
                         proof_resource_close_alternative_child(state, &arm_state, report, &moved_any)
-                    proof_resource_merge_alternative_moves(state, &moved_any, report)
+                    proof_resource_merge_alternative_moves(state, &moved_any, report, position.offset.usize())
                 Ast::Expr.GetElse(guarded, recovery, _):
                     (proof_resource_check_expression(guarded, state, report, function_name, functions) can Global{Read,Write})
                     recovery_state: mutable ProofResourceState = proof_resource_empty()
@@ -342,9 +361,19 @@ extend ElisaProof:
                 proof_add_budget_finding(report, "resource-expression-depth", position.line, function_name, "contract resource expression exceeds the bounded AST recursion depth", "depth", depth, PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT)
                 return
             match expression:
-                Ast::Expr.Binary(left, _, right, _):
+                Ast::Expr.Binary(left, operator, right, position):
                     (proof_resource_check_contract_expression(left, state, report, function_name, functions, depth + 1) can Global{Read,Write})
-                    (proof_resource_check_contract_expression(right, state, report, function_name, functions, depth + 1) can Global{Read,Write})
+                    if proof_resource_is_source_short_circuit(left, operator, right, position):
+                        evaluated_state: mutable ProofResourceState = proof_resource_empty()
+                        skipped_state: mutable ProofResourceState = proof_resource_empty()
+                        proof_resource_copy_into(state, &evaluated_state, report)
+                        proof_resource_copy_into(state, &skipped_state, report)
+                        proof_resource_mark_scope_inherited(state, &evaluated_state)
+                        proof_resource_mark_scope_inherited(state, &skipped_state)
+                        (proof_resource_check_contract_expression(right, &evaluated_state, report, function_name, functions, depth + 1) can Global{Read,Write})
+                        proof_resource_close_if_children(state, &evaluated_state, &skipped_state, report, position.offset.usize())
+                    else:
+                        (proof_resource_check_contract_expression(right, state, report, function_name, functions, depth + 1) can Global{Read,Write})
                 Ast::Expr.Paren(inner, _):
                     (proof_resource_check_contract_expression(inner, state, report, function_name, functions, depth + 1) can Global{Read,Write})
                 Ast::Expr.Unary(TokenKind.Not, inner, _):

@@ -67,7 +67,6 @@ for group in re.findall(r'node\.kind\s+in\s+\{([^}]*)\}', dispatch):
 
 explicitly_refused = {
     "resource-region-bind",
-    "resource-join-move",
     "resource-call-result",
 }
 refusal_groups = re.findall(r'if node\.kind in \{([^}]*)\}:\s*return false', dispatch, re.S)
@@ -89,8 +88,43 @@ assert "proof_replay_resource_call_site_matches_owner_with_work(report, resource
 assert 'if node.kind in {"resource-safety", "resource-scope", "resource-alternatives"}:' in dispatch
 assert 'if node.kind == "resource-disjoint":' in dispatch
 assert 'proof_replay_resource_owner_prefix_event_valid_with_work(report, resource_root, root, active_resource_prefix_end' in dispatch
-assert '"resource-join-move"' in refusal
+assert 'if node.kind == "resource-alternatives":' in dispatch
+assert "proof_replay_resource_alternatives_source_valid_with_work(report, root, node, active_owner" in dispatch
+assert 'if node.kind == "resource-join-move":' in dispatch
+assert '"resource-join-move"' not in refusal
 assert '"resource-call-result"' in refusal
+
+alternative_source = (ROOT / "src/proof/replay/resource_alternative_source_validation.elisa").read_text(encoding="utf-8")
+alternative_scope = function_body(alternative_source, "proof_replay_resource_alt_scope_has_source")
+assert 'if node.kind == "resource-safety" or node.kind == "resource-disjoint":' in alternative_scope
+assert 'if node.kind == "resource-join-move":' in alternative_scope
+assert "proof_replay_owner_work_charge(1, work)" in alternative_source
+assert "matches == 1" in function_body(alternative_source, "proof_replay_resource_alternatives_source_valid_with_work")
+alternative_bind = function_body(alternative_source, "proof_replay_resource_alt_bind_matches")
+assert '"resource-bind-inventory", node.name' in alternative_bind
+assert '"resource-bind-loop-inventory", node.name' in alternative_bind
+event_validation = (ROOT / "src/proof/replay/resource_event_source_validation.elisa").read_text(encoding="utf-8")
+resource_state = (ROOT / "src/proof/resources/state_and_regions.elisa").read_text(encoding="utf-8")
+event_find_statements = function_body(event_validation, "proof_replay_resource_event_find_statements_with_work")
+assert "Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):" in event_find_statements
+assert "expression is not Ast::Expr.Absent and not proof_replay_resource_event_find_expression_with_work(expression," in event_find_statements
+assignment_coverage = function_body(
+    event_validation, "proof_replay_resource_region_assignment_statements_covered_with_work"
+)
+assert "Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):" in assignment_coverage
+assert "expression is not Ast::Expr.Absent and not proof_replay_resource_region_assignment_expression_blocks_covered_with_work(report, root, prefix_end, expression," in assignment_coverage
+positioned_bind_producer = function_body(resource_state, "proof_resource_add_binding_traced_at_position")
+assert "position.end_offset.i64()" in positioned_bind_producer
+bind_source = function_body(event_validation, "proof_replay_resource_event_find_statements_with_work")
+assert 'position.end_offset == offset.u32()' in bind_source
+assert 'iterable_position.end_offset == offset.u32()' in bind_source
+
+resource_summary_shape = function_body(
+    (ROOT / "src/proof/kernel_replay/arena_shapes.elisa").read_text(encoding="utf-8"),
+    "proof_kernel_replay_arena_resource_summary_shape",
+)
+assert 'node.kind == "resource-alternatives"' in resource_summary_shape
+assert "node.value >= 0 and node.value <= 4294967295" in resource_summary_shape
 
 # Direct resource nodes are broader than the trace leaves above: they also include
 # container roots and call payload children. Pin the whole producer surface and
@@ -104,7 +138,6 @@ expected_direct_nodes = {
 assert direct_nodes == expected_direct_nodes, (direct_nodes, expected_direct_nodes)
 call_validation = (ROOT / "src/proof/replay/resource_call_source_validation.elisa").read_text(encoding="utf-8")
 call_site_validation = (ROOT / "src/proof/replay/resource_call_site_validation.elisa").read_text(encoding="utf-8")
-event_validation = (ROOT / "src/proof/replay/resource_event_source_validation.elisa").read_text(encoding="utf-8")
 resource_ordering = (ROOT / "src/proof/replay/resource_trace_order_validation.elisa").read_text(encoding="utf-8")
 ordered_events = function_body(resource_ordering, "proof_replay_resource_event_offsets_ordered_with_work")
 positioned_events = ordered_events.split("positioned: bool =", 1)[1].split("\n            if positioned:", 1)[0]
@@ -198,14 +231,16 @@ for nested in {"resource-call-arg", "resource-call-formal", "resource-call-regio
     assert f'"{nested}"' in call_validation, nested
 for container in {"resource-safety", "resource-scope", "resource-alternatives"}:
     assert f'"{container}"' in call_validation + event_validation, container
-assert '"resource-disjoint"' in call_validation + event_validation
+resource_event_facts = function_body(certificate_validation, "proof_replay_resource_event_facts_with_owner")
+assert 'if node.kind == "resource-disjoint":' in resource_event_facts
+assert "proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, active_owner, dependency_stack, false, true" in resource_event_facts
 
 # The call-event census intentionally stops at a call node. Producer shape guarantees
 # nested evaluations are separate owner trace events, while call children are only
 # serialized argument/formal/region payloads. Pin both halves so future producer changes
 # cannot make a nested resource transition invisible to the owner inventory.
 resource_root_producer = function_body(
-    (ROOT / "src/proof/resources/state_and_regions.elisa").read_text(encoding="utf-8"),
+    (ROOT / "src/proof/resources/state_finish.elisa").read_text(encoding="utf-8"),
     "proof_resource_finish",
 )
 assert "for event in state.evidence.trace_events" in resource_root_producer

@@ -87,8 +87,9 @@ assert 'if kind in {"changes", "preserves"}' in frame_checker
 assert "proof_frame_clause_obligation(valid, position.line, name, frame_clause_index)" in frame_checker
 assert "frame_clause_index <- frame_clause_index + 1" in frame_checker
 frame_inventory = function_body(ROOT / "src/proof/model/report_frame_inventory.elisa", "proof_report_frame_clause_inventory_consistent")
-assert "proof_report_frame_clause_keys_collect(declarations, &expected_keys, source_work, 0)" in frame_inventory
-assert "entry.attempts_count != 0" in frame_inventory
+assert all(text in frame_inventory for text in ("proof_report_frame_clause_keys_collect(declarations, &expected_rows, source_work, 0)", "entry.attempts_count != 0", "entry.proven != source_clause.valid"))
+frame_source_collect = function_body(ROOT / "src/proof/model/report_frame_inventory.elisa", "proof_report_frame_clause_keys_collect")
+assert all(text in frame_source_collect for text in ("proof_frame_place(expression)", "proof_report_frame_clause_root_is_parameter(parameter_names, decoded.place.root, source_work)"))
 assert "found.count > 1" in frame_inventory and "found.count == 0" in frame_inventory
 assert "proof_report_source_postcondition_index_find(policy_owner_index, owner_key, source_work)" in frame_inventory
 admission_snapshot_path = ROOT / "src/proof/model/checked_view_admission.elisa"
@@ -158,7 +159,7 @@ assert 'matches <- 2' in owner_source  # Ambiguous/unsupported AST paths fail cl
 # Resource call edges use the exact caller declaration identity carried by the resource root,
 # and the source offset zero remains valid for declarations at the beginning of a file.
 resource_root = function_body(
-    ROOT / "src/proof/resources/state_and_regions.elisa", "proof_resource_finish"
+    ROOT / "src/proof/resources/state_finish.elisa", "proof_resource_finish"
 )
 assert "functions.lookup.source.lines[function_index].usize()" in resource_root
 assert "functions.lookup.source.offsets[function_index].i64()" in resource_root
@@ -454,9 +455,9 @@ for gate in (
 
 invariants = ROOT / "src/proof/model/report_invariants.elisa"
 assert visibility_before(invariants, "proof_report_all_obligations_proven") == "private"
-legacy_diagnostic = function_body(invariants, "proof_report_source_has_unresolved_checks")
-assert "Legacy report diagnostic" in invariants.read_text(encoding="utf-8")
-assert "proof_report_all_obligations_proven(report)" in legacy_diagnostic
+legacy_diagnostic_source = ROOT / "src/proof/model/report_legacy_unresolved_checks.elisa"
+legacy_diagnostic = function_body(legacy_diagnostic_source, "proof_report_source_has_unresolved_checks")
+assert "Legacy report diagnostic" in legacy_diagnostic_source.read_text(encoding="utf-8") and "proof_report_all_obligations_proven(report)" in legacy_diagnostic
 
 checked_source_admissions = function_body(checked_view, "proof_checked_view_source_admissions_complete")
 for gate in ("proof_checked_view_goal_source_admissions_complete(view)",
@@ -538,7 +539,7 @@ assert 'proof_push(buffer, "true" if proof_output_cached_proven_status(proven_go
 package_output = ROOT / "src/app/package_output.elisa"
 serialized_package = function_body(package_output, "proof_push_json_package_with_replayed")
 assert "proof_checked_view_source_admissible(checked_view)" in serialized_package
-assert "snapshot.complete and producer_claim_snapshot.complete" in serialized_package
+assert "snapshot.complete" in serialized_package and "producer_claim_snapshot" not in serialized_package and "producer_claimed_goals: darray[bool]" in serialized_package
 assert "proven_goals: darray[bool] = snapshot.proven_goals" in serialized_package
 assert "continue if not proof_output_cached_proven_status(proven_goals, goal_id)" in serialized_package
 

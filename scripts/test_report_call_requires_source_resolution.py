@@ -90,6 +90,9 @@ assert 'obligation.source_kind == "call-requires"' in ledger_check
 assert "obligation.attempts_start > report.results.goal_attempts.count" in ledger_check
 assert "selected_call_attempts != 1" in ledger_check
 assert "obligation.proven or obligation.attempts_count != 0" in ledger_check
+attempt_ledger = body(INVARIANTS, "proof_report_goal_attempts_bounded_by_obligations")
+assert '(event.proven and event.attempts_count == 0 and event.source_kind != "frame-clause")' in attempt_ledger
+assert 'event.source_kind == "frame" and event.attempts_count > 0' in attempt_ledger
 for field in (
     "attempt.source_call_position",
     "attempt.source_call_callee_name",

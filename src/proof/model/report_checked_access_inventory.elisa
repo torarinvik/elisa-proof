@@ -1,0 +1,597 @@
+# Source census for the bounds-guard operators which produce `checked-index` and
+# `checked-get` certificates. This deliberately admits only AST forms whose executable
+# traversal is mirrored here. Any unmodelled node, repeated source position, or metering
+# failure rejects source admission.
+extend ElisaProof:
+    private:
+        struct ProofCheckedAccessSource:
+            owner_name: sview
+            owner_line: u32
+            owner_offset: u32
+            position: Ast::Pos
+            rule: sview
+
+        struct ProofCheckedAccessIndex:
+            valid: bool = false
+            hashes: mutable darray[u32] = []
+            slots: mutable darray[usize] = []
+            empty: usize = 0
+
+        def proof_checked_access_key_hash(owner_name: sview, owner_line: u32, owner_offset: u32, position: Ast::Pos, rule: sview) -> u32:
+            hash: mutable u32 = proof_expr_shape_mix(proof_name_hash(owner_name), owner_line.i64())
+            hash <- proof_expr_shape_mix(hash, owner_offset.i64())
+            hash <- proof_expr_shape_mix(hash, position.line.i64())
+            hash <- proof_expr_shape_mix(hash, position.column.i64())
+            hash <- proof_expr_shape_mix(hash, position.offset.i64())
+            hash <- proof_expr_shape_mix(hash, position.end_line.i64())
+            hash <- proof_expr_shape_mix(hash, position.end_column.i64())
+            hash <- proof_expr_shape_mix(hash, position.end_offset.i64())
+            proof_expr_shape_mix(hash, proof_name_hash(rule).i64())
+
+        def proof_checked_access_key_equal(row: ProofCheckedAccessSource, owner_name: sview, owner_line: u32, owner_offset: u32, position: Ast::Pos, rule: sview) -> bool:
+            row.owner_name == owner_name and row.owner_line == owner_line and row.owner_offset == owner_offset and row.rule == rule and proof_report_call_requires_position_equal(row.position, position)
+
+        def proof_checked_access_index_build(rows: darray[ProofCheckedAccessSource]&, source_work: mutable usize&) -> ProofCheckedAccessIndex can[Memory.Allocate, Abort.Panic]:
+            count: usize = rows.count
+            return ProofCheckedAccessIndex{valid: true, empty: 0} if count == 0
+            capacity: usize = proof_name_index_capacity(count)
+            return ProofCheckedAccessIndex{valid: false} if capacity == 0 or not proof_report_source_work_charge(capacity * 2, source_work)
+            index: mutable ProofCheckedAccessIndex = ProofCheckedAccessIndex{valid: true, hashes: [], slots: [], empty: count}
+            for _ in 0..<capacity |index, source_work, count|:
+                return ProofCheckedAccessIndex{valid: false} if not proof_report_source_work_charge(1, source_work)
+                index.hashes.push(0)
+                index.slots.push(count)
+            for row_index in 0..<count |row_index, rows, index, count, capacity, source_work|:
+                row: ProofCheckedAccessSource = rows[row_index]
+                return ProofCheckedAccessIndex{valid: false} if not proof_report_source_work_charge(sview_len(row.owner_name), source_work) or not proof_report_source_work_charge(sview_len(row.rule), source_work)
+                hash: u32 = proof_checked_access_key_hash(row.owner_name, row.owner_line, row.owner_offset, row.position, row.rule)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, row, row_index, index, rows, capacity, source_work, placed|:
+                    return ProofCheckedAccessIndex{valid: false} if not proof_report_source_work_charge(1, source_work)
+                    previous: usize = index.slots[slot]
+                    if previous == count:
+                        index.hashes[slot] <- hash
+                        index.slots[slot] <- row_index
+                        placed <- true
+                        break
+                    return ProofCheckedAccessIndex{valid: false} if previous >= count
+                    if index.hashes[slot] == hash:
+                        prior: ProofCheckedAccessSource = rows[previous]
+                        return ProofCheckedAccessIndex{valid: false} if not proof_report_source_work_charge(sview_len(prior.owner_name), source_work) or not proof_report_source_work_charge(sview_len(prior.rule), source_work)
+                        return ProofCheckedAccessIndex{valid: false} if proof_checked_access_key_equal(prior, row.owner_name, row.owner_line, row.owner_offset, row.position, row.rule)
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return ProofCheckedAccessIndex{valid: false} if not placed
+            index
+
+        def proof_checked_access_index_find(index: ProofCheckedAccessIndex&, rows: darray[ProofCheckedAccessSource]&, owner_name: sview, owner_line: u32, owner_offset: u32, position: Ast::Pos, rule: sview, source_work: mutable usize&) -> (complete: bool, found: bool, row: usize):
+            count: usize = rows.count
+            capacity: usize = index.slots.count
+            return (false, false, count) if not index.valid or index.empty != count or index.hashes.count != capacity
+            return (true, false, count) if count == 0 and capacity == 0
+            return (false, false, count) if capacity == 0 or capacity != proof_name_index_capacity(count)
+            return (false, false, count) if not proof_report_source_work_charge(sview_len(owner_name), source_work) or not proof_report_source_work_charge(sview_len(rule), source_work)
+            hash: u32 = proof_checked_access_key_hash(owner_name, owner_line, owner_offset, position, rule)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, index, rows, owner_name, owner_line, owner_offset, position, rule, count, capacity, source_work|:
+                return (false, false, count) if not proof_report_source_work_charge(1, source_work)
+                current: usize = index.slots[slot]
+                return (true, false, count) if current == count
+                return (false, false, count) if current > count
+                if index.hashes[slot] == hash:
+                    row: ProofCheckedAccessSource = rows[current]
+                    return (false, false, count) if not proof_report_source_work_charge(sview_len(row.owner_name), source_work) or not proof_report_source_work_charge(sview_len(row.rule), source_work)
+                    if proof_checked_access_key_equal(row, owner_name, owner_line, owner_offset, position, rule):
+                        return (true, true, current)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            (false, false, count)
+
+        def proof_checked_access_expr_cost(expression: Ast::Expr, work: mutable usize&) -> (complete: bool, cost: usize):
+            match expression:
+                Ast::Expr.Invalid:
+                    return (false, 0) if not proof_report_source_work_charge(1, work)
+                    return (true, 1)
+                _:
+                    proof_replay_summary_expr_cost_with_work(expression, work)
+
+        def proof_checked_access_alias_value(expression: Ast::Expr, alias_names: darray[sview]&, alias_values: darray[Ast::Expr]&, work: mutable usize&) -> (complete: bool, value: Ast::Expr):
+            match expression:
+                Ast::Expr.Index(_, _, _):
+                    index_cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(expression, work)
+                    return (false, Ast::Expr.Invalid) if not index_cost.complete
+                    return (true, expression)
+                Ast::Expr.Ident(name, _):
+                    return (false, Ast::Expr.Invalid) if alias_names.count != alias_values.count
+                    index: mutable usize = alias_names.count
+                    while index > 0 |index, alias_names, alias_values, name, work|:
+                        index <- index - 1
+                        current_name: sview = alias_names[index]
+                        return (false, Ast::Expr.Invalid) if not proof_report_source_work_charge(1, work) or not proof_report_source_work_charge(sview_len(current_name), work) or not proof_report_source_work_charge(sview_len(name), work)
+                        if current_name == name:
+                            value: Ast::Expr = alias_values[index]
+                            value_cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(value, work)
+                            return (false, Ast::Expr.Invalid) if not value_cost.complete
+                            return (true, value)
+                    return (true, Ast::Expr.Invalid)
+                _:
+                    return (true, Ast::Expr.Invalid)
+
+        def proof_checked_access_alias_store(name: sview, expression: Ast::Expr, alias_names: mutable darray[sview]&, alias_values: mutable darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            return false if name == "" or alias_names.count != alias_values.count
+            return false if not proof_report_source_work_charge(sview_len(name), work)
+            existing: mutable usize = alias_names.count
+            while existing > 0 |existing, alias_names, name, work|:
+                existing <- existing - 1
+                existing_name: sview = alias_names[existing]
+                return false if not proof_report_source_work_charge(1, work) or not proof_report_source_work_charge(sview_len(existing_name), work)
+                break if existing_name == name
+            return false if existing == alias_names.count and alias_names.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+            # Resolve the initializer against the pre-assignment environment. This preserves
+            # ordinary self-assignment (`alias = alias`) while the subsequent invalidation
+            # still removes every other stored expression that depends on the written name.
+            expression_cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(expression, work)
+            return false if not expression_cost.complete
+            value: (complete: bool, value: Ast::Expr) = proof_checked_access_alias_value(expression, alias_names, alias_values, work)
+            return false if not value.complete
+            stored: mutable Ast::Expr = value.value
+            stored_cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(stored, work)
+            return false if not stored_cost.complete or not proof_report_source_work_charge(stored_cost.cost, work)
+            stored_mentions: (complete: bool, mentions: bool) = proof_checked_access_alias_mentions_name_with_work(stored, name, work)
+            return false if not stored_mentions.complete
+            stored <- Ast::Expr.Invalid if stored_mentions.mentions
+            for index in 0..<alias_values.count |index, alias_values, name, work|:
+                prior_value: Ast::Expr = alias_values[index]
+                prior_cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(prior_value, work)
+                return false if not prior_cost.complete or not proof_report_source_work_charge(prior_cost.cost, work)
+                prior_mentions: (complete: bool, mentions: bool) = proof_checked_access_alias_mentions_name_with_work(prior_value, name, work)
+                return false if not prior_mentions.complete
+                alias_values[index] <- Ast::Expr.Invalid if prior_mentions.mentions
+            if existing < alias_names.count:
+                alias_values[existing] <- stored
+            else:
+                alias_names.push(name)
+                alias_values.push(stored)
+            true
+
+        def proof_checked_access_alias_invalidate_all(alias_names: mutable darray[sview]&, alias_values: mutable darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            return false if alias_names.count != alias_values.count
+            for index in 0..<alias_names.count |index, alias_names, alias_values, work|:
+                return false if not proof_report_source_work_charge(1, work) or not proof_report_source_work_charge(sview_len(alias_names[index]), work)
+                alias_values[index] <- Ast::Expr.Invalid
+            true
+
+        def proof_checked_access_alias_merge_equal_indexes(alias_names: mutable darray[sview]&, alias_values: mutable darray[Ast::Expr]&, then_names: darray[sview]&, then_values: darray[Ast::Expr]&, else_names: darray[sview]&, else_values: darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            baseline_count: usize = alias_names.count
+            return false if baseline_count != alias_values.count
+            return proof_checked_access_alias_invalidate_all(alias_names, alias_values, work) if then_names.count < baseline_count or else_names.count < baseline_count or then_values.count < baseline_count or else_values.count < baseline_count
+            for index in 0..<baseline_count |index, alias_names, alias_values, then_names, then_values, else_names, else_values, work|:
+                base_name: sview = alias_names[index]
+                then_name: sview = then_names[index]
+                else_name: sview = else_names[index]
+                return false if not proof_report_source_work_charge(1, work) or not proof_report_source_work_charge(sview_len(base_name), work) or not proof_report_source_work_charge(sview_len(then_name), work) or not proof_report_source_work_charge(sview_len(else_name), work)
+                return false if then_names[index] != base_name or else_names[index] != base_name
+                if then_values[index] is Ast::Expr.Index(_, _, _) and else_values[index] is Ast::Expr.Index(_, _, _):
+                    then_cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(then_values[index], work)
+                    else_cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(else_values[index], work)
+                    return false if not then_cost.complete or not else_cost.complete
+                    if proof_expr_equal(then_values[index], else_values[index]):
+                        alias_values[index] <- then_values[index]
+                    else:
+                        alias_values[index] <- Ast::Expr.Invalid
+                else:
+                    alias_values[index] <- Ast::Expr.Invalid
+            true
+
+        def proof_checked_access_alias_merge_match_arm(alias_names: darray[sview]&, entry_values: darray[Ast::Expr]&, joined_values: mutable darray[Ast::Expr]&, arm_names: darray[sview]&, arm_values: darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            count: usize = alias_names.count
+            return false if count != entry_values.count or count != joined_values.count
+            return false if arm_names.count < count or arm_values.count < count
+            for index in 0..<count |index, alias_names, entry_values, joined_values, arm_names, arm_values, work|:
+                base_name: sview = alias_names[index]
+                arm_name: sview = arm_names[index]
+                return false if not proof_report_source_work_charge(1, work) or not proof_report_source_work_charge(sview_len(base_name), work) or not proof_report_source_work_charge(sview_len(arm_name), work)
+                if arm_name == base_name and entry_values[index] is Ast::Expr.Index(_, _, _) and joined_values[index] is Ast::Expr.Index(_, _, _) and arm_values[index] is Ast::Expr.Index(_, _, _):
+                    entry_cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(entry_values[index], work)
+                    joined_cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(joined_values[index], work)
+                    arm_cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(arm_values[index], work)
+                    return false if not entry_cost.complete or not joined_cost.complete or not arm_cost.complete
+                    if proof_expr_equal(joined_values[index], entry_values[index]) and proof_expr_equal(arm_values[index], entry_values[index]):
+                        joined_values[index] <- entry_values[index]
+                    else:
+                        joined_values[index] <- Ast::Expr.Invalid
+                else:
+                    joined_values[index] <- Ast::Expr.Invalid
+            true
+
+        def proof_checked_access_alias_snapshot_charge(alias_names: darray[sview]&, alias_values: darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            return false if alias_names.count != alias_values.count
+            return false if not proof_report_source_work_charge(alias_names.count, work)
+            for name in alias_names |name, work|:
+                return false if not proof_report_source_work_charge(sview_len(name), work)
+            return false if not proof_report_source_work_charge(alias_values.count, work)
+            for value in alias_values |value, work|:
+                if value is Ast::Expr.Invalid:
+                    return false if not proof_report_source_work_charge(1, work)
+                    continue
+                cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(value, work)
+                return false if not cost.complete
+            true
+
+        def proof_checked_access_expression_has_state_effect(expression: Ast::Expr, operator_mask: usize, work: mutable usize&) -> (complete: bool, effectful: bool):
+            cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(expression, work)
+            return (false, false) if not cost.complete
+            (true, proof_expr_has_call(expression) or proof_expr_has_move(expression) or proof_source_expression_has_overloaded_operator(expression, operator_mask, 0))
+
+        def proof_checked_access_invalidate_overloaded(expression: Ast::Expr, operator_mask: usize, alias_names: mutable darray[sview]&, alias_values: mutable darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            cost: (complete: bool, cost: usize) = proof_checked_access_expr_cost(expression, work)
+            return false if not cost.complete
+            return proof_checked_access_alias_invalidate_all(alias_names, alias_values, work) if proof_source_expression_has_overloaded_operator(expression, operator_mask, 0)
+            true
+
+        def proof_checked_access_collect_expr(expression: Ast::Expr, owner_name: sview, owner_line: u32, owner_offset: u32, rows: mutable darray[ProofCheckedAccessSource]&, operator_mask: usize, alias_names: mutable darray[sview]&, alias_values: mutable darray[Ast::Expr]&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_report_source_work_charge(1, work)
+            match expression:
+                Ast::Expr.GetElse(Ast::Expr.Index(object, index, _), recovery, position):
+                    return false if rows.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+                    rows.push(ProofCheckedAccessSource{owner_name: owner_name, owner_line: owner_line, owner_offset: owner_offset, position: position, rule: "checked-get"})
+                    return false if not proof_checked_access_collect_expr(object, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    return false if not proof_checked_access_collect_expr(index, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    # Recovery statements are checked by the statement-level control-flow
+                    # pass. Do not count them again while walking the expression wrapper.
+                    true
+                Ast::Expr.Binary(Ast::Expr.Index(object, index, _), TokenKind.Else, fallback, position):
+                    return false if rows.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+                    rows.push(ProofCheckedAccessSource{owner_name: owner_name, owner_line: owner_line, owner_offset: owner_offset, position: position, rule: "checked-index"})
+                    return false if not proof_checked_access_collect_expr(object, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    return false if not proof_checked_access_collect_expr(index, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    return proof_checked_access_collect_expr(fallback, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.Else, right, position):
+                    if left is Ast::Expr.Ident(_,_):
+                        alias_value: (complete: bool, value: Ast::Expr) = proof_checked_access_alias_value(left, alias_names, alias_values, work)
+                        return false if not alias_value.complete
+                        if alias_value.value is Ast::Expr.Index(_, _, _):
+                            return false if rows.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4 or not proof_report_source_work_charge(sview_len(owner_name), work)
+                            rows.push(ProofCheckedAccessSource{owner_name: owner_name, owner_line: owner_line, owner_offset: owner_offset, position: position, rule: "checked-index"})
+                    return false if not proof_checked_access_collect_expr(left, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    return proof_checked_access_collect_expr(right, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                Ast::Expr.GetElse(guarded, recovery, position):
+                    if guarded is Ast::Expr.Ident(alias_name, position):
+                        alias_value: (complete: bool, value: Ast::Expr) = proof_checked_access_alias_value(guarded, alias_names, alias_values, work)
+                        return false if not alias_value.complete
+                        if alias_value.value is Ast::Expr.Index(_, _, _):
+                            return false if rows.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4 or not proof_report_source_work_charge(sview_len(owner_name), work)
+                            rows.push(ProofCheckedAccessSource{owner_name: owner_name, owner_line: owner_line, owner_offset: owner_offset, position: position, rule: "checked-get"})
+                    return false if not proof_checked_access_collect_expr(guarded, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    # Nested recovery is not part of the value safety walk; the direct
+                    # statement recovery is visited independently by return analysis.
+                    true
+                Ast::Expr.Call(callee, arguments, _, _) | Ast::Expr.IndexN(callee, arguments, _):
+                    return false if not proof_checked_access_collect_expr(callee, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    for argument in arguments |owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth|:
+                        return false if not proof_checked_access_collect_expr(argument, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    true
+                Ast::Expr.StaticEffectCall(_, _, _, arguments, _, _):
+                    for argument in arguments |owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth|:
+                        return false if not proof_checked_access_collect_expr(argument, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    true
+                Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _) | Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _):
+                    proof_checked_access_collect_expr(inner, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                Ast::Expr.Index(left, right, _) | Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Refinement(left, right, _):
+                    proof_checked_access_collect_expr(left, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1) and proof_checked_access_collect_expr(right, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_checked_access_collect_expr(object, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1) and proof_checked_access_collect_expr(low, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1) and proof_checked_access_collect_expr(high, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth|:
+                        return false if not proof_checked_access_collect_expr(element, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth|:
+                        return false if not proof_checked_access_collect_expr(entry.key, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1) or not proof_checked_access_collect_expr(entry.value, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    true
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth|:
+                        return false if not proof_checked_access_collect_expr(field.value, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_checked_access_collect_expr(base, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    for field in fields |owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth|:
+                        return false if not proof_checked_access_collect_expr(field.value, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    true
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return false if not proof_checked_access_collect_expr(condition, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(condition, operator_mask, work)
+                    return false if not effect.complete
+                    return false if effect.effectful and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                    return false if not proof_checked_access_alias_snapshot_charge(alias_names, alias_values, work)
+                    then_names: mutable darray[sview] = proof_copy_names(alias_names)
+                    then_values: mutable darray[Ast::Expr] = proof_copy_exprs(alias_values)
+                    return false if not proof_checked_access_alias_snapshot_charge(alias_names, alias_values, work)
+                    else_names: mutable darray[sview] = proof_copy_names(alias_names)
+                    else_values: mutable darray[Ast::Expr] = proof_copy_exprs(alias_values)
+                    return false if not proof_checked_access_collect_expr(then_value, owner_name, owner_line, owner_offset, rows, operator_mask, then_names, then_values, work, depth + 1)
+                    return false if not proof_checked_access_collect_expr(else_value, owner_name, owner_line, owner_offset, rows, operator_mask, else_names, else_values, work, depth + 1)
+                    proof_checked_access_alias_merge_equal_indexes(alias_names, alias_values, then_names, then_values, else_names, else_values, work)
+                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                    return false if not proof_checked_access_collect_expr(scrutinee, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(scrutinee, operator_mask, work)
+                    return false if not effect.complete
+                    return false if effect.effectful and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                    return false if not proof_checked_access_alias_snapshot_charge(alias_names, alias_values, work)
+                    entry_names: mutable darray[sview] = proof_copy_names(alias_names)
+                    entry_values: mutable darray[Ast::Expr] = proof_copy_exprs(alias_values)
+                    for arm in arms |owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth|:
+                        return false if not proof_checked_access_alias_snapshot_charge(entry_names, entry_values, work)
+                        arm_names: mutable darray[sview] = proof_copy_names(entry_names)
+                        arm_values: mutable darray[Ast::Expr] = proof_copy_exprs(entry_values)
+                        pattern_bindings: mutable darray[sview] = []
+                        return false if not proof_structural_pattern_bindings_with_source_limit(arm.pattern, &pattern_bindings, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                        for binding in pattern_bindings |binding, arm_names, arm_values, work|:
+                            return false if not proof_checked_access_alias_store(binding, Ast::Expr.Invalid, arm_names, arm_values, work)
+                        return false if not proof_checked_access_collect_expr(arm.guard, owner_name, owner_line, owner_offset, rows, operator_mask, arm_names, arm_values, work, depth + 1)
+                        guard_effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(arm.guard, operator_mask, work)
+                        return false if not guard_effect.complete
+                        if guard_effect.effectful:
+                            return false if not proof_checked_access_alias_invalidate_all(arm_names, arm_values, work)
+                            return false if not proof_checked_access_alias_invalidate_all(entry_names, entry_values, work)
+                            return false if not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                        return false if not proof_checked_access_collect_body(arm.body, owner_name, owner_line, owner_offset, rows, operator_mask, arm_names, arm_values, work, depth + 1)
+                        return false if not proof_checked_access_alias_merge_match_arm(entry_names, entry_values, alias_values, arm_names, arm_values, work)
+                    true
+                Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+                    return false if not proof_checked_access_collect_expr(iterable, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                    iterable_effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(iterable, operator_mask, work)
+                    return false if not iterable_effect.complete
+                    return false if iterable_effect.effectful and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                    return false if not proof_checked_access_alias_snapshot_charge(alias_names, alias_values, work)
+                    comprehension_names: mutable darray[sview] = proof_copy_names(alias_names)
+                    comprehension_values: mutable darray[Ast::Expr] = proof_copy_exprs(alias_values)
+                    return false if variable != "" and not proof_checked_access_alias_store(variable, Ast::Expr.Invalid, comprehension_names, comprehension_values, work)
+                    return false if not proof_checked_access_collect_expr(condition, owner_name, owner_line, owner_offset, rows, operator_mask, comprehension_names, comprehension_values, work, depth + 1)
+                    condition_effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(condition, operator_mask, work)
+                    return false if not condition_effect.complete
+                    return false if condition_effect.effectful and not proof_checked_access_alias_invalidate_all(comprehension_names, comprehension_values, work)
+                    return false if not proof_checked_access_alias_snapshot_charge(comprehension_names, comprehension_values, work)
+                    body_names: mutable darray[sview] = proof_copy_names(comprehension_names)
+                    body_values: mutable darray[Ast::Expr] = proof_copy_exprs(comprehension_values)
+                    return false if not proof_checked_access_collect_expr(body, owner_name, owner_line, owner_offset, rows, operator_mask, body_names, body_values, work, depth + 1)
+                    proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                Ast::Expr.Block(statements, value, _, _):
+                    return false if not proof_checked_access_alias_snapshot_charge(alias_names, alias_values, work)
+                    block_names: mutable darray[sview] = proof_copy_names(alias_names)
+                    block_values: mutable darray[Ast::Expr] = proof_copy_exprs(alias_values)
+                    return false if not proof_checked_access_collect_body(statements, owner_name, owner_line, owner_offset, rows, operator_mask, block_names, block_values, work, depth + 1)
+                    return false if not proof_checked_access_collect_expr(value, owner_name, owner_line, owner_offset, rows, operator_mask, block_names, block_values, work, depth + 1)
+                    proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                Ast::Expr.Lambda(_, body, _):
+                    # Lambda bodies are deferred and the producer deliberately does not
+                    # certify their index safety at closure creation.
+                    true
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    true
+                _:
+                    false
+
+        # Top-level statement GetElse recoveries are checked by return/control-flow analysis
+        # in an isolated state. Nested expression recoveries are not traversed by that pass.
+        def proof_checked_access_collect_statement_value(expression: Ast::Expr, owner_name: sview, owner_line: u32, owner_offset: u32, rows: mutable darray[ProofCheckedAccessSource]&, operator_mask: usize, alias_names: mutable darray[sview]&, alias_values: mutable darray[Ast::Expr]&, work: mutable usize&, depth: usize) -> bool:
+            return false if not proof_checked_access_collect_expr(expression, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth)
+            match expression:
+                Ast::Expr.GetElse(_, recovery, _):
+                    return false if not proof_checked_access_alias_snapshot_charge(alias_names, alias_values, work)
+                    recovery_names: mutable darray[sview] = proof_copy_names(alias_names)
+                    recovery_values: mutable darray[Ast::Expr] = proof_copy_exprs(alias_values)
+                    proof_checked_access_collect_body(recovery, owner_name, owner_line, owner_offset, rows, operator_mask, recovery_names, recovery_values, work, depth + 1)
+                _:
+                    true
+
+        def proof_checked_access_collect_body(body: darray[Ast::Stmt]&, owner_name: sview, owner_line: u32, owner_offset: u32, rows: mutable darray[ProofCheckedAccessSource]&, operator_mask: usize, alias_names: mutable darray[sview]&, alias_values: mutable darray[Ast::Expr]&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for statement in body |statement, owner_name, owner_line, owner_offset, rows, operator_mask, work, depth|:
+                return false if not proof_report_source_work_charge(1, work)
+                match statement:
+                    Ast::Stmt.Expr(value, _):
+                        return false if not proof_checked_access_invalidate_overloaded(value, operator_mask, alias_names, alias_values, work)
+                        return false if not proof_checked_access_collect_statement_value(value, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                        effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(value, operator_mask, work)
+                        return false if not effect.complete
+                        if effect.effectful:
+                            return false if not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                    Ast::Stmt.Return(value, _):
+                        if value is returned:
+                            return false if not proof_checked_access_invalidate_overloaded(returned, operator_mask, alias_names, alias_values, work)
+                            return false if not proof_checked_access_collect_statement_value(returned, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                            effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(returned, operator_mask, work)
+                            return false if not effect.complete
+                            return false if effect.effectful and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                    Ast::Stmt.Contract(_, value, _):
+                        return false if not proof_checked_access_invalidate_overloaded(value, operator_mask, alias_names, alias_values, work)
+                        return false if not proof_checked_access_collect_expr(value, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                        effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(value, operator_mask, work)
+                        return false if not effect.complete
+                        return false if effect.effectful and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        return false if not proof_checked_access_alias_snapshot_charge(alias_names, alias_values, work)
+                        block_names: mutable darray[sview] = proof_copy_names(alias_names)
+                        block_values: mutable darray[Ast::Expr] = proof_copy_exprs(alias_values)
+                        return false if not proof_checked_access_collect_body(nested, owner_name, owner_line, owner_offset, rows, operator_mask, block_names, block_values, work, depth + 1)
+                        return false if not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        return false if not proof_checked_access_invalidate_overloaded(condition, operator_mask, alias_names, alias_values, work)
+                        return false if not proof_checked_access_collect_expr(condition, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                        recovery_transfer: (complete: bool, found: bool) = proof_checked_access_control_expr_has_recovery_transfer(condition, work, 0, 0)
+                        return false if not recovery_transfer.complete
+                        return false if recovery_transfer.found and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                        effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(condition, operator_mask, work)
+                        return false if not effect.complete
+                        return false if effect.effectful and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                        return false if not proof_checked_access_alias_snapshot_charge(alias_names, alias_values, work)
+                        then_names: mutable darray[sview] = proof_copy_names(alias_names)
+                        then_values: mutable darray[Ast::Expr] = proof_copy_exprs(alias_values)
+                        return false if not proof_checked_access_alias_snapshot_charge(alias_names, alias_values, work)
+                        else_names: mutable darray[sview] = proof_copy_names(alias_names)
+                        else_values: mutable darray[Ast::Expr] = proof_copy_exprs(alias_values)
+                        return false if not proof_checked_access_collect_body(yes, owner_name, owner_line, owner_offset, rows, operator_mask, then_names, then_values, work, depth + 1) or not proof_checked_access_collect_body(no, owner_name, owner_line, owner_offset, rows, operator_mask, else_names, else_values, work, depth + 1)
+                        return false if not proof_checked_access_alias_merge_equal_indexes(alias_names, alias_values, then_names, then_values, else_names, else_values, work)
+                    Ast::Stmt.While(condition, nested, _):
+                        return false if not proof_checked_access_invalidate_overloaded(condition, operator_mask, alias_names, alias_values, work)
+                        return false if not proof_checked_access_collect_expr(condition, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                        recovery_transfer: (complete: bool, found: bool) = proof_checked_access_control_expr_has_recovery_transfer(condition, work, 0, 0)
+                        return false if not recovery_transfer.complete
+                        return false if recovery_transfer.found and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                        effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(condition, operator_mask, work)
+                        return false if not effect.complete
+                        return false if effect.effectful and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                        transfer: (complete: bool, found: bool) = proof_checked_access_loop_has_exit_transfer(nested, work, 0, 0)
+                        return false if not transfer.complete
+                        return false if not proof_checked_access_alias_snapshot_charge(alias_names, alias_values, work)
+                        entry_names: mutable darray[sview] = proof_copy_names(alias_names)
+                        entry_values: mutable darray[Ast::Expr] = proof_copy_exprs(alias_values)
+                        return false if not proof_checked_access_alias_snapshot_charge(entry_names, entry_values, work)
+                        loop_names: mutable darray[sview] = proof_copy_names(entry_names)
+                        loop_values: mutable darray[Ast::Expr] = proof_copy_exprs(entry_values)
+                        return false if not proof_checked_access_collect_body(nested, owner_name, owner_line, owner_offset, rows, operator_mask, loop_names, loop_values, work, depth + 1)
+                        return false if transfer.found and not proof_checked_access_alias_invalidate_all(loop_names, loop_values, work)
+                        return false if not proof_checked_access_alias_merge_equal_indexes(alias_names, alias_values, entry_names, entry_values, loop_names, loop_values, work)
+                    Ast::Stmt.For(_, variables, iterable, nested, _):
+                        return false if not proof_checked_access_invalidate_overloaded(iterable, operator_mask, alias_names, alias_values, work)
+                        return false if not proof_checked_access_collect_expr(iterable, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                        recovery_transfer: (complete: bool, found: bool) = proof_checked_access_control_expr_has_recovery_transfer(iterable, work, 0, 0)
+                        return false if not recovery_transfer.complete
+                        return false if recovery_transfer.found and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                        effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(iterable, operator_mask, work)
+                        return false if not effect.complete
+                        return false if effect.effectful and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                        transfer: (complete: bool, found: bool) = proof_checked_access_loop_has_exit_transfer(nested, work, 0, 0)
+                        return false if not transfer.complete
+                        return false if not proof_checked_access_alias_snapshot_charge(alias_names, alias_values, work)
+                        entry_names: mutable darray[sview] = proof_copy_names(alias_names)
+                        entry_values: mutable darray[Ast::Expr] = proof_copy_exprs(alias_values)
+                        return false if not proof_checked_access_alias_snapshot_charge(entry_names, entry_values, work)
+                        loop_names: mutable darray[sview] = proof_copy_names(entry_names)
+                        loop_values: mutable darray[Ast::Expr] = proof_copy_exprs(entry_values)
+                        for variable in variables |variable, loop_names, loop_values, work|:
+                            return false if variable != "" and not proof_checked_access_alias_store(variable, Ast::Expr.Invalid, loop_names, loop_values, work)
+                        return false if not proof_checked_access_collect_body(nested, owner_name, owner_line, owner_offset, rows, operator_mask, loop_names, loop_values, work, depth + 1)
+                        return false if transfer.found and not proof_checked_access_alias_invalidate_all(loop_names, loop_values, work)
+                        return false if not proof_checked_access_alias_merge_equal_indexes(alias_names, alias_values, entry_names, entry_values, loop_names, loop_values, work)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return false if not proof_checked_access_invalidate_overloaded(scrutinee, operator_mask, alias_names, alias_values, work)
+                        return false if not proof_checked_access_collect_expr(scrutinee, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                        effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(scrutinee, operator_mask, work)
+                        return false if not effect.complete
+                        return false if effect.effectful and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                        return false if not proof_checked_access_alias_snapshot_charge(alias_names, alias_values, work)
+                        entry_names: mutable darray[sview] = proof_copy_names(alias_names)
+                        entry_values: mutable darray[Ast::Expr] = proof_copy_exprs(alias_values)
+                        for arm in arms |owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth|:
+                            return false if not proof_checked_access_alias_snapshot_charge(entry_names, entry_values, work)
+                            arm_names: mutable darray[sview] = proof_copy_names(entry_names)
+                            arm_values: mutable darray[Ast::Expr] = proof_copy_exprs(entry_values)
+                            pattern_bindings: mutable darray[sview] = []
+                            return false if not proof_structural_pattern_bindings_with_source_limit(arm.pattern, &pattern_bindings, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                            for binding in pattern_bindings |binding, arm_names, arm_values, work|:
+                                return false if not proof_checked_access_alias_store(binding, Ast::Expr.Invalid, arm_names, arm_values, work)
+                            return false if not proof_checked_access_collect_expr(arm.guard, owner_name, owner_line, owner_offset, rows, operator_mask, arm_names, arm_values, work, depth + 1)
+                            guard_effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(arm.guard, operator_mask, work)
+                            return false if not guard_effect.complete
+                            if guard_effect.effectful:
+                                return false if not proof_checked_access_alias_invalidate_all(arm_names, arm_values, work)
+                                return false if not proof_checked_access_alias_invalidate_all(entry_names, entry_values, work)
+                                return false if not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                            return false if not proof_checked_access_collect_body(arm.body, owner_name, owner_line, owner_offset, rows, operator_mask, arm_names, arm_values, work, depth + 1)
+                            return false if not proof_checked_access_alias_merge_match_arm(entry_names, entry_values, alias_values, arm_names, arm_values, work)
+                        true
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        # The checker evaluates the initializer for runtime safety; the type
+                        # expression is not an executable checked-access producer site.
+                        return false if not proof_checked_access_invalidate_overloaded(initializer, operator_mask, alias_names, alias_values, work)
+                        return false if not proof_checked_access_collect_statement_value(initializer, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                        effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(initializer, operator_mask, work)
+                        return false if not effect.complete
+                        return false if effect.effectful and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                        return proof_checked_access_alias_store(proof_statement_declared_name(statement), Ast::Expr.Invalid, alias_names, alias_values, work) if effect.effectful
+                        return false if not proof_checked_access_alias_store(proof_statement_declared_name(statement), initializer, alias_names, alias_values, work)
+                    Ast::Stmt.Assign(target, operator, value, _):
+                        # Alias substitution can duplicate a source occurrence. Repeated
+                        # attempts remain bound to that unique source key.
+                        return false if not proof_checked_access_invalidate_overloaded(target, operator_mask, alias_names, alias_values, work)
+                        return false if not proof_checked_access_collect_expr(target, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                        return false if not proof_checked_access_invalidate_overloaded(value, operator_mask, alias_names, alias_values, work)
+                        return false if not proof_checked_access_collect_statement_value(value, owner_name, owner_line, owner_offset, rows, operator_mask, alias_names, alias_values, work, depth + 1)
+                        effect: (complete: bool, effectful: bool) = proof_checked_access_expression_has_state_effect(value, operator_mask, work)
+                        return false if not effect.complete
+                        return false if effect.effectful and not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                        if target is Ast::Expr.Ident(target_name, _) and (operator == TokenKind.Assign or operator == TokenKind.LArrow) and not effect.effectful:
+                            return false if not proof_checked_access_alias_store(target_name, value, alias_names, alias_values, work)
+                        elif target is Ast::Expr.Ident(target_name, _):
+                            return false if not proof_checked_access_alias_store(target_name, Ast::Expr.Invalid, alias_names, alias_values, work)
+                        else:
+                            return false if not proof_checked_access_alias_invalidate_all(alias_names, alias_values, work)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return false
+            true
+
+        def proof_checked_access_collect_declarations(declarations: darray[Ast::Decl]&, rows: mutable darray[ProofCheckedAccessSource]&, operator_mask: usize, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for declaration in declarations |declaration, rows, operator_mask, work, depth|:
+                return false if not proof_report_source_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        return false if not proof_report_source_work_charge(sview_len(name), work)
+                        function_alias_names: mutable darray[sview] = []
+                        function_alias_values: mutable darray[Ast::Expr] = []
+                        return false if position.line == 0 or name == "" or not proof_checked_access_collect_body(body, name, position.line, position.offset, rows, operator_mask, function_alias_names, function_alias_values, work, depth + 1)
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if not proof_report_source_work_charge(sview_len(module_name), work)
+                        return false if not proof_checked_access_collect_declarations(nested, rows, operator_mask, work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_checked_access_collect_declarations(nested, rows, operator_mask, work, depth + 1)
+                    Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _) | Ast::Decl.Import(_, _):
+                        pass
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
+            true
+
+        def proof_report_checked_access_coverage(file: Ast::File&, report: ProofReport&, source_work: mutable usize&) -> bool:
+            expected: mutable darray[ProofCheckedAccessSource] = []
+            operator_mask: (complete: bool, mask: usize) = proof_source_operator_protocol_mask_with_work(report.source.source_annotations, source_work)
+            return false if not operator_mask.complete
+            return false if not proof_checked_access_collect_declarations(file.top_decls, &expected, operator_mask.mask, source_work, 0)
+            index: ProofCheckedAccessIndex = proof_checked_access_index_build(expected, source_work)
+            return false if not index.valid
+            seen: mutable darray[bool] = []
+            for _ in 0..<expected.count |seen, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                seen.push(false)
+            for attempt in report.results.goal_attempts |attempt, expected, seen, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(attempt.name), source_work) or not proof_report_source_work_charge(sview_len(attempt.rule), source_work)
+                continue if attempt.rule != "checked-index" and attempt.rule != "checked-get"
+                return false if attempt.source_phase != "" or attempt.source_call_requires or attempt.source_call_obligation_selected
+                position: Ast::Pos = Ast::expr_pos(attempt.goal)
+                root_shape_matches: mutable bool = false
+                match attempt.goal:
+                    Ast::Expr.Binary(Ast::Expr.Index(_, _, _), TokenKind.Else, _, _):
+                        root_shape_matches <- true if attempt.rule == "checked-index"
+                    Ast::Expr.GetElse(Ast::Expr.Index(_, _, _), _, _):
+                        root_shape_matches <- true if attempt.rule == "checked-get"
+                    _:
+                        pass
+                return false if not root_shape_matches
+                found: (complete: bool, found: bool, row: usize) = proof_checked_access_index_find(index, expected, attempt.name, attempt.owner_function_line, attempt.owner_function_offset, position, attempt.rule, source_work)
+                return false if not found.complete or not found.found or found.row >= seen.count
+                # The producer substitutes aliases before constructing the goal AST. Bind
+                # source authority through the unique owner/position/rule key instead of
+                # comparing a transformed goal to the original subtree. Repeated attempts
+                # at one source position are valid when that expression is evaluated twice.
+                seen[found.row] <- true
+            for present in seen |source_work|:
+                return false if not proof_report_source_work_charge(1, source_work) or not present
+            source_work <= proof_replay_summary_source_work_limit()

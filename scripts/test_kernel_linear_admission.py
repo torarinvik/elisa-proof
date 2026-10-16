@@ -144,4 +144,36 @@ comparison = collector.index("proof_kernel_replay_collect_bound_comparison_with_
 assert and_branch < and_return < comparison
 assert "\n            proof_kernel_replay_collect_bound_comparison_with_goal_work" in collector
 
-print("linear replay: operator roots, primitive operands, and unsigned widths are admitted exactly")
+goal_depth = body(ROOT / "src/proof/linear/congruence_goal_depth.elisa", "proof_goal_depth")
+operator_guard = goal_depth.index(
+    "arithmetic_guard_safe: bool = proof_source_arithmetic_operator_guard_with_work(goal, facts, operator_mask, budget, exhausted)"
+)
+equality_literal_shortcut = goal_depth.index(
+    "proof_disjunction_comparison_from_equality_literal_with_work(left, operator, right, facts, budget, exhausted)"
+)
+assert operator_guard < equality_literal_shortcut, (
+    "comparison equality-literal reasoning must reject source-overloaded facts first"
+)
+
+goal_admission = body(ROOT / "src/proof/model/report_goal_admission.elisa", "proof_report_goal_source_admissible_after_structure_internal")
+assert goal_admission.index("proof_source_expression_has_overloaded_operator_with_work(attempt.goal, source_operator_mask") < goal_admission.index("proof_source_assert_by_goal_attempt_admitted")
+assert "report.source.source_primitive_operator_mask" not in (ROOT / "src/proof/model/report_goal_admission.elisa").read_text(encoding="utf-8")
+source_masks = body(ROOT / "src/proof/model/checked_view.elisa", "proof_source_analysis_operator_mask_from_source")
+assert "proof_source_primitive_operator_overloaded_with_work(annotations, source_work)" in source_masks
+assert "mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY" in source_masks
+assert "proof_source_operator_mask_with_generic_bounds(annotations, mask, source_work)" in source_masks
+declaration_mask = body(ROOT / "src/proof/model/checked_view.elisa", "proof_source_analysis_operator_declaration_mask")
+assert "mask <- mask | proof_source_operator_dunder_mask(name)" in declaration_mask
+unknown_declaration = declaration_mask.split("                    _:\n", 1)[1]
+assert "return false" in unknown_declaration
+index_masks = body(ROOT / "src/proof/check/source_operator_guard.elisa", "proof_source_operator_masks_from_index")
+assert "proof_source_operator_mask_with_generic_bounds(report.source.source_annotations, PROOF_SOURCE_OPERATOR_MASK_EMPTY, source_work)" in index_masks
+source_snapshot = body(ROOT / "src/proof/model/checked_view_admission.elisa", "proof_source_analysis_goal_admission_snapshot")
+assert "not source.source_operator_masks_valid" in source_snapshot
+assert "source.source_primitive_operator_mask" in source_snapshot
+source_bound = body(ROOT / "src/proof/model/report_structure_bound_failure.elisa", "proof_source_analysis_report_structure_bound_failure")
+assert 'return "source-operator-mask" if not source.source_operator_masks_valid' in source_bound
+assert "report.source.source_primitive_operator_mask != source.source_primitive_operator_mask" in source_bound
+assert "report.source.source_operator_protocol_mask != source.source_operator_protocol_mask" in source_bound
+
+print("linear replay: operator roots, primitive operands, widths, and equality facts are admitted exactly")

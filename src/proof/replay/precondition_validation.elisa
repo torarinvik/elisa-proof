@@ -335,6 +335,101 @@ extend ElisaProof:
                 best_matches != 1 or best_name != trace.name or best_offset != owner_offset
             return proof_replay_precondition_contract_expr_matches(report, trace, requirement, candidate_source_cost, work)
 
+        def proof_replay_resource_disjoint_precondition_body_site_matches(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt], source_work: mutable usize&) -> bool:
+            leading: mutable bool = true
+            matches: mutable usize = 0
+            for statement in body |leading, report, trace, source_work, matches|:
+                return false if not proof_replay_precondition_work_add(source_work, 1)
+                match statement:
+                    Ast::Stmt.Contract(kind, requirement, _):
+                        if kind == "requires":
+                            continue if not leading
+                            return false if:
+                                not proof_replay_precondition_expr_repetition_charge(requirement, 2, source_work)
+                                not proof_replay_precondition_expr_repetition_charge(trace.expression, 2, source_work)
+                            if proof_replay_expr_equal_depth(requirement, trace.expression, 0):
+                                position_work: mutable usize = 0
+                                same_positions: bool = proof_replay_trace_expression_positions_equal_with_work(requirement, trace.expression, 0, &position_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                                return false if not proof_replay_precondition_work_add(source_work, position_work)
+                                matches <- matches + 1 if same_positions
+                                return false if matches > 1
+                        else:
+                            leading <- false
+                    _:
+                        leading <- false
+            return matches == 1
+
+        # Resource-disjoint events have no source position at which to check whether an
+        # entry fact is still live. Admit only the narrow case that is stable for the whole
+        # function: a direct `usize` parameter inequality from a leading `requires`, with
+        # immutable by-value parameters that are neither shadowed nor touched anywhere in
+        # the body. The ordinary precondition validator remains tied to its exact consumer.
+        def proof_replay_resource_disjoint_precondition_is_stable(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
+            return false if trace.kind != "precondition" or trace.name == "" or trace.line == 0 or trace.owner_line != 0
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(left_name, _), TokenKind.BangEq, Ast::Expr.Ident(right_name, _), _):
+                    return false if left_name == "" or right_name == "" or left_name == right_name
+                    return false if not proof_replay_summary_owner_source_preflight(report, trace.name, trace.line, source_work)
+                    return false if not proof_replay_precondition_source_tree_charge(report.source.source_declarations, source_work, 0, 0)
+                    return false if not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)
+                    matches: mutable usize = 0
+                    owner_offset: mutable u32 = 0
+                    parameters: mutable darray[Ast::ParamDecl] = []
+                    body: mutable darray[Ast::Stmt] = []
+                    proof_replay_precondition_find_owner(report.source.source_declarations, trace.name, trace.line, &matches, &owner_offset, &parameters, &body, 0)
+                    return false if matches != 1
+                    return false if not proof_replay_resource_disjoint_precondition_body_site_matches(report, trace, body, source_work)
+                    left_matches: mutable usize = 0
+                    right_matches: mutable usize = 0
+                    for parameter in parameters |left_name, right_name, left_matches, right_matches, source_work|:
+                        return false if not proof_replay_precondition_work_add(source_work, 1)
+                        return false if not proof_replay_precondition_work_add(source_work, sview_len(parameter.name))
+                        continue if parameter.name != left_name and parameter.name != right_name
+                        return false if parameter.is_mutable or parameter.has_default or parameter.is_affine
+                        match parameter.type_expression:
+                            Ast::Expr.Ident("usize", _):
+                                scalar: (complete: bool, scalar: bool) = proof_replay_resource_scalar_type_with_work(parameter.type_expression, report, source_work, 0)
+                                return false if not scalar.complete or not scalar.scalar
+                            _:
+                                return false
+                        left_matches <- left_matches + 1 if parameter.name == left_name
+                        right_matches <- right_matches + 1 if parameter.name == right_name
+                    return false if left_matches != 1 or right_matches != 1
+                    return false if:
+                        proof_replay_source_body_declares_with_work(report.source.source_declarations, body, left_name, source_work)
+                        proof_replay_source_body_declares_with_work(report.source.source_declarations, body, right_name, source_work)
+                        proof_replay_source_body_touches_with_work(report.source.source_declarations, body, left_name, true, source_work)
+                        proof_replay_source_body_touches_with_work(report.source.source_declarations, body, right_name, true, source_work)
+                    operator_mask_status: (complete: bool, mask: usize) = proof_source_analysis_operator_mask_from_source(report.source.source_declarations, report.source.source_annotations, source_work)
+                    return false if not operator_mask_status.complete
+                    operator_work_exhausted: mutable bool = false
+                    return false if proof_source_expression_has_overloaded_operator_with_work(trace.expression, operator_mask_status.mask, source_work, operator_work_exhausted) or operator_work_exhausted
+                    return true
+                _:
+                    return false
+
+        def proof_replay_resource_disjoint_precondition_is_stable_cached(report: ProofReport&, trace_index: usize, trace: ProofFactTrace, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if not proof_replay_precondition_work_add(source_work, 1)
+            trace_count: usize = report.analysis_1.traces.records.count
+            report_identity: uintptr = (&report).cast[uintptr]
+            source_identity: uintptr = report.source.source_file_identity
+            if cache.resource_precondition_report_identity != report_identity or cache.resource_precondition_source_identity != source_identity or cache.resource_precondition_trace_count != trace_count or cache.resource_precondition_statuses.count != trace_count:
+                return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or trace_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + trace_count
+                cache.resource_precondition_statuses.resize(trace_count)
+                for index in 0..<trace_count |index, cache|:
+                    cache.resource_precondition_statuses[index] <- 0
+                cache.resource_precondition_report_identity <- report_identity
+                cache.resource_precondition_source_identity <- source_identity
+                cache.resource_precondition_trace_count <- trace_count
+            return false if trace_index >= trace_count
+            status: u8 = cache.resource_precondition_statuses[trace_index]
+            return true if status == 1
+            return false if status == 2
+            stable: bool = proof_replay_resource_disjoint_precondition_is_stable(report, trace, source_work)
+            cache.resource_precondition_statuses[trace_index] <- 1 if stable else 2
+            return stable
+
         def proof_replay_precondition_source_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
             work: mutable usize = 0
             return proof_replay_precondition_source_valid_with_work(report, trace, &work)
@@ -384,6 +479,74 @@ extend ElisaProof:
             source_candidate_scan_cost: usize = owner_scan_cost + source_tree_cost * 3
             return proof_replay_precondition_source_valid_after_preflight(report, trace, source_work, source_candidate_scan_cost)
 
+        # A `requires` clause establishes an entry-state fact. It can be used at a later proof
+        # point only while every value named by that fact is unchanged. Tie the consumer to the
+        # exact source goal, then scan the source prefix for writes to parameters and mutable
+        # globals whenever the fact depends on either. Scan every such root because two formal
+        # references may alias even when their names differ. A call inside the precondition can
+        # hide a global read behind its callee, so call-bearing facts conservatively depend on all
+        # global roots. Calls in executable statements are rejected in this case because they may
+        # mutate a global or an aliased parameter without naming the affected root at the call
+        # site. A containing statement is scanned whole, so writes later within the same statement
+        # conservatively invalidate the fact too.
+        def proof_replay_precondition_live_at_consumer(report: ProofReport&, trace: ProofFactTrace, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, source_work: mutable usize&) -> bool:
+            consumer_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            return false if not proof_replay_mutable_local_consumer_position_with_work(report, trace, body, &consumer_position, source_work)
+            return false if consumer_position.offset == 0
+            depends_on_mutable_state: mutable bool = false
+            return false if not proof_replay_precondition_expr_repetition_charge(trace.expression, 1, source_work)
+            call_dependent: bool = proof_replay_expression_contains_call_node(trace.expression, 0)
+            may_alias_global: mutable bool = call_dependent
+            depends_on_mutable_state <- true if call_dependent
+            for parameter in parameters |report, trace, body, consumer_position, source_work|:
+                return false if:
+                    not proof_replay_precondition_work_add(source_work, 1)
+                    not proof_replay_precondition_work_add(source_work, sview_len(parameter.name))
+                    not proof_replay_precondition_expr_repetition_charge(trace.expression, 1, source_work)
+                parameter_used: bool = parameter.name != "" and proof_expr_mentions_name(trace.expression, parameter.name)
+                depends_on_mutable_state <- true if parameter_used
+                if parameter_used:
+                    may_alias_global <- true if proof_replay_precondition_parameter_may_alias_global(report, parameter.type_expression, source_work)
+                    return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            for annotation in report.source.source_annotations |report, trace, body, consumer_position, source_work|:
+                return false if:
+                    not proof_replay_precondition_work_add(source_work, 1)
+                    not proof_replay_precondition_work_add(source_work, sview_len(annotation.name))
+                    not proof_replay_precondition_work_add(source_work, sview_len(annotation.owner))
+                continue if annotation.name != "__global_mutable" or annotation.owner == ""
+                return false if not proof_replay_precondition_expr_repetition_charge(trace.expression, 1, source_work)
+                depends_on_mutable_state <- true if proof_expr_mentions_name(trace.expression, annotation.owner)
+            depends_on_mutable_state <- true if proof_replay_precondition_mentions_mutable_global(report.source.source_declarations, trace.expression, source_work, 0)
+            return true if not depends_on_mutable_state
+            for statement in body |report, body, parameters, consumer_position, source_work|:
+                position: Ast::Pos = proof_replay_statement_position(statement)
+                return false if position.offset == 0
+                break if position.offset >= consumer_position.offset
+                match statement:
+                    # Contract expressions are checked as propositions and do not execute in
+                    # the function's state. Their calls are separately restricted to pure calls.
+                    Ast::Stmt.Contract(_, _, _):
+                        pass
+                    _:
+                        return false if proof_replay_precondition_statement_introduces_state_alias(report, parameters, statement, source_work, 0)
+                        single_statement: darray[Ast::Stmt] = [statement]
+                        return false if proof_replay_source_body_has_call(single_statement, source_work, 0)
+                for parameter in parameters |report, parameters, statement, source_work|:
+                    return false if:
+                        not proof_replay_precondition_work_add(source_work, 1)
+                        not proof_replay_precondition_work_add(source_work, sview_len(parameter.name))
+                    continue if parameter.name == ""
+                    return false if proof_replay_source_statement_touches_with_work(report.source.source_declarations, statement, parameter.name, true, source_work)
+                for annotation in report.source.source_annotations |report, statement, source_work|:
+                    return false if:
+                        not proof_replay_precondition_work_add(source_work, 1)
+                        not proof_replay_precondition_work_add(source_work, sview_len(annotation.name))
+                        not proof_replay_precondition_work_add(source_work, sview_len(annotation.owner))
+                    continue if annotation.name != "__global_mutable" or annotation.owner == ""
+                    return false if proof_replay_source_statement_touches_with_work(report.source.source_declarations, statement, annotation.owner, true, source_work)
+                return false if proof_replay_precondition_statement_touches_mutable_global(report.source.source_declarations, trace.expression, statement, may_alias_global, source_work, 0)
+            return true
+
         def proof_replay_precondition_source_valid_after_preflight(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&, candidate_source_cost: usize) -> bool:
             return false if:
                 trace.kind != "precondition" or trace.name == "" or trace.line == 0 or trace.owner_line != 0
@@ -394,6 +557,16 @@ extend ElisaProof:
             body: mutable darray[Ast::Stmt] = []
             proof_replay_precondition_find_owner(report.source.source_declarations, trace.name, trace.line, &matches, &owner_offset, &parameters, &body, 0)
             return false if matches != 1
+            return false if not proof_replay_precondition_live_at_consumer(report, trace, parameters, body, source_work)
+            # A source-exact precondition can still invoke an implicit protocol through
+            # operator syntax. Entry facts are reusable only when replay can establish that
+            # the expression stays within builtin dispatch; this includes Index.__index__,
+            # whose call is absent from the AST's explicit Call nodes. The source-admission
+            # pass already matched this cached mask against the independently parsed source.
+            operator_mask: (complete: bool, mask: usize) = proof_source_primitive_operator_mask_from_report_with_work(report, source_work)
+            return false if not operator_mask.complete
+            operator_work_exhausted: mutable bool = false
+            return false if proof_source_expression_has_overloaded_operator_with_work(trace.expression, operator_mask.mask, source_work, operator_work_exhausted) or operator_work_exhausted
             return true if proof_replay_precondition_body_contract_matches(report, trace, body, candidate_source_cost, source_work)
             # Signature clauses are retained from the parser and keyed by the unique owner's
             # declaration line. Only `requires` rows can establish entry assumptions.

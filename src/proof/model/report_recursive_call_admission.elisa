@@ -12,19 +12,6 @@ extend ElisaProof:
             names: darray[sview]
             counts: darray[usize]
 
-        # Rebuild this lookup from the report rows consumed by source admission. The
-        # report's cached structural hash slots are producer data and are not replay
-        # authority, even when replay has built a separate index in a scratch report.
-        struct ProofSourceRecursiveCallStructuralOwnerIndex:
-            valid: bool
-            empty: usize
-            entries: usize
-            hashes: darray[u32]
-            slots: darray[usize]
-            names: darray[sview]
-            counts: darray[usize]
-            verified: darray[bool]
-
         def proof_source_recursive_call_function_count(declarations: darray[Ast::Decl]&, total: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT
             for declaration in declarations |total, source_work|:
@@ -180,11 +167,11 @@ extend ElisaProof:
                 _:
                     # Unknown AST forms are scanned as call-shaped candidates. This may
                     # reject a local-name collision, but cannot overlook a method dispatch.
-                    proof_expr_has_call(expression)
+                    proof_expr_has_call_with_work(expression, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
 
         def proof_source_recursive_call_expr_candidate(expression: Ast::Expr, name: sview, source_work: mutable usize&) -> bool:
-            # The two legacy predicates below each walk the complete expression. Reserve
-            # for both traversals and the candidate name before invoking either one.
+            # The final call/name predicates each walk the complete expression. Reserve
+            # for both and meter the conservative fallback walk in the shared counter.
             return false if not proof_report_source_work_charge(sview_len(name), source_work) or not proof_replay_summary_expr_repeat_charge_with_work(expression, 2, source_work)
             return true if proof_source_recursive_call_method_candidate(expression, name, source_work, 0)
             proof_expr_has_call(expression) and proof_expr_mentions_name(expression, name)
@@ -324,85 +311,6 @@ extend ElisaProof:
                     _:
                         pass
             (true, false)
-        def proof_source_recursive_call_structural_owner_index_build(report: ProofReport&, source_certificates_checked: bool, source_work: mutable usize&) -> ProofSourceRecursiveCallStructuralOwnerIndex can[Memory.Allocate]:
-            index: mutable ProofSourceRecursiveCallStructuralOwnerIndex = ProofSourceRecursiveCallStructuralOwnerIndex{valid: true, empty: 0}
-            return index if not source_certificates_checked
-            names: darray[sview]& = report.analysis_1.structural.names
-            verified: darray[bool]& = report.analysis_1.structural.verified_members
-            total: usize = names.count
-            return ProofSourceRecursiveCallStructuralOwnerIndex{} if total != verified.count or total > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
-            index.empty <- total
-            return index if total == 0
-            capacity: usize = proof_name_index_capacity(total)
-            return ProofSourceRecursiveCallStructuralOwnerIndex{} if capacity == 0 or capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3
-            return ProofSourceRecursiveCallStructuralOwnerIndex{} if not proof_report_source_work_charge(capacity * 3, source_work)
-            index.hashes.resize(capacity)
-            index.slots.resize(capacity)
-            for slot in 0..<capacity |slot, index, total, source_work|:
-                return ProofSourceRecursiveCallStructuralOwnerIndex{} if not proof_report_source_work_charge(1, source_work)
-                index.slots[slot] <- total
-            for row in 0..<total |row, index, names, verified, total, capacity, source_work|:
-                name: sview = names[row]
-                return ProofSourceRecursiveCallStructuralOwnerIndex{} if not proof_report_source_work_charge(sview_len(name), source_work)
-                hash: u32 = proof_name_hash(name)
-                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
-                probes: mutable usize = 0
-                placed: mutable bool = false
-                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, row, index, names, verified, total, capacity, source_work, placed|:
-                    return ProofSourceRecursiveCallStructuralOwnerIndex{} if not proof_report_source_work_charge(1, source_work)
-                    current: usize = index.slots[slot]
-                    if current == total:
-                        unique_row: usize = index.names.count
-                        index.hashes[slot] <- hash
-                        index.slots[slot] <- unique_row
-                        index.names.push(name)
-                        index.counts.push(1)
-                        index.verified.push(verified[row])
-                        index.entries <- index.entries + 1
-                        placed <- true
-                        break
-                    return ProofSourceRecursiveCallStructuralOwnerIndex{} if current >= index.names.count or current >= index.counts.count or current >= index.verified.count
-                    if index.hashes[slot] == hash:
-                        return ProofSourceRecursiveCallStructuralOwnerIndex{} if not proof_report_source_work_charge(sview_len(index.names[current]), source_work) or not proof_report_source_work_charge(sview_len(name), source_work)
-                        if index.names[current] == name:
-                            index.counts[current] <- index.counts[current] + 1
-                            index.entries <- index.entries + 1
-                            placed <- true
-                            break
-                    slot <- (slot + 1) % capacity
-                    probes <- probes + 1
-                return ProofSourceRecursiveCallStructuralOwnerIndex{} if not placed
-            return ProofSourceRecursiveCallStructuralOwnerIndex{} if index.entries != total or index.names.count != index.counts.count or index.names.count != index.verified.count
-            index
-
-        def proof_source_recursive_call_structural_owner_verified(index: ProofSourceRecursiveCallStructuralOwnerIndex&, name: sview, source_certificates_checked: bool, source_work: mutable usize&) -> (complete: bool, verified: bool):
-            return (true, false) if not source_certificates_checked
-            name_count: usize = index.names.count
-            capacity: usize = index.slots.count
-            return (false, false) if:
-                not index.valid or index.entries != index.empty or name_count != index.counts.count or name_count != index.verified.count
-                name_count > index.empty or capacity != index.hashes.count
-            return (true, false) if index.empty == 0 and capacity == 0
-            expected_capacity: usize = proof_name_index_capacity(index.empty)
-            return (false, false) if expected_capacity == 0 or capacity != expected_capacity
-            return (false, false) if not proof_report_source_work_charge(sview_len(name), source_work)
-            wanted_hash: u32 = proof_name_hash(name)
-            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
-            probes: mutable usize = 0
-            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, index, name_count, capacity, source_work|:
-                return (false, false) if not proof_report_source_work_charge(1, source_work)
-                row: usize = index.slots[slot]
-                return (true, false) if row == index.empty
-                return (false, false) if row >= name_count
-                if index.hashes[slot] == wanted_hash:
-                    return (false, false) if not proof_report_source_work_charge(sview_len(index.names[row]), source_work)
-                    if index.names[row] == name:
-                        return (false, false) if index.counts[row] != 1
-                        return (true, index.verified[row])
-                slot <- (slot + 1) % capacity
-                probes <- probes + 1
-            return (false, false)
-
         def proof_source_recursive_call_owner_scheduled(name: sview, position: Ast::Pos, scheduled_owners: darray[ProofSourceScheduledOwner]&, scheduled_cursor: mutable usize&, source_work: mutable usize&) -> (complete: bool, scheduled: bool):
             while scheduled_cursor < scheduled_owners.count |name, position, scheduled_owners, scheduled_cursor, source_work|:
                 owner: ProofSourceScheduledOwner = scheduled_owners[scheduled_cursor]
@@ -415,7 +323,7 @@ extend ElisaProof:
                 return (true, true)
             (true, false)
 
-        def proof_source_recursive_call_collect(report: ProofReport&, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, declaration_names: ProofSourceRecursiveCallNameIndex&, structural_owners: ProofSourceRecursiveCallStructuralOwnerIndex&, scheduled_owners: darray[ProofSourceScheduledOwner]&, scheduled_cursor: mutable usize&, source_certificates_checked: bool, source_work: mutable usize&, depth: usize) -> bool:
+        def proof_source_recursive_call_collect(report: ProofReport&, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, declaration_names: ProofSourceRecursiveCallNameIndex&, structural_owners: mutable ProofSourceRecursiveCallStructuralOwnerIndex&, scheduled_owners: darray[ProofSourceScheduledOwner]&, scheduled_cursor: mutable usize&, source_certificates_checked: bool, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_SOURCE_RECURSIVE_CALL_DEPTH_LIMIT
             for declaration in declarations |report, source_certificates_checked, source_work, depth|:
                 return false if not proof_report_source_work_charge(1, source_work)
@@ -526,7 +434,7 @@ extend ElisaProof:
                         return false if not recursive_attempt_index.valid
                         return false if not proof_source_recursive_call_attempt_index_fill(recursive_attempt_index, report, calls, owner_position, name, source_work)
                         if structural_owner.verified:
-                            return false if not proof_source_recursive_call_structural_index_fill(recursive_attempt_index, report, name, owner_position, source_work)
+                            return false if not proof_source_recursive_call_structural_index_fill(recursive_attempt_index, &structural_owners, name, owner_position, source_work)
                         for call_index in 0..<calls.count |call_index, calls, requires, decreases, parameters, report, name, owner_position, source_work, recursive_attempt_index|:
                             call: (position: Ast::Pos, arguments: darray[Ast::Expr]) = calls[call_index]
                             structural_call_verified: bool = structural_owner.verified and recursive_attempt_index.structural_certificate_counts[call_index] == 1
@@ -591,5 +499,5 @@ extend ElisaProof:
             return false if not declaration_names.valid
             structural_owners: ProofSourceRecursiveCallStructuralOwnerIndex = proof_source_recursive_call_structural_owner_index_build(report, source_certificates_checked, source_work)
             return false if not structural_owners.valid
-            complete: bool = proof_source_recursive_call_collect(report, declarations, declarations, declaration_names, structural_owners, scheduled_owners, &scheduled_cursor, source_certificates_checked, source_work, 0)
-            complete and scheduled_cursor == scheduled_owners.count
+            complete: bool = proof_source_recursive_call_collect(report, declarations, declarations, declaration_names, &structural_owners, scheduled_owners, &scheduled_cursor, source_certificates_checked, source_work, 0)
+            complete and scheduled_cursor == scheduled_owners.count and proof_source_recursive_call_structural_rows_consumed(structural_owners, source_work)

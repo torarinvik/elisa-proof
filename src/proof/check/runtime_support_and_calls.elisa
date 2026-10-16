@@ -201,7 +201,8 @@ extend ElisaProof:
                     pass
             return proof_expr_supported(expression) and proof_runtime_expression_calls_allowed(expression, functions)
 
-        def proof_statement_region_new_call_supported(expression: Ast::Expr, functions: mutable ProofFunctionTable&) -> bool:
+        def proof_statement_region_new_call_supported(expression: Ast::Expr, functions: mutable ProofFunctionTable&, depth: usize = 0) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Call(callee, arguments, _, _):
                     return false if not proof_expr_supported(callee) or not proof_runtime_expression_calls_allowed(callee, functions)
@@ -209,7 +210,7 @@ extend ElisaProof:
                         return false if not proof_statement_region_new_call_argument_supported(argument, functions)
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_statement_region_new_call_supported(inner, functions)
+                    return proof_statement_region_new_call_supported(inner, functions, depth + 1)
                 _:
                     return false
 
@@ -241,35 +242,90 @@ extend ElisaProof:
         # The compiler represents `raise E.Tag` as a call-shaped expression, but its operational
         # meaning is a terminating exceptional transfer rather than an ordinary statement call.
         # Treat only the reserved terminal heads as such; arbitrary user calls remain normal and
-        # must not accidentally discharge a get/try recovery path.
-        def proof_expression_is_terminal(expression: Ast::Expr) -> bool:
+        # must not accidentally discharge a get/try recovery path. The completeness bit keeps a
+        # deeply parenthesized term from being mistaken for an ordinary nonterminal expression.
+        def proof_expression_terminal_with_depth(expression: Ast::Expr, depth: usize = 0) -> (complete: bool, terminal: bool):
+            return (false, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Call(callee, _, _, _):
                     called: sview = proof_callable_name(callee)
-                    return called in {"raise", "panic"}
+                    return (true, called in {"raise", "panic"})
                 Ast::Expr.Paren(inner, _):
-                    return proof_expression_is_terminal(inner)
+                    return proof_expression_terminal_with_depth(inner, depth + 1)
                 _:
-                    return false
+                    return (true, false)
 
         # A primitive operator may contain a call to a pure scalar function, such as a checked
         # numeric bound helper. The ordinary scalar witness relation intentionally does not treat
         # calls as values; runtime admission can do so only after the function table proves both
-        # scalar return shape and transitive purity. This keeps explicit call state handling in
-        # force while avoiding a false rejection of `x < pure_bound() - y`.
-        def proof_runtime_scalar_operator_is_untrusted(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
-            for fact in facts |expression, facts|:
+        # scalar return shape and transitive purity. Build the scalar marker view with its bounded
+        # reader, then share that meter across the recursive call-aware walk.
+        def proof_runtime_scalar_operator_is_untrusted_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            for fact in facts |fact, work|:
+                return true if not proof_runtime_operator_fact_charge(fact, work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
                 continue if not proof_marker_has_callee(fact, "__elisa_untrusted_operator_type")
                 marker: (known: bool, term: Ast::Expr, protocol: sview) = proof_untrusted_operator_marker_info(fact)
-                return true if not marker.known or proof_expr_equal(marker.term, expression)
+                return true if not marker.known
+                return true if proof_runtime_operator_terms_equal_with_work(marker.term, expression, work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+                return true if work > PROOF_LINEAR_SAFETY_WORK_LIMIT
             false
 
-        def proof_scalar_runtime_term_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, depth: usize) -> bool:
-            return true if proof_scalar_term_witnessed(expression, facts, depth)
+        def proof_scalar_term_witnessed_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            if work >= PROOF_MATCH_LOWERING_WORK_LIMIT:
+                work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1
+                return false
+            remaining: usize = PROOF_MATCH_LOWERING_WORK_LIMIT - work
+            allowance: usize = remaining if remaining < PROOF_LINEAR_SAFETY_WORK_LIMIT else PROOF_LINEAR_SAFETY_WORK_LIMIT
+            start: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - allowance
+            budget: mutable usize = start
+            exhausted: mutable bool = false
+            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, &budget, &exhausted)
+            if not marker_result.complete or proof_goal_bool_ref_value(exhausted):
+                work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1
+                return false
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(marker_result.witnesses, &budget, &exhausted)
+            if not marker_scale.complete or proof_goal_bool_ref_value(exhausted):
+                work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1
+                return false
+            witnessed: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(expression, marker_result.witnesses, marker_scale.scale, &budget, &exhausted)
+            spent: usize = budget - start if budget >= start else allowance
+            if not witnessed.complete or proof_goal_bool_ref_value(exhausted) or not proof_match_lowering_charge(spent, work):
+                work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1
+                return false
+            witnessed.matches
+
+        def proof_scalar_runtime_term_witnessed_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, depth: usize, work: mutable usize&) -> bool:
+            if work >= PROOF_MATCH_LOWERING_WORK_LIMIT:
+                work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1
+                return false
+            remaining: usize = PROOF_MATCH_LOWERING_WORK_LIMIT - work
+            allowance: usize = remaining if remaining < PROOF_LINEAR_SAFETY_WORK_LIMIT else PROOF_LINEAR_SAFETY_WORK_LIMIT
+            start: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - allowance
+            budget: mutable usize = start
+            exhausted: mutable bool = false
+            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, &budget, &exhausted)
+            if not marker_result.complete or proof_goal_bool_ref_value(exhausted):
+                work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1
+                return false
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(marker_result.witnesses, &budget, &exhausted)
+            if not marker_scale.complete or proof_goal_bool_ref_value(exhausted):
+                work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1
+                return false
+            witnessed: bool = proof_scalar_runtime_term_witnessed_in_with_work(expression, facts, marker_result.witnesses, marker_scale.scale, functions, depth, &budget, &exhausted)
+            spent: usize = budget - start if budget >= start else allowance
+            if proof_goal_bool_ref_value(exhausted) or budget > PROOF_LINEAR_SAFETY_WORK_LIMIT or not proof_match_lowering_charge(spent, work):
+                work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1
+                return false
+            witnessed
+
+        def proof_scalar_runtime_term_witnessed_in_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, functions: mutable ProofFunctionTable&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            direct_witness: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(expression, markers, marker_scale, budget, exhausted)
+            return false if not direct_witness.complete or proof_goal_bool_ref_value(exhausted)
+            return true if direct_witness.matches
             return false if depth >= PROOF_RUNTIME_SCALAR_WITNESS_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_scalar_runtime_term_witnessed(inner, facts, functions, depth + 1)
+                    return proof_scalar_runtime_term_witnessed_in_with_work(inner, facts, markers, marker_scale, functions, depth + 1, budget, exhausted)
                 Ast::Expr.Call(callee, arguments, _, _):
                     called: sview = proof_callable_name(callee)
                     called_index: usize = proof_function_index_for_callee(functions, callee)
@@ -277,18 +333,22 @@ extend ElisaProof:
                         called == "" or called_index >= functions.summaries.pure.count or not functions.summaries.pure[called_index]
                         called_index >= functions.returns.return_scalar.count or not functions.returns.return_scalar[called_index]
                         not proof_runtime_calls_are_pure_with_known_presence(expression, functions, true)
-                    for argument in arguments |facts, functions, depth|:
-                        return false if not proof_scalar_runtime_term_witnessed(argument, facts, functions, depth + 1)
+                    for argument in arguments |argument, facts, markers, marker_scale, functions, depth, budget, exhausted|:
+                        return false if not proof_scalar_runtime_term_witnessed_in_with_work(argument, facts, markers, marker_scale, functions, depth + 1, budget, exhausted)
                     return true
                 Ast::Expr.Unary(operator, operand, _):
-                    return false if not proof_congruent_unary_operator(operator) or proof_runtime_scalar_operator_is_untrusted(expression, facts)
-                    return proof_scalar_runtime_term_witnessed(operand, facts, functions, depth + 1)
+                    return false if not proof_congruent_unary_operator(operator)
+                    return false if proof_runtime_scalar_operator_is_untrusted_with_work(expression, facts, budget) or proof_goal_bool_ref_value(exhausted)
+                    return false if budget > PROOF_LINEAR_SAFETY_WORK_LIMIT
+                    return proof_scalar_runtime_term_witnessed_in_with_work(operand, facts, markers, marker_scale, functions, depth + 1, budget, exhausted)
                 Ast::Expr.Binary(left, operator, right, _):
-                    return false if not proof_congruent_binary_operator(operator) or proof_runtime_scalar_operator_is_untrusted(expression, facts)
-                    return false if not proof_scalar_runtime_term_witnessed(left, facts, functions, depth + 1)
-                    return proof_scalar_runtime_term_witnessed(right, facts, functions, depth + 1)
+                    return false if not proof_congruent_binary_operator(operator)
+                    return false if proof_runtime_scalar_operator_is_untrusted_with_work(expression, facts, budget) or proof_goal_bool_ref_value(exhausted)
+                    return false if budget > PROOF_LINEAR_SAFETY_WORK_LIMIT
+                    return false if not proof_scalar_runtime_term_witnessed_in_with_work(left, facts, markers, marker_scale, functions, depth + 1, budget, exhausted)
+                    return proof_scalar_runtime_term_witnessed_in_with_work(right, facts, markers, marker_scale, functions, depth + 1, budget, exhausted)
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_scalar_runtime_term_witnessed(condition, facts, functions, depth + 1) and proof_scalar_runtime_term_witnessed(then_expression, facts, functions, depth + 1) and proof_scalar_runtime_term_witnessed(else_expression, facts, functions, depth + 1)
+                    return proof_scalar_runtime_term_witnessed_in_with_work(condition, facts, markers, marker_scale, functions, depth + 1, budget, exhausted) and proof_scalar_runtime_term_witnessed_in_with_work(then_expression, facts, markers, marker_scale, functions, depth + 1, budget, exhausted) and proof_scalar_runtime_term_witnessed_in_with_work(else_expression, facts, markers, marker_scale, functions, depth + 1, budget, exhausted)
                 _:
                     return false
 
@@ -329,11 +389,11 @@ extend ElisaProof:
                     return (proof_expr_has_unmodeled_operator_with_work(inner, facts, report, functions, depth + 1, work) can Global.Read)
                 Ast::Expr.Unary(operator, operand, _):
                     protocol: sview = proof_builtin_unary_operator_protocol(operator)
-                    return true if protocol != "" and not (proof_runtime_operator_expression_witnessed(expression, facts, report, functions, 0) can Global.Read)
+                    return true if protocol != "" and not (proof_runtime_operator_expression_witnessed_with_work(expression, facts, report, functions, 0, work) can Global.Read)
                     return (proof_expr_has_unmodeled_operator_with_work(operand, facts, report, functions, depth + 1, work) can Global.Read)
                 Ast::Expr.Binary(left, operator, right, _):
                     protocol: sview = proof_builtin_operator_protocol(operator)
-                    return true if protocol != "" and not (proof_runtime_operator_expression_witnessed(expression, facts, report, functions, 0) can Global.Read)
+                    return true if protocol != "" and not (proof_runtime_operator_expression_witnessed_with_work(expression, facts, report, functions, 0, work) can Global.Read)
                     return (proof_expr_has_unmodeled_operator_with_work(left, facts, report, functions, depth + 1, work) can Global.Read) or (proof_expr_has_unmodeled_operator_with_work(right, facts, report, functions, depth + 1, work) can Global.Read)
                 Ast::Expr.Call(callee, arguments, _, _):
                     transition: (known: bool, operand: Ast::Expr) = proof_admitted_protocol_transition_operand(expression, report)
@@ -351,14 +411,14 @@ extend ElisaProof:
                     # bracket is compile-time type syntax, so it is neither a runtime index nor
                     # an overloaded `__index__` dispatch.
                     return (proof_expr_has_unmodeled_operator_with_work(object, facts, report, functions, depth + 1, work) can Global.Read) if proof_is_type_cast_index(object)
-                    return true if not proof_builtin_index_expression_witnessed(expression, facts)
+                    return true if not proof_builtin_index_expression_witnessed_with_work(expression, facts, work)
                     return (proof_expr_has_unmodeled_operator_with_work(object, facts, report, functions, depth + 1, work) can Global.Read) or (proof_expr_has_unmodeled_operator_with_work(index, facts, report, functions, depth + 1, work) can Global.Read)
                 Ast::Expr.Slice(object, low, high, _):
                     return (proof_expr_has_unmodeled_operator_with_work(object, facts, report, functions, depth + 1, work) can Global.Read) or (proof_expr_has_unmodeled_operator_with_work(low, facts, report, functions, depth + 1, work) can Global.Read) or (proof_expr_has_unmodeled_operator_with_work(high, facts, report, functions, depth + 1, work) can Global.Read)
                 Ast::Expr.IndexN(object, arguments, _):
                     return (proof_expr_has_unmodeled_operator_with_work(object, facts, report, functions, depth + 1, work) can Global.Read) if proof_is_type_cast_index(object)
                     return true if:
-                        not proof_builtin_index_expression_witnessed(expression, facts)
+                        not proof_builtin_index_expression_witnessed_with_work(expression, facts, work)
                         (proof_expr_has_unmodeled_operator_with_work(object, facts, report, functions, depth + 1, work) can Global.Read)
                     for argument in arguments |facts, functions, depth, work|:
                         return true if (proof_expr_has_unmodeled_operator_with_work(argument, facts, report, functions, depth + 1, work) can Global.Read)
